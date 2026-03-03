@@ -1,0 +1,34 @@
+{
+  "name": "clawforce",
+  "version": "0.2.0",
+  "description": "Reliability and accountability engine for autonomous agents",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./openclaw": "./adapters/openclaw.ts"
+  },
+  "openclaw": {
+    "extensions": [
+      "./adapters/openclaw.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "openclaw": "*",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

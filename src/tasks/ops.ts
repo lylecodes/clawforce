@@ -1,0 +1,812 @@
+/**
+ * Clawforce — Core operations
+ *
+ * createTask, transitionTask, attachEvidence, getTask, listTasks
+ * All operations are SQLite-backed and emit diagnostic events.
+ */
+
+import crypto from "node:crypto";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import { writeAuditEntry } from "../audit.js";
+import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
+import { getDb } from "../db.js";
+import { signAction } from "../identity.js";
+import { getExtendedProjectConfig } from "../project.js";
+import { classifyRisk } from "../risk/classifier.js";
+import { getRiskConfig } from "../risk/config.js";
+import { applyRiskGate } from "../risk/gate.js";
+import { isTaskInFuturePhase } from "../workflow.js";
+import { validateTransition } from "./state-machine.js";
+import type {
+  Evidence,
+  EvidenceType,
+  Task,
+  TaskPriority,
+  TaskResult,
+  TaskState,
+  Transition,
+  TransitionResult,
+} from "../types.js";
+import { recordTaskCycleTime } from "../metrics.js";
+import { clearWorkerAssignment, registerWorkerAssignment } from "../worker-registry.js";
+import { ingestEvent } from "../events/store.js";
+import { validateEvidence } from "./evidence-schema.js";
+
+function rowToTask(row: Record<string, unknown>): Task {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    title: row.title as string,
+    description: (row.description as string) ?? undefined,
+    state: row.state as TaskState,
+    priority: row.priority as TaskPriority,
+    assignedTo: (row.assigned_to as string) ?? undefined,
+    createdBy: row.created_by as string,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+    deadline: (row.deadline as number) ?? undefined,
+    retryCount: row.retry_count as number,
+    maxRetries: row.max_retries as number,
+    tags: row.tags ? JSON.parse(row.tags as string) : undefined,
+    workflowId: (row.workflow_id as string) ?? undefined,
+    workflowPhase: (row.workflow_phase as number) ?? undefined,
+    parentTaskId: (row.parent_task_id as string) ?? undefined,
+    department: (row.department as string) ?? undefined,
+    team: (row.team as string) ?? undefined,
+    metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
+  };
+}
+
+function rowToEvidence(row: Record<string, unknown>): Evidence {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    type: row.type as EvidenceType,
+    content: row.content as string,
+    contentHash: row.content_hash as string,
+    attachedBy: row.attached_by as string,
+    attachedAt: row.attached_at as number,
+    metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
+  };
+}
+
+function rowToTransition(row: Record<string, unknown>): Transition {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    fromState: row.from_state as TaskState,
+    toState: row.to_state as TaskState,
+    actor: row.actor as string,
+    actorSignature: (row.actor_signature as string) ?? undefined,
+    reason: (row.reason as string) ?? undefined,
+    evidenceId: (row.evidence_id as string) ?? undefined,
+    createdAt: row.created_at as number,
+  };
+}
+
+export function createTask(
+  params: {
+    projectId: string;
+    title: string;
+    description?: string;
+    priority?: TaskPriority;
+    assignedTo?: string;
+    createdBy: string;
+    deadline?: number;
+    maxRetries?: number;
+    tags?: string[];
+    workflowId?: string;
+    workflowPhase?: number;
+    parentTaskId?: string;
+    department?: string;
+    team?: string;
+    metadata?: Record<string, unknown>;
+  },
+  dbOverride?: DatabaseSync,
+): Task {
+  const db = dbOverride ?? getDb(params.projectId);
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  let state: TaskState = params.assignedTo ? "ASSIGNED" : "OPEN";
+
+  // Workflow phase gate: force OPEN if task is in a future phase
+  if (state === "ASSIGNED" && params.workflowId && params.workflowPhase != null) {
+    const gate = isTaskInFuturePhase({ workflowId: params.workflowId, workflowPhase: params.workflowPhase, projectId: params.projectId }, db);
+    if (gate.blocked) {
+      state = "OPEN";
+    }
+  }
+
+  const stmt = db.prepare(`
+    INSERT INTO tasks (id, project_id, title, description, state, priority, assigned_to,
+      created_by, created_at, updated_at, deadline, retry_count, max_retries, tags,
+      workflow_id, workflow_phase, parent_task_id, department, team, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  stmt.run(
+    id,
+    params.projectId,
+    params.title,
+    params.description ?? null,
+    state,
+    params.priority ?? "P2",
+    params.assignedTo ?? null,
+    params.createdBy,
+    now,
+    now,
+    params.deadline ?? null,
+    params.maxRetries ?? 3,
+    params.tags ? JSON.stringify(params.tags) : null,
+    params.workflowId ?? null,
+    params.workflowPhase ?? null,
+    params.parentTaskId ?? null,
+    params.department ?? null,
+    params.team ?? null,
+    params.metadata ? JSON.stringify(params.metadata) : null,
+  );
+
+  const task = getTask(params.projectId, id, db)!;
+
+  // Check for potential duplicate (non-terminal task with same title)
+  let duplicateWarning: string | undefined;
+  try {
+    const existing = db.prepare(
+      "SELECT id, state FROM tasks WHERE project_id = ? AND title = ? AND state NOT IN ('DONE', 'FAILED', 'CANCELLED') AND id != ?",
+    ).get(params.projectId, params.title, id) as Record<string, unknown> | undefined;
+    if (existing) {
+      duplicateWarning = `Potential duplicate: task "${params.title}" already exists as ${(existing.id as string).slice(0, 8)} (${existing.state})`;
+    }
+  } catch (err) {
+    safeLog("task.create.dedupCheck", err);
+  }
+  (task as Task & { duplicateWarning?: string }).duplicateWarning = duplicateWarning;
+
+  // Track assignment so bootstrap hook can detect workers
+  if (params.assignedTo) {
+    registerWorkerAssignment(params.assignedTo, params.projectId, id);
+  }
+
+  try {
+    emitDiagnosticEvent({
+      type: "clawforce.transition",
+      projectId: params.projectId,
+      taskId: id,
+      fromState: "NONE",
+      toState: state,
+      actor: params.createdBy,
+    });
+  } catch (err) {
+    safeLog("task.create.diagnostic", err);
+  }
+
+  try {
+    writeAuditEntry({
+      projectId: params.projectId,
+      actor: params.createdBy,
+      action: "task.create",
+      targetType: "task",
+      targetId: id,
+      detail: params.title,
+    }, db);
+  } catch (err) {
+    safeLog("task.create.audit", err);
+  }
+
+  return task;
+}
+
+export function transitionTask(
+  params: {
+    projectId: string;
+    taskId: string;
+    toState: TaskState;
+    actor: string;
+    reason?: string;
+    evidenceId?: string;
+    verificationRequired?: boolean;
+    assignedTo?: string;
+  },
+  dbOverride?: DatabaseSync,
+): TransitionResult {
+  const db = dbOverride ?? getDb(params.projectId);
+  const task = getTask(params.projectId, params.taskId, db);
+  if (!task) return { ok: false, reason: "Task not found" };
+
+  // Risk tier check (before validation)
+  try {
+    const extConfig = getExtendedProjectConfig(params.projectId);
+    const riskConfig = getRiskConfig(extConfig?.riskTiers);
+    if (riskConfig.enabled) {
+      const classification = classifyRisk({
+        actionType: "transition",
+        toState: params.toState,
+        fromState: task.state,
+        taskPriority: task.priority,
+        actor: params.actor,
+      }, riskConfig);
+
+      if (classification.tier !== "low") {
+        const gateResult = applyRiskGate({
+          projectId: params.projectId,
+          actionType: "transition",
+          actionDetail: `${task.state} → ${params.toState} on task "${task.title}"`,
+          actor: params.actor,
+          classification,
+          config: riskConfig,
+          dbOverride: db,
+        });
+
+        if (gateResult.action === "block") {
+          return { ok: false, reason: gateResult.reason };
+        }
+        if (gateResult.action === "require_approval") {
+          // Create a proposal for this action
+          try {
+            const proposalId = crypto.randomUUID();
+            db.prepare(`
+              INSERT INTO proposals (id, project_id, title, description, proposed_by, status, risk_tier, created_at)
+              VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+            `).run(
+              proposalId, params.projectId, gateResult.proposalTitle,
+              `Risk-gated transition: ${task.state} → ${params.toState} on task ${task.id}`,
+              params.actor, classification.tier, Date.now(),
+            );
+          } catch (err) {
+            safeLog("transition.riskProposal", err);
+          }
+          return { ok: false, reason: `Action requires approval (risk tier: ${classification.tier}): ${classification.reasons.join("; ")}` };
+        }
+        // delay: proceed but log it (actual delay enforcement is at dispatch level)
+      }
+    }
+  } catch (err) {
+    safeLog("transition.riskCheck", err);
+    // Risk check failure is non-fatal — proceed
+  }
+
+  // Workflow phase gate: block ASSIGNED/IN_PROGRESS for future-phase tasks
+  if (params.toState === "ASSIGNED" || params.toState === "IN_PROGRESS") {
+    const gate = isTaskInFuturePhase(task, db);
+    if (gate.blocked) {
+      return { ok: false, reason: gate.reason! };
+    }
+  }
+
+  // Check if evidence exists when transitioning to REVIEW
+  let hasEvidence = !!params.evidenceId;
+  if (!hasEvidence && task.state === "IN_PROGRESS" && params.toState === "REVIEW") {
+    const evidenceRow = db
+      .prepare("SELECT COUNT(*) as cnt FROM evidence WHERE task_id = ?")
+      .get(params.taskId) as Record<string, unknown> | undefined;
+    hasEvidence = !!evidenceRow && (evidenceRow.cnt as number) > 0;
+  }
+
+  const error = validateTransition({
+    task,
+    toState: params.toState,
+    actor: params.actor,
+    hasEvidence,
+    verificationRequired: params.verificationRequired ?? true,
+  });
+
+  if (error) return { ok: false, reason: error.message };
+
+  // Lease-conflict check: reject OPEN→ASSIGNED and ASSIGNED→IN_PROGRESS
+  // if another agent holds an active lease
+  if (
+    (task.state === "OPEN" && params.toState === "ASSIGNED") ||
+    (task.state === "ASSIGNED" && params.toState === "IN_PROGRESS")
+  ) {
+    const leaseRow = db.prepare(
+      "SELECT lease_holder, lease_expires_at FROM tasks WHERE id = ?",
+    ).get(params.taskId) as Record<string, unknown> | undefined;
+
+    if (leaseRow) {
+      const holder = leaseRow.lease_holder as string | null;
+      const expiresAt = leaseRow.lease_expires_at as number | null;
+      const actor = params.assignedTo ?? params.actor;
+
+      if (holder && expiresAt && expiresAt > Date.now() && holder !== actor) {
+        return {
+          ok: false,
+          reason: `Task is leased by "${holder}" until ${new Date(expiresAt).toISOString()}. Cannot transition while another agent holds the lease.`,
+        };
+      }
+    }
+  }
+
+  const now = Date.now();
+  const transitionId = crypto.randomUUID();
+  const signatureData = `${transitionId}:${params.taskId}:${task.state}:${params.toState}:${params.actor}:${now}`;
+  let actorSignature: string | undefined;
+  try {
+    actorSignature = signAction(params.actor, signatureData);
+  } catch (err) {
+    safeLog("transition.sign", err);
+  }
+
+  // Update task state
+  const updateFields: string[] = ["state = ?", "updated_at = ?"];
+  const updateValues: SQLInputValue[] = [params.toState, now];
+
+  // Handle assignment on any transition → ASSIGNED
+  if (params.toState === "ASSIGNED" && params.assignedTo) {
+    updateFields.push("assigned_to = ?");
+    updateValues.push(params.assignedTo);
+  } else if (params.toState === "ASSIGNED" && task.state === "OPEN") {
+    updateFields.push("assigned_to = ?");
+    updateValues.push(params.actor);
+  }
+
+  // Increment retry on FAILED → OPEN
+  if (task.state === "FAILED" && params.toState === "OPEN") {
+    updateFields.push("retry_count = retry_count + 1");
+  }
+
+  // Clear assignment on unassign transitions
+  if (params.toState === "OPEN" && task.state !== "FAILED") {
+    updateFields.push("assigned_to = NULL");
+  }
+
+  updateValues.push(params.taskId, task.state, params.projectId);
+  const updateResult = db.prepare(
+    `UPDATE tasks SET ${updateFields.join(", ")} WHERE id = ? AND state = ? AND project_id = ?`
+  ).run(...updateValues);
+  if (updateResult.changes === 0) {
+    return { ok: false, reason: `Concurrent state change: task no longer in state "${task.state}"` };
+  }
+
+  // Record transition
+  db.prepare(`
+    INSERT INTO transitions (id, task_id, from_state, to_state, actor, actor_signature, reason, evidence_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    transitionId,
+    params.taskId,
+    task.state,
+    params.toState,
+    params.actor,
+    actorSignature ?? null,
+    params.reason ?? null,
+    params.evidenceId ?? null,
+    now,
+  );
+
+  // Audit log entry for transition (fills gap: transitions table has records but audit log didn't)
+  try {
+    writeAuditEntry({
+      projectId: params.projectId,
+      actor: params.actor,
+      action: "task.transition",
+      targetType: "task",
+      targetId: params.taskId,
+      detail: JSON.stringify({ from: task.state, to: params.toState, reason: params.reason }),
+    }, db);
+  } catch (err) {
+    safeLog("transition.audit", err);
+  }
+
+  // Track/clear worker assignment for bootstrap hook detection
+  if (params.toState === "ASSIGNED") {
+    const assignee = params.assignedTo ?? params.actor;
+    registerWorkerAssignment(assignee, params.projectId, params.taskId);
+  }
+  if (params.toState === "DONE" || params.toState === "FAILED" || params.toState === "CANCELLED") {
+    if (task.assignedTo) clearWorkerAssignment(task.assignedTo, db);
+  }
+
+  // Record cycle time metric when task reaches DONE
+  if (params.toState === "DONE") {
+    try {
+      recordTaskCycleTime(params.projectId, params.taskId, task.createdAt, now, task.assignedTo, db);
+    } catch (err) { safeLog("transition.cycleTime", err); }
+  }
+
+  // Emit task_review_ready when transitioning from IN_PROGRESS to REVIEW
+  if (task.state === "IN_PROGRESS" && params.toState === "REVIEW") {
+    let evidenceCount = 0;
+    try {
+      const evidenceRow = db.prepare("SELECT COUNT(*) as cnt FROM evidence WHERE task_id = ?").get(params.taskId) as Record<string, unknown> | undefined;
+      evidenceCount = (evidenceRow?.cnt as number) ?? 0;
+    } catch (err) { safeLog("transition.evidenceCount", err); }
+
+    try {
+      ingestEvent(params.projectId, "task_review_ready", "internal", {
+        taskId: params.taskId,
+        assignedTo: task.assignedTo,
+        fromState: task.state,
+        evidenceCount,
+      }, `task-review:${params.taskId}:${transitionId}`, db);
+    } catch (err) { safeLog("transition.reviewEvent", err); }
+  }
+
+  // Emit events for terminal transitions
+  if (params.toState === "DONE") {
+    try {
+      ingestEvent(params.projectId, "task_completed", "internal", {
+        taskId: params.taskId,
+        actor: params.actor,
+        workflowId: task.workflowId,
+      }, `task-completed:${params.taskId}`, db);
+    } catch (err) { safeLog("transition.completedEvent", err); }
+  }
+  if (params.toState === "FAILED") {
+    try {
+      ingestEvent(params.projectId, "task_failed", "internal", {
+        taskId: params.taskId,
+        actor: params.actor,
+        reason: params.reason,
+        workflowId: task.workflowId,
+      }, `task-failed:${params.taskId}:${transitionId}`, db);
+    } catch (err) { safeLog("transition.failedEvent", err); }
+  }
+
+  const updatedTask = getTask(params.projectId, params.taskId, db)!;
+  const transition: Transition = {
+    id: transitionId,
+    taskId: params.taskId,
+    fromState: task.state,
+    toState: params.toState,
+    actor: params.actor,
+    actorSignature,
+    reason: params.reason,
+    evidenceId: params.evidenceId,
+    createdAt: now,
+  };
+
+  try {
+    emitDiagnosticEvent({
+      type: "clawforce.transition",
+      projectId: params.projectId,
+      taskId: params.taskId,
+      fromState: task.state,
+      toState: params.toState,
+      actor: params.actor,
+    });
+  } catch (err) {
+    safeLog("transition.diagnostic", err);
+  }
+
+  return { ok: true, task: updatedTask, transition };
+}
+
+/**
+ * Reassign a task to a new agent. Routes through transitionTask for
+ * IN_PROGRESS → ASSIGNED state changes. For ASSIGNED tasks (no state change),
+ * handles assignment update with proper audit trail and worker registry.
+ */
+export function reassignTask(
+  params: {
+    projectId: string;
+    taskId: string;
+    newAssignee: string;
+    actor: string;
+    reason?: string;
+  },
+  dbOverride?: DatabaseSync,
+): TransitionResult {
+  const db = dbOverride ?? getDb(params.projectId);
+  const task = getTask(params.projectId, params.taskId, db);
+  if (!task) return { ok: false, reason: "Task not found" };
+
+  if (task.state !== "ASSIGNED" && task.state !== "IN_PROGRESS") {
+    return {
+      ok: false,
+      reason: `Cannot reassign task in state ${task.state}. Only ASSIGNED or IN_PROGRESS tasks can be reassigned.`,
+    };
+  }
+
+  const previousAssignee = task.assignedTo;
+  const reassignReason = params.reason ?? `Reassigned from ${previousAssignee ?? "unassigned"} to ${params.newAssignee}`;
+
+  if (task.state === "IN_PROGRESS") {
+    // State change — route through transitionTask for full validation
+    return transitionTask({
+      projectId: params.projectId,
+      taskId: params.taskId,
+      toState: "ASSIGNED",
+      actor: params.actor,
+      assignedTo: params.newAssignee,
+      reason: reassignReason,
+      verificationRequired: false,
+    }, db);
+  }
+
+  // ASSIGNED — no state change, just update the assignee
+  // Still need: phase gate, audit, worker registry, signature
+
+  const gate = isTaskInFuturePhase(task, db);
+  if (gate.blocked) {
+    return { ok: false, reason: gate.reason! };
+  }
+
+  const now = Date.now();
+  const transitionId = crypto.randomUUID();
+  const signatureData = `${transitionId}:${params.taskId}:ASSIGNED:ASSIGNED:${params.actor}:${now}`;
+  let actorSignature: string | undefined;
+  try {
+    actorSignature = signAction(params.actor, signatureData);
+  } catch (err) {
+    safeLog("reassign.sign", err);
+  }
+
+  // Update assigned_to (optimistic lock on state)
+  const updateResult = db.prepare(
+    "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ? AND state = 'ASSIGNED' AND project_id = ?",
+  ).run(params.newAssignee, now, params.taskId, params.projectId);
+
+  if (updateResult.changes === 0) {
+    return { ok: false, reason: "Concurrent state change: task no longer in ASSIGNED state" };
+  }
+
+  // Record transition
+  db.prepare(`
+    INSERT INTO transitions (id, task_id, from_state, to_state, actor, actor_signature, reason, created_at)
+    VALUES (?, ?, 'ASSIGNED', 'ASSIGNED', ?, ?, ?, ?)
+  `).run(transitionId, params.taskId, params.actor, actorSignature ?? null, reassignReason, now);
+
+  // Worker registry
+  if (previousAssignee) {
+    clearWorkerAssignment(previousAssignee, db);
+  }
+  registerWorkerAssignment(params.newAssignee, params.projectId, params.taskId);
+
+  // Audit
+  try {
+    writeAuditEntry({
+      projectId: params.projectId,
+      actor: params.actor,
+      action: "task.reassign",
+      targetType: "task",
+      targetId: params.taskId,
+      detail: JSON.stringify({ previousAssignee, newAssignee: params.newAssignee }),
+    }, db);
+  } catch (err) {
+    safeLog("reassign.audit", err);
+  }
+
+  try {
+    emitDiagnosticEvent({
+      type: "clawforce.transition",
+      projectId: params.projectId,
+      taskId: params.taskId,
+      fromState: "ASSIGNED",
+      toState: "ASSIGNED",
+      actor: params.actor,
+    });
+  } catch (err) {
+    safeLog("reassign.diagnostic", err);
+  }
+
+  const updatedTask = getTask(params.projectId, params.taskId, db)!;
+  const transition: Transition = {
+    id: transitionId,
+    taskId: params.taskId,
+    fromState: "ASSIGNED",
+    toState: "ASSIGNED",
+    actor: params.actor,
+    actorSignature,
+    reason: reassignReason,
+    createdAt: now,
+  };
+
+  return { ok: true, task: updatedTask, transition };
+}
+
+export function attachEvidence(
+  params: {
+    projectId: string;
+    taskId: string;
+    type: EvidenceType;
+    content: string;
+    attachedBy: string;
+    metadata?: Record<string, unknown>;
+  },
+  dbOverride?: DatabaseSync,
+): Evidence {
+  const db = dbOverride ?? getDb(params.projectId);
+  const id = crypto.randomUUID();
+  const contentHash = crypto.createHash("sha256").update(params.content).digest("hex");
+  const now = Date.now();
+
+  // Advisory validation — log warnings but never block
+  try {
+    const validation = validateEvidence(params.type, params.content, params.metadata);
+    if (!validation.valid) {
+      for (const warning of validation.warnings) {
+        safeLog("evidence.validation", warning);
+      }
+    }
+  } catch (err) {
+    safeLog("evidence.validationInit", err);
+  }
+
+  db.prepare(`
+    INSERT INTO evidence (id, task_id, type, content, content_hash, attached_by, attached_at, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    params.taskId,
+    params.type,
+    params.content,
+    contentHash,
+    params.attachedBy,
+    now,
+    params.metadata ? JSON.stringify(params.metadata) : null,
+  );
+
+  try {
+    writeAuditEntry({
+      projectId: params.projectId,
+      actor: params.attachedBy,
+      action: "evidence.attach",
+      targetType: "evidence",
+      targetId: id,
+      detail: params.type,
+    }, db);
+  } catch (err) {
+    safeLog("evidence.audit", err);
+  }
+
+  return {
+    id,
+    taskId: params.taskId,
+    type: params.type as EvidenceType,
+    content: params.content,
+    contentHash,
+    attachedBy: params.attachedBy,
+    attachedAt: now,
+    metadata: params.metadata,
+  };
+}
+
+export function getTask(projectId: string, taskId: string, dbOverride?: DatabaseSync): Task | undefined {
+  const db = dbOverride ?? getDb(projectId);
+  const row = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as Record<string, unknown> | undefined;
+  return row ? rowToTask(row) : undefined;
+}
+
+export function getTaskEvidence(projectId: string, taskId: string, dbOverride?: DatabaseSync): Evidence[] {
+  const db = dbOverride ?? getDb(projectId);
+  const rows = db.prepare("SELECT * FROM evidence WHERE task_id = ? ORDER BY attached_at").all(taskId) as Record<string, unknown>[];
+  return rows.map(rowToEvidence);
+}
+
+export function getTaskTransitions(projectId: string, taskId: string, dbOverride?: DatabaseSync): Transition[] {
+  const db = dbOverride ?? getDb(projectId);
+  const rows = db.prepare("SELECT * FROM transitions WHERE task_id = ? ORDER BY created_at").all(taskId) as Record<string, unknown>[];
+  return rows.map(rowToTransition);
+}
+
+export type ListTasksFilter = {
+  state?: TaskState;
+  states?: TaskState[];
+  assignedTo?: string;
+  priority?: TaskPriority;
+  tags?: string[];
+  workflowId?: string;
+  limit?: number;
+};
+
+export function listTasks(
+  projectId: string,
+  filter?: ListTasksFilter,
+  dbOverride?: DatabaseSync,
+): Task[] {
+  const db = dbOverride ?? getDb(projectId);
+  const conditions: string[] = ["project_id = ?"];
+  const values: SQLInputValue[] = [projectId];
+
+  if (filter?.states && filter.states.length > 0) {
+    const placeholders = filter.states.map(() => "?").join(", ");
+    conditions.push(`state IN (${placeholders})`);
+    values.push(...filter.states);
+  } else if (filter?.state) {
+    conditions.push("state = ?");
+    values.push(filter.state);
+  }
+  if (filter?.assignedTo) {
+    conditions.push("assigned_to = ?");
+    values.push(filter.assignedTo);
+  }
+  if (filter?.priority) {
+    conditions.push("priority = ?");
+    values.push(filter.priority);
+  }
+  if (filter?.workflowId) {
+    conditions.push("workflow_id = ?");
+    values.push(filter.workflowId);
+  }
+
+  const limit = filter?.limit ?? 100;
+  const sql = `SELECT * FROM tasks WHERE ${conditions.join(" AND ")}
+    ORDER BY
+      CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 END,
+      created_at ASC
+    LIMIT ?`;
+  values.push(limit);
+
+  const rows = db.prepare(sql).all(...values) as Record<string, unknown>[];
+  let tasks = rows.map(rowToTask);
+
+  // Tag filtering in application layer (JSON column)
+  if (filter?.tags && filter.tags.length > 0) {
+    tasks = tasks.filter((t) => filter.tags!.some((tag) => t.tags?.includes(tag)));
+  }
+
+  return tasks;
+}
+
+// --- Task Leases ---
+
+/**
+ * Acquire a lease on a task. Atomic: succeeds only if no active lease exists
+ * or the existing lease has expired.
+ * Returns true if the lease was acquired.
+ */
+export function acquireTaskLease(
+  projectId: string,
+  taskId: string,
+  holder: string,
+  durationMs: number,
+  dbOverride?: DatabaseSync,
+): boolean {
+  const db = dbOverride ?? getDb(projectId);
+  const now = Date.now();
+  const expiresAt = now + durationMs;
+
+  const result = db.prepare(
+    `UPDATE tasks
+     SET lease_holder = ?, lease_acquired_at = ?, lease_expires_at = ?
+     WHERE id = ? AND project_id = ?
+       AND (lease_holder IS NULL OR lease_expires_at < ?)`,
+  ).run(holder, now, expiresAt, taskId, projectId, now);
+
+  return result.changes > 0;
+}
+
+/**
+ * Release a task lease. Only the current holder can release it.
+ * Returns true if the lease was released.
+ */
+export function releaseTaskLease(
+  projectId: string,
+  taskId: string,
+  holder: string,
+  dbOverride?: DatabaseSync,
+): boolean {
+  const db = dbOverride ?? getDb(projectId);
+
+  const result = db.prepare(
+    `UPDATE tasks
+     SET lease_holder = NULL, lease_acquired_at = NULL, lease_expires_at = NULL
+     WHERE id = ? AND project_id = ? AND lease_holder = ?`,
+  ).run(taskId, projectId, holder);
+
+  return result.changes > 0;
+}
+
+/**
+ * Renew (extend) an existing task lease. Only the current holder can renew.
+ * Returns true if the lease was renewed.
+ */
+export function renewTaskLease(
+  projectId: string,
+  taskId: string,
+  holder: string,
+  durationMs: number,
+  dbOverride?: DatabaseSync,
+): boolean {
+  const db = dbOverride ?? getDb(projectId);
+  const now = Date.now();
+  const expiresAt = now + durationMs;
+
+  const result = db.prepare(
+    `UPDATE tasks
+     SET lease_expires_at = ?
+     WHERE id = ? AND project_id = ? AND lease_holder = ?`,
+  ).run(expiresAt, taskId, projectId, holder);
+
+  return result.changes > 0;
+}
