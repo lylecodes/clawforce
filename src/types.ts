@@ -651,7 +651,9 @@ export type CostRecord = {
 };
 
 export type BudgetConfig = {
+  hourlyLimitCents?: number;
   dailyLimitCents?: number;
+  monthlyLimitCents?: number;
   sessionLimitCents?: number;
   taskLimitCents?: number;
 };
