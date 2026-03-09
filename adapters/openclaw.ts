@@ -95,6 +95,7 @@ import {
 type MemoryToolFactory = (opts: { agentSessionKey?: string }) => Record<string, unknown> | null;
 import { recordCostFromLlmOutput } from "../src/cost.js";
 import { registerBulkPricing } from "../src/pricing.js";
+import { updateProviderUsage } from "../src/rate-limits.js";
 import type { CronRegistrar, CronRegistrarInput } from "../src/types.js";
 
 type GhostRecallConfig = {
@@ -387,6 +388,23 @@ const clawforcePlugin = {
           } else {
             api.logger.warn(`Clawforce: unknown job "${jobName}" for agent ${agentId} — using base config`);
           }
+        }
+
+        // Refresh provider rate limits (non-blocking, best-effort)
+        try {
+          // Access OpenClaw's usage summary if available via runtime
+          const usageSummary = (api as any).runtime?.system?.getProviderUsageSummary?.();
+          if (usageSummary?.providers) {
+            for (const snapshot of usageSummary.providers) {
+              updateProviderUsage(snapshot.provider, {
+                windows: snapshot.windows,
+                plan: snapshot.plan,
+                error: snapshot.error,
+              });
+            }
+          }
+        } catch {
+          // Non-fatal — rate limit data is advisory
         }
 
         // H7: Assemble context first — only start tracking if context assembly succeeds

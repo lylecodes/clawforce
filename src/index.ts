@@ -8,6 +8,7 @@
 
 // --- Lifecycle & Configuration ---
 export { initClawforce, shutdownClawforce, getActiveProjectIds, registerProject, unregisterProject, isClawforceInitialized } from "./lifecycle.js";
+export { syncAgentsToOpenClaw, buildOpenClawAgentEntry } from "./agent-sync.js";
 export {
   getAgentConfig,
   initProject,
@@ -34,10 +35,14 @@ export { disableAgent, enableAgent, isAgentDisabled } from "./enforcement/disabl
 // --- Context Assembly ---
 export { assembleContext } from "./context/assembler.js";
 export { buildOnboardingContext, buildExplainContent } from "./context/onboarding.js";
-export { buildMemoryContext } from "./context/sources/memory.js";
+
+// --- Jobs (Scoped Sessions) ---
+export { resolveJobName, resolveEffectiveConfig, canManageJobs, listJobs, upsertJob, deleteJob } from "./jobs.js";
+export { setCronService, getCronService } from "./manager-cron.js";
+export type { CronServiceLike } from "./manager-cron.js";
 
 // --- Skills ---
-export { resolveSkillSource, getTopicList, SKILL_TOPICS } from "./skills/registry.js";
+export { resolveSkillSource, getTopicList, registerCustomSkills, SKILL_TOPICS } from "./skills/registry.js";
 
 // --- Tools ---
 export { adaptTool, jsonResult, errorResult, safeExecute } from "./tools/common.js";
@@ -48,7 +53,11 @@ export { createClawforceVerifyTool } from "./tools/verify-tool.js";
 export { createClawforceCompactTool } from "./tools/compact-tool.js";
 export { createClawforceWorkflowTool } from "./tools/workflow-tool.js";
 export { createClawforceOpsTool } from "./tools/ops-tool.js";
-export { createClawforceMemoryTool } from "./tools/memory-tool.js";
+export { createClawforceContextTool } from "./tools/context-tool.js";
+export { createClawforceMessageTool } from "./tools/message-tool.js";
+export { createClawforceGoalTool } from "./tools/goal-tool.js";
+export { createClawforceChannelTool } from "./tools/channel-tool.js";
+
 
 // --- Policy ---
 export { registerPolicies } from "./policy/registry.js";
@@ -56,6 +65,35 @@ export { withPolicyCheck } from "./policy/middleware.js";
 
 // --- Approval ---
 export { approveProposal, listPendingProposals, rejectProposal } from "./approval/resolve.js";
+export { resolveApprovalChannel } from "./approval/channel-router.js";
+export type { ApprovalChannel, ChannelConfig } from "./approval/channel-router.js";
+export { setApprovalNotifier, getApprovalNotifier, formatTelegramMessage, buildApprovalButtons } from "./approval/notify.js";
+export type { ApprovalNotifier, NotificationPayload, NotificationResult } from "./approval/notify.js";
+export { persistToolCallIntent, getIntentByProposalForProject, getApprovedIntentsForTask, resolveIntentForProject } from "./approval/intent-store.js";
+export type { ToolCallIntent } from "./approval/intent-store.js";
+export { addPreApproval, checkPreApproval, consumePreApproval } from "./approval/pre-approved.js";
+
+// --- Messaging ---
+export { createMessage, getMessage, getPendingMessages, listMessages, listSentMessages, markDelivered, markBulkDelivered, markRead, getThread, searchMessages, updateProtocolStatus } from "./messaging/store.js";
+export { setMessageNotifier, getMessageNotifier, formatMessageNotification, notifyMessage } from "./messaging/notify.js";
+export type { MessageNotifier } from "./messaging/notify.js";
+export {
+  initiateRequest, initiateDelegation, initiateFeedback,
+  respondToRequest, acceptDelegation, rejectDelegation, completeDelegation, submitFeedback,
+  getActiveProtocols, getExpiredProtocols, expireProtocol, escalateProtocol, validateProtocolTransition,
+} from "./messaging/protocols.js";
+
+// --- Goals ---
+export { createGoal, getGoal, listGoals, updateGoal, achieveGoal, abandonGoal, getChildGoals, getGoalTree, linkTaskToGoal, unlinkTaskFromGoal, getGoalTasks } from "./goals/ops.js";
+export type { CreateGoalParams, ListGoalsFilters, GoalTreeNode } from "./goals/ops.js";
+export { checkGoalCascade, computeGoalProgress } from "./goals/cascade.js";
+export type { GoalProgress, CascadeResult } from "./goals/cascade.js";
+
+// --- Channels ---
+export { createChannel, getChannel, getChannelByName, listChannels, addMember, removeMember, updateChannelMetadata, concludeChannel, archiveChannel, getChannelMessages } from "./channels/store.js";
+export { sendChannelMessage, buildChannelTranscript } from "./channels/messages.js";
+export { startMeeting, advanceMeetingTurn, concludeMeeting, getMeetingStatus } from "./channels/meeting.js";
+export { setChannelNotifier, getChannelNotifier, notifyChannelMessage } from "./channels/notify.js";
 
 // --- Audit ---
 export { registerKillFunction } from "./audit/auto-kill.js";
@@ -63,8 +101,49 @@ export { registerKillFunction } from "./audit/auto-kill.js";
 // --- Tasks ---
 export { handleWorkerSessionEnd } from "./tasks/session-end.js";
 
+// --- Memory (Ghost Turn + Flush) ---
+export { runGhostRecall, runCronRecall, clearCooldown, clearAllCooldowns, INTENSITY_PRESETS } from "./memory/ghost-turn.js";
+export type { GhostTurnIntensity, GhostTurnOpts, MemoryToolInstance } from "./memory/ghost-turn.js";
+export { resolveProvider, callTriage, parseTriageResponse } from "./memory/llm-client.js";
+export type { ProviderInfo, TriageResult } from "./memory/llm-client.js";
+export {
+  incrementTurnCount, incrementToolCallCount, markMemoryWrite, hasMemoryWrite,
+  shouldFlush, resetCycle, markFlushAttempted, hasFlushBeenAttempted,
+  isSessionSubstantive, clearSession as clearFlushSession, isMemoryWriteCall,
+  getFlushPrompt,
+} from "./memory/flush-tracker.js";
+
+// --- Event Actions & Templates ---
+export { interpolate, interpolateRecord } from "./events/template.js";
+export type { TemplateContext } from "./events/template.js";
+export { executeAction } from "./events/actions.js";
+export type { ActionResult } from "./events/actions.js";
+
 // --- Diagnostics ---
 export { emitDiagnosticEvent, setDiagnosticEmitter } from "./diagnostics.js";
+
+// --- Pricing ---
+export { getPricing, registerModelPricing, registerModelPricingFromConfig, registerBulkPricing } from "./pricing.js";
+export type { ModelPricing } from "./pricing.js";
+
+// --- Rate Limits ---
+export { updateProviderUsage, getProviderUsage, getAllProviderUsage, isProviderThrottled, getMaxUsagePercent } from "./rate-limits.js";
+export type { ProviderUsage, UsageWindow } from "./rate-limits.js";
+
+// --- Multi-Window Budget ---
+export { getBudgetStatus, checkMultiWindowBudget } from "./budget-windows.js";
+export type { BudgetStatus, WindowStatus } from "./budget-windows.js";
+
+// --- Capacity ---
+export { getCapacityReport } from "./capacity.js";
+export type { CapacityReport, ThrottleRisk } from "./capacity.js";
+
+// --- Resources Context ---
+export { buildResourcesContext } from "./context/sources/resources.js";
+
+// --- Dashboard ---
+export { createDashboardServer, handleRequest } from "./dashboard/index.js";
+export type { DashboardOptions } from "./dashboard/index.js";
 
 // --- Database ---
 export { getDb, getMemoryDb, closeDb, closeAllDbs, setProjectsDir, getProjectsDir, validateProjectId } from "./db.js";
@@ -83,6 +162,7 @@ export type {
   AgentRole,
   ContextSource,
   Expectation,
+  JobDefinition,
   PerformancePolicy,
   WorkforceConfig,
   RequiredOutput,
@@ -94,5 +174,24 @@ export type {
   CronRegistrar,
   CronRegistrarInput,
   ClawforceEvent,
+  ActionConstraint,
+  ActionConstraints,
+  ActionScope,
   DispatchQueueItem,
+  SkillPack,
+  Message,
+  MessageType,
+  MessagePriority,
+  MessageStatus,
+  ProtocolStatus,
+  Goal,
+  GoalStatus,
+  EventActionConfig,
+  EventHandlerConfig,
+  EventActionType,
+  Channel,
+  ChannelType,
+  ChannelStatus,
+  ChannelConfig as CommChannelConfig,
+  MeetingConfig,
 } from "./types.js";
