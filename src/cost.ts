@@ -50,6 +50,7 @@ export function recordCost(
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
     model?: string;
+    provider?: string;
     source?: string;
   },
   dbOverride?: DatabaseSync,
@@ -62,8 +63,8 @@ export function recordCost(
   db.prepare(`
     INSERT INTO cost_records (id, project_id, agent_id, session_key, task_id,
       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-      cost_cents, model, source, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cost_cents, model, provider, source, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     params.projectId,
@@ -76,6 +77,7 @@ export function recordCost(
     params.cacheWriteTokens ?? 0,
     costCents,
     params.model ?? null,
+    params.provider ?? null,
     params.source ?? "dispatch",
     now,
   );
@@ -122,6 +124,7 @@ export function recordCost(
     cacheWriteTokens: params.cacheWriteTokens ?? 0,
     costCents,
     model: params.model,
+    provider: params.provider,
     source: params.source ?? "dispatch",
     createdAt: now,
   };
@@ -142,6 +145,7 @@ export function getCostSummary(
     projectId: string;
     agentId?: string;
     taskId?: string;
+    provider?: string;
     since?: number;
     until?: number;
   },
@@ -158,6 +162,10 @@ export function getCostSummary(
   if (params.taskId) {
     conditions.push("task_id = ?");
     values.push(params.taskId);
+  }
+  if (params.provider) {
+    conditions.push("provider = ?");
+    values.push(params.provider);
   }
   if (params.since) {
     conditions.push("created_at >= ?");

@@ -104,15 +104,52 @@ export type TaskResult =
  */
 export type CronRegistrar = (job: CronRegistrarInput) => Promise<void>;
 
-/** Minimal cron job shape for the registrar (mirrors CronJobCreate essentials). */
+/** Schedule types matching OpenClaw's CronScheduleSchema. */
+export type CronSchedule =
+  | { kind: "at"; at: string }
+  | { kind: "every"; everyMs: number; anchorMs?: number }
+  | { kind: "cron"; expr: string; tz?: string; staggerMs?: number };
+
+/** Delivery configuration for cron jobs. */
+export type CronDelivery = {
+  mode: "none" | "announce" | "webhook";
+  to?: string;
+  channel?: "last" | string;
+  accountId?: string;
+  bestEffort?: boolean;
+};
+
+/** Failure alert configuration for cron jobs. */
+export type CronFailureAlert = false | {
+  after?: number;
+  channel?: "last" | string;
+  to?: string;
+  cooldownMs?: number;
+  mode?: "announce" | "webhook";
+  accountId?: string;
+};
+
+/** Cron job input matching OpenClaw's CronJobCreate shape. */
 export type CronRegistrarInput = {
   name: string;
   agentId: string;
   enabled: boolean;
-  schedule: { kind: "every"; everyMs: number };
-  sessionTarget: "isolated";
-  wakeMode: "now";
-  payload: { kind: "agentTurn"; message: string };
+  schedule: CronSchedule;
+  sessionTarget: "main" | "isolated";
+  wakeMode: "next-heartbeat" | "now";
+  payload: {
+    kind: "agentTurn";
+    message: string;
+    model?: string;
+    fallbacks?: string[];
+    thinking?: string;
+    timeoutSeconds?: number;
+    lightContext?: boolean;
+  };
+  description?: string;
+  deleteAfterRun?: boolean;
+  delivery?: CronDelivery;
+  failureAlert?: CronFailureAlert;
 };
 
 export type ClawforceConfig = {
@@ -124,14 +161,42 @@ export type ClawforceConfig = {
   cronRegistrar?: CronRegistrar;
 };
 
+// --- Dispatch throttle types ---
+
+/** Per-project dispatch concurrency and rate-limiting configuration. */
+export type DispatchConfig = {
+  /** Max concurrent dispatches per project (default: 3). */
+  maxConcurrentDispatches?: number;
+  /** Max dispatches per hour per project. */
+  maxDispatchesPerHour?: number;
+  /** Per-agent concurrency and rate limits. */
+  agentLimits?: Record<string, {
+    maxConcurrent?: number;
+    maxPerHour?: number;
+  }>;
+};
+
+/** Strategy for automatic task assignment. */
+export type AssignmentStrategy = "workload_balanced" | "round_robin" | "skill_matched";
+
+/** Configuration for the auto-assignment engine. */
+export type AssignmentConfig = {
+  /** Enable auto-assignment (default: false — opt-in). */
+  enabled: boolean;
+  /** Assignment strategy (default: "workload_balanced"). */
+  strategy: AssignmentStrategy;
+  /** Auto-dispatch tasks when assigned (default: true when assignment enabled). */
+  autoDispatchOnAssign?: boolean;
+};
+
 // --- Agent Enforcement Framework types ---
 
 /** Role determines default behavior and management patterns. */
-export type AgentRole = "manager" | "employee" | "scheduled";
+export type AgentRole = "manager" | "employee" | "scheduled" | "assistant";
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
@@ -221,12 +286,59 @@ export type AgentConfig = {
    * - undefined: use role profile default
    */
   compaction?: boolean | CompactionConfig;
+  /** Name of the skill_pack to apply to this agent. */
+  skill_pack?: string;
+  /** Scoped sessions. Each key is a job name with its own briefing/expectations/cron. */
+  jobs?: Record<string, JobDefinition>;
+};
+
+/** A scoped session definition for an agent. */
+export type JobDefinition = {
+  /** Cron schedule. Accepts shorthand ("5m"), cron expr ("0 9 * * MON-FRI"), or ISO datetime ("at:2025-12-31T23:59:00Z"). */
+  cron?: string;
+  /** Timezone for cron expressions (e.g. "America/New_York"). Ignored for interval/at schedules. */
+  cronTimezone?: string;
+  /** Session target: "isolated" (default) or "main". */
+  sessionTarget?: "main" | "isolated";
+  /** Wake mode: "now" (default) or "next-heartbeat". */
+  wakeMode?: "next-heartbeat" | "now";
+  /** Delivery configuration for cron results. */
+  delivery?: CronDelivery;
+  /** Failure alert configuration. */
+  failureAlert?: CronFailureAlert;
+  /** Model override for this job's cron payload. */
+  model?: string;
+  /** Timeout in seconds for this job's cron session. */
+  timeoutSeconds?: number;
+  /** Use light context for this job's cron session. */
+  lightContext?: boolean;
+  /** Mark as one-shot: auto-delete after single run. Default true for "at" schedules. */
+  deleteAfterRun?: boolean;
+  /** Context sources (replaces base briefing when specified). */
+  briefing?: ContextSource[];
+  /** Sources to exclude from base briefing (used when briefing is not specified). */
+  exclude_briefing?: string[];
+  /** Compliance requirements (replaces base expectations when specified). */
+  expectations?: Expectation[];
+  /** Failure behavior (replaces base when specified). */
+  performance_policy?: PerformancePolicy;
+  /** Compaction config (replaces base when specified). */
+  compaction?: boolean | CompactionConfig;
+  /** Nudge text for the cron payload (replaces default nudge). */
+  nudge?: string;
 };
 
 /** Top-level approval policy configuration. */
 export type ApprovalPolicy = {
   /** Natural language policy text — served to manager at decision time. */
   policy: string;
+};
+
+/** A reusable config bundle for agents. */
+export type SkillPack = {
+  briefing?: ContextSource[];
+  expectations?: Expectation[];
+  performance_policy?: PerformancePolicy;
 };
 
 /** Full project config with workforce management. */
@@ -250,10 +362,188 @@ export type WorkforceConfig = {
     alertRules?: Record<string, Record<string, unknown>>;
   };
   riskTiers?: RiskTierConfig;
+  /** Custom skill topics: domain markdown files accessible via skill system. */
+  skills?: Record<string, {
+    title: string;
+    description: string;
+    path: string;
+    roles?: AgentRole[];
+  }>;
+  /** Reusable config bundles that agents can reference. */
+  skill_packs?: Record<string, SkillPack>;
+  /** Dispatch throttle configuration. */
+  dispatch?: DispatchConfig;
+  /** Auto-assignment engine configuration. */
+  assignment?: AssignmentConfig;
+  /** Tool gates: per-tool risk classification for MCP/external tools. */
+  toolGates?: ToolGatesConfig;
+  /** Bulk action thresholds: escalate tier when action count exceeds limit in window. */
+  bulkThresholds?: Record<string, BulkThreshold>;
+  /** User-defined event-to-action mappings. */
+  event_handlers?: Record<string, EventHandlerConfig>;
+  /** Review gate configuration: verifier selection, timeouts, self-review. */
+  review?: ReviewConfig;
+  /** Channel definitions for agent group communication. */
+  channels?: ChannelConfig[];
+  /** Safety limits: configurable guardrails with conservative defaults. */
+  safety?: SafetyConfig;
+};
+
+// --- Safety config types ---
+
+export type SafetyConfig = {
+  /** Max depth of agent-spawning-agent chains. Default: 3. */
+  maxSpawnDepth?: number;
+  /** Budget multiplier before pausing dispatch. Default: 1.5 (150% of daily budget). */
+  costCircuitBreaker?: number;
+  /** Same task title failed N times across tasks → require human. Default: 3. */
+  loopDetectionThreshold?: number;
+  /** Max concurrent active meetings per project. Default: 2. */
+  maxConcurrentMeetings?: number;
+  /** Max messages per minute per channel. Default: 60. */
+  maxMessageRate?: number;
 };
 
 /** @deprecated Use WorkforceConfig instead. */
 export type EnforcementProjectConfig = WorkforceConfig;
+
+// --- Review config types ---
+
+/** Review gate configuration for task verification. */
+export type ReviewConfig = {
+  /** Explicit verifier agent ID. If omitted, falls back to regex pattern matching. */
+  verifierAgent?: string;
+  /** Hours before a REVIEW task with no verifier action triggers escalation. */
+  autoEscalateAfterHours?: number;
+  /** Whether task assignees can review their own work. Default: false. */
+  selfReviewAllowed?: boolean;
+  /** Maximum task priority that allows self-review. Tasks at higher priority still require cross-verification. Default: P3. */
+  selfReviewMaxPriority?: TaskPriority;
+};
+
+// --- Channel types ---
+
+export type ChannelType = "topic" | "meeting";
+export const CHANNEL_TYPES: readonly ChannelType[] = ["topic", "meeting"] as const;
+
+export type ChannelStatus = "active" | "concluded" | "archived";
+export const CHANNEL_STATUSES: readonly ChannelStatus[] = ["active", "concluded", "archived"] as const;
+
+/** A persistent group communication channel. */
+export type Channel = {
+  id: string;
+  projectId: string;
+  name: string;
+  type: ChannelType;
+  members: string[];
+  status: ChannelStatus;
+  createdBy: string;
+  createdAt: number;
+  concludedAt?: number;
+  metadata?: Record<string, unknown>;
+};
+
+/** Meeting orchestration state stored in channel metadata. */
+export type MeetingConfig = {
+  participants: string[];
+  currentTurn: number;
+  prompt?: string;
+};
+
+/** Channel definition from workforce YAML config. */
+export type ChannelConfig = {
+  name: string;
+  type?: ChannelType;
+  /** Explicit agent IDs to add as members. */
+  members?: string[];
+  /** Auto-join agents by department. */
+  departments?: string[];
+  /** Auto-join agents by team. */
+  teams?: string[];
+  /** Auto-join agents by role. */
+  roles?: AgentRole[];
+  /** Telegram group ID for mirroring channel messages. */
+  telegramGroupId?: string;
+  /** Telegram thread/topic ID within the group. */
+  telegramThreadId?: number;
+};
+
+// --- Event handler config types ---
+
+/** Built-in action types for event handlers. */
+export type EventActionType = "create_task" | "notify" | "escalate" | "enqueue_work" | "emit_event";
+
+export const EVENT_ACTION_TYPES: readonly EventActionType[] = [
+  "create_task", "notify", "escalate", "enqueue_work", "emit_event",
+] as const;
+
+/** Create a task when the event fires. */
+export type CreateTaskAction = {
+  action: "create_task";
+  /** Title template with {{payload.field}} interpolation. */
+  template: string;
+  /** Description template. */
+  description?: string;
+  /** Task priority (default P2). */
+  priority?: TaskPriority;
+  /** "auto" for auto-assignment, or agent name. */
+  assign_to?: string;
+  /** Department for the created task. */
+  department?: string;
+  /** Team for the created task. */
+  team?: string;
+};
+
+/** Send a notification message. */
+export type NotifyAction = {
+  action: "notify";
+  /** Message template with {{payload.field}} interpolation. */
+  message: string;
+  /** Target agent name (defaults to first manager). */
+  to?: string;
+  /** Message priority. */
+  priority?: "low" | "normal" | "high" | "urgent";
+};
+
+/** Escalate to a manager or named agent. */
+export type EscalateAction = {
+  action: "escalate";
+  /** Target: "manager" or agent name. */
+  to: string;
+  /** Message template. */
+  message?: string;
+};
+
+/** Enqueue a task for dispatch. */
+export type EnqueueWorkAction = {
+  action: "enqueue_work";
+  /** Task ID (template string or defaults to payload.taskId). */
+  task_id?: string;
+  /** Queue priority 0-3. */
+  priority?: number;
+};
+
+/** Emit a follow-on event. */
+export type EmitEventAction = {
+  action: "emit_event";
+  /** Event type to emit. */
+  event_type: string;
+  /** Payload template (each value supports {{payload.field}}). */
+  event_payload?: Record<string, string>;
+  /** Dedup key template. */
+  dedup_key?: string;
+};
+
+/** Union of all event action configs. */
+export type EventActionConfig =
+  | CreateTaskAction
+  | NotifyAction
+  | EscalateAction
+  | EnqueueWorkAction
+  | EmitEventAction;
+
+/** Array of actions triggered by a single event type. */
+export type EventHandlerConfig = EventActionConfig[];
 
 // --- Event-driven dispatch types ---
 
@@ -263,27 +553,49 @@ export type EventType =
   | "deploy_finished"
   | "task_completed"
   | "task_failed"
+  | "task_assigned"
+  | "task_created"
   | "sweep_finding"
   | "dispatch_succeeded"
   | "dispatch_failed"
   | "task_review_ready"
   | "dispatch_dead_letter"
+  | "proposal_approved"
+  | "proposal_created"
+  | "proposal_rejected"
+  | "message_sent"
+  | "protocol_started"
+  | "protocol_responded"
+  | "protocol_completed"
+  | "protocol_expired"
+  | "protocol_escalated"
+  | "goal_created"
+  | "goal_achieved"
+  | "goal_abandoned"
   | "custom";
 
 export const EVENT_TYPES: readonly EventType[] = [
   "ci_failed", "pr_opened", "deploy_finished", "task_completed",
-  "task_failed", "sweep_finding", "dispatch_succeeded", "dispatch_failed",
-  "task_review_ready", "dispatch_dead_letter", "custom",
+  "task_failed", "task_assigned", "task_created", "sweep_finding",
+  "dispatch_succeeded", "dispatch_failed", "task_review_ready",
+  "dispatch_dead_letter", "proposal_approved", "proposal_created", "proposal_rejected", "message_sent",
+  "protocol_started", "protocol_responded", "protocol_completed", "protocol_expired", "protocol_escalated",
+  "goal_created", "goal_achieved", "goal_abandoned",
+  "custom",
 ] as const;
 
-export type EventSource = "tool" | "internal" | "cron";
+export type EventSource = "tool" | "internal" | "cron" | "webhook";
 
 export type EventStatus = "pending" | "processing" | "handled" | "failed" | "ignored";
+
+export const EVENT_STATUSES: readonly EventStatus[] = [
+  "pending", "processing", "handled", "failed", "ignored",
+] as const;
 
 export type ClawforceEvent = {
   id: string;
   projectId: string;
-  type: EventType;
+  type: string;
   source: EventSource;
   payload: Record<string, unknown>;
   dedupKey?: string;
@@ -333,6 +645,7 @@ export type CostRecord = {
   cacheWriteTokens: number;
   costCents: number;
   model?: string;
+  provider?: string;
   source: string;
   createdAt: number;
 };
@@ -348,6 +661,30 @@ export type BudgetCheckResult = {
   remaining?: number;
   reason?: string;
 };
+
+/**
+ * Constraint modifiers on an action scope entry.
+ * Applied after policy check passes, before execution.
+ */
+export type ActionConstraints = {
+  own_tasks_only?: boolean;
+  department_only?: boolean;
+};
+
+/**
+ * An action scope entry with optional constraints.
+ */
+export type ActionConstraint = {
+  actions: string[] | "*";
+  constraints?: ActionConstraints;
+};
+
+/**
+ * Action scope: maps tool names to allowed actions.
+ * `"*"` means all actions allowed; `string[]` restricts to listed actions.
+ * `ActionConstraint` allows actions with runtime constraints.
+ */
+export type ActionScope = Record<string, string[] | "*" | ActionConstraint>;
 
 // --- Policy enforcement types ---
 
@@ -394,6 +731,8 @@ export type SloDefinition = {
   windowMs: number;
   denominatorKey?: string;
   severity: "warning" | "critical";
+  /** What to do when no metric data exists in the window. Defaults to "pass". */
+  noDataPolicy?: "pass" | "fail" | "warn";
   onBreach?: {
     action: "create_task";
     taskTitle: string;
@@ -408,6 +747,7 @@ export type AlertRuleDefinition = {
   condition: "gt" | "lt" | "gte" | "lte" | "eq";
   threshold: number;
   windowMs: number;
+  aggregation?: "sum" | "avg" | "count" | "min" | "max";
   action: "create_task" | "emit_event" | "escalate";
   actionParams?: Record<string, unknown>;
   cooldownMs: number;
@@ -426,7 +766,7 @@ export type AnomalyConfig = {
 
 export type RiskTier = "low" | "medium" | "high" | "critical";
 
-export type RiskGateAction = "none" | "delay" | "approval" | "human_approval";
+export type RiskGateAction = "none" | "delay" | "confirm" | "approval" | "human_approval";
 
 export type RiskClassification = {
   tier: RiskTier;
@@ -449,4 +789,101 @@ export type RiskTierConfig = {
   defaultTier: RiskTier;
   policies: Record<RiskTier, { gate: RiskGateAction; delayMs?: number }>;
   patterns: RiskPattern[];
+};
+
+// --- Tool gate types ---
+
+export type ToolGateEntry = {
+  category: string;
+  tier: RiskTier;
+  /** Override the default gate action for this tier. */
+  gate?: RiskGateAction;
+};
+
+export type BulkThreshold = {
+  /** Time window in milliseconds. */
+  windowMs: number;
+  /** Maximum calls allowed in window before escalation. */
+  maxCount: number;
+  /** Tier to escalate to when threshold exceeded. */
+  escalateTo: RiskTier;
+};
+
+export type ToolGatesConfig = Record<string, ToolGateEntry>;
+
+// --- Messaging types ---
+
+export type MessageType = "direct" | "request" | "delegation" | "escalation" | "notification" | "meeting" | "feedback";
+
+export const MESSAGE_TYPES: readonly MessageType[] = [
+  "direct", "request", "delegation", "escalation", "notification", "meeting", "feedback",
+] as const;
+
+export type MessagePriority = "low" | "normal" | "high" | "urgent";
+
+export const MESSAGE_PRIORITIES: readonly MessagePriority[] = [
+  "low", "normal", "high", "urgent",
+] as const;
+
+export type MessageStatus = "queued" | "delivered" | "read" | "failed";
+
+export const MESSAGE_STATUSES: readonly MessageStatus[] = [
+  "queued", "delivered", "read", "failed",
+] as const;
+
+export type Message = {
+  id: string;
+  fromAgent: string;
+  toAgent: string;
+  projectId: string;
+  channelId: string | null;
+  type: MessageType;
+  priority: MessagePriority;
+  content: string;
+  status: MessageStatus;
+  parentMessageId: string | null;
+  createdAt: number;
+  deliveredAt: number | null;
+  readAt: number | null;
+  protocolStatus: ProtocolStatus | null;
+  responseDeadline: number | null;
+  metadata: Record<string, unknown> | null;
+};
+
+// --- Protocol types ---
+
+export type ProtocolStatus =
+  | "awaiting_response" | "resolved"
+  | "pending_acceptance" | "in_progress" | "completed" | "rejected"
+  | "awaiting_review" | "reviewed" | "approved" | "revision_requested"
+  | "expired" | "escalated" | "cancelled";
+
+export const PROTOCOL_STATUSES: readonly ProtocolStatus[] = [
+  "awaiting_response", "resolved",
+  "pending_acceptance", "in_progress", "completed", "rejected",
+  "awaiting_review", "reviewed", "approved", "revision_requested",
+  "expired", "escalated", "cancelled",
+] as const;
+
+// --- Goal types ---
+
+export type GoalStatus = "active" | "achieved" | "abandoned";
+
+export const GOAL_STATUSES: readonly GoalStatus[] = ["active", "achieved", "abandoned"] as const;
+
+export type Goal = {
+  id: string;
+  projectId: string;
+  title: string;
+  description?: string;
+  acceptanceCriteria?: string;
+  status: GoalStatus;
+  parentGoalId?: string;
+  ownerAgentId?: string;
+  department?: string;
+  team?: string;
+  createdBy: string;
+  createdAt: number;
+  achievedAt?: number;
+  metadata?: Record<string, unknown>;
 };

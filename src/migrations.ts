@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 22;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -21,6 +21,21 @@ const migrations: Record<number, Migration> = {
   5: migrateV5,
   6: migrateV6,
   7: migrateV7,
+  8: migrateV8,
+  9: migrateV9,
+  10: migrateV10,
+  11: migrateV11,
+  12: migrateV12,
+  13: migrateV13,
+  14: migrateV14,
+  15: migrateV15,
+  16: migrateV16,
+  17: migrateV17,
+  18: migrateV18,
+  19: migrateV19,
+  20: migrateV20,
+  21: migrateV21,
+  22: migrateV22,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -37,8 +52,16 @@ export function runMigrations(db: DatabaseSync): void {
   for (let v = currentVersion + 1; v <= SCHEMA_VERSION; v++) {
     const migrate = migrations[v];
     if (migrate) {
-      migrate(db);
-      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)").run(v, Date.now());
+      // D3: Wrap each migration + version record in a transaction for atomicity
+      db.prepare("BEGIN IMMEDIATE").run();
+      try {
+        migrate(db);
+        db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)").run(v, Date.now());
+        db.prepare("COMMIT").run();
+      } catch (err) {
+        try { db.prepare("ROLLBACK").run(); } catch { /* already rolled back */ }
+        throw err;
+      }
     }
   }
 }
@@ -314,9 +337,9 @@ function migrateV3(db: DatabaseSync): void {
   `);
 
   // Add lease columns to tasks table
-  db.exec(`ALTER TABLE tasks ADD COLUMN lease_holder TEXT`);
-  db.exec(`ALTER TABLE tasks ADD COLUMN lease_acquired_at INTEGER`);
-  db.exec(`ALTER TABLE tasks ADD COLUMN lease_expires_at INTEGER`);
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN lease_holder TEXT`);
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN lease_acquired_at INTEGER`);
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN lease_expires_at INTEGER`);
 }
 
 // --- Migration V4: Cost tracking, policies, monitoring, risk tiers ---
@@ -448,8 +471,8 @@ function migrateV4(db: DatabaseSync): void {
   `);
 
   // Add risk_tier columns to existing tables
-  db.exec(`ALTER TABLE proposals ADD COLUMN risk_tier TEXT`);
-  db.exec(`ALTER TABLE dispatch_queue ADD COLUMN risk_tier TEXT`);
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN risk_tier TEXT`);
+  safeAlterTable(db, `ALTER TABLE dispatch_queue ADD COLUMN risk_tier TEXT`);
 }
 
 // --- Migration V5: Worker assignments table ---
@@ -468,8 +491,8 @@ function migrateV5(db: DatabaseSync): void {
 // --- Migration V6: Department and team columns on tasks ---
 
 function migrateV6(db: DatabaseSync): void {
-  db.exec(`ALTER TABLE tasks ADD COLUMN department TEXT`);
-  db.exec(`ALTER TABLE tasks ADD COLUMN team TEXT`);
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN department TEXT`);
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN team TEXT`);
 }
 
 // --- Migration V7: Shared memory table ---
@@ -498,4 +521,306 @@ function migrateV7(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_memory_scope ON memory(scope);
     CREATE INDEX IF NOT EXISTS idx_memory_project_scope ON memory(project_id, scope, deprecated);
   `);
+}
+
+// --- Migration V8: Drop memory table (replaced by OpenClaw RAG) ---
+
+function migrateV8(db: DatabaseSync): void {
+  db.exec(`DROP TABLE IF EXISTS memory`);
+}
+
+// --- Migration V9: Indexes for audit_runs + hash_version column for audit_log ---
+
+function migrateV9(db: DatabaseSync): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_audit_runs_session_key ON audit_runs(session_key);
+    CREATE INDEX IF NOT EXISTS idx_audit_runs_ended_at ON audit_runs(ended_at);
+  `);
+  safeAlterTable(db, `ALTER TABLE audit_log ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1`);
+}
+
+// --- Migration V10: Add job_name tracking to audit_runs ---
+
+function migrateV10(db: DatabaseSync): void {
+  safeAlterTable(db, `ALTER TABLE audit_runs ADD COLUMN job_name TEXT`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_runs_job_name ON audit_runs(job_name)`);
+}
+
+// --- Migration V11: Add dispatch_context to tracked_sessions ---
+
+function migrateV11(db: DatabaseSync): void {
+  safeAlterTable(db, `ALTER TABLE tracked_sessions ADD COLUMN dispatch_context TEXT`);
+}
+
+// --- Migration V12: Approval channel routing + tool call intents + pre-approvals ---
+
+function migrateV12(db: DatabaseSync): void {
+  // Extend proposals table for channel routing
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN channel TEXT`);
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN notification_message_id TEXT`);
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN timeout_action TEXT DEFAULT 'reject'`);
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN timeout_at INTEGER`);
+
+  // Tool call intents — blocked tool calls awaiting approval
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tool_call_intents (
+      id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      task_id TEXT,
+      tool_name TEXT NOT NULL,
+      tool_params TEXT NOT NULL,
+      category TEXT NOT NULL,
+      risk_tier TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tool_intents_proposal ON tool_call_intents(proposal_id);
+    CREATE INDEX IF NOT EXISTS idx_tool_intents_task ON tool_call_intents(project_id, task_id, status);
+  `);
+
+  // Pre-approvals — single-use allowlist for re-dispatched tasks
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pre_approvals (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      approved_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      consumed INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pre_approvals_lookup ON pre_approvals(project_id, task_id, tool_name, consumed);
+  `);
+}
+
+// --- Migration V13: Unified messaging ---
+
+function migrateV13(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      from_agent TEXT NOT NULL,
+      to_agent TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      channel_id TEXT,
+      type TEXT NOT NULL DEFAULT 'direct',
+      priority TEXT NOT NULL DEFAULT 'normal',
+      content TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      parent_message_id TEXT,
+      created_at INTEGER NOT NULL,
+      delivered_at INTEGER,
+      read_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(project_id, to_agent, status);
+    CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(project_id, from_agent);
+    CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_message_id);
+  `);
+}
+
+// --- Migration V14: Protocol support on messages ---
+
+function migrateV14(db: DatabaseSync): void {
+  safeAlterTable(db, `ALTER TABLE messages ADD COLUMN protocol_status TEXT`);
+  safeAlterTable(db, `ALTER TABLE messages ADD COLUMN response_deadline INTEGER`);
+  safeAlterTable(db, `ALTER TABLE messages ADD COLUMN metadata TEXT`);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_messages_protocol ON messages(project_id, protocol_status);
+    CREATE INDEX IF NOT EXISTS idx_messages_deadline ON messages(project_id, response_deadline);
+  `);
+}
+
+// --- Migration V15: Goals table + goal_id on tasks ---
+
+function migrateV15(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS goals (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      acceptance_criteria TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      parent_goal_id TEXT,
+      owner_agent_id TEXT,
+      department TEXT,
+      team TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      achieved_at INTEGER,
+      metadata TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_goals_project ON goals(project_id);
+    CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(project_id, status);
+    CREATE INDEX IF NOT EXISTS idx_goals_parent ON goals(parent_goal_id);
+    CREATE INDEX IF NOT EXISTS idx_goals_owner ON goals(owner_agent_id);
+  `);
+
+  // Add goal_id column to tasks for direct task-to-goal linkage
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN goal_id TEXT`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)`);
+}
+
+function migrateV16(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS channels (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'topic',
+      members TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      concluded_at INTEGER,
+      metadata TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_channels_project ON channels(project_id);
+    CREATE INDEX IF NOT EXISTS idx_channels_project_status ON channels(project_id, type, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_name ON channels(project_id, name);
+    CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id);
+  `);
+}
+
+function migrateV17(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_dependencies (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      depends_on_task_id TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'blocks',
+      created_at INTEGER NOT NULL,
+      created_by TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_deps_task ON task_dependencies(project_id, task_id);
+    CREATE INDEX IF NOT EXISTS idx_task_deps_depends ON task_dependencies(project_id, depends_on_task_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_deps_pair ON task_dependencies(project_id, task_id, depends_on_task_id);
+  `);
+}
+
+function migrateV18(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS project_metadata (
+      project_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT,
+      PRIMARY KEY (project_id, key)
+    );
+  `);
+}
+
+// --- Migration V19: Trust evolution ---
+
+function migrateV19(db: DatabaseSync): void {
+  // Trust decisions — longitudinal record of every approval/rejection per category
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS trust_decisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      agent_id TEXT,
+      proposal_id TEXT,
+      tool_name TEXT,
+      risk_tier TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trust_decisions_category ON trust_decisions(project_id, category, created_at);
+    CREATE INDEX IF NOT EXISTS idx_trust_decisions_project ON trust_decisions(project_id, created_at);
+  `);
+
+  // Trust overrides — tier adjustments with decay tracking
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS trust_overrides (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      original_tier TEXT NOT NULL,
+      override_tier TEXT NOT NULL,
+      reason TEXT,
+      activated_at INTEGER NOT NULL,
+      last_used_at INTEGER,
+      decay_after_days INTEGER NOT NULL DEFAULT 30,
+      status TEXT NOT NULL DEFAULT 'active'
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_trust_overrides_category ON trust_overrides(project_id, category, status);
+  `);
+}
+
+// --- Migration V20: Preference store ---
+
+function migrateV20(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS preferences (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'explicit',
+      confidence REAL NOT NULL DEFAULT 1.0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_preferences_lookup ON preferences(project_id, agent_id, category, key);
+    CREATE INDEX IF NOT EXISTS idx_preferences_agent ON preferences(project_id, agent_id);
+  `);
+}
+
+// --- Migration V21: Undo registry ---
+
+function migrateV21(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS undo_registry (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      tool_params TEXT NOT NULL,
+      action_summary TEXT NOT NULL,
+      undo_tool_name TEXT,
+      undo_tool_params TEXT,
+      status TEXT NOT NULL DEFAULT 'available',
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      executed_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_undo_project_category ON undo_registry(project_id, category, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_undo_project_status ON undo_registry(project_id, status, expires_at);
+  `);
+}
+
+// --- Migration V22: Add provider column to cost_records ---
+
+function migrateV22(db: DatabaseSync): void {
+  safeAlterTable(db, `ALTER TABLE cost_records ADD COLUMN provider TEXT`);
+}
+
+/** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */
+function safeAlterTable(db: DatabaseSync, sql: string): void {
+  try {
+    db.exec(sql);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("duplicate column name")) throw err;
+  }
 }
