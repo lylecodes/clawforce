@@ -57,7 +57,20 @@ vi.mock("../../src/enforcement/tracker.js", () => ({
   getSession: vi.fn(() => null),
   recordToolCall: vi.fn(),
   recoverOrphanedSessions: vi.fn(() => []),
+  setDispatchContext: vi.fn(),
   startTracking: vi.fn(),
+}));
+vi.mock("../../src/db.js", () => ({
+  getDb: vi.fn(() => ({})),
+  getMemoryDb: vi.fn(() => ({})),
+}));
+vi.mock("../../src/dispatch/queue.js", () => ({
+  completeItem: vi.fn(),
+  failItem: vi.fn(),
+}));
+vi.mock("../../src/tasks/ops.js", () => ({
+  getTask: vi.fn(() => null),
+  releaseTaskLease: vi.fn(),
 }));
 vi.mock("../../src/approval/resolve.js", () => ({
   approveProposal: vi.fn(),
@@ -74,6 +87,15 @@ vi.mock("../../src/enforcement/disabled-store.js", () => ({
 vi.mock("../../src/tasks/session-end.js", () => ({
   handleWorkerSessionEnd: vi.fn(),
 }));
+vi.mock("../../src/policy/registry.js", () => ({
+  registerPolicies: vi.fn(),
+  getPolicies: vi.fn(() => []),
+  resetPolicyRegistryForTest: vi.fn(),
+}));
+vi.mock("../../src/policy/middleware.js", () => ({
+  withPolicyCheck: vi.fn((execute: unknown) => execute),
+  enforceToolPolicy: vi.fn(() => ({ allowed: true })),
+}));
 vi.mock("../../src/tools/common.js", () => ({
   adaptTool: vi.fn((t: unknown) => t),
 }));
@@ -81,13 +103,39 @@ vi.mock("../../src/tools/log-tool.js", () => ({
   createClawforceLogTool: vi.fn(() => ({ name: "clawforce_log" })),
 }));
 vi.mock("../../src/tools/task-tool.js", () => ({
-  createClawforceTaskTool: vi.fn(() => ({ name: "clawforce_task" })),
+  createClawforceTaskTool: vi.fn(() => ({
+    name: "clawforce_task",
+    label: "Clawforce Task",
+    description: "Task tool",
+    parameters: {
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "create", "transition", "attach_evidence", "get", "list", "history", "fail",
+            "get_approval_context", "submit_proposal", "check_proposal", "metrics",
+            "bulk_create", "bulk_transition",
+          ],
+        },
+      },
+    },
+    execute: vi.fn(async () => ({ content: [{ type: "text", text: "{}" }], details: null })),
+  })),
 }));
 vi.mock("../../src/tools/verify-tool.js", () => ({
   createClawforceVerifyTool: vi.fn(() => ({ name: "clawforce_verify" })),
 }));
 vi.mock("../../src/tools/workflow-tool.js", () => ({
   createClawforceWorkflowTool: vi.fn(() => ({ name: "clawforce_workflow" })),
+}));
+vi.mock("../../src/tools/message-tool.js", () => ({
+  createClawforceMessageTool: vi.fn(() => ({ name: "clawforce_message" })),
+}));
+vi.mock("../../src/messaging/notify.js", () => ({
+  setMessageNotifier: vi.fn(),
+  getMessageNotifier: vi.fn(() => null),
+  formatMessageNotification: vi.fn(() => ""),
+  notifyMessage: vi.fn(),
 }));
 
 // --- Import subject under test after mocks are in place ---
@@ -136,8 +184,8 @@ describe("clawforce plugin", () => {
       clawforcePlugin.register(api as any);
     });
 
-    it("registers 4 hooks", () => {
-      expect(api.on).toHaveBeenCalledTimes(4);
+    it("registers 6 hooks", () => {
+      expect(api.on).toHaveBeenCalledTimes(6);
     });
 
     it("registers the expected hook names", () => {
@@ -145,19 +193,21 @@ describe("clawforce plugin", () => {
         (c: unknown[]) => c[0] as string,
       );
       expect(registeredEvents).toContain("before_prompt_build");
+      expect(registeredEvents).toContain("before_tool_call");
       expect(registeredEvents).toContain("after_tool_call");
       expect(registeredEvents).toContain("agent_end");
       expect(registeredEvents).toContain("subagent_ended");
+      expect(registeredEvents).toContain("llm_output");
     });
 
-    it("registers 8 tools", () => {
-      expect(api.registerTool).toHaveBeenCalledTimes(8);
-      expect(api._tools).toHaveLength(8);
+    it("registers 12 tools", () => {
+      expect(api.registerTool).toHaveBeenCalledTimes(12);
+      expect(api._tools).toHaveLength(12);
     });
 
-    it("registers 3 commands", () => {
-      expect(api.registerCommand).toHaveBeenCalledTimes(3);
-      expect(api._commands).toHaveLength(3);
+    it("registers 4 commands", () => {
+      expect(api.registerCommand).toHaveBeenCalledTimes(4);
+      expect(api._commands).toHaveLength(4);
     });
 
     it("registers the expected command names", () => {
@@ -165,6 +215,7 @@ describe("clawforce plugin", () => {
       expect(names).toContain("clawforce-proposals");
       expect(names).toContain("clawforce-approve");
       expect(names).toContain("clawforce-reject");
+      expect(names).toContain("clawforce-memory");
     });
 
     it("registers 1 service", () => {
@@ -173,9 +224,11 @@ describe("clawforce plugin", () => {
       expect(api._services[0].id).toBe("clawforce-sweep");
     });
 
-    it("registers 1 gateway method", () => {
-      expect(api.registerGatewayMethod).toHaveBeenCalledTimes(1);
+    it("registers 3 gateway methods", () => {
+      expect(api.registerGatewayMethod).toHaveBeenCalledTimes(3);
       expect(api._gatewayMethods.has("clawforce.init")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.approval_callback")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.inject_channel_message")).toBe(true);
     });
 
     it("does nothing when config.enabled is false", () => {
@@ -237,6 +290,83 @@ describe("clawforce plugin", () => {
       const svc = api2._services[0];
       expect(typeof svc.start).toBe("function");
       expect(typeof svc.stop).toBe("function");
+    });
+  });
+
+  describe("scoped tool factories", () => {
+    it("unregistered agent gets only setup tool (default-deny)", () => {
+      const api2 = createMockApi();
+      clawforcePlugin.register(api2 as any);
+
+      // With default-deny, unregistered agents only get clawforce_setup
+      const results = api2._tools.map((factory: any) =>
+        factory({ agentId: "unknown-agent", sessionKey: "s1" }),
+      );
+      const nonNull = results.filter((r: any) => r !== null);
+      // Only clawforce_setup should be returned (UNREGISTERED_SCOPE)
+      expect(nonNull.length).toBe(1);
+    });
+
+    it("scheduled agent gets null for hidden tools", async () => {
+      const { getAgentConfig } = await import("../../src/project.js");
+      const mockGetAgentConfig = getAgentConfig as ReturnType<typeof vi.fn>;
+
+      // Mock a scheduled agent
+      mockGetAgentConfig.mockReturnValue({
+        projectId: "p1",
+        projectDir: "/tmp/test",
+        config: { role: "scheduled" },
+      });
+
+      const api2 = createMockApi();
+      clawforcePlugin.register(api2 as any);
+
+      // Find the clawforce_task factory by checking registration calls
+      const registerCalls = (api2.registerTool as ReturnType<typeof vi.fn>).mock.calls;
+      const taskFactory = registerCalls.find((c: any[]) => c[1]?.name === "clawforce_task")?.[0];
+      expect(taskFactory).toBeDefined();
+
+      const result = taskFactory({ agentId: "sched-1", sessionKey: "s1" });
+      expect(result).toBeNull();
+
+      // Cleanup
+      mockGetAgentConfig.mockReturnValue(null);
+    });
+
+    it("employee tool factory filters action enum in schema", async () => {
+      const { getAgentConfig } = await import("../../src/project.js");
+      const mockGetAgentConfig = getAgentConfig as ReturnType<typeof vi.fn>;
+
+      // Mock an employee agent
+      mockGetAgentConfig.mockReturnValue({
+        projectId: "p1",
+        projectDir: "/tmp/test",
+        config: { role: "employee" },
+      });
+
+      const api2 = createMockApi();
+      clawforcePlugin.register(api2 as any);
+
+      // Find the clawforce_task factory
+      const registerCalls = (api2.registerTool as ReturnType<typeof vi.fn>).mock.calls;
+      const taskFactory = registerCalls.find((c: any[]) => c[1]?.name === "clawforce_task")?.[0];
+      expect(taskFactory).toBeDefined();
+
+      const tool = taskFactory({ agentId: "emp-1", sessionKey: "s1" });
+      expect(tool).not.toBeNull();
+
+      // If the tool has parameters with action enum, it should be filtered
+      if (tool?.parameters?.properties?.action?.enum) {
+        const actions = tool.parameters.properties.action.enum as string[];
+        expect(actions).toContain("get");
+        expect(actions).toContain("transition");
+        expect(actions).not.toContain("create");
+        expect(actions).not.toContain("bulk_create");
+        expect(actions).not.toContain("metrics");
+      }
+
+      // Cleanup
+      mockGetAgentConfig.mockReturnValue(null);
     });
   });
 });

@@ -130,6 +130,39 @@ export function recordCost(
   };
 }
 
+/**
+ * Record cost from an OpenClaw llm_output hook event.
+ * Convenience wrapper that maps hook event fields to recordCost params.
+ */
+export function recordCostFromLlmOutput(params: {
+  projectId: string;
+  agentId: string;
+  sessionKey?: string;
+  taskId?: string;
+  provider?: string;
+  model?: string;
+  usage: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+}): CostRecord {
+  return recordCost({
+    projectId: params.projectId,
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
+    taskId: params.taskId,
+    provider: params.provider,
+    model: params.model,
+    inputTokens: params.usage.input ?? 0,
+    outputTokens: params.usage.output ?? 0,
+    cacheReadTokens: params.usage.cacheRead ?? 0,
+    cacheWriteTokens: params.usage.cacheWrite ?? 0,
+    source: "llm_output",
+  });
+}
+
 export type CostSummary = {
   totalCostCents: number;
   totalInputTokens: number;

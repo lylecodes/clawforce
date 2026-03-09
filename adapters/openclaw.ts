@@ -5,6 +5,7 @@
  * Translates OpenClaw lifecycle events into clawforce core calls.
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { OpenClawPluginApi as _OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -20,30 +21,53 @@ type OpenClawPluginApi = _OpenClawPluginApi & {
 };
 
 import { assembleContext } from "../src/context/assembler.js";
+import { resolveJobName, resolveDispatchContext, resolveEffectiveConfig } from "../src/jobs.js";
 import { validateWorkforceConfig } from "../src/config-validator.js";
 import { checkCompliance } from "../src/enforcement/check.js";
 import { executeFailureAction, executeCrashAction, recordCompliantRun } from "../src/enforcement/actions.js";
 import { resolveEscalationTarget, routeEscalation } from "../src/enforcement/escalation-router.js";
-import { endSession, getSession, recordToolCall, recoverOrphanedSessions, startTracking } from "../src/enforcement/tracker.js";
+import { endSession, getSession, recordToolCall, recoverOrphanedSessions, setDispatchContext, startTracking } from "../src/enforcement/tracker.js";
 import { emitDiagnosticEvent, setDiagnosticEmitter } from "../src/diagnostics.js";
 import { getActiveProjectIds, initClawforce, shutdownClawforce } from "../src/lifecycle.js";
 import {
   getAgentConfig,
+  getExtendedProjectConfig,
+  getRegisteredAgentIds,
   initProject,
   loadWorkforceConfig,
   loadProject,
   registerWorkforceConfig,
   resolveProjectDir,
 } from "../src/project.js";
+import { syncAgentsToOpenClaw } from "../src/agent-sync.js";
 import { approveProposal, listPendingProposals, rejectProposal } from "../src/approval/resolve.js";
+import { resolveApprovalChannel } from "../src/approval/channel-router.js";
+import {
+  type ApprovalNotifier,
+  type NotificationPayload,
+  setApprovalNotifier,
+  getApprovalNotifier,
+  formatTelegramMessage,
+  buildApprovalButtons,
+} from "../src/approval/notify.js";
+import { persistToolCallIntent } from "../src/approval/intent-store.js";
+import { checkPreApproval, consumePreApproval } from "../src/approval/pre-approved.js";
+import { recordToolGateHit, getEffectiveTier } from "../src/risk/bulk-detector.js";
+import { getRiskConfig } from "../src/risk/config.js";
+import { getDb } from "../src/db.js";
+import { completeItem, failItem } from "../src/dispatch/queue.js";
+import { getTask, releaseTaskLease } from "../src/tasks/ops.js";
+import { registerJobCrons, setCronService } from "../src/manager-cron.js";
 import { registerKillFunction } from "../src/audit/auto-kill.js";
 import { disableAgent, isAgentDisabled } from "../src/enforcement/disabled-store.js";
 import { handleWorkerSessionEnd } from "../src/tasks/session-end.js";
 import { buildOnboardingContext } from "../src/context/onboarding.js";
 import { registerPolicies } from "../src/policy/registry.js";
-import { generateDefaultScopePolicies } from "../src/profiles.js";
-import { withPolicyCheck } from "../src/policy/middleware.js";
-import { adaptTool } from "../src/tools/common.js";
+import { generateDefaultScopePolicies, getAllowedActionsForTool } from "../src/profiles.js";
+import { resolveEffectiveScope } from "../src/scope.js";
+import { ensureAgentDocs } from "../src/context/sources/auto-generate.js";
+import { withPolicyCheck, enforceToolPolicy } from "../src/policy/middleware.js";
+import { adaptTool, type ToolResult } from "../src/tools/common.js";
 import { createClawforceLogTool } from "../src/tools/log-tool.js";
 import { createClawforceSetupTool } from "../src/tools/setup-tool.js";
 import { createClawforceTaskTool } from "../src/tools/task-tool.js";
@@ -51,8 +75,42 @@ import { createClawforceVerifyTool } from "../src/tools/verify-tool.js";
 import { createClawforceCompactTool } from "../src/tools/compact-tool.js";
 import { createClawforceWorkflowTool } from "../src/tools/workflow-tool.js";
 import { createClawforceOpsTool } from "../src/tools/ops-tool.js";
-import { createClawforceMemoryTool } from "../src/tools/memory-tool.js";
+import { createClawforceContextTool } from "../src/tools/context-tool.js";
+import { createClawforceMessageTool } from "../src/tools/message-tool.js";
+import { createClawforceChannelTool } from "../src/tools/channel-tool.js";
+import { setMessageNotifier, formatMessageNotification } from "../src/messaging/notify.js";
+import { setChannelNotifier, formatChannelMessage } from "../src/channels/notify.js";
+import { advanceMeetingTurn, concludeMeeting, getMeetingStatus } from "../src/channels/meeting.js";
+import { buildChannelTranscript } from "../src/channels/messages.js";
+import { getChannel } from "../src/channels/store.js";
+// Memory system
+import { runGhostRecall, runCronRecall, clearCooldown, type GhostTurnIntensity, type MemoryToolInstance, INTENSITY_PRESETS } from "../src/memory/ghost-turn.js";
+import {
+  incrementTurnCount, incrementToolCallCount, markMemoryWrite, hasMemoryWrite,
+  shouldFlush, resetCycle, markFlushAttempted, hasFlushBeenAttempted,
+  isSessionSubstantive, clearSession as clearFlushSession, isMemoryWriteCall,
+  getFlushPrompt,
+} from "../src/memory/flush-tracker.js";
+// OpenClaw RAG memory tool factories — lazy-imported at registration time
+type MemoryToolFactory = (opts: { agentSessionKey?: string }) => Record<string, unknown> | null;
+import { recordCostFromLlmOutput } from "../src/cost.js";
+import { registerBulkPricing } from "../src/pricing.js";
 import type { CronRegistrar, CronRegistrarInput } from "../src/types.js";
+
+type GhostRecallConfig = {
+  enabled?: boolean;
+  intensity?: GhostTurnIntensity;
+  windowSize?: number;
+  maxInjectedChars?: number;
+  maxSearches?: number;
+  debug?: boolean;
+};
+
+type MemoryFlushConfig = {
+  enabled?: boolean;
+  flushInterval?: number;
+  minToolCalls?: number;
+};
 
 type ClawforcePluginConfig = {
   enabled?: boolean;
@@ -62,9 +120,28 @@ type ClawforcePluginConfig = {
   staleTaskHours?: number;
   cronStuckTimeoutMs?: number;
   cronMaxConsecutiveFailures?: number;
+  ghostRecall?: GhostRecallConfig;
+  memoryFlush?: MemoryFlushConfig;
+  /** Sync clawforce agents to OpenClaw config (agents.list[]). Default: true. */
+  syncAgents?: boolean;
 };
 
-const DEFAULT_CONFIG: Required<ClawforcePluginConfig> = {
+const DEFAULT_GHOST_RECALL: Required<GhostRecallConfig> = {
+  enabled: true,
+  intensity: "medium",
+  windowSize: 10,
+  maxInjectedChars: 4000,
+  maxSearches: 3,
+  debug: false,
+};
+
+const DEFAULT_MEMORY_FLUSH: Required<MemoryFlushConfig> = {
+  enabled: true,
+  flushInterval: 15,
+  minToolCalls: 3,
+};
+
+const DEFAULT_CONFIG = {
   enabled: true,
   projectsDir: "~/.clawforce",
   sweepIntervalMs: 60_000,
@@ -72,10 +149,46 @@ const DEFAULT_CONFIG: Required<ClawforcePluginConfig> = {
   staleTaskHours: 4,
   cronStuckTimeoutMs: 300_000,
   cronMaxConsecutiveFailures: 3,
+  ghostRecall: DEFAULT_GHOST_RECALL,
+  memoryFlush: DEFAULT_MEMORY_FLUSH,
+} as const;
+
+function resolveGhostRecall(raw?: Record<string, unknown>): Required<GhostRecallConfig> {
+  if (!raw) return { ...DEFAULT_GHOST_RECALL };
+  return {
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_GHOST_RECALL.enabled,
+    intensity: (["low", "medium", "high"].includes(raw.intensity as string) ? raw.intensity : DEFAULT_GHOST_RECALL.intensity) as GhostTurnIntensity,
+    windowSize: typeof raw.windowSize === "number" ? raw.windowSize : DEFAULT_GHOST_RECALL.windowSize,
+    maxInjectedChars: typeof raw.maxInjectedChars === "number" ? raw.maxInjectedChars : DEFAULT_GHOST_RECALL.maxInjectedChars,
+    maxSearches: typeof raw.maxSearches === "number" ? raw.maxSearches : DEFAULT_GHOST_RECALL.maxSearches,
+    debug: typeof raw.debug === "boolean" ? raw.debug : DEFAULT_GHOST_RECALL.debug,
+  };
+}
+
+function resolveMemoryFlush(raw?: Record<string, unknown>): Required<MemoryFlushConfig> {
+  if (!raw) return { ...DEFAULT_MEMORY_FLUSH };
+  return {
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_MEMORY_FLUSH.enabled,
+    flushInterval: typeof raw.flushInterval === "number" ? raw.flushInterval : DEFAULT_MEMORY_FLUSH.flushInterval,
+    minToolCalls: typeof raw.minToolCalls === "number" ? raw.minToolCalls : DEFAULT_MEMORY_FLUSH.minToolCalls,
+  };
+}
+
+type ResolvedConfig = {
+  enabled: boolean;
+  projectsDir: string;
+  sweepIntervalMs: number;
+  defaultMaxRetries: number;
+  staleTaskHours: number;
+  cronStuckTimeoutMs: number;
+  cronMaxConsecutiveFailures: number;
+  ghostRecall: Required<GhostRecallConfig>;
+  memoryFlush: Required<MemoryFlushConfig>;
+  syncAgents: boolean;
 };
 
-function resolveConfig(raw?: Record<string, unknown>): Required<ClawforcePluginConfig> {
-  if (!raw) return { ...DEFAULT_CONFIG };
+function resolveConfig(raw?: Record<string, unknown>): ResolvedConfig {
+  if (!raw) return { ...DEFAULT_CONFIG, ghostRecall: { ...DEFAULT_GHOST_RECALL }, memoryFlush: { ...DEFAULT_MEMORY_FLUSH }, syncAgents: true };
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONFIG.enabled,
     projectsDir: typeof raw.projectsDir === "string" ? raw.projectsDir : DEFAULT_CONFIG.projectsDir,
@@ -84,6 +197,9 @@ function resolveConfig(raw?: Record<string, unknown>): Required<ClawforcePluginC
     staleTaskHours: typeof raw.staleTaskHours === "number" ? raw.staleTaskHours : DEFAULT_CONFIG.staleTaskHours,
     cronStuckTimeoutMs: typeof raw.cronStuckTimeoutMs === "number" ? raw.cronStuckTimeoutMs : DEFAULT_CONFIG.cronStuckTimeoutMs,
     cronMaxConsecutiveFailures: typeof raw.cronMaxConsecutiveFailures === "number" ? raw.cronMaxConsecutiveFailures : DEFAULT_CONFIG.cronMaxConsecutiveFailures,
+    ghostRecall: resolveGhostRecall(raw.ghostRecall as Record<string, unknown> | undefined),
+    memoryFlush: resolveMemoryFlush(raw.memoryFlush as Record<string, unknown> | undefined),
+    syncAgents: typeof raw.syncAgents === "boolean" ? raw.syncAgents : true,
   };
 }
 
@@ -135,6 +251,22 @@ function scanAndRegisterProjects(projectsDir: string, logger: MinimalLogger): vo
         const hasErrors = warnings.some((w) => w.level === "error");
         if (!hasErrors || Object.keys(wfConfig.agents).length > 0) {
           registerWorkforceConfig(entry.name, wfConfig, projectDir);
+
+          // Bootstrap per-agent docs (TOOLS.md auto-generation)
+          for (const [agentId, agentConfig] of Object.entries(wfConfig.agents)) {
+            try {
+              ensureAgentDocs(projectDir, agentId, agentConfig);
+            } catch (err) {
+              logger.warn(`Clawforce: failed to bootstrap agent docs for "${agentId}": ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+
+          // Register per-job crons for agents with jobs
+          for (const [agentId, agentConfig] of Object.entries(wfConfig.agents)) {
+            if (agentConfig.jobs) {
+              void registerJobCrons(entry.name, agentId, agentConfig.jobs);
+            }
+          }
 
           // Build combined policy list: explicit + auto-generated scope defaults
           const allPolicies: Array<{ name: string; type: string; target?: string; config: Record<string, unknown> }> = [];
@@ -223,8 +355,14 @@ const clawforcePlugin = {
       }
     }
 
+    // --- Memory mode toggle (per-session) ---
+    const memoryModeStore = new Map<string, boolean>();
+
+    // --- Meeting session tracking (per-session) ---
+    const meetingSessionStore = new Map<string, { channelId: string; turnIndex: number; projectId: string }>();
+
     // --- Context injection via before_prompt_build ---
-    api.on("before_prompt_build", async (_event, ctx) => {
+    api.on("before_prompt_build", async (event, ctx) => {
       const agentId = ctx.agentId;
       const sessionKey = ctx.sessionKey;
       if (!agentId) return;
@@ -239,15 +377,117 @@ const clawforcePlugin = {
       }
 
       if (entry && sessionKey) {
-        // Start compliance tracking for this session
-        startTracking(sessionKey, agentId, entry.projectId, entry.config);
+        // Resolve job-scoped config if a job tag is present in the prompt
+        const jobName = resolveJobName((event as { prompt?: string }).prompt);
+        let config = entry.config;
+        if (jobName) {
+          const effective = resolveEffectiveConfig(entry.config, jobName);
+          if (effective) {
+            config = effective;
+          } else {
+            api.logger.warn(`Clawforce: unknown job "${jobName}" for agent ${agentId} — using base config`);
+          }
+        }
 
-        const content = assembleContext(agentId, entry.config, {
+        // H7: Assemble context first — only start tracking if context assembly succeeds
+        let content: string | null = null;
+        try {
+          content = assembleContext(agentId, config, {
             projectId: entry.projectId,
             projectDir: entry.projectDir,
           });
-        if (content) {
-          return { prependContext: content };
+        } catch (err) {
+          api.logger.warn(`Clawforce: context assembly failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+
+        // Start compliance tracking after confirmed context success
+        startTracking(sessionKey, agentId, entry.projectId, config, jobName ?? undefined);
+
+        // Detect dispatch context (links session to dispatch queue item)
+        const dispatchCtx = resolveDispatchContext((event as { prompt?: string }).prompt);
+        if (dispatchCtx) {
+          setDispatchContext(sessionKey, dispatchCtx);
+        }
+
+        // Detect meeting tag [clawforce:meeting=<channelId>:<turnIndex>]
+        const prompt = (event as { prompt?: string }).prompt ?? "";
+        const meetingMatch = prompt.match(/\[clawforce:meeting=([^:]+):(\d+)\]/);
+        if (meetingMatch) {
+          const meetingChannelId = meetingMatch[1]!;
+          const turnIndex = parseInt(meetingMatch[2]!, 10);
+          meetingSessionStore.set(sessionKey, { channelId: meetingChannelId, turnIndex, projectId: entry.projectId });
+
+          // Inject full channel transcript + meeting prompt into context
+          try {
+            const transcript = buildChannelTranscript(entry.projectId, meetingChannelId, { limit: 50 });
+            const status = getMeetingStatus(entry.projectId, meetingChannelId);
+            const meetingCfg = status?.channel?.metadata?.meetingConfig as { prompt?: string } | undefined;
+            const meetingPrompt = meetingCfg?.prompt;
+
+            const meetingContext = [
+              "## Meeting Context\n",
+              `You are participating in a meeting (turn ${turnIndex + 1}/${status?.participants?.length ?? "?"}).`,
+              meetingPrompt ? `\n**Meeting topic:** ${meetingPrompt}` : "",
+              transcript ? `\n### Transcript so far:\n${transcript}` : "\n(No messages yet — you're first.)",
+              "\nUse `clawforce_channel send` to contribute your response to this meeting channel.",
+            ].filter(Boolean).join("\n");
+
+            content = content ? `${content}\n\n${meetingContext}` : meetingContext;
+          } catch (err) {
+            api.logger.warn(`Clawforce: meeting context injection failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        // Track turns for periodic memory flush
+        if (cfg.memoryFlush.enabled) {
+          incrementTurnCount(sessionKey);
+        }
+
+        // Ghost turn memory recall
+        let ghostContext: string | null = null;
+        if (cfg.ghostRecall.enabled && _createMemorySearchTool) {
+          try {
+            const isMemMode = memoryModeStore.get(sessionKey) ?? false;
+            const isCron = config.role === "scheduled";
+
+            if (isCron) {
+              // Cron path: use job prompt directly, no LLM triage
+              const cronPrompt = (event as { prompt?: string }).prompt ?? "";
+              const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
+              const toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
+              ghostContext = await runCronRecall(cronPrompt, toolInstance, {
+                maxSearches: cfg.ghostRecall.maxSearches,
+                maxInjectedChars: cfg.ghostRecall.maxInjectedChars,
+                debug: cfg.ghostRecall.debug,
+                sessionKey,
+              });
+            } else {
+              // User-facing path: LLM triage on recent messages
+              const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
+              const toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
+              ghostContext = await runGhostRecall(
+                (event as { messages?: unknown[] }).messages ?? [],
+                toolInstance,
+                {
+                  sessionKey,
+                  intensity: cfg.ghostRecall.intensity,
+                  memoryMode: isMemMode,
+                  windowSize: cfg.ghostRecall.windowSize,
+                  maxInjectedChars: cfg.ghostRecall.maxInjectedChars,
+                  maxSearches: cfg.ghostRecall.maxSearches,
+                  debug: cfg.ghostRecall.debug,
+                },
+              );
+            }
+          } catch (err) {
+            emitDiagnosticEvent({ type: "ghost_turn_error", sessionKey, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+
+        const parts = [content, ghostContext].filter(Boolean);
+        if (parts.length > 0) {
+          return { prependContext: parts.join("\n\n") };
         }
       }
 
@@ -275,6 +515,7 @@ const clawforcePlugin = {
             session.sessionKey,
             event.error,
             session.metrics,
+            session.jobName,
           );
           api.logger.warn(
             `Clawforce: ${session.agentId} crashed — action: ${actionResult.action}`,
@@ -300,16 +541,20 @@ const clawforcePlugin = {
             await handleDisable(session.agentId);
           }
 
-          // Escalation
+          // H9: Escalation with error boundary
           if (actionResult.alertMessage) {
-            const target = resolveEscalationTarget(agentEntry.config);
-            await routeEscalation({
-              injectAgentMessage: api.injectAgentMessage.bind(api),
-              target,
-              message: actionResult.alertMessage,
-              sourceAgentId: session.agentId,
-              logger: api.logger,
-            });
+            try {
+              const target = resolveEscalationTarget(agentEntry.config);
+              await routeEscalation({
+                injectAgentMessage: api.injectAgentMessage.bind(api),
+                target,
+                message: actionResult.alertMessage,
+                sourceAgentId: session.agentId,
+                logger: api.logger,
+              });
+            } catch (err) {
+              api.logger.warn(`Clawforce: escalation failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
           return;
         }
@@ -338,14 +583,244 @@ const clawforcePlugin = {
         event.durationMs ?? 0,
         !event.error,
       );
+
+      // Memory flush tracking: detect memory writes + count tool calls
+      if (cfg.memoryFlush.enabled) {
+        incrementToolCallCount(ctx.sessionKey);
+        if (isMemoryWriteCall(toolName, event.params)) {
+          markMemoryWrite(ctx.sessionKey);
+        }
+      }
+    });
+
+    // --- Universal tool gating via before_tool_call ---
+    // Enforces clawforce policies on ALL tools (MCP, external, OpenClaw native).
+    // Clawforce's own tools are skipped — they have withPolicyCheck() defense-in-depth.
+    api.on("before_tool_call", async (event, ctx) => {
+      if (!ctx.agentId) return;
+
+      const entry = getAgentConfig(ctx.agentId);
+      if (!entry) return; // Unknown agent — not managed by clawforce, allow
+
+      // Skip clawforce tools — they already run through withPolicyCheck()
+      if (event.toolName.startsWith("clawforce_") || event.toolName === "memory_search" || event.toolName === "memory_get") {
+        return;
+      }
+
+      const result = enforceToolPolicy(
+        {
+          projectId: entry.projectId,
+          agentId: ctx.agentId,
+          sessionKey: ctx.sessionKey,
+          toolName: event.toolName,
+        },
+        event.params ?? {},
+      );
+
+      if (!result.allowed) {
+        return {
+          block: true,
+          blockReason: `Clawforce policy: ${result.reason}`,
+        };
+      }
+
+      // --- Tool gates: block MCP/external tools that require approval ---
+      const extConfig = getExtendedProjectConfig(entry.projectId);
+      const gate = extConfig?.toolGates?.[event.toolName];
+      if (gate) {
+        // Record hit for bulk detection (always, even if pre-approved)
+        recordToolGateHit(entry.projectId, ctx.agentId, gate.category);
+
+        // Determine effective tier (may be escalated by bulk detection)
+        const { tier: effectiveTier, bulkEscalated } = getEffectiveTier(
+          entry.projectId, ctx.agentId, gate.category,
+          gate.tier, extConfig.bulkThresholds,
+        );
+
+        // Determine gate action: explicit override on gate entry, or from risk tier policies
+        const riskConfig = getRiskConfig(extConfig.riskTiers);
+        const gateAction = gate.gate
+          ?? riskConfig.policies[effectiveTier]?.gate
+          ?? "approval";
+
+        // "none" → allow without approval
+        if (gateAction === "none") return;
+
+        // "delay" → allow (delay is informational for tool gates — actual delay handled at dispatch level)
+        if (gateAction === "delay") return;
+
+        // Check pre-approvals first (fast path for re-dispatched tasks)
+        const session = ctx.sessionKey ? getSession(ctx.sessionKey) : null;
+        const taskId = session?.dispatchContext?.taskId;
+        if (taskId && checkPreApproval({ projectId: entry.projectId, taskId, toolName: event.toolName })) {
+          consumePreApproval({ projectId: entry.projectId, taskId, toolName: event.toolName });
+          return; // pre-approved, allow
+        }
+
+        // "human_approval" → block entirely (no proposal, requires config change)
+        if (gateAction === "human_approval") {
+          return {
+            block: true,
+            blockReason: `Clawforce: ${gate.category} is blocked (risk: ${effectiveTier}, gate: human_approval). Requires configuration change to allow.`,
+          };
+        }
+
+        // "confirm" or "approval" → create proposal + intent, block the call
+        const isConfirm = gateAction === "confirm";
+        const titlePrefix = isConfirm ? "Confirm" : "Tool gate";
+        const bulkNote = bulkEscalated ? ` [bulk escalated from ${gate.tier}]` : "";
+
+        try {
+          const proposalId = crypto.randomUUID();
+          const db = getDb(entry.projectId);
+          db.prepare(`
+            INSERT INTO proposals (id, project_id, title, description, proposed_by, status, risk_tier, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+          `).run(
+            proposalId, entry.projectId,
+            `${titlePrefix}: ${gate.category} (${effectiveTier})${bulkNote}`,
+            `${event.toolName} call requires ${isConfirm ? "confirmation" : "approval"}`,
+            ctx.agentId, effectiveTier, Date.now(),
+          );
+
+          // Persist the intent for re-dispatch on approval
+          persistToolCallIntent({
+            proposalId,
+            projectId: entry.projectId,
+            agentId: ctx.agentId,
+            taskId,
+            toolName: event.toolName,
+            toolParams: (event.params ?? {}) as Record<string, unknown>,
+            category: gate.category,
+            riskTier: effectiveTier,
+          }, db);
+
+          // Notify via channel (async, non-blocking)
+          getApprovalNotifier()?.sendProposalNotification({
+            proposalId,
+            projectId: entry.projectId,
+            title: `${titlePrefix}: ${gate.category} (${effectiveTier})${bulkNote}`,
+            description: `${event.toolName} call requires ${isConfirm ? "confirmation" : "approval"}`,
+            proposedBy: ctx.agentId,
+            riskTier: effectiveTier,
+            toolContext: { toolName: event.toolName, category: gate.category, taskId },
+          }).catch(() => { /* non-fatal */ });
+
+          // Emit proposal_created event
+          try {
+            const { ingestEvent } = await import("../src/events/store.js");
+            ingestEvent(entry.projectId, "proposal_created", "internal", {
+              proposalId,
+              proposedBy: ctx.agentId,
+              riskTier: effectiveTier,
+              title: `${titlePrefix}: ${gate.category} (${effectiveTier})${bulkNote}`,
+              toolName: event.toolName,
+              bulkEscalated,
+            }, `proposal-created:${proposalId}`, db);
+          } catch { /* non-fatal */ }
+
+          return {
+            block: true,
+            blockReason: `Clawforce: ${gate.category} requires ${isConfirm ? "confirmation" : "approval"} (risk: ${effectiveTier}${bulkNote}). Proposal ${proposalId} created.`,
+          };
+        } catch (err) {
+          api.logger.warn(`Clawforce: tool gate error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     });
 
     // --- Compliance enforcement at agent_end ---
     api.on("agent_end", async (event, ctx) => {
       if (!ctx.sessionKey) return;
 
+      // --- Periodic memory flush ---
+      if (cfg.memoryFlush.enabled) {
+        // Mid-cycle flush: if turns have accumulated without memory writes
+        if (shouldFlush(ctx.sessionKey, cfg.memoryFlush.flushInterval)) {
+          try {
+            await api.injectAgentMessage({
+              sessionKey: ctx.sessionKey,
+              message: getFlushPrompt(),
+            });
+            resetCycle(ctx.sessionKey);
+            emitDiagnosticEvent({ type: "memory_flush_periodic", sessionKey: ctx.sessionKey });
+          } catch (err) {
+            api.logger.warn(`Clawforce: periodic flush failed for ${ctx.sessionKey}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return; // Let the flush run; compliance happens on next agent_end
+        }
+
+        // Session-end safety net: if the session was substantive but had no memory writes
+        if (
+          !hasFlushBeenAttempted(ctx.sessionKey) &&
+          !hasMemoryWrite(ctx.sessionKey) &&
+          isSessionSubstantive(ctx.sessionKey, cfg.memoryFlush.minToolCalls)
+        ) {
+          markFlushAttempted(ctx.sessionKey);
+          try {
+            await api.injectAgentMessage({
+              sessionKey: ctx.sessionKey,
+              message: getFlushPrompt(),
+            });
+            emitDiagnosticEvent({ type: "memory_flush_session_end", sessionKey: ctx.sessionKey });
+          } catch (err) {
+            api.logger.warn(`Clawforce: session-end flush failed for ${ctx.sessionKey}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return; // Let the flush run; compliance happens on next agent_end
+        }
+      }
+
+      // --- Compliance check ---
       const session = endSession(ctx.sessionKey);
+
+      // Clean up memory tracking state
+      clearFlushSession(ctx.sessionKey);
+      clearCooldown(ctx.sessionKey);
+      memoryModeStore.delete(ctx.sessionKey);
+
+      // --- Meeting turn advancement ---
+      const meetingCtx = meetingSessionStore.get(ctx.sessionKey);
+      if (meetingCtx) {
+        meetingSessionStore.delete(ctx.sessionKey);
+        try {
+          const result = advanceMeetingTurn(meetingCtx.projectId, meetingCtx.channelId);
+          if (result.done) {
+            concludeMeeting(meetingCtx.projectId, meetingCtx.channelId, "system");
+            api.logger.info(`Clawforce: meeting concluded in channel ${meetingCtx.channelId}`);
+          } else {
+            api.logger.info(`Clawforce: meeting advanced to turn ${result.turnIndex} (${result.nextAgent})`);
+          }
+        } catch (err) {
+          api.logger.warn(`Clawforce: meeting turn advance failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       if (!session) return; // Not an enforced agent
+
+      // --- Dispatch completion handling ---
+      if (session.dispatchContext) {
+        const { queueItemId, taskId } = session.dispatchContext;
+        try {
+          const db = getDb(session.projectId);
+          const task = getTask(session.projectId, taskId, db);
+
+          if (task && task.state !== "ASSIGNED" && task.state !== "IN_PROGRESS") {
+            // Task advanced — dispatch succeeded
+            completeItem(queueItemId, db, session.projectId);
+            emitDiagnosticEvent({ type: "dispatch_session_succeeded", sessionKey: ctx.sessionKey, queueItemId, taskId, finalState: task.state });
+          } else {
+            // Task stuck — dispatch failed
+            const reason = `Task remained in ${task?.state ?? "unknown"} after dispatch session`;
+            failItem(queueItemId, reason, db, session.projectId);
+            emitDiagnosticEvent({ type: "dispatch_session_failed", sessionKey: ctx.sessionKey, queueItemId, taskId, reason });
+          }
+
+          // Release the task lease acquired by the dispatcher
+          releaseTaskLease(session.projectId, taskId, `dispatch:${queueItemId}`, db);
+        } catch (err) {
+          api.logger.warn(`Clawforce: dispatch completion handling failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       const result = checkCompliance(session);
 
@@ -360,7 +835,7 @@ const clawforcePlugin = {
       if (!agentEntry) return;
 
       const actionResult = executeFailureAction(
-        agentEntry.config.performance_policy,
+        session.performancePolicy ?? agentEntry.config.performance_policy,
         result,
       );
 
@@ -388,20 +863,140 @@ const clawforcePlugin = {
         await handleDisable(session.agentId);
       }
 
-      // Escalation: route alert to the configured target
+      // H9: Escalation with error boundary
       if (actionResult.alertMessage) {
-        const target = resolveEscalationTarget(agentEntry.config);
-        await routeEscalation({
-          injectAgentMessage: api.injectAgentMessage.bind(api),
-          target,
-          message: actionResult.alertMessage,
-          sourceAgentId: session.agentId,
-          logger: api.logger,
+        try {
+          const target = resolveEscalationTarget(agentEntry.config);
+          await routeEscalation({
+            injectAgentMessage: api.injectAgentMessage.bind(api),
+            target,
+            message: actionResult.alertMessage,
+            sourceAgentId: session.agentId,
+            logger: api.logger,
+          });
+        } catch (err) {
+          api.logger.warn(`Clawforce: escalation failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    });
+
+    // --- Auto-capture costs via llm_output ---
+    api.on("llm_output", async (event, ctx) => {
+      if (!ctx.agentId || !ctx.sessionKey) return;
+
+      const entry = getAgentConfig(ctx.agentId);
+      if (!entry) return;
+
+      // Resolve task ID from tracked session dispatch context
+      const session = getSession(ctx.sessionKey);
+      const taskId = session?.dispatchContext?.taskId;
+
+      try {
+        recordCostFromLlmOutput({
+          projectId: entry.projectId,
+          agentId: ctx.agentId,
+          sessionKey: ctx.sessionKey,
+          taskId,
+          provider: event.provider,
+          model: event.model,
+          usage: event.usage ?? {},
         });
+      } catch (err) {
+        api.logger.warn(`Clawforce: cost capture failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
 
     // --- Tool registration ---
+
+    /**
+     * Filter a tool's schema to only expose allowed actions.
+     * Deep-clones parameters to avoid mutating shared module-level constants.
+     */
+    function filterToolSchema(
+      tool: ReturnType<typeof adaptTool>,
+      allowedActions: string[] | "*",
+    ): ReturnType<typeof adaptTool> {
+      if (allowedActions === "*") return tool;
+      if (!tool.parameters) return tool;
+
+      // Deep-clone parameters to avoid mutating shared schemas
+      const params = JSON.parse(JSON.stringify(tool.parameters));
+      let removedActions: string[] = [];
+      if (params?.properties?.action?.enum) {
+        const original = params.properties.action.enum as string[];
+        const filtered = original.filter((a: string) => allowedActions.includes(a));
+        removedActions = original.filter((a: string) => !allowedActions.includes(a));
+        params.properties.action.enum = filtered;
+      }
+
+      // Strip removed action references from descriptions
+      let description = tool.description;
+      if (removedActions.length > 0 && description) {
+        description = stripRemovedActionReferences(description, removedActions);
+        // Also strip from property descriptions
+        if (params?.properties) {
+          for (const prop of Object.values(params.properties) as Array<Record<string, unknown>>) {
+            if (typeof prop.description === "string") {
+              prop.description = stripRemovedActionReferences(prop.description, removedActions);
+            }
+          }
+        }
+      }
+
+      return { ...tool, description, parameters: params };
+    }
+
+    /**
+     * Remove references to removed actions from a description string.
+     * Handles patterns like "action_name: description," and "action_name" mentions.
+     */
+    function stripRemovedActionReferences(text: string, removedActions: string[]): string {
+      let result = text;
+      for (const action of removedActions) {
+        // Remove "action_name: description." or "action_name: description," patterns
+        result = result.replace(new RegExp(`\\b${action}:\\s*[^.,;]*[.,;]?\\s*`, "g"), "");
+        // Remove "action_name, " or ", action_name" in comma-separated lists
+        result = result.replace(new RegExp(`,?\\s*\\b${action}\\b\\s*,?`, "g"), (match) => {
+          // If match has commas on both sides, keep one comma
+          return match.startsWith(",") && match.endsWith(",") ? "," : "";
+        });
+      }
+      // Clean up double spaces and trailing punctuation artifacts
+      result = result.replace(/\s{2,}/g, " ").replace(/,\s*\./g, ".").trim();
+      return result;
+    }
+
+    /**
+     * Create a scoped tool factory that handles:
+     * 1. Registration filtering (returns null if tool not in scope → hidden)
+     * 2. Schema filtering (prunes action enum to allowed actions)
+     * 3. Policy wrapping (runtime enforcement as safety net)
+     */
+    function scopedToolFactory(
+      toolName: string,
+      createToolFn: (ctx: { agentId?: string; sessionKey?: string }) => ReturnType<typeof adaptTool>,
+    ): (ctx: { agentId?: string; sessionKey?: string }) => ReturnType<typeof adaptTool> | null {
+      return (ctx) => {
+        // Resolve scope — always returns a scope (UNREGISTERED_SCOPE for unknown agents)
+        const scope = ctx.agentId ? resolveEffectiveScope(ctx.agentId) : null;
+
+        if (scope) {
+          const allowedActions = getAllowedActionsForTool(scope, toolName);
+          // Tool not in scope → hidden from this agent
+          if (allowedActions === null) return null;
+
+          // Create the tool, then filter schema and wrap with policy
+          const tool = createToolFn(ctx);
+          const filtered = filterToolSchema(tool, allowedActions);
+          return wrapWithPolicy(filtered, toolName, ctx);
+        }
+
+        // No agentId provided — create tool and wrap with policy
+        const tool = createToolFn(ctx);
+        return wrapWithPolicy(tool, toolName, ctx);
+      };
+    }
+
     // Helper to wrap tool with policy enforcement when agent has an associated project
     function wrapWithPolicy(
       tool: ReturnType<typeof adaptTool>,
@@ -411,75 +1006,90 @@ const clawforcePlugin = {
       const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
       if (!agentEntry) return tool;
 
-      const originalExecute = tool.execute.bind(tool);
-      tool.execute = async (...args: Parameters<typeof originalExecute>) => {
+      // H6: Capture original execute once, build chain without mutating tool in-place
+      const originalExecute = tool.execute.bind(tool) as (...args: unknown[]) => Promise<ToolResult>;
+      const disabledCheckedExecute = async (...args: unknown[]): Promise<ToolResult> => {
         // Hard-block disabled agents from executing any tool
         if (ctx.agentId && isAgentDisabled(agentEntry.projectId, ctx.agentId)) {
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "Agent is disabled by Clawforce. No tool calls are permitted." }) }],
+            details: null,
           };
         }
         return originalExecute(...args);
       };
 
-      // Apply policy enforcement on top
-      const policyWrapped = tool.execute;
-      tool.execute = withPolicyCheck(policyWrapped as typeof originalExecute, {
+      // Apply policy enforcement on top of disabled check
+      const policyWrappedExecute = withPolicyCheck(disabledCheckedExecute, {
         projectId: agentEntry.projectId,
         agentId: ctx.agentId!,
         sessionKey: ctx.sessionKey,
         toolName,
       });
-      return tool;
+
+      return { ...tool, execute: policyWrappedExecute };
     }
 
     api.registerTool(
-      (ctx) => wrapWithPolicy(
-        adaptTool(createClawforceTaskTool({ agentSessionKey: ctx.sessionKey })),
-        "clawforce_task", ctx,
-      ),
+      scopedToolFactory("clawforce_task", (ctx) => {
+        const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        return adaptTool(createClawforceTaskTool({
+          agentSessionKey: ctx.sessionKey,
+          projectId: agentEntry?.projectId,
+        }));
+      }),
       { name: "clawforce_task" },
     );
 
     api.registerTool(
-      (ctx) => {
+      scopedToolFactory("clawforce_log", (ctx) => {
         const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
-        const tool = adaptTool(createClawforceLogTool({
+        return adaptTool(createClawforceLogTool({
           agentSessionKey: ctx.sessionKey,
           agentId: agentEntry ? ctx.agentId! : ctx.sessionKey,
+          projectId: agentEntry?.projectId,
         }));
-        return wrapWithPolicy(tool, "clawforce_log", ctx);
-      },
+      }),
       { name: "clawforce_log" },
     );
 
     api.registerTool(
-      (ctx) => wrapWithPolicy(
-        adaptTool(createClawforceVerifyTool({ agentSessionKey: ctx.sessionKey })),
-        "clawforce_verify", ctx,
-      ),
+      scopedToolFactory("clawforce_verify", (ctx) => {
+        const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        return adaptTool(createClawforceVerifyTool({
+          agentSessionKey: ctx.sessionKey,
+          projectId: agentEntry?.projectId,
+        }));
+      }),
       { name: "clawforce_verify" },
     );
 
     api.registerTool(
-      (ctx) => wrapWithPolicy(
-        adaptTool(createClawforceWorkflowTool({ agentSessionKey: ctx.sessionKey })),
-        "clawforce_workflow", ctx,
-      ),
+      scopedToolFactory("clawforce_workflow", (ctx) => {
+        const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        return adaptTool(createClawforceWorkflowTool({
+          agentSessionKey: ctx.sessionKey,
+          projectId: agentEntry?.projectId,
+        }));
+      }),
       { name: "clawforce_workflow" },
     );
 
     api.registerTool(
-      () => adaptTool(createClawforceSetupTool({ projectsDir: cfg.projectsDir })),
+      scopedToolFactory("clawforce_setup", (ctx) =>
+        adaptTool(createClawforceSetupTool({
+          projectsDir: cfg.projectsDir,
+          agentId: ctx.agentId ?? undefined,
+        })),
+      ),
       { name: "clawforce_setup" },
     );
 
     api.registerTool(
-      (ctx) => {
+      scopedToolFactory("clawforce_compact", (ctx) => {
         const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
         const projectDir = agentEntry?.projectDir;
         if (!projectDir) {
-          // No project dir — return a no-op tool that explains the situation
           return adaptTool({
             label: "Clawforce Compact",
             name: "clawforce_compact",
@@ -491,37 +1101,128 @@ const clawforcePlugin = {
             }),
           });
         }
-        return wrapWithPolicy(
-          adaptTool(createClawforceCompactTool({
-            projectDir,
-            agentSessionKey: ctx.sessionKey,
-            agentId: ctx.agentId ?? undefined,
-          })),
-          "clawforce_compact", ctx,
-        );
-      },
+        return adaptTool(createClawforceCompactTool({
+          projectDir,
+          agentSessionKey: ctx.sessionKey,
+          agentId: ctx.agentId ?? undefined,
+        }));
+      }),
       { name: "clawforce_compact" },
     );
 
     api.registerTool(
-      (ctx) => wrapWithPolicy(
-        adaptTool(createClawforceOpsTool({ agentSessionKey: ctx.sessionKey })),
-        "clawforce_ops", ctx,
-      ),
+      scopedToolFactory("clawforce_ops", (ctx) => {
+        const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        return adaptTool(createClawforceOpsTool({
+          agentSessionKey: ctx.sessionKey,
+          projectId: agentEntry?.projectId,
+          projectDir: agentEntry?.projectDir,
+        }));
+      }),
       { name: "clawforce_ops" },
     );
 
     api.registerTool(
-      (ctx) => {
+      scopedToolFactory("clawforce_context", (ctx) => {
         const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
-        const tool = adaptTool(createClawforceMemoryTool({
+        return adaptTool(createClawforceContextTool({
           agentSessionKey: ctx.sessionKey,
-          agentId: agentEntry ? ctx.agentId! : ctx.sessionKey,
-          agentConfig: agentEntry?.config,
+          projectId: agentEntry?.projectId,
+          projectDir: agentEntry?.projectDir,
         }));
-        return wrapWithPolicy(tool, "clawforce_memory", ctx);
-      },
-      { name: "clawforce_memory" },
+      }),
+      { name: "clawforce_context" },
+    );
+
+    api.registerTool(
+      scopedToolFactory("clawforce_message", (ctx) => {
+        const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        return adaptTool(createClawforceMessageTool({
+          agentSessionKey: ctx.sessionKey,
+          agentId: ctx.agentId ?? undefined,
+          projectId: agentEntry?.projectId,
+        }));
+      }),
+      { name: "clawforce_message" },
+    );
+
+    api.registerTool(
+      scopedToolFactory("clawforce_channel", (ctx) => {
+        const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        return adaptTool(createClawforceChannelTool({
+          agentSessionKey: ctx.sessionKey,
+          projectId: agentEntry?.projectId,
+        }));
+      }),
+      { name: "clawforce_channel" },
+    );
+
+    // --- OpenClaw RAG memory tools ---
+    // Lazy-import factories from OpenClaw's internal memory tool module.
+    let _createMemorySearchTool: MemoryToolFactory | null | undefined;
+    let _createMemoryGetTool: MemoryToolFactory | null | undefined;
+
+    async function loadMemoryFactories(): Promise<void> {
+      if (_createMemorySearchTool !== undefined) return; // already attempted
+      try {
+        // Use variable to prevent Vite from statically analyzing the import path
+        const memoryModPath = "openclaw/dist/plugin-sdk/agents/tools/memory-tool.js";
+        const mod = await import(/* @vite-ignore */ memoryModPath) as Record<string, unknown>;
+        _createMemorySearchTool = (mod.createMemorySearchTool as MemoryToolFactory) ?? null;
+        _createMemoryGetTool = (mod.createMemoryGetTool as MemoryToolFactory) ?? null;
+      } catch {
+        _createMemorySearchTool = null;
+        _createMemoryGetTool = null;
+      }
+    }
+
+    // H8: Memory factories are loaded in the gateway_start service below, not fire-and-forget
+
+    function memoryNotConfiguredTool(name: string): ReturnType<typeof adaptTool> {
+      return adaptTool({
+        label: name === "memory_search" ? "Memory Search" : "Memory Get",
+        name,
+        description: `OpenClaw RAG memory tool (not configured). Ensure OpenClaw memory is enabled in your project settings.`,
+        parameters: {},
+        execute: async () => ({
+          content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "OpenClaw memory is not configured for this environment." }) }],
+          details: null,
+        }),
+      });
+    }
+
+    function adaptMemoryTool(raw: Record<string, unknown>): ReturnType<typeof adaptTool> {
+      // Ensure label is present (OpenClaw tools may omit it)
+      const tool = {
+        label: (raw.label as string) ?? (raw.name as string) ?? "Memory",
+        name: raw.name as string,
+        description: raw.description as string,
+        parameters: raw.parameters,
+        execute: raw.execute as (...args: unknown[]) => Promise<ToolResult>,
+      };
+      return adaptTool(tool);
+    }
+
+    // memory_search — OpenClaw RAG semantic search
+    api.registerTool(
+      scopedToolFactory("memory_search", (ctx) => {
+        if (!_createMemorySearchTool) return memoryNotConfiguredTool("memory_search");
+        const tool = _createMemorySearchTool({ agentSessionKey: ctx.sessionKey });
+        if (!tool) return memoryNotConfiguredTool("memory_search");
+        return adaptMemoryTool(tool);
+      }),
+      { name: "memory_search" },
+    );
+
+    // memory_get — OpenClaw RAG memory retrieval
+    api.registerTool(
+      scopedToolFactory("memory_get", (ctx) => {
+        if (!_createMemoryGetTool) return memoryNotConfiguredTool("memory_get");
+        const tool = _createMemoryGetTool({ agentSessionKey: ctx.sessionKey });
+        if (!tool) return memoryNotConfiguredTool("memory_get");
+        return adaptMemoryTool(tool);
+      }),
+      { name: "memory_get" },
     );
 
     // --- Gateway methods: cron + kill ---
@@ -542,6 +1243,7 @@ const clawforcePlugin = {
       // Capture cron service (full service for disable support, add function for job registration)
       if (!capturedCronAdd && context.cron) {
         capturedCronService = context.cron;
+        setCronService(context.cron);
         capturedCronAdd = async (input) => {
           await context.cron.add(input);
         };
@@ -571,7 +1273,166 @@ const clawforcePlugin = {
         });
       }
 
+      // Capture channel APIs for approval notifications
+      const channelApis = api.runtime?.channel;
+      if (channelApis?.telegram?.sendMessageTelegram) {
+        const sendTelegram = channelApis.telegram.sendMessageTelegram;
+
+        const notifier: ApprovalNotifier = {
+          async sendProposalNotification(payload: NotificationPayload) {
+            const channel = resolveApprovalChannel(payload.projectId, payload.proposedBy);
+            if (channel.channel !== "telegram") {
+              return { sent: false, channel: channel.channel };
+            }
+
+            const target = channel.target;
+            if (!target) {
+              return { sent: false, channel: "telegram", error: "No Telegram target configured" };
+            }
+
+            try {
+              const message = formatTelegramMessage(payload);
+              const buttons = buildApprovalButtons(payload.projectId, payload.proposalId);
+              const result = await sendTelegram(target, message, {
+                textMode: "markdown",
+                buttons,
+                messageThreadId: channel.threadId,
+              });
+
+              // Store notification_message_id for audit trail
+              try {
+                const db = getDb(payload.projectId);
+                db.prepare(
+                  "UPDATE proposals SET notification_message_id = ?, channel = 'telegram' WHERE id = ? AND project_id = ?",
+                ).run(result.messageId, payload.proposalId, payload.projectId);
+              } catch { /* non-fatal */ }
+
+              return { sent: true, channel: "telegram", messageId: result.messageId };
+            } catch (err) {
+              api.logger.warn(`Clawforce: failed to send Telegram notification: ${err instanceof Error ? err.message : String(err)}`);
+              return { sent: false, channel: "telegram", error: err instanceof Error ? err.message : String(err) };
+            }
+          },
+
+          async editProposalMessage(_proposalId, _projectId, _resolution, _feedback) {
+            // Message editing requires editMessageTelegram which isn't on the runtime channel API.
+            // Resolution is communicated via the callback response to the user.
+          },
+        };
+
+        setApprovalNotifier(notifier);
+        api.logger.info("Clawforce: approval notifier configured (Telegram)");
+
+        // Wire message notifier using same Telegram channel
+        setMessageNotifier({
+          async sendMessageNotification(message) {
+            try {
+              const msgChannel = resolveApprovalChannel(message.projectId, message.toAgent);
+              if (msgChannel.channel !== "telegram" || !msgChannel.target) {
+                return { sent: false, error: "No Telegram target" };
+              }
+              const text = formatMessageNotification(message);
+              const result = await sendTelegram(msgChannel.target, text, { textMode: "markdown" });
+              return { sent: true, messageId: result?.messageId };
+            } catch (err) {
+              return { sent: false, error: err instanceof Error ? err.message : String(err) };
+            }
+          },
+        });
+        api.logger.info("Clawforce: message notifier configured (Telegram)");
+
+        // Wire channel notifier for Telegram mirroring
+        setChannelNotifier({
+          async sendChannelNotification({ channel, message }) {
+            const telegramGroupId = (channel.metadata as Record<string, unknown> | undefined)?.telegramGroupId as string | undefined;
+            if (!telegramGroupId) return { sent: false, error: "No Telegram group configured" };
+
+            try {
+              const text = formatChannelMessage(channel, message);
+              const telegramThreadId = (channel.metadata as Record<string, unknown> | undefined)?.telegramThreadId as number | undefined;
+              const result = await sendTelegram(telegramGroupId, text, {
+                textMode: "markdown",
+                ...(telegramThreadId ? { messageThreadId: telegramThreadId } : {}),
+              });
+              return { sent: true };
+            } catch (err) {
+              return { sent: false, error: err instanceof Error ? err.message : String(err) };
+            }
+          },
+        });
+        api.logger.info("Clawforce: channel notifier configured (Telegram)");
+      }
+
       respond(true);
+    });
+
+    // --- Approval callback gateway method ---
+    api.registerGatewayMethod("clawforce.approval_callback", async ({ params, respond }) => {
+      const { action, projectId, proposalId, feedback } = params as {
+        action: "approve" | "reject";
+        projectId: string;
+        proposalId: string;
+        feedback?: string;
+      };
+
+      if (!action || !projectId || !proposalId) {
+        respond(false, { error: "Missing required params: action, projectId, proposalId" });
+        return;
+      }
+
+      try {
+        if (action === "approve") {
+          const result = approveProposal(projectId, proposalId, feedback);
+          respond(!!result, result ? { proposal: { id: result.id, status: result.status } } : { error: "Not found or already resolved" });
+        } else {
+          const result = rejectProposal(projectId, proposalId, feedback);
+          respond(!!result, result ? { proposal: { id: result.id, status: result.status } } : { error: "Not found or already resolved" });
+        }
+      } catch (err) {
+        respond(false, { error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // --- Channel message injection gateway method ---
+    // API surface for human Telegram messages → channel (gateway wiring is an OpenClaw concern)
+    api.registerGatewayMethod("clawforce.inject_channel_message", async ({ params, respond }) => {
+      const { projectId, channelId, channelName, content, senderName } = params as {
+        projectId: string;
+        channelId?: string;
+        channelName?: string;
+        content: string;
+        senderName?: string;
+      };
+
+      if (!projectId || !content || (!channelId && !channelName)) {
+        respond(false, { error: "Missing required params: projectId, content, and either channelId or channelName" });
+        return;
+      }
+
+      try {
+        const { sendChannelMessage } = await import("../src/channels/messages.js");
+        const { getChannel: getChannelById, getChannelByName: getChannelByN } = await import("../src/channels/store.js");
+
+        const channel = channelId
+          ? getChannelById(projectId, channelId)
+          : getChannelByN(projectId, channelName!);
+
+        if (!channel) {
+          respond(false, { error: "Channel not found" });
+          return;
+        }
+
+        const message = sendChannelMessage({
+          fromAgent: senderName ?? "human",
+          channelId: channel.id,
+          projectId,
+          content,
+        });
+
+        respond(true, { messageId: message.id, channelId: channel.id });
+      } catch (err) {
+        respond(false, { error: err instanceof Error ? err.message : String(err) });
+      }
     });
 
     // --- Approval commands ---
@@ -678,6 +1539,20 @@ const clawforcePlugin = {
       },
     });
 
+    // --- Memory mode command ---
+    api.registerCommand({
+      name: "clawforce-memory",
+      description: "Toggle memory mode — maximum context recall on every turn",
+      acceptsArgs: true,
+      handler: (ctx) => {
+        const key = ctx.senderId ?? ctx.from;
+        if (!key) return { text: "No active session." };
+        const current = memoryModeStore.get(key) ?? false;
+        memoryModeStore.set(key, !current);
+        return { text: `Memory mode ${!current ? "ON — max intensity recall on every turn" : "OFF — normal recall"}` };
+      },
+    });
+
     // --- Sweep service ---
     let cronCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -695,6 +1570,9 @@ const clawforcePlugin = {
           }
         });
 
+        // H8: Await memory factory loading before anything else uses them
+        await loadMemoryFactories();
+
         initClawforce({
           enabled: true,
           projectsDir: cfg.projectsDir,
@@ -705,6 +1583,57 @@ const clawforcePlugin = {
         });
         // Scan for project configs and register agents
         scanAndRegisterProjects(cfg.projectsDir, api.logger);
+
+        // Sync clawforce agents to OpenClaw config (agents.list[])
+        if (cfg.syncAgents) {
+          const agentIds = getRegisteredAgentIds();
+          const agentsToSync = agentIds
+            .map((id) => {
+              const entry = getAgentConfig(id);
+              if (!entry) return null;
+              return { agentId: id, config: entry.config, projectDir: entry.projectDir };
+            })
+            .filter((e): e is NonNullable<typeof e> => e !== null);
+
+          if (agentsToSync.length > 0) {
+            void syncAgentsToOpenClaw({
+              agents: agentsToSync,
+              loadConfig: () => api.runtime.config.loadConfig(),
+              writeConfigFile: (c) => api.runtime.config.writeConfigFile(c as never),
+              logger: api.logger,
+            });
+          }
+        }
+
+        // Load model pricing from OpenClaw's model registry
+        try {
+          const config = api.config;
+          const providers = config.models?.providers;
+          if (providers) {
+            const pricingEntries: Array<{ id: string; cost: { input: number; output: number; cacheRead: number; cacheWrite: number } }> = [];
+            for (const provider of Object.values(providers) as Array<{ models?: Array<{ id?: string; cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }> }>) {
+              for (const model of provider.models ?? []) {
+                if (model.id && model.cost) {
+                  pricingEntries.push({
+                    id: model.id,
+                    cost: {
+                      input: model.cost.input ?? 0,
+                      output: model.cost.output ?? 0,
+                      cacheRead: model.cost.cacheRead ?? 0,
+                      cacheWrite: model.cost.cacheWrite ?? 0,
+                    },
+                  });
+                }
+              }
+            }
+            if (pricingEntries.length > 0) {
+              registerBulkPricing(pricingEntries);
+              api.logger.info(`Clawforce: loaded pricing for ${pricingEntries.length} models from OpenClaw config`);
+            }
+          }
+        } catch (err) {
+          api.logger.warn(`Clawforce: failed to load model pricing from config: ${err instanceof Error ? err.message : String(err)}`);
+        }
 
         // Warn if cron jobs are buffered but service isn't captured yet
         if (pendingCronJobs.length > 0 && !capturedCronAdd) {
