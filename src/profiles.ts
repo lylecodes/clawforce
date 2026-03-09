@@ -6,7 +6,7 @@
  * their role's profile and only need to specify what's different.
  */
 
-import type { AgentRole, ContextSource, Expectation, PerformancePolicy } from "./types.js";
+import type { ActionConstraint, ActionConstraints, ActionScope, AgentRole, ContextSource, Expectation, PerformancePolicy } from "./types.js";
 
 /** A profile defines the full default template for an agent role. */
 export type RoleProfile = {
@@ -28,9 +28,16 @@ export type Paradigm = RoleProfile;
 export const BUILTIN_PROFILES: Record<AgentRole, RoleProfile> = {
   manager: {
     briefing: [
+      { source: "soul" },
+      { source: "tools_reference" },
       { source: "project_md" },
+      { source: "planning_delta" },
+      { source: "velocity" },
       { source: "task_board" },
+      { source: "goal_hierarchy" },
       { source: "escalations" },
+      { source: "pending_messages" },
+      { source: "channel_messages" },
       { source: "workflows" },
       { source: "activity" },
       { source: "sweep_status" },
@@ -39,9 +46,12 @@ export const BUILTIN_PROFILES: Record<AgentRole, RoleProfile> = {
       { source: "knowledge", filter: { category: ["decision"] } },
       { source: "memory" },
       { source: "cost_summary" },
+      { source: "resources" },
       { source: "policy_status" },
       { source: "health_status" },
       { source: "team_status" },
+      { source: "trust_scores" },
+      { source: "skill" },
     ],
     expectations: [
       { tool: "clawforce_log", action: "write", min_calls: 1 },
@@ -53,13 +63,18 @@ export const BUILTIN_PROFILES: Record<AgentRole, RoleProfile> = {
 
   employee: {
     briefing: [
+      { source: "soul" },
+      { source: "tools_reference" },
       { source: "assigned_task" },
+      { source: "pending_messages" },
+      { source: "channel_messages" },
       { source: "memory" },
+      { source: "skill" },
     ],
     expectations: [
       { tool: "clawforce_task", action: ["transition", "fail"], min_calls: 1 },
       { tool: "clawforce_log", action: "write", min_calls: 1 },
-      { tool: "clawforce_memory", action: "save", min_calls: 1 },
+      { tool: "memory_search", action: "search", min_calls: 1 },
     ],
     performance_policy: { action: "retry", max_retries: 3, then: "alert" },
     compaction: false,
@@ -67,14 +82,33 @@ export const BUILTIN_PROFILES: Record<AgentRole, RoleProfile> = {
 
   scheduled: {
     briefing: [
+      { source: "soul" },
+      { source: "tools_reference" },
+      { source: "pending_messages" },
       { source: "memory" },
+      { source: "skill" },
     ],
     expectations: [
       { tool: "clawforce_log", action: "outcome", min_calls: 1 },
-      { tool: "clawforce_memory", action: "save", min_calls: 1 },
+      { tool: "memory_search", action: "search", min_calls: 1 },
     ],
     performance_policy: { action: "retry", max_retries: 3, then: "terminate_and_alert" },
     compaction: false,
+  },
+
+  assistant: {
+    briefing: [
+      { source: "soul" },
+      { source: "tools_reference" },
+      { source: "preferences" },
+      { source: "pending_messages" },
+      { source: "channel_messages" },
+      { source: "memory" },
+      { source: "skill" },
+    ],
+    expectations: [],
+    performance_policy: { action: "alert" },
+    compaction: true,
   },
 };
 
@@ -98,6 +132,10 @@ export const ROLE_DEFAULTS: Record<AgentRole, { title: string; persona: string }
     title: "Scheduled Worker",
     persona: "You are a scheduled worker responsible for completing your assigned job and reporting the outcome.",
   },
+  assistant: {
+    title: "Personal Assistant",
+    persona: "You are a personal assistant. You help your user with tasks, answer questions, manage information, and take actions on their behalf. You are proactive, thorough, and always confirm before taking consequential actions.",
+  },
 };
 
 /**
@@ -110,22 +148,95 @@ export const CRITICAL_SOURCES: Partial<Record<AgentRole, string[]>> = {
 };
 
 /**
- * Default allowed tools per role. Used to auto-generate action_scope
- * policies when none are explicitly configured.
+ * Default allowed tools and actions per role. Used to auto-generate action_scope
+ * policies and to filter tool registration/schemas at startup.
+ *
+ * `"*"` = all actions allowed for that tool.
+ * `string[]` = only listed actions are visible and permitted.
+ * Tool absent from a role's scope = hidden from that role entirely.
  */
-export const DEFAULT_ACTION_SCOPES: Record<AgentRole, string[]> = {
-  manager: [
-    "clawforce_task", "clawforce_log", "clawforce_verify", "clawforce_compact",
-    "clawforce_workflow", "clawforce_ops", "clawforce_setup", "clawforce_memory",
-  ],
-  employee: [
-    "clawforce_task", "clawforce_log", "clawforce_verify", "clawforce_compact",
-    "clawforce_memory",
-  ],
-  scheduled: [
-    "clawforce_log", "clawforce_memory",
-  ],
+export const DEFAULT_ACTION_SCOPES: Record<AgentRole, ActionScope> = {
+  manager: {
+    clawforce_task: "*",
+    clawforce_log: "*",
+    clawforce_verify: "*",
+    clawforce_compact: "*",
+    clawforce_workflow: "*",
+    clawforce_ops: "*",
+    clawforce_setup: "*",
+    clawforce_context: "*",
+    clawforce_message: "*",
+    clawforce_goal: "*",
+    clawforce_channel: "*",
+    memory_search: "*",
+    memory_get: "*",
+  },
+  employee: {
+    clawforce_task: [
+      "get", "list", "transition", "fail", "attach_evidence", "history",
+      "get_approval_context", "submit_proposal", "check_proposal",
+      "list_deps", "list_dependents", "list_blockers",
+    ],
+    clawforce_log: ["write", "outcome", "search", "list"],
+    clawforce_verify: "*",
+    clawforce_compact: "*",
+    clawforce_setup: ["explain", "status"],
+    clawforce_context: "*",
+    clawforce_message: [
+      "send", "list", "read", "reply",
+      "request", "delegate", "request_feedback",
+      "respond", "accept", "reject", "complete", "submit_review",
+      "list_protocols",
+    ],
+    clawforce_goal: ["get", "list", "status"],
+    clawforce_channel: ["send", "list", "history", "meeting_status", "join", "leave"],
+    memory_search: "*",
+    memory_get: "*",
+  },
+  scheduled: {
+    clawforce_log: ["outcome", "search", "list"],
+    clawforce_setup: ["explain", "status"],
+    clawforce_context: ["list_skills", "get_skill", "get_knowledge"],
+    clawforce_message: ["list", "read", "respond", "list_protocols"],
+    memory_search: "*",
+    memory_get: "*",
+  },
+  assistant: {
+    clawforce_log: ["write", "outcome", "search", "list"],
+    clawforce_setup: ["explain", "status"],
+    clawforce_context: "*",
+    clawforce_message: ["send", "list", "read", "reply"],
+    clawforce_channel: ["send", "list", "history", "join", "leave", "meeting_status"],
+    memory_search: "*",
+    memory_get: "*",
+  },
 };
+
+/** Extract the list of tool names from an ActionScope. */
+export function getToolNamesFromScope(scope: ActionScope): string[] {
+  return Object.keys(scope);
+}
+
+/** Get allowed actions for a tool from an ActionScope. Returns `null` if tool is not in scope. */
+export function getAllowedActionsForTool(scope: ActionScope, toolName: string): string[] | "*" | null {
+  if (!(toolName in scope)) return null;
+  const entry = scope[toolName]!;
+  // ActionConstraint shape: extract .actions
+  if (typeof entry === "object" && !Array.isArray(entry) && "actions" in entry) {
+    return (entry as ActionConstraint).actions;
+  }
+  return entry as string[] | "*";
+}
+
+/** Get constraints for a tool from an ActionScope. Returns `undefined` if no constraints. */
+export function getConstraintsForTool(scope: ActionScope, toolName: string): ActionConstraints | undefined {
+  if (!(toolName in scope)) return undefined;
+  const entry = scope[toolName]!;
+  if (typeof entry === "object" && !Array.isArray(entry) && "actions" in entry) {
+    return (entry as ActionConstraint).constraints;
+  }
+  return undefined;
+}
 
 /**
  * Generate default action_scope policies from agent roles.
@@ -150,13 +261,13 @@ export function generateDefaultScopePolicies(
   for (const [agentId, agentConfig] of Object.entries(agents)) {
     if (coveredAgents.has(agentId)) continue;
 
-    const allowedTools = DEFAULT_ACTION_SCOPES[agentConfig.role];
-    if (allowedTools) {
+    const scope = DEFAULT_ACTION_SCOPES[agentConfig.role];
+    if (scope) {
       result.push({
         name: `default-scope:${agentId}`,
         type: "action_scope",
         target: agentId,
-        config: { allowed_tools: [...allowedTools] },
+        config: { allowed_tools: { ...scope } },
       });
     }
   }

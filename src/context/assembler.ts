@@ -26,13 +26,20 @@ import {
   renderWorkflows,
 } from "./builder.js";
 import { listPendingProposals } from "../approval/resolve.js";
+import { getPendingMessages, markBulkDelivered } from "../messaging/store.js";
 import { buildCompactionInstructions, isCompactionEnabled } from "./sources/compaction.js";
 import { buildCostSummary } from "./sources/cost-summary.js";
 import { buildHealthStatus } from "./sources/health-status.js";
 import { buildInstructions } from "./sources/instructions.js";
 import { buildPolicyStatus } from "./sources/policy-status.js";
-import { buildMemoryContext } from "./sources/memory.js";
+import { buildResourcesContext } from "./sources/resources.js";
+import { resolveToolsDocs, resolveSoulDoc } from "./sources/agent-docs.js";
+
 import { resolveSkillSource } from "../skills/registry.js";
+import { buildDeltaReport, renderDeltaReport } from "../planning/ooda.js";
+import { buildVelocityReport, renderVelocityReport } from "../planning/velocity.js";
+import { renderPreferences } from "../trust/preferences.js";
+import { renderTrustSummary } from "../trust/tracker.js";
 import { ROLE_DEFAULTS } from "../profiles.js";
 import { getDirectReports } from "../org.js";
 import { getAgentConfig } from "../project.js";
@@ -58,7 +65,7 @@ export function assembleContext(
   const sections: string[] = [];
 
   // Inject title and persona at the top of the context
-  const profileHeader = buildProfileHeader(agentId, config);
+  const profileHeader = buildProfileHeader(agentId, config, opts?.projectDir);
   if (profileHeader) {
     sections.push(profileHeader);
   }
@@ -148,12 +155,45 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
     case "team_performance":
       return resolveTeamPerformanceSource(ctx);
 
-    case "skill":
-      return resolveSkillSource(ctx.config.role);
+    case "skill": {
+      // If tools_reference is also in the briefing, exclude "tools" from the skill TOC
+      // to avoid duplicating the tools reference content.
+      const hasToolsRef = ctx.config.briefing.some((s) => s.source === "tools_reference");
+      return resolveSkillSource(ctx.config.role, undefined, hasToolsRef ? ["tools"] : undefined, ctx.projectId);
+    }
 
     case "memory":
-      if (!ctx.projectId) return null;
-      return buildMemoryContext(ctx.projectId, ctx.agentId, ctx.config);
+      return "## Shared Memory\n\nUse `memory_search` to find relevant learnings from previous sessions. Use `memory_get` to retrieve specific memories by ID.";
+
+    case "soul":
+      return resolveSoulDoc(ctx.agentId, ctx.projectDir);
+
+    case "tools_reference":
+      return resolveToolsDocs(ctx.agentId, ctx.config, ctx.projectDir, ctx.projectId);
+
+    case "pending_messages":
+      return resolvePendingMessagesSource(ctx);
+
+    case "goal_hierarchy":
+      return resolveGoalHierarchySource(ctx);
+
+    case "channel_messages":
+      return resolveChannelMessagesSource(ctx);
+
+    case "planning_delta":
+      return resolvePlanningDeltaSource(ctx);
+
+    case "velocity":
+      return resolveVelocitySource(ctx);
+
+    case "preferences":
+      return resolvePreferencesSource(ctx);
+
+    case "trust_scores":
+      return resolveTrustScoresSource(ctx);
+
+    case "resources":
+      return resolveResourcesSource(ctx);
 
     default:
       return null;
@@ -427,6 +467,11 @@ function resolveKnowledge(source: ContextSource, ctx: AssemblerContext): string 
 function resolveFile(source: ContextSource, ctx: AssemblerContext): string | null {
   if (!source.path || !ctx.projectDir) return null;
 
+  // Detect glob pattern
+  if (source.path.includes("*")) {
+    return resolveFileGlob(source.path, ctx.projectDir);
+  }
+
   // Path traversal check: resolved path must be under projectDir
   const resolved = path.resolve(ctx.projectDir, source.path);
   if (!resolved.startsWith(ctx.projectDir + path.sep) && resolved !== ctx.projectDir) {
@@ -446,12 +491,80 @@ function resolveFile(source: ContextSource, ctx: AssemblerContext): string | nul
 }
 
 /**
+ * Resolve a glob pattern to concatenated file contents.
+ * Uses fs.globSync (Node 22+) with per-file and total caps.
+ */
+function resolveFileGlob(pattern: string, projectDir: string): string | null {
+  const PER_FILE_CAP = 5_120; // 5KB per file
+  const TOTAL_CAP = 10_240; // 10KB total
+
+  try {
+    const resolvedPattern = path.resolve(projectDir, pattern);
+    // Ensure the resolved pattern starts with projectDir (path traversal guard)
+    if (!resolvedPattern.startsWith(projectDir + path.sep) && !resolvedPattern.startsWith(projectDir)) {
+      return null;
+    }
+
+    let matches: string[];
+    try {
+      matches = fs.globSync(pattern, { cwd: projectDir }) as unknown as string[];
+    } catch {
+      // globSync may not be available — fall back gracefully
+      return null;
+    }
+
+    if (matches.length === 0) return null;
+
+    const sections: string[] = [];
+    let totalSize = 0;
+
+    for (const match of matches) {
+      if (totalSize >= TOTAL_CAP) break;
+
+      const filePath = path.resolve(projectDir, match);
+      // Path traversal guard per match
+      if (!filePath.startsWith(projectDir + path.sep) && filePath !== projectDir) continue;
+
+      try {
+        if (!fs.existsSync(filePath)) continue;
+        let content = fs.readFileSync(filePath, "utf-8").trim();
+        if (!content) continue;
+
+        // Per-file cap
+        if (content.length > PER_FILE_CAP) {
+          content = content.slice(0, PER_FILE_CAP) + "\n…(truncated)";
+        }
+
+        // Total cap check
+        if (totalSize + content.length > TOTAL_CAP) {
+          content = content.slice(0, TOTAL_CAP - totalSize) + "\n…(truncated)";
+        }
+
+        sections.push(`### ${match}\n\n\`\`\`\n${content}\n\`\`\``);
+        totalSize += content.length;
+      } catch {
+        continue;
+      }
+    }
+
+    if (sections.length === 0) return null;
+    return `## Files: ${pattern}\n\n${sections.join("\n\n")}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build a profile header with title and persona for the agent.
  * Uses role defaults if the agent doesn't specify its own.
+ * If SOUL.md exists, uses its content as persona instead of config.persona.
  */
-function buildProfileHeader(agentId: string, config: AgentConfig): string | null {
+function buildProfileHeader(agentId: string, config: AgentConfig, projectDir?: string): string | null {
   const title = config.title ?? ROLE_DEFAULTS[config.role]?.title;
-  const persona = config.persona;
+
+  // SOUL.md overrides config.persona when present
+  const soulContent = resolveSoulDoc(agentId, projectDir);
+  const persona = soulContent ?? config.persona;
 
   if (!title && !persona) return null;
 
@@ -499,6 +612,289 @@ function resolveTeamStatusSource(ctx: AssemblerContext): string | null {
 /**
  * Build team performance: shows recent review outcomes for direct reports.
  */
+function resolvePendingMessagesSource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+
+  let db: DatabaseSync;
+  try {
+    db = getDb(ctx.projectId);
+  } catch {
+    return null;
+  }
+
+  let messages: import("../types.js").Message[];
+  try {
+    messages = getPendingMessages(ctx.projectId, ctx.agentId, db);
+  } catch {
+    return null;
+  }
+
+  if (messages.length === 0) return null;
+
+  // Mark as delivered (they are now in the context)
+  try {
+    markBulkDelivered(messages.map((m) => m.id), db);
+  } catch { /* best effort */ }
+
+  const lines = [
+    "## Pending Messages",
+    "",
+    `You have ${messages.length} unread message(s):`,
+    "",
+  ];
+
+  for (const msg of messages) {
+    const priorityFlag = msg.priority === "urgent" ? " **[URGENT]**" : msg.priority === "high" ? " [HIGH]" : "";
+    const shortId = msg.id.slice(0, 8);
+
+    if (msg.protocolStatus) {
+      // Protocol message — render with type-specific context
+      const deadlineInfo = msg.responseDeadline
+        ? ` (deadline: ${formatTimeAgo(msg.responseDeadline - Date.now())} remaining)`
+        : "";
+
+      switch (msg.type) {
+        case "request":
+          lines.push(`### REQUEST from ${msg.fromAgent}${priorityFlag}${deadlineInfo}`);
+          lines.push(msg.content);
+          lines.push(`*Use \`clawforce_message respond message_id=${shortId}\` to respond*`);
+          break;
+
+        case "delegation":
+          lines.push(`### DELEGATION from ${msg.fromAgent}${priorityFlag}${deadlineInfo}`);
+          lines.push(msg.content);
+          if (msg.protocolStatus === "pending_acceptance") {
+            lines.push(`*Use \`clawforce_message accept message_id=${shortId}\` or \`reject\` to respond*`);
+          }
+          break;
+
+        case "feedback": {
+          lines.push(`### REVIEW REQUEST from ${msg.fromAgent}${priorityFlag}${deadlineInfo}`);
+          lines.push(msg.content);
+          const meta = msg.metadata;
+          if (meta?.artifact) lines.push(`**Artifact:** ${meta.artifact}`);
+          if (meta?.reviewCriteria) lines.push(`**Criteria:** ${meta.reviewCriteria}`);
+          lines.push(`*Use \`clawforce_message submit_review message_id=${shortId} verdict=approve|revise|reject\`*`);
+          break;
+        }
+
+        default: {
+          // Other protocol types — generic rendering
+          const ago = formatTimeAgo(Date.now() - msg.createdAt);
+          lines.push(`### From: ${msg.fromAgent} (${msg.type})${priorityFlag} — ${ago}`);
+          lines.push(msg.content);
+          lines.push(`*Message ID: \`${shortId}\` — use clawforce_message read/reply to respond*`);
+        }
+      }
+    } else {
+      // Standard message — existing rendering
+      const typeTag = msg.type !== "direct" ? ` (${msg.type})` : "";
+      const ago = formatTimeAgo(Date.now() - msg.createdAt);
+      lines.push(`### From: ${msg.fromAgent}${typeTag}${priorityFlag} — ${ago}`);
+      lines.push(msg.content);
+      lines.push(`*Message ID: \`${shortId}\` — use clawforce_message read/reply to respond*`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function resolveGoalHierarchySource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+
+  let db: DatabaseSync;
+  try {
+    db = getDb(ctx.projectId);
+  } catch {
+    return null;
+  }
+
+  // Query active goals (and recently achieved for context)
+  const rows = db.prepare(
+    "SELECT * FROM goals WHERE project_id = ? AND status IN ('active', 'achieved') ORDER BY parent_goal_id IS NULL DESC, created_at ASC",
+  ).all(ctx.projectId) as Record<string, unknown>[];
+
+  if (rows.length === 0) return null;
+
+  // For non-managers, filter to relevant goals (by department/team)
+  const agentDept = ctx.config.department;
+  const agentTeam = ctx.config.team;
+  const isManager = ctx.config.role === "manager";
+
+  type GoalRow = { id: string; title: string; status: string; parentGoalId: string | null; ownerAgentId: string | null; department: string | null; team: string | null };
+  const goals: GoalRow[] = rows.map((r) => ({
+    id: r.id as string,
+    title: r.title as string,
+    status: r.status as string,
+    parentGoalId: (r.parent_goal_id as string) ?? null,
+    ownerAgentId: (r.owner_agent_id as string) ?? null,
+    department: (r.department as string) ?? null,
+    team: (r.team as string) ?? null,
+  }));
+
+  // Filter for non-managers: show goals in their department/team or top-level goals
+  const visibleGoals = isManager
+    ? goals
+    : goals.filter((g) =>
+      g.parentGoalId === null || // always show top-level
+      (agentDept && g.department === agentDept) ||
+      (agentTeam && g.team === agentTeam) ||
+      g.ownerAgentId === ctx.agentId,
+    );
+
+  if (visibleGoals.length === 0) return null;
+
+  // Build tree rendering
+  const lines = ["## Goals", ""];
+
+  // Top-level goals first
+  const topLevel = visibleGoals.filter((g) => g.parentGoalId === null);
+  const childMap = new Map<string, GoalRow[]>();
+  for (const g of visibleGoals) {
+    if (g.parentGoalId) {
+      const siblings = childMap.get(g.parentGoalId) ?? [];
+      siblings.push(g);
+      childMap.set(g.parentGoalId, siblings);
+    }
+  }
+
+  function renderGoal(g: GoalRow, depth: number): void {
+    const prefix = depth === 0 ? "###" : depth === 1 ? "####" : "-";
+    const statusTag = g.status === "achieved" ? " ✓ ACHIEVED" : "";
+    const ownerTag = g.ownerAgentId ? ` (${g.ownerAgentId})` : "";
+    const deptTag = g.department ? ` [${g.department}]` : "";
+
+    // Count children for progress hint
+    const children = childMap.get(g.id) ?? [];
+    const achievedCount = children.filter((c) => c.status === "achieved").length;
+    const progressHint = children.length > 0 ? ` — ${achievedCount}/${children.length} sub-goals` : "";
+
+    lines.push(`${prefix} ${g.title}${deptTag}${ownerTag}${statusTag}${progressHint}`);
+
+    for (const child of children) {
+      renderGoal(child, depth + 1);
+    }
+  }
+
+  for (const goal of topLevel) {
+    renderGoal(goal, 0);
+  }
+
+  return lines.join("\n");
+}
+
+function resolveChannelMessagesSource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+
+  let db: DatabaseSync;
+  try {
+    db = getDb(ctx.projectId);
+  } catch {
+    return null;
+  }
+
+  // Find channels where the agent is a member
+  const channelRows = db.prepare(
+    "SELECT * FROM channels WHERE project_id = ? AND status = 'active'",
+  ).all(ctx.projectId) as Record<string, unknown>[];
+
+  if (channelRows.length === 0) return null;
+
+  const sections: string[] = [];
+  let totalChars = 0;
+  const charBudget = 5000;
+
+  for (const row of channelRows) {
+    let members: string[] = [];
+    try { members = JSON.parse((row.members as string) ?? "[]"); } catch { /* */ }
+    if (!members.includes(ctx.agentId)) continue;
+
+    const channelId = row.id as string;
+    const channelName = row.name as string;
+    const channelType = row.type as string;
+
+    // Get recent messages (last 20 per channel)
+    const msgs = db.prepare(
+      "SELECT from_agent, content, created_at FROM messages WHERE channel_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 20",
+    ).all(channelId, ctx.projectId) as Record<string, unknown>[];
+
+    if (msgs.length === 0) continue;
+
+    const lines = [`### #${channelName} (${channelType})`];
+    // Reverse to chronological order
+    for (const msg of msgs.reverse()) {
+      const line = `**${msg.from_agent}**: ${(msg.content as string).slice(0, 300)}`;
+      if (totalChars + line.length > charBudget) break;
+      lines.push(line);
+      totalChars += line.length;
+    }
+
+    // Check if it's an active meeting and it's this agent's turn
+    if (channelType === "meeting" && row.metadata) {
+      try {
+        const metadata = JSON.parse(row.metadata as string);
+        const mc = metadata?.meetingConfig;
+        if (mc?.participants && mc.currentTurn < mc.participants.length) {
+          const currentAgent = mc.participants[mc.currentTurn];
+          if (currentAgent === ctx.agentId) {
+            lines.push("");
+            lines.push("**It is your turn in this meeting.** Use `clawforce_channel send` to respond.");
+          }
+        }
+      } catch { /* */ }
+    }
+
+    sections.push(lines.join("\n"));
+    if (totalChars > charBudget) break;
+  }
+
+  if (sections.length === 0) return null;
+  return ["## Channel Messages", "", ...sections].join("\n");
+}
+
+function resolvePlanningDeltaSource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+
+  try {
+    const report = buildDeltaReport(ctx.projectId, ctx.agentId);
+    return renderDeltaReport(report);
+  } catch {
+    return null;
+  }
+}
+
+function resolveVelocitySource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+
+  try {
+    const report = buildVelocityReport(ctx.projectId);
+    return renderVelocityReport(report);
+  } catch {
+    return null;
+  }
+}
+
+function resolvePreferencesSource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+
+  try {
+    return renderPreferences(ctx.projectId, ctx.agentId);
+  } catch {
+    return null;
+  }
+}
+
+function resolveTrustScoresSource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+
+  try {
+    return renderTrustSummary(ctx.projectId);
+  } catch {
+    return null;
+  }
+}
+
 function resolveTeamPerformanceSource(ctx: AssemblerContext): string | null {
   if (!ctx.projectId) return null;
 
@@ -535,4 +931,13 @@ function resolveTeamPerformanceSource(ctx: AssemblerContext): string | null {
   if (!hasData) return null;
 
   return lines.join("\n");
+}
+
+function resolveResourcesSource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+  try {
+    return buildResourcesContext(ctx.projectId, ctx.agentId);
+  } catch {
+    return null;
+  }
 }
