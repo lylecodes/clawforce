@@ -3,11 +3,14 @@
  *
  * Claims items from the dispatch queue, acquires task leases,
  * spawns agents, and completes/fails queue items.
- * Module-level concurrency counter prevents overloading.
+ * Per-project and per-agent concurrency + rate limiting.
  */
 
 import type { DatabaseSync } from "node:sqlite";
 import { checkBudget } from "../budget.js";
+import { checkMultiWindowBudget } from "../budget-windows.js";
+import { isProviderThrottled } from "../rate-limits.js";
+import { checkSpawnDepth, checkCostCircuitBreaker, checkLoopDetection } from "../safety.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { getExtendedProjectConfig } from "../project.js";
@@ -15,36 +18,160 @@ import { classifyRisk } from "../risk/classifier.js";
 import { getRiskConfig } from "../risk/config.js";
 import { applyRiskGate } from "../risk/gate.js";
 import { getTask, getTaskEvidence } from "../tasks/ops.js";
-import { acquireTaskLease, releaseTaskLease, renewTaskLease } from "../tasks/ops.js";
+import { acquireTaskLease, releaseTaskLease } from "../tasks/ops.js";
 import { ingestEvent } from "../events/store.js";
 import { processEvents } from "../events/router.js";
-import { claimNext, completeItem, failItem, reclaimExpiredLeases } from "./queue.js";
-import { dispatchAndTransition } from "./spawn.js";
+import { claimNext, failItem, markDispatched, reclaimExpiredLeases } from "./queue.js";
+import { dispatchViaCron } from "./cron-dispatch.js";
+import { buildTaskPrompt } from "./spawn.js";
+import { getApprovedIntentsForTask } from "../approval/intent-store.js";
 import { recordMetric } from "../metrics.js";
 import { writeAuditEntry } from "../audit.js";
 import { isTaskInFuturePhase } from "../workflow.js";
-import type { DispatchQueueItem } from "../types.js";
+import type { DispatchConfig, DispatchQueueItem } from "../types.js";
 
-let activeDispatches = 0;
-let maxConcurrency = 3;
+/** Task lease duration in milliseconds — long enough for async dispatch + execution + 5min buffer. */
+const TASK_LEASE_MS = 2 * 60 * 60 * 1000 + 5 * 60 * 1000; // 2h + 5min buffer
 
-/** Set the maximum number of concurrent dispatches. */
+// --- Concurrency tracking ---
+
+/** Global hard ceiling across all projects. */
+const DEFAULT_MAX_CONCURRENCY = 3;
+let globalMaxConcurrency = DEFAULT_MAX_CONCURRENCY;
+let globalActiveDispatches = 0;
+
+/** Per-project active dispatch counts. */
+const projectDispatches = new Map<string, number>();
+
+/** Per-project dispatch timestamps for rate limiting (sliding window). */
+const projectDispatchTimestamps = new Map<string, number[]>();
+
+/** Per-agent active dispatch counts. */
+const agentDispatches = new Map<string, number>();
+
+/** Per-agent dispatch timestamps for rate limiting (sliding window). */
+const agentDispatchTimestamps = new Map<string, number[]>();
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+/** Set the global maximum number of concurrent dispatches. */
 export function setMaxConcurrency(max: number): void {
-  maxConcurrency = max;
+  globalMaxConcurrency = max;
 }
 
 /** Get current dispatch concurrency info. */
 export function getConcurrencyInfo(): { active: number; max: number } {
-  return { active: activeDispatches, max: maxConcurrency };
+  return { active: globalActiveDispatches, max: globalMaxConcurrency };
+}
+
+/** Get per-project dispatch rate info for ops visibility. */
+export function getDispatchRateInfo(projectId: string): {
+  active: number;
+  recentHour: number;
+  config: DispatchConfig | null;
+} {
+  pruneTimestamps(projectDispatchTimestamps, projectId);
+  const extConfig = getExtendedProjectConfig(projectId);
+  return {
+    active: projectDispatches.get(projectId) ?? 0,
+    recentHour: (projectDispatchTimestamps.get(projectId) ?? []).length,
+    config: extConfig?.dispatch ?? null,
+  };
+}
+
+/** Prune timestamps older than 1 hour from the sliding window. */
+function pruneTimestamps(map: Map<string, number[]>, key: string): void {
+  const timestamps = map.get(key);
+  if (!timestamps) return;
+  const cutoff = Date.now() - ONE_HOUR_MS;
+  const pruned = timestamps.filter((t) => t > cutoff);
+  if (pruned.length === 0) {
+    map.delete(key);
+  } else {
+    map.set(key, pruned);
+  }
+}
+
+/** Check if a project is at its concurrency or rate limit. Returns null if OK, or a reason string. */
+function checkProjectLimits(projectId: string, config: DispatchConfig | undefined, db: DatabaseSync): string | null {
+  if (config?.maxConcurrentDispatches != null) {
+    // Use DB state for concurrency — counts items actively being processed (leased or dispatched)
+    const row = db.prepare(
+      "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND status IN ('leased', 'dispatched')",
+    ).get(projectId) as Record<string, unknown>;
+    const active = (row.cnt as number) ?? 0;
+    if (active >= config.maxConcurrentDispatches) {
+      return `Project concurrency limit reached (${active}/${config.maxConcurrentDispatches})`;
+    }
+  }
+  if (config?.maxDispatchesPerHour != null) {
+    pruneTimestamps(projectDispatchTimestamps, projectId);
+    const recentCount = (projectDispatchTimestamps.get(projectId) ?? []).length;
+    if (recentCount >= config.maxDispatchesPerHour) {
+      return `Project rate limit reached (${recentCount}/${config.maxDispatchesPerHour} per hour)`;
+    }
+  }
+  return null;
+}
+
+/** Check if an agent is at its concurrency or rate limit. Returns null if OK, or a reason string. */
+function checkAgentLimits(agentId: string, config: DispatchConfig | undefined): string | null {
+  const agentLimits = config?.agentLimits?.[agentId];
+  if (!agentLimits) return null;
+
+  if (agentLimits.maxConcurrent != null) {
+    const active = agentDispatches.get(agentId) ?? 0;
+    if (active >= agentLimits.maxConcurrent) {
+      return `Agent "${agentId}" concurrency limit reached (${active}/${agentLimits.maxConcurrent})`;
+    }
+  }
+  if (agentLimits.maxPerHour != null) {
+    pruneTimestamps(agentDispatchTimestamps, agentId);
+    const recentCount = (agentDispatchTimestamps.get(agentId) ?? []).length;
+    if (recentCount >= agentLimits.maxPerHour) {
+      return `Agent "${agentId}" rate limit reached (${recentCount}/${agentLimits.maxPerHour} per hour)`;
+    }
+  }
+  return null;
+}
+
+/** Record a successful dispatch in tracking maps. */
+function recordDispatch(projectId: string, agentId: string): void {
+  globalActiveDispatches++;
+  projectDispatches.set(projectId, (projectDispatches.get(projectId) ?? 0) + 1);
+  agentDispatches.set(agentId, (agentDispatches.get(agentId) ?? 0) + 1);
+
+  const now = Date.now();
+  const projTs = projectDispatchTimestamps.get(projectId) ?? [];
+  projTs.push(now);
+  projectDispatchTimestamps.set(projectId, projTs);
+
+  const agentTs = agentDispatchTimestamps.get(agentId) ?? [];
+  agentTs.push(now);
+  agentDispatchTimestamps.set(agentId, agentTs);
+}
+
+/** Release a dispatch slot from tracking maps. */
+function releaseDispatch(projectId: string, agentId: string): void {
+  globalActiveDispatches--;
+  const projCount = projectDispatches.get(projectId) ?? 0;
+  if (projCount <= 1) projectDispatches.delete(projectId);
+  else projectDispatches.set(projectId, projCount - 1);
+
+  const agentCount = agentDispatches.get(agentId) ?? 0;
+  if (agentCount <= 1) agentDispatches.delete(agentId);
+  else agentDispatches.set(agentId, agentCount - 1);
 }
 
 /**
  * Run a single pass of the dispatch loop:
  * 1. Reclaim expired leases
- * 2. Claim next queued item
- * 3. Acquire task lease
- * 4. Dispatch agent
- * 5. Complete/fail queue item
+ * 2. Check project-level concurrency/rate limits
+ * 3. Claim next queued item
+ * 4. Check agent-level limits
+ * 5. Acquire task lease
+ * 6. Dispatch agent
+ * 7. Complete/fail queue item
  *
  * Returns the number of items dispatched in this pass.
  */
@@ -58,17 +185,49 @@ export async function dispatchLoop(
   // Reclaim expired leases first
   reclaimExpiredLeases(projectId, db);
 
-  // Process items while under concurrency limit
-  while (activeDispatches < maxConcurrency) {
+  const extConfig = getExtendedProjectConfig(projectId);
+  const dispatchConfig = extConfig?.dispatch;
+
+  // Use DB-based active count for global ceiling (resilient to process restarts)
+  const getGlobalActiveCount = () => {
+    const row = db.prepare(
+      "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE status IN ('leased', 'dispatched')",
+    ).get() as Record<string, unknown>;
+    return (row.cnt as number) ?? 0;
+  };
+
+  while (getGlobalActiveCount() < globalMaxConcurrency) {
+    // Check project-level limits before claiming
+    const projectLimitReason = checkProjectLimits(projectId, dispatchConfig, db);
+    if (projectLimitReason) {
+      // Project rate-limited — items stay queued for next pass
+      break;
+    }
+
     const item = claimNext(projectId, undefined, undefined, db);
     if (!item) break;
 
-    activeDispatches++;
+    // Resolve agentId early for per-agent limit check
+    const task = getTask(projectId, item.taskId, db);
+    const payload = item.payload ?? {};
+    const agentId = task?.assignedTo ?? (payload.profile ? `claude-code:${payload.profile as string}` : "claude-code:worker");
+
+    // Check per-agent limits
+    const agentLimitReason = checkAgentLimits(agentId, dispatchConfig);
+    if (agentLimitReason) {
+      failItem(item.id, agentLimitReason, db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: agentLimitReason, rateLimited: true }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "agent_rate_limited" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      dispatched++;
+      continue;
+    }
+
+    recordDispatch(projectId, agentId);
     try {
-      await dispatchItem(projectId, item, db);
+      await dispatchItem(projectId, item, db, agentId);
       dispatched++;
     } finally {
-      activeDispatches--;
+      releaseDispatch(projectId, agentId);
     }
   }
 
@@ -85,6 +244,7 @@ async function dispatchItem(
   projectId: string,
   item: DispatchQueueItem,
   db: DatabaseSync,
+  resolvedAgentId: string,
 ): Promise<void> {
   // Pre-dispatch budget check (includes agent-level and session-level budgets)
   try {
@@ -101,6 +261,39 @@ async function dispatchItem(
   } catch (err) {
     safeLog("dispatcher.budgetCheck", err);
     // Budget check failure is non-fatal — proceed with dispatch
+  }
+
+  // Safety checks: spawn depth, cost circuit breaker, loop detection
+  try {
+    const spawnCheck = checkSpawnDepth(projectId, item.taskId, db);
+    if (!spawnCheck.ok) {
+      failItem(item.id, spawnCheck.reason, db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: spawnCheck.reason, safetyLimit: "spawn_depth" }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "spawn_depth" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      return;
+    }
+
+    const circuitBreaker = checkCostCircuitBreaker(projectId, resolvedAgentId, db);
+    if (!circuitBreaker.ok) {
+      failItem(item.id, circuitBreaker.reason, db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: circuitBreaker.reason, safetyLimit: "cost_circuit_breaker" }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "cost_circuit_breaker" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      return;
+    }
+
+    const task = getTask(projectId, item.taskId, db);
+    if (task) {
+      const loopCheck = checkLoopDetection(projectId, task.title, db);
+      if (!loopCheck.ok) {
+        failItem(item.id, loopCheck.reason, db, projectId);
+        emitDispatchEvent(projectId, "dispatch_failed", item, { error: loopCheck.reason, safetyLimit: "loop_detection" }, db);
+        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "loop_detection" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+        return;
+      }
+    }
+  } catch (err) {
+    safeLog("dispatcher.safetyCheck", err);
+    // Safety check failure is non-fatal — proceed with dispatch
   }
 
   // Risk-aware dispatch check
@@ -165,9 +358,9 @@ async function dispatchItem(
     return;
   }
 
-  // Acquire task lease
-  const holder = `dispatcher:${item.id}`;
-  const leaseOk = acquireTaskLease(projectId, item.taskId, holder, 15 * 60 * 1000, db);
+  // Acquire task lease (long lease — released in agent_end hook)
+  const holder = `dispatch:${item.id}`;
+  const leaseOk = acquireTaskLease(projectId, item.taskId, holder, TASK_LEASE_MS, db);
   if (!leaseOk) {
     failItem(item.id, "Could not acquire task lease — another agent holds it", db, projectId);
     emitDispatchEvent(projectId, "dispatch_failed", item, { error: "Could not acquire task lease" }, db);
@@ -175,58 +368,43 @@ async function dispatchItem(
     return;
   }
 
-  const RENEWAL_MS = 5 * 60 * 1000;
-  const LEASE_MS = 15 * 60 * 1000;
-  const renewalTimer = setInterval(() => {
-    try { renewTaskLease(projectId, item.taskId, holder, LEASE_MS, db); }
-    catch (err) { safeLog("dispatcher.renewLease", err); }
-  }, RENEWAL_MS);
-
   try {
     // Extract dispatch params from queue item payload
     const payload = item.payload ?? {};
-    const prompt = (payload.prompt as string) ?? `Execute task: ${task.title}`;
-    const projectDir = (payload.projectDir as string) ?? process.cwd();
-    const profile = payload.profile as string | undefined;
+    const userPrompt = (payload.prompt as string) ?? `Execute task: ${task.title}`;
     const model = payload.model as string | undefined;
     const timeoutMs = payload.timeoutMs as number | undefined;
 
-    // Build retry context if task has been attempted before
+    // Build full prompt (task context + retry context + pre-approvals)
+    const prompt = buildTaskPrompt(task, userPrompt);
     const retryContext = buildRetryContext(projectId, item.taskId, db);
-    const fullPrompt = retryContext ? `${prompt}\n\n${retryContext}` : prompt;
+    const preApprovalContext = buildPreApprovalContext(projectId, item.taskId, db);
+    const extras = [retryContext, preApprovalContext].filter(Boolean).join("\n\n");
+    const fullPrompt = extras ? `${prompt}\n\n${extras}` : prompt;
 
-    const preState = task.state;
-    const result = await dispatchAndTransition({
-      task,
-      projectDir,
+    const result = await dispatchViaCron({
+      queueItemId: item.id,
+      taskId: item.taskId,
+      projectId,
       prompt: fullPrompt,
-      profile,
+      agentId: resolvedAgentId,
       model,
-      timeoutMs,
+      timeoutSeconds: timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined,
     });
 
     if (result.ok) {
-      // Verify task actually advanced
-      const postTask = getTask(projectId, item.taskId, db);
-      if (postTask && postTask.state === preState) {
-        // Subprocess succeeded but task didn't transition — treat as failure
-        const error = `Dispatch succeeded (exit 0) but task remained in ${preState}`;
-        failItem(item.id, error, db, projectId);
-        emitDispatchEvent(projectId, "dispatch_failed", item, { error, stateStuck: true }, db);
-        maybeEmitDeadLetter(projectId, item, error, db);
-        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_state_stuck", value: 1, tags: { queueItemId: item.id, stuckState: preState } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
-        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "state_stuck" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
-      } else {
-        completeItem(item.id, db, projectId);
-        emitDispatchEvent(projectId, "dispatch_succeeded", item, {}, db);
-        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_success", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
-      }
+      // Cron job created — mark as dispatched (completion handled in agent_end hook)
+      markDispatched(item.id, db, projectId);
+      emitDispatchEvent(projectId, "dispatch_succeeded", item, { cronJobName: result.cronJobName }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_cron_created", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
     } else {
-      const error = result.stderr.slice(0, 500);
+      const error = result.error ?? "Unknown dispatch error";
       failItem(item.id, error, db, projectId);
       emitDispatchEvent(projectId, "dispatch_failed", item, { error }, db);
       maybeEmitDeadLetter(projectId, item, error, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "agent_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "cron_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      // Release lease on failure — no session will run
+      try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (err) { safeLog("dispatcher.releaseLease", err); }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -234,13 +412,8 @@ async function dispatchItem(
     emitDispatchEvent(projectId, "dispatch_failed", item, { error: message }, db);
     maybeEmitDeadLetter(projectId, item, message, db);
     try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "exception" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
-  } finally {
-    clearInterval(renewalTimer);
-    try {
-      releaseTaskLease(projectId, item.taskId, holder, db);
-    } catch (err) {
-      safeLog("dispatcher.releaseLease", err);
-    }
+    // Release lease on failure
+    try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (releaseErr) { safeLog("dispatcher.releaseLease", releaseErr); }
   }
 }
 
@@ -328,6 +501,31 @@ export function buildRetryContext(
 }
 
 /**
+ * Build pre-approval context for re-dispatched tasks.
+ * Tells the agent which tool calls have been pre-approved.
+ */
+function buildPreApprovalContext(
+  projectId: string,
+  taskId: string,
+  db: DatabaseSync,
+): string | null {
+  try {
+    const intents = getApprovedIntentsForTask(projectId, taskId, db);
+    if (intents.length === 0) return null;
+
+    const lines = ["## Pre-Approved Actions", "The following tool calls have been pre-approved. You may proceed with them:"];
+    for (const intent of intents) {
+      const ageMs = Date.now() - (intent.resolvedAt ?? intent.createdAt);
+      const agoMin = Math.round(ageMs / 60_000);
+      lines.push(`- \`${intent.toolName}\` (category: ${intent.category}) — approved ${agoMin}m ago`);
+    }
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Convenience entry point: process events then run dispatch loop.
  * Used by sweep as a backstop and by the process_events tool action.
  */
@@ -341,8 +539,35 @@ export async function processAndDispatch(
   return { eventsProcessed, dispatched };
 }
 
-/** Reset concurrency counter (for testing). */
+/** Reset concurrency counters (for testing). */
 export function resetDispatcherForTest(): void {
-  activeDispatches = 0;
-  maxConcurrency = 3;
+  globalActiveDispatches = 0;
+  globalMaxConcurrency = DEFAULT_MAX_CONCURRENCY;
+  projectDispatches.clear();
+  projectDispatchTimestamps.clear();
+  agentDispatches.clear();
+  agentDispatchTimestamps.clear();
+}
+
+/**
+ * Pre-dispatch gate: checks multi-window budget and provider rate limits.
+ * Call this before dispatching an agent session to ensure resource availability.
+ */
+export function shouldDispatch(
+  projectId: string,
+  agentId: string,
+  provider: string = "anthropic",
+): { ok: true } | { ok: false; reason: string } {
+  // Check multi-window budget (hourly / daily / monthly)
+  const budgetResult = checkMultiWindowBudget({ projectId, agentId });
+  if (!budgetResult.ok) {
+    return { ok: false, reason: budgetResult.reason! };
+  }
+
+  // Check provider rate limits
+  if (isProviderThrottled(provider, 95)) {
+    return { ok: false, reason: `Provider ${provider} rate limit exceeded (>95% used)` };
+  }
+
+  return { ok: true };
 }
