@@ -10,24 +10,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "./db.js";
 import { recordMetric } from "./metrics.js";
 import { safeLog } from "./diagnostics.js";
+import { getPricing } from "./pricing.js";
 import type { CostRecord } from "./types.js";
-
-/**
- * Per-million-token pricing in cents. Updated for Claude model family.
- * Input/output prices differ; cache reads are discounted.
- */
-const MODEL_PRICING: Record<string, { inputPerM: number; outputPerM: number; cacheReadPerM: number; cacheWritePerM: number }> = {
-  "claude-opus-4-6":     { inputPerM: 1500, outputPerM: 7500, cacheReadPerM: 150,  cacheWritePerM: 1875 },
-  "claude-sonnet-4-6":   { inputPerM: 300,  outputPerM: 1500, cacheReadPerM: 30,   cacheWritePerM: 375  },
-  "claude-haiku-4-5":    { inputPerM: 80,   outputPerM: 400,  cacheReadPerM: 8,    cacheWritePerM: 100  },
-  // Aliases
-  "opus":                { inputPerM: 1500, outputPerM: 7500, cacheReadPerM: 150,  cacheWritePerM: 1875 },
-  "sonnet":              { inputPerM: 300,  outputPerM: 1500, cacheReadPerM: 30,   cacheWritePerM: 375  },
-  "haiku":               { inputPerM: 80,   outputPerM: 400,  cacheReadPerM: 8,    cacheWritePerM: 100  },
-};
-
-/** Default pricing when model is unknown — use sonnet pricing as safe middle ground. */
-const DEFAULT_PRICING = { inputPerM: 300, outputPerM: 1500, cacheReadPerM: 30, cacheWritePerM: 375 };
 
 /**
  * Calculate cost in cents from token counts and model.
@@ -39,7 +23,7 @@ export function calculateCostCents(params: {
   cacheWriteTokens?: number;
   model?: string;
 }): number {
-  const pricing = (params.model && MODEL_PRICING[params.model]) || DEFAULT_PRICING;
+  const pricing = getPricing(params.model ?? "");
   const input = Math.max(0, params.inputTokens);
   const output = Math.max(0, params.outputTokens);
   const cacheRead = Math.max(0, params.cacheReadTokens ?? 0);
