@@ -21,7 +21,7 @@ import type { WorkforceConfig, AgentConfig } from "../../src/types.js";
 
 function makeAgent(overrides?: Partial<AgentConfig>): AgentConfig {
   return {
-    role: "employee",
+    extends: "employee",
     expectations: [{ tool: "clawforce_log", action: "outcome", min_calls: 1 }],
     briefing: [],
     performance_policy: { action: "log" },

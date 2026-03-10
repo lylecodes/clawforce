@@ -5,7 +5,6 @@
  * Returns warnings (non-fatal) so the plugin can still load with partial configs.
  */
 
-import { CRITICAL_SOURCES } from "./profiles.js";
 import { validatePolicyConfigs } from "./policy/normalizer.js";
 import { isKnownCategory } from "./risk/categories.js";
 import type { AgentConfig, CompactionConfig, ContextSource, RiskGateAction, RiskTier, WorkforceConfig } from "./types.js";
@@ -301,7 +300,7 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
   // Check manager has propose requirement if approval policy exists
   if (config.approval?.policy) {
     const managers = Object.entries(config.agents).filter(
-      ([, c]) => c.role === "manager",
+      ([, c]) => c.coordination?.enabled,
     );
     for (const [agentId, mgrConfig] of managers) {
       const hasPropose = mgrConfig.expectations.some(
@@ -354,8 +353,13 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
     });
   }
 
-  // Must have at least one expectation (assistants intentionally have none)
-  if (config.expectations.length === 0 && config.role !== "assistant") {
+  // Warn if expectations are empty and the agent inherits from a preset that
+  // normally provides them (manager/employee). Agents with no `extends` or a
+  // custom preset may intentionally have zero expectations.
+  if (
+    config.expectations.length === 0 &&
+    (config.extends === "manager" || config.extends === "employee")
+  ) {
     warnings.push({
       level: "warn",
       agentId,
@@ -398,21 +402,6 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
     });
   }
 
-  // Scheduled agents should have clawforce_log outcome requirement
-  if (config.role === "scheduled") {
-    const hasOutcome = config.expectations.some(
-      (r) => r.tool === "clawforce_log" &&
-        (Array.isArray(r.action) ? r.action.includes("outcome") : r.action === "outcome"),
-    );
-    if (!hasOutcome) {
-      warnings.push({
-        level: "warn",
-        agentId,
-        message: "Scheduled agent has no expectation for clawforce_log outcome — runs won't be audited.",
-      });
-    }
-  }
-
   // Validate reports_to
   if (config.reports_to !== undefined && config.reports_to !== "parent") {
     // Named agent target — warn if the target agent isn't also configured
@@ -447,16 +436,23 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
 
   // Validate exclude_briefing
   if (config.exclude_briefing && config.exclude_briefing.length > 0) {
-    const criticalForRole = CRITICAL_SOURCES[config.role];
-    if (criticalForRole) {
-      for (const excluded of config.exclude_briefing) {
-        if (criticalForRole.includes(excluded)) {
-          warnings.push({
-            level: "warn",
-            agentId,
-            message: `Excluding critical baseline source "${excluded}" for role "${config.role}" — agent may lack essential context.`,
-          });
-        }
+    // Derive critical sources from config shape:
+    //  - coordination.enabled → needs "task_board"
+    //  - extends === "employee" (or default) → needs "assigned_task"
+    const criticalSources: string[] = [];
+    if (config.coordination?.enabled || config.extends === "manager") {
+      criticalSources.push("task_board");
+    }
+    if (config.extends === "employee" || (!config.extends && !config.coordination?.enabled)) {
+      criticalSources.push("assigned_task");
+    }
+    for (const excluded of config.exclude_briefing) {
+      if (criticalSources.includes(excluded)) {
+        warnings.push({
+          level: "warn",
+          agentId,
+          message: `Excluding critical baseline source "${excluded}" — agent may lack essential context.`,
+        });
       }
     }
 
@@ -561,11 +557,11 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
         });
       }
 
-      // Ensure compaction expectation exists (assistants use auto-compaction without enforcement)
+      // Ensure compaction expectation exists when compaction is enabled
       const hasCompactOutput = config.expectations.some(
         (r) => r.tool === "clawforce_compact",
       );
-      if (!hasCompactOutput && config.role !== "assistant") {
+      if (!hasCompactOutput && config.compaction) {
         warnings.push({
           level: "warn",
           agentId,

@@ -7,7 +7,7 @@ function baseConfig(overrides: Partial<WorkforceConfig> = {}): WorkforceConfig {
     name: "test-project",
     agents: {
       worker: {
-        role: "employee" as const,
+        extends: "employee",
         briefing: [{ source: "instructions" as const }],
         expectations: [{ tool: "clawforce_task", action: "update", min_calls: 1 }],
         performance_policy: { action: "alert" as const },

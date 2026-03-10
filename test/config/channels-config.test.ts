@@ -34,9 +34,9 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
   worker1:
-    role: employee
+    extends: employee
 
 channels:
   - name: engineering
@@ -63,7 +63,7 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
 
 channels:
   - type: topic
@@ -83,7 +83,7 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
 
 channels:
   - name: engineering
@@ -103,7 +103,7 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
 
 channels:
   - name: bad-type
@@ -124,7 +124,7 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
 
 channels:
   - name: test-ch
@@ -144,9 +144,9 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
   worker1:
-    role: employee
+    extends: employee
 
 channels:
   - name: engineering
@@ -171,7 +171,7 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
 `);
 
     const config = loadWorkforceConfig(configPath);
@@ -188,9 +188,9 @@ name: test-project
 
 agents:
   mgr:
-    role: manager
+    extends: manager
   worker1:
-    role: employee
+    extends: employee
 
 channels:
   - name: eng-channel

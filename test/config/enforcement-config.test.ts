@@ -42,7 +42,7 @@ approval:
 
 agents:
   leon:
-    role: orchestrator
+    extends: manager
     context_in:
       - source: instructions
       - source: custom
@@ -59,7 +59,7 @@ agents:
       channel: telegram
 
   coder:
-    role: worker
+    extends: employee
     context_in:
       - source: instructions
     required_outputs:
@@ -85,7 +85,7 @@ agents:
     // Leon (manager) — gets role profile defaults merged in
     const leon = config!.agents.leon;
     expect(leon).toBeDefined();
-    expect(leon!.role).toBe("manager");
+    expect(leon!.extends).toBe("manager");
     // Should have manager baseline + user sources (instructions, custom)
     expect(leon!.briefing.some((s) => s.source === "instructions")).toBe(true);
     expect(leon!.briefing.some((s) => s.source === "task_board")).toBe(true);
@@ -103,7 +103,7 @@ agents:
     // Coder (employee)
     const coder = config!.agents.coder;
     expect(coder).toBeDefined();
-    expect(coder!.role).toBe("employee");
+    expect(coder!.extends).toBe("employee");
     expect(coder!.performance_policy.action).toBe("retry");
     expect(coder!.performance_policy.max_retries).toBe(3);
     expect(coder!.performance_policy.then).toBe("alert");
@@ -114,7 +114,7 @@ agents:
 name: test
 agents:
   agent1:
-    role: worker
+    extends: employee
     context_in:
       - source: custom
         content: "hello"
@@ -139,7 +139,7 @@ agents:
 name: test
 agents:
   agent1:
-    role: worker
+    extends: employee
     context_in:
       - source: instructions
     required_outputs:
@@ -176,7 +176,7 @@ agents:
 name: test
 agents:
   agent1:
-    role: orchestrator
+    extends: manager
     context_in:
       - source: knowledge
         filter:
@@ -200,12 +200,12 @@ agents:
     });
   });
 
-  it("handles cron agent config", () => {
+  it("handles agent with explicit expectations and performance policy", () => {
     const configPath = writeYaml("project.yaml", `
 name: test
 agents:
   outreach:
-    role: cron
+    extends: employee
     context_in:
       - source: instructions
     required_outputs:
@@ -215,14 +215,14 @@ agents:
     on_failure:
       action: retry
       max_retries: 3
-      then: disable_and_alert
+      then: alert
 `);
 
     const config = loadWorkforceConfig(configPath);
     const outreach = config!.agents.outreach;
-    expect(outreach!.role).toBe("scheduled");
+    expect(outreach!.extends).toBe("employee");
     expect(outreach!.performance_policy.action).toBe("retry");
-    expect(outreach!.performance_policy.then).toBe("terminate_and_alert");
+    expect(outreach!.performance_policy.then).toBe("alert");
   });
 });
 
@@ -240,7 +240,8 @@ describe("enforcement config registry", () => {
       name: "test",
       agents: {
         leon: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [{ source: "instructions" }],
           expectations: [{ tool: "clawforce_task", action: "propose", min_calls: 1 }],
           performance_policy: { action: "alert" },
@@ -251,7 +252,7 @@ describe("enforcement config registry", () => {
     const entry = getAgentConfig("leon");
     expect(entry).not.toBeNull();
     expect(entry!.projectId).toBe("proj1");
-    expect(entry!.config.role).toBe("manager");
+    expect(entry!.config.extends).toBe("manager");
   });
 
   it("returns null for unregistered agents", () => {
@@ -264,7 +265,7 @@ describe("enforcement config registry", () => {
       approval: { policy: "Always require approval." },
       agents: {
         agent1: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
@@ -285,7 +286,8 @@ describe("config validation", () => {
       approval: { policy: "Approve everything small." },
       agents: {
         leon: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [{ source: "instructions" }],
           expectations: [
             { tool: "clawforce_task", action: ["propose"], min_calls: 1 },
@@ -304,7 +306,7 @@ describe("config validation", () => {
       name: "test",
       agents: {
         agent1: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
@@ -320,7 +322,7 @@ describe("config validation", () => {
       name: "test",
       agents: {
         agent1: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "retry" },
@@ -331,29 +333,14 @@ describe("config validation", () => {
     expect(warnings.some((w) => w.message.includes("no max_retries"))).toBe(true);
   });
 
-  it("warns when scheduled agent lacks clawforce_log outcome", () => {
-    const warnings = validateWorkforceConfig({
-      name: "test",
-      agents: {
-        cron1: {
-          role: "scheduled",
-          briefing: [],
-          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
-          performance_policy: { action: "alert" },
-        },
-      },
-    });
-
-    expect(warnings.some((w) => w.message.includes("clawforce_log outcome"))).toBe(true);
-  });
-
-  it("warns when manager has approval policy but no propose requirement", () => {
+  it("warns when coordinating agent has approval policy but no propose requirement", () => {
     const warnings = validateWorkforceConfig({
       name: "test",
       approval: { policy: "Require approval for everything." },
       agents: {
         orch: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
@@ -369,7 +356,7 @@ describe("config validation", () => {
       name: "test",
       agents: {
         agent1: {
-          role: "employee",
+          extends: "employee",
           briefing: [{ source: "file" }],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
@@ -385,7 +372,7 @@ describe("config validation", () => {
       name: "test",
       agents: {
         w1: {
-          role: "employee",
+          extends: "employee",
           briefing: [{ source: "instructions" }],
           exclude_briefing: ["assigned_task"],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
@@ -404,7 +391,8 @@ describe("config validation", () => {
       name: "test",
       agents: {
         orch: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [{ source: "instructions" }],
           exclude_briefing: ["task_board"],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
@@ -423,7 +411,7 @@ describe("config validation", () => {
       name: "test",
       agents: {
         agent1: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           exclude_briefing: ["nonexistent_source"],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
@@ -444,21 +432,23 @@ describe("escalation cycle detection", () => {
       name: "test",
       agents: {
         a: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
           reports_to: "b",
         },
         b: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
           reports_to: "c",
         },
         c: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
@@ -475,7 +465,8 @@ describe("escalation cycle detection", () => {
 
   it("warns on escalation chains deeper than 5 levels", () => {
     const agents: Record<string, {
-      role: "employee" | "manager";
+      extends: "employee" | "manager";
+      coordination?: { enabled: boolean };
       briefing: [];
       expectations: { tool: string; action: string; min_calls: number }[];
       performance_policy: { action: "alert" };
@@ -485,7 +476,8 @@ describe("escalation cycle detection", () => {
     // Create a chain: e0 → e1 → e2 → e3 → e4 → e5 → e6
     for (let i = 0; i <= 6; i++) {
       agents[`e${i}`] = {
-        role: i === 0 ? "employee" : "manager",
+        extends: i === 0 ? "employee" : "manager",
+        ...(i !== 0 ? { coordination: { enabled: true } } : {}),
         briefing: [],
         expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
         performance_policy: { action: "alert" },
@@ -509,21 +501,23 @@ describe("escalation cycle detection", () => {
       name: "test",
       agents: {
         worker: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
           reports_to: "lead",
         },
         lead: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
           reports_to: "director",
         },
         director: {
-          role: "manager",
+          extends: "manager",
+          coordination: { enabled: true },
           briefing: [],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
@@ -563,7 +557,7 @@ describe("profile defaults via config loading", () => {
 name: test
 agents:
   orch:
-    role: orchestrator
+    extends: manager
     required_outputs:
       - tool: clawforce_log
         action: write
@@ -580,10 +574,9 @@ agents:
     expect(sourceNames).toContain("task_board");
     expect(sourceNames).toContain("project_md");
     expect(sourceNames).toContain("escalations");
-    expect(sourceNames).toContain("workflows");
-    expect(sourceNames).toContain("activity");
-    expect(sourceNames).toContain("sweep_status");
-    expect(sourceNames).toContain("proposals");
+    expect(sourceNames).toContain("soul");
+    expect(sourceNames).toContain("memory");
+    expect(sourceNames).toContain("skill");
   });
 
   it("employee inherits profile expectations and performance_policy when omitted", () => {
@@ -591,7 +584,7 @@ agents:
 name: test
 agents:
   w1:
-    role: worker
+    extends: employee
 `);
 
     const config = loadWorkforceConfig(configPath);
@@ -606,32 +599,31 @@ agents:
     expect(w1.performance_policy.then).toBe("alert");
   });
 
-  it("scheduled inherits profile defaults", () => {
+  it("employee inherits briefing from preset", () => {
     const configPath = writeYaml("project.yaml", `
 name: test
 agents:
-  cron1:
-    role: cron
+  worker1:
+    extends: employee
 `);
 
     const config = loadWorkforceConfig(configPath);
-    const cron = config!.agents.cron1!;
+    const worker = config!.agents.worker1!;
 
-    // instructions (auto-injected) + soul + tools_reference + pending_messages + memory + skill (scheduled baseline)
-    expect(cron.briefing).toHaveLength(6);
-    expect(cron.briefing[0]!.source).toBe("instructions");
-    const sourceNames = cron.briefing.map((s) => s.source);
+    expect(worker.briefing[0]!.source).toBe("instructions");
+    const sourceNames = worker.briefing.map((s) => s.source);
     expect(sourceNames).toContain("soul");
     expect(sourceNames).toContain("tools_reference");
+    expect(sourceNames).toContain("assigned_task");
     expect(sourceNames).toContain("memory");
     expect(sourceNames).toContain("skill");
-    // Inherits scheduled profile expectations
-    expect(cron.expectations.some((r) => r.tool === "clawforce_log" &&
-      (Array.isArray(r.action) ? r.action.includes("outcome") : r.action === "outcome"),
-    )).toBe(true);
-    // Inherits scheduled profile performance_policy
-    expect(cron.performance_policy.action).toBe("retry");
-    expect(cron.performance_policy.then).toBe("terminate_and_alert");
+    // Inherits employee profile expectations
+    expect(worker.expectations.some((r) => r.tool === "clawforce_task")).toBe(true);
+    expect(worker.expectations.some((r) => r.tool === "clawforce_log")).toBe(true);
+    // Inherits employee profile performance_policy
+    expect(worker.performance_policy.action).toBe("retry");
+    expect(worker.performance_policy.max_retries).toBe(3);
+    expect(worker.performance_policy.then).toBe("alert");
   });
 
   it("does not duplicate when user explicitly includes a baseline source", () => {
@@ -639,7 +631,7 @@ agents:
 name: test
 agents:
   orch:
-    role: orchestrator
+    extends: manager
     context_in:
       - source: task_board
     required_outputs:
@@ -661,7 +653,7 @@ agents:
 name: test
 agents:
   orch:
-    role: orchestrator
+    extends: manager
     exclude_context:
       - sweep_status
       - proposals
@@ -688,7 +680,7 @@ agents:
 name: test
 agents:
   orch:
-    role: orchestrator
+    extends: manager
     context_in:
       - source: proposals
     required_outputs:
