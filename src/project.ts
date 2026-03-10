@@ -315,9 +315,17 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
     });
   }
 
-  const extendsFrom = typeof raw.extends === "string" && raw.extends.trim()
+  // Use `extends` if set, fall back to `role` for backward compat, default to "employee"
+  const rawExtends = typeof raw.extends === "string" && raw.extends.trim()
     ? raw.extends.trim()
-    : "employee";  // default to employee preset
+    : undefined;
+  const rawRole = typeof raw.role === "string" && raw.role.trim()
+    ? raw.role.trim()
+    : undefined;
+  // Map legacy role aliases
+  const ROLE_ALIAS: Record<string, string> = { orchestrator: "manager", worker: "employee" };
+  const mappedRole = rawRole ? (ROLE_ALIAS[rawRole] ?? rawRole) : undefined;
+  const extendsFrom = rawExtends ?? mappedRole ?? "employee";
 
   // Accept both old and new field names for migration
   const briefing = normalizeContextSources(raw.briefing ?? raw.context_in);

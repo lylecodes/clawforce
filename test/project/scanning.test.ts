@@ -80,8 +80,8 @@ agents:
     expect(enfConfig).not.toBeNull();
     expect(enfConfig!.name).toBe("Test Project");
     expect(Object.keys(enfConfig!.agents)).toEqual(["coder", "leon"]);
-    expect(enfConfig!.agents.coder!.role).toBe("employee");
-    expect(enfConfig!.agents.leon!.role).toBe("manager");
+    expect(enfConfig!.agents.coder!.extends).toBe("employee");
+    expect(enfConfig!.agents.leon!.extends).toBe("manager");
   });
 
   it("validates enforcement config and warns on issues", () => {
@@ -132,7 +132,7 @@ agents:
     const entry = getAgentConfig("my-agent");
     expect(entry).not.toBeNull();
     expect(entry!.projectId).toBe("reg-project");
-    expect(entry!.config.role).toBe("employee");
+    expect(entry!.config.extends).toBe("employee");
     expect(entry!.projectDir).toBe(tmpDir);
   });
 

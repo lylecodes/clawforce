@@ -10,7 +10,7 @@ import type { AgentConfig } from "../src/types.js";
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
-    role: "employee",
+    extends: "employee",
     briefing: [{ source: "instructions" }],
     expectations: [],
     performance_policy: { action: "alert" },
@@ -51,7 +51,7 @@ describe("buildOpenClawAgentEntry", () => {
   it("sets subagents.allowAgents for manager role", () => {
     const entry = buildOpenClawAgentEntry(
       "mgr",
-      makeAgentConfig({ role: "manager" }),
+      makeAgentConfig({ extends: "manager", coordination: { enabled: true } }),
     );
     expect(entry.subagents).toEqual({ allowAgents: ["*"] });
   });
@@ -59,7 +59,7 @@ describe("buildOpenClawAgentEntry", () => {
   it("does not set subagents for non-manager roles", () => {
     const entry = buildOpenClawAgentEntry(
       "worker",
-      makeAgentConfig({ role: "employee" }),
+      makeAgentConfig({ extends: "employee" }),
     );
     expect(entry.subagents).toBeUndefined();
   });
@@ -151,7 +151,7 @@ describe("syncAgentsToOpenClaw", () => {
     const result = await syncAgentsToOpenClaw({
       agents: [
         { agentId: "bot1", config: makeAgentConfig({ title: "Bot One", model: "claude-opus-4-6" }) },
-        { agentId: "bot2", config: makeAgentConfig({ role: "manager", title: "Manager" }), projectDir: "/proj" },
+        { agentId: "bot2", config: makeAgentConfig({ extends: "manager", coordination: { enabled: true }, title: "Manager" }), projectDir: "/proj" },
       ],
       loadConfig,
       writeConfigFile,

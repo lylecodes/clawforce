@@ -109,8 +109,8 @@ function getEligibleAgents(
     const entry = getAgentConfig(agentId);
     if (!entry || entry.projectId !== projectId) continue;
 
-    // Only employees can be auto-assigned
-    if (entry.config.role !== "employee") continue;
+    // Only employees can be auto-assigned (managers/coordinators are excluded)
+    if (entry.config.extends === "manager" || entry.config.coordination?.enabled) continue;
 
     // Check disabled
     if (isAgentDisabled(projectId, agentId, db)) continue;

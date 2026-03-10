@@ -35,7 +35,7 @@ describe("resolveEffectiveScope", () => {
   it("returns role defaults when no custom policies", () => {
     vi.spyOn(projectModule, "getAgentConfig").mockReturnValue({
       projectId: "proj1",
-      config: { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } },
+      config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } },
     });
 
     const scope = resolveEffectiveScope("worker1");
@@ -46,7 +46,7 @@ describe("resolveEffectiveScope", () => {
   it("uses custom action_scope policy when present", () => {
     vi.spyOn(projectModule, "getAgentConfig").mockReturnValue({
       projectId: "proj1",
-      config: { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } },
+      config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } },
     });
 
     registerPolicies("proj1", [
@@ -74,7 +74,7 @@ describe("resolveEffectiveScope", () => {
   it("handles legacy string[] format", () => {
     vi.spyOn(projectModule, "getAgentConfig").mockReturnValue({
       projectId: "proj1",
-      config: { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } },
+      config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } },
     });
 
     registerPolicies("proj1", [
@@ -99,7 +99,7 @@ describe("resolveEffectiveScope", () => {
   it("falls back when no policy matches", () => {
     vi.spyOn(projectModule, "getAgentConfig").mockReturnValue({
       projectId: "proj1",
-      config: { role: "scheduled", briefing: [], expectations: [], performance_policy: { action: "alert" } },
+      config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } },
     });
 
     // Register policy for a different agent
@@ -116,7 +116,7 @@ describe("resolveEffectiveScope", () => {
 
     const scope = resolveEffectiveScope("worker1");
 
-    expect(scope).toEqual(DEFAULT_ACTION_SCOPES.scheduled);
+    expect(scope).toEqual(DEFAULT_ACTION_SCOPES.employee);
   });
 });
 

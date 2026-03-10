@@ -62,7 +62,7 @@ describe("dispatch concurrency + rate limiting", () => {
   it("respects per-project concurrency limit from config", async () => {
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
       dispatch: { maxConcurrentDispatches: 1 },
     });
 
@@ -81,7 +81,7 @@ describe("dispatch concurrency + rate limiting", () => {
   it("respects per-project rate limit (maxDispatchesPerHour)", async () => {
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
       dispatch: { maxDispatchesPerHour: 1 },
     });
 
@@ -100,7 +100,7 @@ describe("dispatch concurrency + rate limiting", () => {
   it("fails agent-rate-limited items with descriptive message", async () => {
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
       dispatch: { agentLimits: { "worker-1": { maxPerHour: 1 } } },
     });
 
@@ -124,7 +124,7 @@ describe("dispatch concurrency + rate limiting", () => {
   it("getDispatchRateInfo returns accurate info", async () => {
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
       dispatch: { maxDispatchesPerHour: 10 },
     });
 
@@ -143,7 +143,7 @@ describe("dispatch concurrency + rate limiting", () => {
 
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
       dispatch: { maxConcurrentDispatches: 10 }, // project allows 10
     });
 

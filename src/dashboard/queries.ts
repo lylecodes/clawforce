@@ -56,7 +56,7 @@ export function queryAgents(projectId: string) {
       const session = activeSessions.find((s) => s.agentId === aid && s.projectId === projectId);
       return {
         id: aid,
-        role: entry.config.role,
+        extends: entry.config.extends,
         title: entry.config.title,
         department: entry.config.department,
         team: entry.config.team,
@@ -79,7 +79,7 @@ export function queryAgentDetail(projectId: string, agentId: string) {
 
   return {
     id: agentId,
-    role: entry.config.role,
+    extends: entry.config.extends,
     title: entry.config.title,
     department: entry.config.department,
     team: entry.config.team,
@@ -249,7 +249,7 @@ export function queryOrgChart(projectId: string) {
       if (!entry || entry.projectId !== projectId) return null;
       return {
         id: aid,
-        role: entry.config.role,
+        extends: entry.config.extends,
         title: entry.config.title,
         department: entry.config.department,
         team: entry.config.team,

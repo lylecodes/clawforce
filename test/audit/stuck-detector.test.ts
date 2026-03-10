@@ -9,7 +9,7 @@ import {
 import type { AgentConfig } from "../../src/types.js";
 
 const cronConfig: AgentConfig = {
-  role: "scheduled",
+  extends: "employee",
   briefing: [{ source: "instructions" }],
   expectations: [
     { tool: "clawforce_log", action: "outcome", min_calls: 1 },

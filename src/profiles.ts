@@ -22,6 +22,37 @@ export type RoleProfile = {
 export type Paradigm = RoleProfile;
 
 /**
+ * Backward-compat view of BUILTIN_AGENT_PRESETS as RoleProfile objects.
+ * Converts string[] briefing arrays to ContextSource[].
+ */
+export const BUILTIN_PROFILES: Record<string, RoleProfile> = Object.fromEntries(
+  Object.entries(BUILTIN_AGENT_PRESETS)
+    .filter(([, preset]) => Array.isArray(preset.briefing))
+    .map(([key, preset]) => [
+      key,
+      {
+        briefing: (preset.briefing as string[]).map((s) => ({ source: s }) as ContextSource),
+        expectations: (preset.expectations ?? []) as Expectation[],
+        performance_policy: (preset.performance_policy ?? { action: "alert" }) as PerformancePolicy,
+        compaction: (preset.compaction ?? false) as boolean,
+      },
+    ]),
+);
+
+/** Default titles and personas per preset. */
+export const ROLE_DEFAULTS: Record<string, { title: string; persona: string }> = Object.fromEntries(
+  Object.entries(BUILTIN_AGENT_PRESETS)
+    .filter(([, preset]) => typeof preset.title === "string")
+    .map(([key, preset]) => [key, { title: preset.title as string, persona: preset.persona as string }]),
+);
+
+/**
+ * Critical sources that cannot be excluded via exclude_briefing.
+ * Currently none are defined; kept for backward compat.
+ */
+export const CRITICAL_SOURCES: Record<string, string[] | undefined> = {};
+
+/**
  * Default allowed tools and actions per role. Used to auto-generate action_scope
  * policies and to filter tool registration/schemas at startup.
  *
@@ -63,6 +94,20 @@ export const DEFAULT_ACTION_SCOPES: Record<string, ActionScope> = {
       "list_protocols",
     ],
     clawforce_goal: ["get", "list", "status"],
+    clawforce_channel: ["send", "list", "history", "meeting_status", "join", "leave"],
+    memory_search: "*",
+    memory_get: "*",
+  },
+  assistant: {
+    clawforce_log: ["write", "outcome", "search", "list"],
+    clawforce_setup: ["explain", "status"],
+    clawforce_context: "*",
+    clawforce_message: [
+      "send", "list", "read", "reply",
+      "request", "delegate", "request_feedback",
+      "respond", "accept", "reject", "complete", "submit_review",
+      "list_protocols",
+    ],
     clawforce_channel: ["send", "list", "history", "meeting_status", "join", "leave"],
     memory_search: "*",
     memory_get: "*",

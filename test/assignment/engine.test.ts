@@ -27,11 +27,11 @@ describe("assignment/engine", () => {
   let db: DatabaseSync;
   const PROJECT = "assignment-test";
 
-  function registerAgents(agents: Record<string, { role?: string; tools?: string[]; department?: string; team?: string }>) {
+  function registerAgents(agents: Record<string, { extends?: string; tools?: string[]; department?: string; team?: string }>) {
     const agentConfig: Record<string, any> = {};
     for (const [id, cfg] of Object.entries(agents)) {
       agentConfig[id] = {
-        role: cfg.role ?? "employee",
+        extends: cfg.extends ?? "employee",
         briefing: [],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -105,7 +105,7 @@ describe("assignment/engine", () => {
       registerWorkforceConfig(PROJECT, {
         name: "test",
         agents: {
-          "manager-1": { role: "manager", briefing: [], expectations: [], performance_policy: { action: "alert" } },
+          "manager-1": { extends: "manager", coordination: { enabled: true }, briefing: [], expectations: [], performance_policy: { action: "alert" } },
         },
       });
 

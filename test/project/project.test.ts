@@ -98,9 +98,9 @@ agents:
     role: orchestrator
 `);
     const config = loadWorkforceConfig(configPath);
-    // Should still parse (defaults to employee since extends is not set)
+    // Should still parse — role: orchestrator maps to extends: manager
     expect(config).not.toBeNull();
-    expect(config!.agents.orch!.extends).toBe("employee");
+    expect(config!.agents.orch!.extends).toBe("manager");
 
     // Verify diagnostic error was emitted for deprecated role usage
     expect(emitDiagnosticEvent).toHaveBeenCalledWith(
@@ -121,8 +121,8 @@ agents:
     role: imaginary_role
 `);
     const config = loadWorkforceConfig(configPath);
-    // role: triggers a config_error but extends defaults to employee
-    expect(config!.agents.bad_agent!.extends).toBe("employee");
+    // role: triggers a config_error but the value is used as extends fallback
+    expect(config!.agents.bad_agent!.extends).toBe("imaginary_role");
 
     // Verify diagnostic error was emitted for deprecated role
     expect(emitDiagnosticEvent).toHaveBeenCalledWith(

@@ -43,9 +43,8 @@ describe("buildExplainContent", () => {
   it("includes project.yaml format example", () => {
     const result = buildExplainContent("/tmp/clawforce");
 
-    expect(result).toContain("role: manager");
-    expect(result).toContain("role: employee");
-    expect(result).toContain("role: scheduled");
+    expect(result).toContain("extends: manager");
+    expect(result).toContain("extends: employee");
     expect(result).toContain("expectations");
     expect(result).toContain("performance_policy");
     expect(result).toContain("briefing");

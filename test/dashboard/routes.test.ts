@@ -5,12 +5,12 @@ import { handleRequest } from "../../src/dashboard/routes.js";
 vi.mock("../../src/dashboard/queries.js", () => ({
   queryProjects: vi.fn(() => [{ id: "proj1", agentCount: 2 }]),
   queryAgents: vi.fn((projectId: string) => [
-    { id: "agent1", role: "manager", status: "idle" },
-    { id: "agent2", role: "employee", status: "active" },
+    { id: "agent1", extends: "manager", status: "idle" },
+    { id: "agent2", extends: "employee", status: "active" },
   ]),
   queryAgentDetail: vi.fn((projectId: string, agentId: string) => {
     if (agentId === "agent1") {
-      return { id: "agent1", role: "manager", status: "idle", directReports: ["agent2"] };
+      return { id: "agent1", extends: "manager", status: "idle", directReports: ["agent2"] };
     }
     return null;
   }),

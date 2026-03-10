@@ -152,6 +152,22 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     compaction: false,
     coordination: { enabled: false },
   },
+  assistant: {
+    title: "Personal Assistant",
+    persona: "You are a personal assistant agent focused on communication, memory management, and helping users.",
+    briefing: [
+      "soul", "tools_reference", "pending_messages", "channel_messages",
+      "memory", "skill", "preferences",
+    ],
+    expectations: [],
+    performance_policy: { action: "alert" },
+    compaction: true,
+    coordination: { enabled: false },
+  },
+  /** @deprecated Use employee instead. */
+  scheduled: {
+    extends: "employee",
+  },
 };
 
 /* ── Builtin Job Presets ── */

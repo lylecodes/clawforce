@@ -62,7 +62,7 @@ describe("review escalation sweep", () => {
       vi.spyOn(project, "getRegisteredAgentIds").mockReturnValue(["mgr-agent"]);
       vi.spyOn(project, "getAgentConfig").mockReturnValue({
         projectId: PROJECT,
-        config: { role: "manager" } as any,
+        config: { extends: "manager" } as any,
       });
     }
   }

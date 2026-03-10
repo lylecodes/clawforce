@@ -13,7 +13,7 @@ import type { AgentConfig, WorkforceConfig } from "../../src/types.js";
 
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
-    role: "employee",
+    extends: "employee",
     briefing: [{ source: "instructions" }],
     expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
     performance_policy: { action: "alert" },
@@ -37,7 +37,7 @@ describe("org hierarchy", () => {
       const config: WorkforceConfig = {
         name: "test",
         agents: {
-          sarah: makeAgent({ role: "manager" }),
+          sarah: makeAgent({ extends: "manager" }),
           alice: makeAgent({ reports_to: "sarah" }),
           bob: makeAgent({ reports_to: "sarah" }),
           charlie: makeAgent({ reports_to: "parent" }),
@@ -55,7 +55,7 @@ describe("org hierarchy", () => {
       const config: WorkforceConfig = {
         name: "test",
         agents: {
-          sarah: makeAgent({ role: "manager" }),
+          sarah: makeAgent({ extends: "manager" }),
           alice: makeAgent({ reports_to: "parent" }),
         },
       };
@@ -68,7 +68,7 @@ describe("org hierarchy", () => {
       const config: WorkforceConfig = {
         name: "test",
         agents: {
-          sarah: makeAgent({ role: "manager" }),
+          sarah: makeAgent({ extends: "manager" }),
           alice: makeAgent({ reports_to: "sarah" }),
         },
       };
@@ -85,8 +85,8 @@ describe("org hierarchy", () => {
         name: "test",
         agents: {
           worker: makeAgent({ reports_to: "lead" }),
-          lead: makeAgent({ role: "manager", reports_to: "director" }),
-          director: makeAgent({ role: "manager", reports_to: "parent" }),
+          lead: makeAgent({ extends: "manager", reports_to: "director" }),
+          director: makeAgent({ extends: "manager", reports_to: "parent" }),
         },
       };
       registerWorkforceConfig(projectId, config);
@@ -101,7 +101,7 @@ describe("org hierarchy", () => {
         name: "test",
         agents: {
           worker: makeAgent({ reports_to: "lead" }),
-          lead: makeAgent({ role: "manager", reports_to: "parent" }),
+          lead: makeAgent({ extends: "manager", reports_to: "parent" }),
         },
       };
       registerWorkforceConfig(projectId, config);
@@ -116,7 +116,7 @@ describe("org hierarchy", () => {
         name: "test",
         agents: {
           worker: makeAgent({ reports_to: "lead" }),
-          lead: makeAgent({ role: "manager" }), // no reports_to
+          lead: makeAgent({ extends: "manager" }), // no reports_to
         },
       };
       registerWorkforceConfig(projectId, config);
@@ -161,7 +161,7 @@ describe("org hierarchy", () => {
       const config: WorkforceConfig = {
         name: "test",
         agents: {
-          root: makeAgent({ role: "manager" }),
+          root: makeAgent({ extends: "manager" }),
         },
       };
       registerWorkforceConfig(projectId, config);

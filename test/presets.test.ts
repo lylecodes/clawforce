@@ -198,8 +198,12 @@ describe("builtin agent presets", () => {
     expect(emp.performance_policy.max_retries).toBe(3);
   });
 
-  it("only manager and employee presets exist", () => {
-    expect(Object.keys(BUILTIN_AGENT_PRESETS)).toEqual(["manager", "employee"]);
+  it("has expected presets", () => {
+    const keys = Object.keys(BUILTIN_AGENT_PRESETS);
+    expect(keys).toContain("manager");
+    expect(keys).toContain("employee");
+    expect(keys).toContain("assistant");
+    expect(keys).toContain("scheduled");
   });
 });
 

@@ -209,7 +209,7 @@ export function findManagerAgent(projectId: string): string | undefined {
     const agentIds = getRegisteredAgentIds();
     for (const agentId of agentIds) {
       const entry = getAgentConfig(agentId);
-      if (entry?.projectId === projectId && entry.config.role === "manager") {
+      if (entry?.projectId === projectId && (entry.config.extends === "manager" || entry.config.coordination?.enabled)) {
         return agentId;
       }
     }

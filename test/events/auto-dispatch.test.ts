@@ -40,7 +40,7 @@ describe("auto-dispatch on task_assigned", () => {
   it("task_assigned event triggers auto-enqueue", () => {
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
     });
 
     // Create an ASSIGNED task (emits task_assigned event)
@@ -105,7 +105,7 @@ describe("auto-dispatch on task_assigned", () => {
   it("dedup prevents double-enqueue for same task", () => {
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
     });
 
     const task = createTask({
@@ -139,7 +139,7 @@ describe("auto-dispatch on task_assigned", () => {
   it("auto-dispatch respects autoDispatchOnAssign: false config", () => {
     registerWorkforceConfig(PROJECT, {
       name: "test",
-      agents: { "worker-1": { role: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
+      agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
       assignment: { enabled: true, strategy: "workload_balanced", autoDispatchOnAssign: false },
     });
 

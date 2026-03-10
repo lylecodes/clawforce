@@ -24,6 +24,7 @@ export {
 } from "./project.js";
 export { validateWorkforceConfig, validateEnforcementConfig } from "./config-validator.js";
 export { generateDefaultScopePolicies } from "./profiles.js";
+export { resolveConfig, mergeArrayWithOperators, detectCycle, BUILTIN_AGENT_PRESETS, BUILTIN_JOB_PRESETS } from "./presets.js";
 
 // --- Enforcement ---
 export { startTracking, recordToolCall, endSession, getSession, recoverOrphanedSessions } from "./enforcement/tracker.js";
@@ -168,6 +169,7 @@ export type {
   WorkflowPhase,
   AgentConfig,
   AgentPermissions,
+  CoordinationConfig,
   ContextSource,
   Expectation,
   JobDefinition,

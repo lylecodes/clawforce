@@ -76,7 +76,7 @@ export function buildOpenClawAgentEntry(
     entry.workspace = projectDir;
   }
 
-  if (config.role === "manager") {
+  if (config.extends === "manager" || config.coordination?.enabled) {
     entry.subagents = { allowAgents: ["*"] };
   }
 

@@ -17,7 +17,7 @@ const { startTracking, recordToolCall, getSession, resetTrackerForTest } = await
 import type { AgentConfig } from "../../src/types.js";
 
 const workerConfig: AgentConfig = {
-  role: "employee",
+  extends: "employee",
   briefing: [{ source: "instructions" }],
   expectations: [
     { tool: "clawforce_task", action: "transition", min_calls: 1 },

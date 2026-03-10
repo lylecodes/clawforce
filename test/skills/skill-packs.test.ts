@@ -40,7 +40,7 @@ skill_packs:
 
 agents:
   reviewer:
-    role: employee
+    extends: employee
     skill_pack: code_reviewer
 `;
     const configPath = path.join(tmpDir, "project.yaml");
@@ -77,7 +77,7 @@ skill_packs:
 
 agents:
   agent1:
-    role: employee
+    extends: employee
 `;
     const configPath = path.join(tmpDir, "project.yaml");
     fs.writeFileSync(configPath, yaml, "utf-8");
@@ -103,7 +103,7 @@ skill_packs:
 
 agents:
   agent1:
-    role: employee
+    extends: employee
 `;
     const configPath = path.join(tmpDir, "project.yaml");
     fs.writeFileSync(configPath, yaml, "utf-8");

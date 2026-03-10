@@ -97,7 +97,7 @@ describe("assistant action scope", () => {
 
   it("generates default scope policy for assistant", () => {
     const policies = generateDefaultScopePolicies({
-      helper: { role: "assistant" as const },
+      helper: { extends: "assistant" } as any,
     });
     expect(policies).toHaveLength(1);
     expect(policies[0]!.target).toBe("helper");
@@ -154,7 +154,7 @@ describe("assistant config validation", () => {
       name: "test",
       agents: {
         helper: {
-          role: "assistant",
+          extends: "assistant",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
@@ -170,7 +170,7 @@ describe("assistant config validation", () => {
       name: "test",
       agents: {
         helper: {
-          role: "assistant",
+          extends: "assistant",
           briefing: [{ source: "file", path: "/tmp/test.md" }],
           expectations: [],
           performance_policy: { action: "alert" },
@@ -187,7 +187,7 @@ describe("assistant config validation", () => {
       name: "test",
       agents: {
         helper: {
-          role: "assistant",
+          extends: "assistant",
           briefing: [{ source: "file" }], // missing path
           expectations: [],
           performance_policy: { action: "alert" },
@@ -229,7 +229,7 @@ agents:
     const config = loadWorkforceConfig(configPath);
     expect(config).toBeDefined();
     const helper = config!.agents.helper!;
-    expect(helper.role).toBe("assistant");
+    expect(helper.extends).toBe("assistant");
     // instructions (auto-injected) + 7 assistant baseline
     expect(helper.briefing).toHaveLength(8);
     expect(helper.briefing[0]!.source).toBe("instructions");

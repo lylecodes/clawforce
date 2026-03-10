@@ -13,7 +13,7 @@ const { getMemoryDb } = await import("../../src/db.js");
 const dbModule = await import("../../src/db.js");
 
 const workerConfig: AgentConfig = {
-  role: "employee",
+  extends: "employee",
   briefing: [{ source: "instructions" }],
   expectations: [
     { tool: "clawforce_task", action: ["transition", "fail"], min_calls: 1 },

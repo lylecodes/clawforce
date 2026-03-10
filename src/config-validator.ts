@@ -557,11 +557,12 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
         });
       }
 
-      // Ensure compaction expectation exists when compaction is enabled
+      // Ensure compaction expectation exists when compaction is enabled.
+      // Skip for assistant preset — assistants intentionally have no enforcement expectations.
       const hasCompactOutput = config.expectations.some(
         (r) => r.tool === "clawforce_compact",
       );
-      if (!hasCompactOutput && config.compaction) {
+      if (!hasCompactOutput && config.compaction && config.extends !== "assistant") {
         warnings.push({
           level: "warn",
           agentId,

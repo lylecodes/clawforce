@@ -7,9 +7,9 @@ vi.mock("../../src/lifecycle.js", () => ({
 
 vi.mock("../../src/project.js", () => {
   const configs = new Map<string, any>([
-    ["agent-mgr", { projectId: "proj1", config: { role: "manager", title: "Manager", department: "eng", team: "core", persona: "helpful", reports_to: null, expectations: [], performance_policy: {} } }],
-    ["agent-dev", { projectId: "proj1", config: { role: "employee", title: "Developer", department: "eng", team: "core", persona: "focused", reports_to: "agent-mgr", expectations: [], performance_policy: {} } }],
-    ["agent-other", { projectId: "proj2", config: { role: "employee", title: "Other", department: "ops" } }],
+    ["agent-mgr", { projectId: "proj1", config: { extends: "manager", title: "Manager", department: "eng", team: "core", persona: "helpful", reports_to: null, expectations: [], performance_policy: {} } }],
+    ["agent-dev", { projectId: "proj1", config: { extends: "employee", title: "Developer", department: "eng", team: "core", persona: "focused", reports_to: "agent-mgr", expectations: [], performance_policy: {} } }],
+    ["agent-other", { projectId: "proj2", config: { extends: "employee", title: "Other", department: "ops" } }],
   ]);
   return {
     getAgentConfig: vi.fn((id: string) => configs.get(id) ?? null),
@@ -108,7 +108,7 @@ describe("queryAgentDetail", () => {
   it("returns detail for a matching agent", () => {
     const result = queryAgentDetail("proj1", "agent-mgr");
     expect(result).not.toBeNull();
-    expect(result!.role).toBe("manager");
+    expect(result!.extends).toBe("manager");
     expect(result!.directReports).toContain("agent-dev");
   });
 

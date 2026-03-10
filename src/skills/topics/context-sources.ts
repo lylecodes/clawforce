@@ -61,7 +61,7 @@ export function generate(): string {
   sections.push("```yaml");
   sections.push("agents:");
   sections.push("  my-agent:");
-  sections.push("    role: employee");
+  sections.push("    extends: employee");
   sections.push("    briefing:");
   sections.push("      - source: assigned_task");
   sections.push("      - source: knowledge");
@@ -81,7 +81,7 @@ export function generate(): string {
   sections.push("```yaml");
   sections.push("agents:");
   sections.push("  my-manager:");
-  sections.push("    role: manager");
+  sections.push("    extends: manager");
   sections.push("    exclude_briefing:");
   sections.push("      - sweep_status");
   sections.push("      - cost_summary");
