@@ -7,7 +7,7 @@ import * as projectModule from "../../src/project.js";
 
 function makeBaseConfig(overrides?: Partial<AgentConfig>): AgentConfig {
   return {
-    role: "manager",
+    extends: "manager",
     briefing: [
       { source: "instructions" },
       { source: "task_board" },
@@ -228,7 +228,7 @@ describe("resolveEffectiveConfig", () => {
 
   it("preserves base identity fields", () => {
     const base = makeBaseConfig({
-      role: "manager",
+      extends: "manager",
       title: "VP Engineering",
       model: "claude-opus-4-6",
       persona: "You are a strict manager.",
@@ -237,7 +237,7 @@ describe("resolveEffectiveConfig", () => {
     });
 
     const effective = resolveEffectiveConfig(base, "triage")!;
-    expect(effective.role).toBe("manager");
+    expect(effective.extends).toBe("manager");
     expect(effective.title).toBe("VP Engineering");
     expect(effective.model).toBe("claude-opus-4-6");
     expect(effective.persona).toBe("You are a strict manager.");
@@ -290,8 +290,8 @@ describe("canManageJobs", () => {
 
   it("allows manager to manage direct reports", () => {
     vi.spyOn(projectModule, "getAgentConfig").mockImplementation((id: string) => {
-      if (id === "leon") return { projectId: "proj", config: makeBaseConfig({ role: "manager" }), projectDir: "/tmp" };
-      if (id === "bob") return { projectId: "proj", config: makeBaseConfig({ role: "employee" as any, reports_to: "leon" }), projectDir: "/tmp" };
+      if (id === "leon") return { projectId: "proj", config: makeBaseConfig({ coordination: { enabled: true } }), projectDir: "/tmp" };
+      if (id === "bob") return { projectId: "proj", config: makeBaseConfig({ extends: "employee", reports_to: "leon" }), projectDir: "/tmp" };
       return undefined;
     });
     vi.spyOn(projectModule, "getRegisteredAgentIds").mockReturnValue(["leon", "bob"]);
@@ -301,8 +301,8 @@ describe("canManageJobs", () => {
 
   it("denies employee managing peers", () => {
     vi.spyOn(projectModule, "getAgentConfig").mockImplementation((id: string) => {
-      if (id === "bob") return { projectId: "proj", config: makeBaseConfig({ role: "employee" as any }), projectDir: "/tmp" };
-      if (id === "alice") return { projectId: "proj", config: makeBaseConfig({ role: "employee" as any }), projectDir: "/tmp" };
+      if (id === "bob") return { projectId: "proj", config: makeBaseConfig({ extends: "employee" }), projectDir: "/tmp" };
+      if (id === "alice") return { projectId: "proj", config: makeBaseConfig({ extends: "employee" }), projectDir: "/tmp" };
       return undefined;
     });
     vi.spyOn(projectModule, "getRegisteredAgentIds").mockReturnValue(["bob", "alice"]);

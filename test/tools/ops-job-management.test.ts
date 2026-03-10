@@ -21,7 +21,7 @@ const { createClawforceOpsTool } = await import("../../src/tools/ops-tool.js");
 
 function makeMockAgentConfig(overrides?: Partial<import("../../src/types.js").AgentConfig>) {
   return {
-    role: "manager" as const,
+    extends: "manager",
     briefing: [{ source: "instructions" as const }, { source: "task_board" as const }],
     expectations: [{ tool: "clawforce_task", action: "list", min_calls: 1 }],
     performance_policy: { action: "alert" as const },
@@ -119,8 +119,8 @@ describe("ops tool — job management actions", () => {
 
       // Mock: caller is manager, target reports to caller
       vi.spyOn(projectModule, "getAgentConfig").mockImplementation((agentId: string) => {
-        if (agentId === "manager-session") return { ...entry, config: makeMockAgentConfig({ role: "manager" }) };
-        if (agentId === "worker-1") return { ...entry, config: makeMockAgentConfig({ role: "employee" as any, reports_to: "manager-session" }) };
+        if (agentId === "manager-session") return { ...entry, config: makeMockAgentConfig({ coordination: { enabled: true } }) };
+        if (agentId === "worker-1") return { ...entry, config: makeMockAgentConfig({ extends: "employee", reports_to: "manager-session" }) };
         return undefined;
       });
       vi.spyOn(projectModule, "getRegisteredAgentIds").mockReturnValue(["manager-session", "worker-1"]);
@@ -349,7 +349,7 @@ describe("ops tool — job management actions", () => {
 
       const parsed = JSON.parse(result.content[0]!.text!);
       expect(parsed.ok).toBe(true);
-      expect(parsed.role).toBe("manager");
+      expect(parsed.extends).toBe("manager");
       expect(parsed.title).toBe("VP Engineering");
       expect(parsed.expectations).toHaveLength(1);
       expect(parsed.jobs).toEqual(["triage"]);

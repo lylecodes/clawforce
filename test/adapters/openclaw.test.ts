@@ -315,7 +315,7 @@ describe("clawforce plugin", () => {
       mockGetAgentConfig.mockReturnValue({
         projectId: "p1",
         projectDir: "/tmp/test",
-        config: { role: "scheduled" },
+        config: { extends: "scheduled" },
       });
 
       const api2 = createMockApi();
@@ -341,7 +341,7 @@ describe("clawforce plugin", () => {
       mockGetAgentConfig.mockReturnValue({
         projectId: "p1",
         projectDir: "/tmp/test",
-        config: { role: "employee" },
+        config: { extends: "employee" },
       });
 
       const api2 = createMockApi();

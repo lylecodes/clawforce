@@ -42,7 +42,7 @@ export function resolveJobName(prompt: string | undefined): string | null {
  * - briefing: job replaces if specified, else base minus exclude_briefing
  * - expectations, performance_policy, compaction: job replaces if specified, else inherit base
  * - "instructions" source auto-prepended if missing from effective briefing
- * - Base identity fields (role, title, persona, etc.) are preserved
+ * - Base identity fields (extends, title, persona, etc.) are preserved
  *
  * Returns null if the job name is not found in the agent's jobs map.
  */
@@ -80,7 +80,7 @@ export function canManageJobs(projectId: string, callerAgentId: string, targetAg
 
   const callerEntry = getAgentConfig(callerAgentId);
   if (!callerEntry || callerEntry.projectId !== projectId) return false;
-  if (callerEntry.config.role !== "manager") return false;
+  if (!callerEntry.config.coordination?.enabled) return false;
 
   const reports = getDirectReports(projectId, callerAgentId);
   return reports.includes(targetAgentId);

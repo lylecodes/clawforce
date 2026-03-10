@@ -63,8 +63,8 @@ export function resolveToolsDocs(
 
   // Auto-generate from effective scope (checks custom policies first)
   const scope = projectId
-    ? resolveEffectiveScopeForProject(projectId, agentId, config.role)
-    : DEFAULT_ACTION_SCOPES[config.role];
+    ? resolveEffectiveScopeForProject(projectId, agentId, config.extends)
+    : DEFAULT_ACTION_SCOPES[config.extends ?? "employee"];
   if (!scope) return null;
 
   return generateScoped(scope);

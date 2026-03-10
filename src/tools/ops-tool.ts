@@ -1011,7 +1011,7 @@ export function createClawforceOpsTool(options?: {
             return jsonResult({
               ok: true,
               agentId: callerAgentId,
-              role: config.role,
+              extends: config.extends,
               title: config.title,
               expectations: config.expectations,
               performance_policy: config.performance_policy,

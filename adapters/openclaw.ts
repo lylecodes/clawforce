@@ -276,7 +276,7 @@ function scanAndRegisterProjects(projectsDir: string, logger: MinimalLogger): vo
           }
           try {
             const agentEntries = Object.fromEntries(
-              Object.entries(wfConfig.agents).map(([id, cfg]) => [id, { role: cfg.role }]),
+              Object.entries(wfConfig.agents).map(([id, cfg]) => [id, { extends: cfg.extends }]),
             );
             const scopePolicies = generateDefaultScopePolicies(agentEntries, wfConfig.policies);
             allPolicies.push(...scopePolicies);
@@ -458,7 +458,7 @@ const clawforcePlugin = {
         if (cfg.ghostRecall.enabled && _createMemorySearchTool) {
           try {
             const isMemMode = memoryModeStore.get(sessionKey) ?? false;
-            const isCron = config.role === "scheduled";
+            const isCron = !!jobName;
 
             if (isCron) {
               // Cron path: use job prompt directly, no LLM triage

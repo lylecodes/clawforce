@@ -3,13 +3,13 @@
  *
  * Resolves the effective ActionScope for an agent by checking:
  * 1. Custom action_scope policies (highest priority)
- * 2. DEFAULT_ACTION_SCOPES[role] (fallback)
+ * 2. DEFAULT_ACTION_SCOPES[extends] (fallback)
  *
  * Extracted from the adapter so context assemblers and tools can
  * use the same logic without depending on the adapter layer.
  */
 
-import type { ActionScope, AgentRole } from "./types.js";
+import type { ActionScope } from "./types.js";
 import { DEFAULT_ACTION_SCOPES } from "./profiles.js";
 import { getAgentConfig } from "./project.js";
 import { getPolicies } from "./policy/registry.js";
@@ -26,23 +26,23 @@ export const UNREGISTERED_SCOPE: ActionScope = {
  * Resolve the effective ActionScope for an agent.
  * Returns `UNREGISTERED_SCOPE` for unregistered agents (default-deny).
  * Checks loaded policies first (respects custom action_scope overrides),
- * falls back to DEFAULT_ACTION_SCOPES[role].
+ * falls back to DEFAULT_ACTION_SCOPES[extends].
  */
 export function resolveEffectiveScope(agentId: string): ActionScope {
   const entry = getAgentConfig(agentId);
   if (!entry) return UNREGISTERED_SCOPE; // unregistered → minimal access
 
-  return resolveEffectiveScopeForProject(entry.projectId, agentId, entry.config.role);
+  return resolveEffectiveScopeForProject(entry.projectId, agentId, entry.config.extends);
 }
 
 /**
  * Resolve the effective ActionScope when caller already has project context.
- * Useful for context assemblers that already know the projectId and role.
+ * Useful for context assemblers that already know the projectId and preset.
  */
 export function resolveEffectiveScopeForProject(
   projectId: string,
   agentId: string,
-  role: AgentRole,
+  extendsPreset: string | undefined,
 ): ActionScope {
   // Check if there's a custom action_scope policy for this agent
   const policies = getPolicies(projectId, agentId);
@@ -66,6 +66,6 @@ export function resolveEffectiveScopeForProject(
     }
   }
 
-  // Fall back to role defaults
-  return DEFAULT_ACTION_SCOPES[role] ?? UNREGISTERED_SCOPE;
+  // Fall back to preset defaults
+  return DEFAULT_ACTION_SCOPES[extendsPreset ?? "employee"] ?? UNREGISTERED_SCOPE;
 }
