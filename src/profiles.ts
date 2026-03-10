@@ -6,7 +6,8 @@
  * their role's profile and only need to specify what's different.
  */
 
-import type { ActionConstraint, ActionConstraints, ActionScope, AgentRole, ContextSource, Expectation, PerformancePolicy } from "./types.js";
+import type { ActionConstraint, ActionConstraints, ActionScope, ContextSource, Expectation, PerformancePolicy } from "./types.js";
+import { BUILTIN_AGENT_PRESETS } from "./presets.js";
 
 /** A profile defines the full default template for an agent role. */
 export type RoleProfile = {
@@ -21,133 +22,6 @@ export type RoleProfile = {
 export type Paradigm = RoleProfile;
 
 /**
- * Built-in profile defaults for each role.
- * The "instructions" source is NOT listed here — it is always
- * auto-injected by normalizeAgentConfig regardless of profile.
- */
-export const BUILTIN_PROFILES: Record<AgentRole, RoleProfile> = {
-  manager: {
-    briefing: [
-      { source: "soul" },
-      { source: "tools_reference" },
-      { source: "project_md" },
-      { source: "planning_delta" },
-      { source: "velocity" },
-      { source: "task_board" },
-      { source: "goal_hierarchy" },
-      { source: "escalations" },
-      { source: "pending_messages" },
-      { source: "channel_messages" },
-      { source: "workflows" },
-      { source: "activity" },
-      { source: "sweep_status" },
-      { source: "proposals" },
-      { source: "agent_status" },
-      { source: "knowledge", filter: { category: ["decision"] } },
-      { source: "memory" },
-      { source: "cost_summary" },
-      { source: "resources" },
-      { source: "policy_status" },
-      { source: "health_status" },
-      { source: "team_status" },
-      { source: "trust_scores" },
-      { source: "skill" },
-    ],
-    expectations: [
-      { tool: "clawforce_log", action: "write", min_calls: 1 },
-      { tool: "clawforce_compact", action: "update_doc", min_calls: 1 },
-    ],
-    performance_policy: { action: "alert" },
-    compaction: true,
-  },
-
-  employee: {
-    briefing: [
-      { source: "soul" },
-      { source: "tools_reference" },
-      { source: "assigned_task" },
-      { source: "pending_messages" },
-      { source: "channel_messages" },
-      { source: "memory" },
-      { source: "skill" },
-    ],
-    expectations: [
-      { tool: "clawforce_task", action: ["transition", "fail"], min_calls: 1 },
-      { tool: "clawforce_log", action: "write", min_calls: 1 },
-      { tool: "memory_search", action: "search", min_calls: 1 },
-    ],
-    performance_policy: { action: "retry", max_retries: 3, then: "alert" },
-    compaction: false,
-  },
-
-  scheduled: {
-    briefing: [
-      { source: "soul" },
-      { source: "tools_reference" },
-      { source: "pending_messages" },
-      { source: "memory" },
-      { source: "skill" },
-    ],
-    expectations: [
-      { tool: "clawforce_log", action: "outcome", min_calls: 1 },
-      { tool: "memory_search", action: "search", min_calls: 1 },
-    ],
-    performance_policy: { action: "retry", max_retries: 3, then: "terminate_and_alert" },
-    compaction: false,
-  },
-
-  assistant: {
-    briefing: [
-      { source: "soul" },
-      { source: "tools_reference" },
-      { source: "preferences" },
-      { source: "pending_messages" },
-      { source: "channel_messages" },
-      { source: "memory" },
-      { source: "skill" },
-    ],
-    expectations: [],
-    performance_policy: { action: "alert" },
-    compaction: true,
-  },
-};
-
-/** @deprecated Use BUILTIN_PROFILES instead. */
-export const BUILTIN_PARADIGMS = BUILTIN_PROFILES;
-
-/**
- * Default titles and personas per role.
- * Applied when the agent config doesn't specify its own.
- */
-export const ROLE_DEFAULTS: Record<AgentRole, { title: string; persona: string }> = {
-  manager: {
-    title: "Manager",
-    persona: "You are a manager responsible for coordinating your team, reviewing work, and making decisions.",
-  },
-  employee: {
-    title: "Employee",
-    persona: "You are an employee responsible for completing assigned tasks thoroughly and reporting results.",
-  },
-  scheduled: {
-    title: "Scheduled Worker",
-    persona: "You are a scheduled worker responsible for completing your assigned job and reporting the outcome.",
-  },
-  assistant: {
-    title: "Personal Assistant",
-    persona: "You are a personal assistant. You help your user with tasks, answer questions, manage information, and take actions on their behalf. You are proactive, thorough, and always confirm before taking consequential actions.",
-  },
-};
-
-/**
- * Sources considered critical for a role.
- * Excluding these produces a validation warning.
- */
-export const CRITICAL_SOURCES: Partial<Record<AgentRole, string[]>> = {
-  manager: ["task_board"],
-  employee: ["assigned_task"],
-};
-
-/**
  * Default allowed tools and actions per role. Used to auto-generate action_scope
  * policies and to filter tool registration/schemas at startup.
  *
@@ -155,7 +29,7 @@ export const CRITICAL_SOURCES: Partial<Record<AgentRole, string[]>> = {
  * `string[]` = only listed actions are visible and permitted.
  * Tool absent from a role's scope = hidden from that role entirely.
  */
-export const DEFAULT_ACTION_SCOPES: Record<AgentRole, ActionScope> = {
+export const DEFAULT_ACTION_SCOPES: Record<string, ActionScope> = {
   manager: {
     clawforce_task: "*",
     clawforce_log: "*",
@@ -193,23 +67,6 @@ export const DEFAULT_ACTION_SCOPES: Record<AgentRole, ActionScope> = {
     memory_search: "*",
     memory_get: "*",
   },
-  scheduled: {
-    clawforce_log: ["outcome", "search", "list"],
-    clawforce_setup: ["explain", "status"],
-    clawforce_context: ["list_skills", "get_skill", "get_knowledge"],
-    clawforce_message: ["list", "read", "respond", "list_protocols"],
-    memory_search: "*",
-    memory_get: "*",
-  },
-  assistant: {
-    clawforce_log: ["write", "outcome", "search", "list"],
-    clawforce_setup: ["explain", "status"],
-    clawforce_context: "*",
-    clawforce_message: ["send", "list", "read", "reply"],
-    clawforce_channel: ["send", "list", "history", "join", "leave", "meeting_status"],
-    memory_search: "*",
-    memory_get: "*",
-  },
 };
 
 /** Extract the list of tool names from an ActionScope. */
@@ -243,7 +100,7 @@ export function getConstraintsForTool(scope: ActionScope, toolName: string): Act
  * Skips agents that already have an explicit action_scope policy targeting them.
  */
 export function generateDefaultScopePolicies(
-  agents: Record<string, { role: AgentRole }>,
+  agents: Record<string, { extends?: string }>,
   existingPolicies?: Array<{ type: string; target?: string }>,
 ): Array<{ name: string; type: string; target: string; config: Record<string, unknown> }> {
   const result: Array<{ name: string; type: string; target: string; config: Record<string, unknown> }> = [];
@@ -261,7 +118,7 @@ export function generateDefaultScopePolicies(
   for (const [agentId, agentConfig] of Object.entries(agents)) {
     if (coveredAgents.has(agentId)) continue;
 
-    const scope = DEFAULT_ACTION_SCOPES[agentConfig.role];
+    const scope = DEFAULT_ACTION_SCOPES[agentConfig.extends ?? "employee"];
     if (scope) {
       result.push({
         name: `default-scope:${agentId}`,
@@ -276,14 +133,14 @@ export function generateDefaultScopePolicies(
 }
 
 /**
- * Merge a role's profile defaults with agent-level overrides.
+ * Merge a preset's profile defaults with agent-level overrides.
  *
  * - briefing: profile baseline (minus excludes) + agent additions (deduped)
  * - expectations: agent replaces if non-empty, otherwise inherits profile
  * - performance_policy: agent replaces if provided, otherwise inherits profile
  */
 export function applyProfile(
-  role: AgentRole,
+  extendsFrom: string,
   agent: {
     briefing: ContextSource[];
     exclude_briefing: string[];
@@ -295,13 +152,28 @@ export function applyProfile(
   expectations: Expectation[];
   performance_policy: PerformancePolicy;
 } {
-  const profile = BUILTIN_PROFILES[role];
+  const preset = BUILTIN_AGENT_PRESETS[extendsFrom];
+  if (!preset) {
+    // Unknown preset — return agent config as-is with empty defaults
+    return {
+      briefing: agent.briefing,
+      expectations: agent.expectations ?? [],
+      performance_policy: agent.performance_policy ?? { action: "alert" },
+    };
+  }
+
+  // Convert preset's string[] briefing to ContextSource[]
+  const presetBriefing: ContextSource[] = (preset.briefing as string[]).map(
+    (s) => ({ source: s } as ContextSource),
+  );
+  const presetExpectations = (preset.expectations ?? []) as Expectation[];
+  const presetPolicy = (preset.performance_policy ?? { action: "alert" }) as PerformancePolicy;
 
   // --- briefing: baseline + agent additions, deduped ---
   const excludeSet = new Set(agent.exclude_briefing);
 
   // Filter baseline: remove excluded sources
-  const baseline = profile.briefing.filter(
+  const baseline = presetBriefing.filter(
     (s) => !excludeSet.has(s.source),
   );
 
@@ -318,10 +190,10 @@ export function applyProfile(
   // --- expectations: replace if specified (even if empty), inherit if null ---
   const mergedExpectations = agent.expectations !== null
     ? agent.expectations
-    : profile.expectations;
+    : presetExpectations;
 
   // --- performance_policy: replace if specified, inherit if not ---
-  const mergedPolicy = agent.performance_policy ?? profile.performance_policy;
+  const mergedPolicy = agent.performance_policy ?? presetPolicy;
 
   return {
     briefing: mergedBriefing,
@@ -329,6 +201,3 @@ export function applyProfile(
     performance_policy: mergedPolicy,
   };
 }
-
-/** @deprecated Use applyProfile instead. */
-export const applyParadigm = applyProfile;
