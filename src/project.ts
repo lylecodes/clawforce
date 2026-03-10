@@ -15,11 +15,11 @@ import type { ManagerSettings } from "./manager-config.js";
 import { registerManagerProject } from "./manager-config.js";
 import { registerManagerCron } from "./manager-cron.js";
 import { resolveEscalationChain } from "./org.js";
-import { applyProfile, BUILTIN_PROFILES } from "./profiles.js";
+import { applyProfile } from "./profiles.js";
+import { BUILTIN_AGENT_PRESETS } from "./presets.js";
 import { registerCustomSkills } from "./skills/registry.js";
 import type {
   AgentConfig,
-  AgentRole,
   AlertRuleDefinition,
   AnomalyConfig,
   ApprovalPolicy,
@@ -95,10 +95,11 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   const rawAgents = raw.agents as Record<string, unknown> | undefined;
   if (!rawAgents) return null;
 
-  // Check if agents section has workforce-style configs (role + expectations)
+  // Check if agents section has workforce-style configs (extends/role + expectations)
   // vs the legacy format (project + workers)
   const hasWorkforceAgents = Object.values(rawAgents).some(
-    (v) => typeof v === "object" && v !== null && "role" in (v as Record<string, unknown>),
+    (v) => typeof v === "object" && v !== null &&
+      ("extends" in (v as Record<string, unknown>) || "role" in (v as Record<string, unknown>)),
   );
   if (!hasWorkforceAgents) return null;
 
@@ -111,7 +112,7 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   for (const [agentId, rawAgent] of Object.entries(rawAgents)) {
     if (typeof rawAgent !== "object" || rawAgent === null) continue;
     const a = rawAgent as Record<string, unknown>;
-    if (!a.role) continue;
+    if (!a.role && !a.extends) continue;
 
     agents[agentId] = normalizeAgentConfig(a, skillPacks);
   }
@@ -295,14 +296,6 @@ function normalizeProjectConfig(raw: Record<string, unknown>): ProjectConfig {
 
 // --- Workforce config normalizers ---
 
-/** Role aliases for migration: old names map to new names. */
-const ROLE_ALIASES: Record<string, AgentRole> = {
-  orchestrator: "manager",
-  worker: "employee",
-  cron: "scheduled",
-};
-
-const VALID_ROLES: AgentRole[] = ["manager", "employee", "scheduled", "assistant"];
 const VALID_SOURCES: ContextSource["source"][] = [
   "instructions", "custom", "project_md", "task_board",
   "assigned_task", "knowledge", "file", "skill", "memory",
@@ -313,20 +306,18 @@ const VALID_SOURCES: ContextSource["source"][] = [
 ];
 
 function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
-  // Support old role names as aliases
-  let rawRole = raw.role as string;
-  if (rawRole in ROLE_ALIASES) {
-    rawRole = ROLE_ALIASES[rawRole]!;
-  }
-  if (!VALID_ROLES.includes(rawRole as AgentRole)) {
+  // Handle extends field — error if old role: field used
+  if (raw.role !== undefined) {
+    const oldRole = raw.role as string;
     emitDiagnosticEvent({
-      type: "config_warning",
-      message: `Unknown role "${rawRole}" — falling back to "employee". Valid roles: ${VALID_ROLES.join(", ")}`,
+      type: "config_error",
+      message: `"role: ${oldRole}" is deprecated. Use "extends: ${oldRole}" instead.`,
     });
   }
-  const role = VALID_ROLES.includes(rawRole as AgentRole)
-    ? (rawRole as AgentRole)
-    : "employee";
+
+  const extendsFrom = typeof raw.extends === "string" && raw.extends.trim()
+    ? raw.extends.trim()
+    : "employee";  // default to employee preset
 
   // Accept both old and new field names for migration
   const briefing = normalizeContextSources(raw.briefing ?? raw.context_in);
@@ -339,7 +330,7 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
   const hasExplicitPolicy = typeof (raw.performance_policy ?? raw.on_failure) === "object" && (raw.performance_policy ?? raw.on_failure) !== null;
 
   // Apply role profile defaults, merging with agent-level overrides
-  const merged = applyProfile(role, {
+  const merged = applyProfile(extendsFrom, {
     briefing,
     exclude_briefing: excludeBriefing,
     expectations: hasExplicitExpectations ? expectations : null,
@@ -379,7 +370,7 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
   const hasExplicitCompaction = raw.compaction !== undefined;
   const compaction = hasExplicitCompaction
     ? normalizeCompactionConfig(raw.compaction)
-    : BUILTIN_PROFILES[role].compaction;
+    : (BUILTIN_AGENT_PRESETS[extendsFrom]?.compaction as boolean | undefined) ?? false;
 
   // When compaction is disabled, strip the compaction expectation that may
   // have been inherited from the profile (unless user explicitly set expectations)
@@ -412,7 +403,7 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
   const jobs = normalizeJobs(raw.jobs);
 
   return {
-    role,
+    extends: extendsFrom,
     title,
     model,
     provider,
@@ -724,7 +715,7 @@ function normalizeSkillsConfig(raw: Record<string, unknown>): WorkforceConfig["s
       description: typeof s.description === "string" ? s.description : s.title,
       path: s.path,
       roles: Array.isArray(s.roles)
-        ? s.roles.filter((r): r is AgentRole => typeof r === "string" && VALID_ROLES.includes(r as AgentRole))
+        ? s.roles.filter((r): r is string => typeof r === "string")
         : undefined,
     };
   }
@@ -912,7 +903,7 @@ function normalizeChannelsConfig(raw: unknown[]): ChannelConfig[] {
       config.teams = ch.teams.filter((t: unknown) => typeof t === "string") as string[];
     }
     if (Array.isArray(ch.roles)) {
-      config.roles = ch.roles.filter((r: unknown) => VALID_ROLES.includes(r as AgentRole)) as AgentRole[];
+      config.roles = ch.roles.filter((r: unknown) => typeof r === "string") as string[];
     }
     if (typeof ch.telegram_group_id === "string" && ch.telegram_group_id.trim()) {
       config.telegramGroupId = ch.telegram_group_id.trim();

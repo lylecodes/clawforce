@@ -59,7 +59,7 @@ describe("parseProjectYaml via loadWorkforceConfig", () => {
 name: test-project
 agents:
   worker1:
-    role: employee
+    extends: employee
     expectations:
       - tool: clawforce_log
         action: write
@@ -71,7 +71,7 @@ agents:
     expect(config).not.toBeNull();
     expect(config!.name).toBe("test-project");
     expect(config!.agents.worker1).toBeDefined();
-    expect(config!.agents.worker1!.role).toBe("employee");
+    expect(config!.agents.worker1!.extends).toBe("employee");
   });
 
   it("returns null for missing agents section", () => {
@@ -88,24 +88,30 @@ name: test-project
     expect(config).toBeNull();
   });
 
-  it("normalizes role aliases", () => {
+  it("emits config_error for deprecated role field", () => {
+    vi.mocked(emitDiagnosticEvent).mockClear();
+
     const configPath = writeYaml(`
 name: test
 agents:
   orch:
     role: orchestrator
-  w1:
-    role: worker
-  c1:
-    role: cron
 `);
     const config = loadWorkforceConfig(configPath);
-    expect(config!.agents.orch!.role).toBe("manager");
-    expect(config!.agents.w1!.role).toBe("employee");
-    expect(config!.agents.c1!.role).toBe("scheduled");
+    // Should still parse (defaults to employee since extends is not set)
+    expect(config).not.toBeNull();
+    expect(config!.agents.orch!.extends).toBe("employee");
+
+    // Verify diagnostic error was emitted for deprecated role usage
+    expect(emitDiagnosticEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "config_error",
+        message: expect.stringContaining("role: orchestrator"),
+      }),
+    );
   });
 
-  it("falls back to 'employee' for unknown role and emits diagnostic warning", () => {
+  it("defaults to 'employee' when extends is not set", () => {
     vi.mocked(emitDiagnosticEvent).mockClear();
 
     const configPath = writeYaml(`
@@ -115,12 +121,13 @@ agents:
     role: imaginary_role
 `);
     const config = loadWorkforceConfig(configPath);
-    expect(config!.agents.bad_agent!.role).toBe("employee");
+    // role: triggers a config_error but extends defaults to employee
+    expect(config!.agents.bad_agent!.extends).toBe("employee");
 
-    // Verify diagnostic event was emitted
+    // Verify diagnostic error was emitted for deprecated role
     expect(emitDiagnosticEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: "config_warning",
+        type: "config_error",
         message: expect.stringContaining("imaginary_role"),
       }),
     );
@@ -133,7 +140,7 @@ agents:
 name: test
 agents:
   src_agent:
-    role: employee
+    extends: employee
     briefing:
       - source: nonexistent_source
 `);
@@ -166,7 +173,7 @@ describe("registerWorkforceConfig + getAgentConfig", () => {
       name: "test",
       agents: {
         worker1: {
-          role: "employee",
+          extends: "employee",
           briefing: [{ source: "instructions" }],
           expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
           performance_policy: { action: "alert" },
@@ -177,7 +184,7 @@ describe("registerWorkforceConfig + getAgentConfig", () => {
     const entry = getAgentConfig("worker1");
     expect(entry).not.toBeNull();
     expect(entry!.projectId).toBe("proj1");
-    expect(entry!.config.role).toBe("employee");
+    expect(entry!.config.extends).toBe("employee");
   });
 
   it("returns null for unregistered agent", () => {
@@ -203,7 +210,7 @@ describe("getRegisteredAgentIds", () => {
       name: "test",
       agents: {
         worker1: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
@@ -219,19 +226,19 @@ describe("getRegisteredAgentIds", () => {
       name: "test",
       agents: {
         manager1: {
-          role: "manager",
+          extends: "manager",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
         },
         worker1: {
-          role: "employee",
+          extends: "employee",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
         },
         cron1: {
-          role: "scheduled",
+          extends: "employee",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
