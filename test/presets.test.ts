@@ -3,6 +3,8 @@ import {
   resolveConfig,
   mergeArrayWithOperators,
   detectCycle,
+  BUILTIN_AGENT_PRESETS,
+  BUILTIN_JOB_PRESETS,
 } from "../src/presets.js";
 
 describe("preset resolution engine", () => {
@@ -162,5 +164,58 @@ describe("preset resolution engine", () => {
       const resolved = resolveConfig(config, {});
       expect(resolved).toEqual(config);
     });
+  });
+});
+
+describe("builtin agent presets", () => {
+  it("manager preset has coordination enabled", () => {
+    const mgr = BUILTIN_AGENT_PRESETS.manager;
+    expect(mgr.coordination).toEqual({ enabled: true, schedule: "*/30 * * * *" });
+    expect(mgr.compaction).toBe(true);
+  });
+
+  it("manager preset has full operational briefing", () => {
+    const mgr = BUILTIN_AGENT_PRESETS.manager;
+    expect(mgr.briefing).toContain("soul");
+    expect(mgr.briefing).toContain("task_board");
+    expect(mgr.briefing).toContain("escalations");
+    expect(mgr.briefing).toContain("cost_summary");
+    expect(mgr.briefing).toContain("resources");
+  });
+
+  it("employee preset has task-focused briefing", () => {
+    const emp = BUILTIN_AGENT_PRESETS.employee;
+    expect(emp.briefing).toContain("soul");
+    expect(emp.briefing).toContain("assigned_task");
+    expect(emp.briefing).not.toContain("task_board");
+    expect(emp.coordination?.enabled).toBe(false);
+    expect(emp.compaction).toBe(false);
+  });
+
+  it("employee preset has retry performance policy", () => {
+    const emp = BUILTIN_AGENT_PRESETS.employee;
+    expect(emp.performance_policy.action).toBe("retry");
+    expect(emp.performance_policy.max_retries).toBe(3);
+  });
+
+  it("only manager and employee presets exist", () => {
+    expect(Object.keys(BUILTIN_AGENT_PRESETS)).toEqual(["manager", "employee"]);
+  });
+});
+
+describe("builtin job presets", () => {
+  it("reflect preset has weekly cron and strategic briefing", () => {
+    const reflect = BUILTIN_JOB_PRESETS.reflect;
+    expect(reflect.cron).toBe("0 9 * * MON");
+    expect(reflect.briefing).toContain("team_performance");
+    expect(reflect.briefing).toContain("cost_summary");
+    expect(reflect.nudge).toContain("Review");
+  });
+
+  it("triage preset has frequent cron and operational briefing", () => {
+    const triage = BUILTIN_JOB_PRESETS.triage;
+    expect(triage.cron).toBe("*/30 * * * *");
+    expect(triage.briefing).toContain("task_board");
+    expect(triage.briefing).toContain("escalations");
   });
 });

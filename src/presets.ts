@@ -116,3 +116,57 @@ export function resolveConfig<T extends Record<string, unknown>>(
 
   return resolved as T;
 }
+
+/* ── Builtin Agent Presets ── */
+
+export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
+  manager: {
+    title: "Manager",
+    persona: "You are a manager agent responsible for coordinating your team, delegating tasks, and reviewing results.",
+    briefing: [
+      "soul", "tools_reference", "project_md", "task_board", "goal_hierarchy",
+      "escalations", "team_status", "trust_scores", "cost_summary", "resources",
+      "pending_messages", "channel_messages", "memory", "skill",
+      "policy_status", "initiative_progress", "preferences",
+    ],
+    expectations: [
+      { tool: "clawforce_log", action: "write", min_calls: 1 },
+      { tool: "clawforce_compact", action: "update_doc", min_calls: 1 },
+    ],
+    performance_policy: { action: "alert" },
+    compaction: true,
+    coordination: { enabled: true, schedule: "*/30 * * * *" },
+  },
+  employee: {
+    title: "Employee",
+    persona: "You are an employee agent responsible for executing assigned tasks and reporting results.",
+    briefing: [
+      "soul", "tools_reference", "assigned_task", "pending_messages",
+      "channel_messages", "memory", "skill",
+    ],
+    expectations: [
+      { tool: "clawforce_task", action: "transition", min_calls: 1 },
+      { tool: "clawforce_log", action: "write", min_calls: 1 },
+    ],
+    performance_policy: { action: "retry", max_retries: 3, then: "alert" },
+    compaction: false,
+    coordination: { enabled: false },
+  },
+};
+
+/* ── Builtin Job Presets ── */
+
+export const BUILTIN_JOB_PRESETS: Record<string, Record<string, unknown>> = {
+  reflect: {
+    cron: "0 9 * * MON",
+    briefing: ["team_performance", "cost_summary", "velocity", "trust_scores"],
+    nudge: "Review team performance. Consider: budget rebalancing, agent hiring/splitting, skill gaps, initiative reprioritization.",
+    performance_policy: { action: "alert" },
+  },
+  triage: {
+    cron: "*/30 * * * *",
+    briefing: ["task_board", "escalations", "pending_messages"],
+    nudge: "Check on your team. Reassign stuck tasks, handle escalations.",
+    performance_policy: { action: "alert" },
+  },
+};
