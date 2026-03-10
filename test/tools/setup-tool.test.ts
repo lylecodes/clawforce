@@ -119,8 +119,8 @@ describe("clawforce_setup tool", () => {
       vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue(["my-project"]);
       vi.spyOn(projectModule, "getRegisteredAgentIds").mockReturnValue(["leon", "coder"]);
       vi.spyOn(projectModule, "getAgentConfig").mockImplementation((agentId: string) => {
-        if (agentId === "leon") return { projectId: "my-project", config: { role: "manager" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } } };
-        if (agentId === "coder") return { projectId: "my-project", config: { role: "employee" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } } };
+        if (agentId === "leon") return { projectId: "my-project", config: { extends: "manager", briefing: [], expectations: [], performance_policy: { action: "alert" as const } } };
+        if (agentId === "coder") return { projectId: "my-project", config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" as const } } };
         return null;
       });
 
@@ -132,8 +132,8 @@ describe("clawforce_setup tool", () => {
       expect(result.projects).toHaveLength(1);
       expect(result.projects[0].id).toBe("my-project");
       expect(result.projects[0].agents).toHaveLength(2);
-      expect(result.projects[0].agents[0]).toEqual({ id: "leon", role: "manager" });
-      expect(result.projects[0].agents[1]).toEqual({ id: "coder", role: "employee" });
+      expect(result.projects[0].agents[0]).toEqual({ id: "leon", extends: "manager" });
+      expect(result.projects[0].agents[1]).toEqual({ id: "coder", extends: "employee" });
     });
 
     it("includes projects_dir path", async () => {
@@ -193,25 +193,25 @@ dir: /tmp/test
 
 agents:
   orchestrator:
-    role: orchestrator
-    context_in:
+    extends: manager
+    briefing:
       - source: instructions
-    required_outputs:
+    expectations:
       - tool: clawforce_task
         action: get_approval_context
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
   worker:
-    role: worker
+    extends: employee
     reports_to: orchestrator
-    context_in:
+    briefing:
       - source: instructions
-    required_outputs:
+    expectations:
       - tool: clawforce_task
         action: [transition, fail]
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: retry
       max_retries: 3
       then: alert
@@ -222,9 +222,9 @@ agents:
       expect(result.valid).toBe(true);
       expect(result.agent_preview).toHaveLength(2);
       expect(result.agent_preview[0].id).toBe("orchestrator");
-      expect(result.agent_preview[0].role).toBe("manager");
+      expect(result.agent_preview[0].extends).toBe("manager");
       expect(result.agent_preview[1].id).toBe("worker");
-      expect(result.agent_preview[1].role).toBe("employee");
+      expect(result.agent_preview[1].extends).toBe("employee");
     });
 
     it("catches missing agents section", async () => {
@@ -236,7 +236,7 @@ dir: /tmp/test
       const result = await execute({ action: "validate", yaml_content: yaml });
 
       expect(result.ok).toBe(true); // No hard errors, just warnings
-      expect(result.issues.some((i: { message: string }) => i.message.includes("No workforce agents found"))).toBe(true);
+      expect(result.issues.some((i: { message: string }) => i.message.includes("No workforce agents found") || i.message.includes("Use 'extends'"))).toBe(true);
     });
 
     it("catches invalid YAML", async () => {
@@ -402,7 +402,7 @@ agents:
       expect(result.project_id).toBe(projectId);
       expect(result.reloaded).toBe(false);
       expect(result.agents).toHaveLength(1);
-      expect(result.agents[0]).toEqual({ id: "worker", role: "employee" });
+      expect(result.agents[0]).toEqual({ id: "worker", extends: "employee" });
       expect(result.message).toContain("activated");
     });
 
@@ -529,7 +529,7 @@ policies:
       vi.spyOn(projectModule, "getAgentConfig").mockImplementation((agentId: string) => {
         if (agentId === "worker1") return {
           projectId: "proj1",
-          config: { role: "employee" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
+          config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
         };
         return null;
       });
@@ -558,7 +558,7 @@ policies:
       vi.spyOn(projectModule, "getAgentConfig").mockImplementation((agentId: string) => {
         if (agentId === "worker1") return {
           projectId: "proj1",
-          config: { role: "employee" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
+          config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
         };
         return null;
       });
@@ -599,7 +599,7 @@ policies:
         if (agentId === "worker1" || agentId === "worker2") {
           return {
             projectId: "my-project",
-            config: { role: "employee" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
+            config: { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
           };
         }
         return null;

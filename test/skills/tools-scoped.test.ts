@@ -61,16 +61,22 @@ describe("generateScoped", () => {
     expect(content).not.toContain("`verify_audit`");
   });
 
-  it("scheduled scope shows minimal tools", () => {
-    const content = generateScoped(DEFAULT_ACTION_SCOPES.scheduled);
+  it("minimal custom scope shows only specified tools", () => {
+    const minimalScope = {
+      clawforce_log: ["outcome", "search", "list"] as string[],
+      clawforce_setup: ["explain", "status"] as string[],
+      memory_search: "*" as const,
+      memory_get: "*" as const,
+    };
+    const content = generateScoped(minimalScope);
 
-    // Scheduled agents only get these tools
+    // Specified tools
     expect(content).toContain("clawforce_log");
     expect(content).toContain("clawforce_setup");
     expect(content).toContain("memory_search");
     expect(content).toContain("memory_get");
 
-    // Should NOT see these
+    // Should NOT see tools not in scope
     expect(content).not.toContain("clawforce_task");
     expect(content).not.toContain("clawforce_verify");
     expect(content).not.toContain("clawforce_compact");
@@ -78,8 +84,14 @@ describe("generateScoped", () => {
     expect(content).not.toContain("clawforce_ops");
   });
 
-  it("scheduled scope restricts clawforce_log to outcome, search, list", () => {
-    const content = generateScoped(DEFAULT_ACTION_SCOPES.scheduled);
+  it("minimal custom scope restricts clawforce_log to outcome, search, list", () => {
+    const minimalScope = {
+      clawforce_log: ["outcome", "search", "list"] as string[],
+      clawforce_setup: ["explain", "status"] as string[],
+      memory_search: "*" as const,
+      memory_get: "*" as const,
+    };
+    const content = generateScoped(minimalScope);
 
     expect(content).toContain("`outcome`");
     expect(content).toContain("`search`");

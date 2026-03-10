@@ -100,10 +100,10 @@ function handleExplain(projectsDir: string, agentId?: string, topic?: string | n
       }
     }
 
-    // Resolve the agent's actual role for topic access checks
+    // Resolve the agent's actual preset for topic access checks
     const agentEntry = agentId ? getAgentConfig(agentId) : null;
-    const role = agentEntry?.config.role ?? "manager";
-    const content = resolveSkillSource(role, topic, undefined, agentEntry?.projectId);
+    const preset = agentEntry?.config.extends ?? "manager";
+    const content = resolveSkillSource(preset, topic, undefined, agentEntry?.projectId);
     if (content === null) {
       return jsonResult({ ok: false, reason: `Unknown topic: "${topic}".` });
     }
@@ -123,15 +123,15 @@ function handleStatus(projectsDir: string): ToolResult {
 
   const projects: Array<{
     id: string;
-    agents: Array<{ id: string; role: string }>;
+    agents: Array<{ id: string; extends: string | undefined }>;
   }> = [];
 
   for (const pid of projectIds) {
-    const agents: Array<{ id: string; role: string }> = [];
+    const agents: Array<{ id: string; extends: string | undefined }> = [];
     for (const aid of agentIds) {
       const entry = getAgentConfig(aid);
       if (entry && entry.projectId === pid) {
-        agents.push({ id: aid, role: entry.config.role });
+        agents.push({ id: aid, extends: entry.config.extends });
       }
     }
     projects.push({ id: pid, agents });
@@ -261,7 +261,7 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
   }
 
   // Validate workforce config
-  let agentPreview: Array<{ id: string; role: string; expectations: number }> = [];
+  let agentPreview: Array<{ id: string; extends: string | undefined; expectations: number }> = [];
   if (wfConfig) {
     const warnings = validateWorkforceConfig(wfConfig);
     for (const w of warnings) {
@@ -271,13 +271,13 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
 
     agentPreview = Object.entries(wfConfig.agents).map(([id, config]) => ({
       id,
-      role: config.role,
+      extends: config.extends,
       expectations: config.expectations.length,
     }));
   } else if (issues.length === 0) {
     issues.push({
       level: "warn",
-      message: "No workforce agents found. Agents need a 'role' field (manager, employee, or scheduled).",
+      message: "No workforce agents found. Use 'extends' to inherit from a preset (manager, employee).",
     });
   }
 
@@ -309,7 +309,7 @@ function handleActivate(params: Record<string, unknown>, projectsDir: string): T
 
   // Load and validate workforce config
   const wfConfig = loadWorkforceConfig(configPath);
-  const registeredAgents: Array<{ id: string; role: string }> = [];
+  const registeredAgents: Array<{ id: string; extends: string | undefined }> = [];
 
   if (wfConfig) {
     const warnings = validateWorkforceConfig(wfConfig);
@@ -334,7 +334,7 @@ function handleActivate(params: Record<string, unknown>, projectsDir: string): T
     }
     try {
       const agentEntries = Object.fromEntries(
-        Object.entries(wfConfig.agents).map(([id, cfg]) => [id, { role: cfg.role }]),
+        Object.entries(wfConfig.agents).map(([id, cfg]) => [id, { extends: cfg.extends }]),
       );
       const scopePolicies = generateDefaultScopePolicies(agentEntries, wfConfig.policies);
       allPolicies.push(...scopePolicies);
@@ -346,7 +346,7 @@ function handleActivate(params: Record<string, unknown>, projectsDir: string): T
 
     // Bootstrap per-agent docs (SOUL.md templates)
     for (const [agentId, config] of Object.entries(wfConfig.agents)) {
-      registeredAgents.push({ id: agentId, role: config.role });
+      registeredAgents.push({ id: agentId, extends: config.extends });
       try {
         ensureAgentDocs(projectDir, agentId, config);
       } catch (err) { safeLog("setup.activate.ensureAgentDocs", err); }

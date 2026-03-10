@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SKILL_TOPICS, getTopicList, resolveSkillSource } from "../../src/skills/registry.js";
 import { TASK_STATES, EVIDENCE_TYPES } from "../../src/types.js";
-import { BUILTIN_PROFILES } from "../../src/profiles.js";
+import { BUILTIN_AGENT_PRESETS } from "../../src/presets.js";
 
 describe("skill system registry", () => {
   describe("SKILL_TOPICS", () => {
@@ -33,16 +33,16 @@ describe("skill system registry", () => {
   });
 
   describe("content correctness", () => {
-    it("roles topic mentions all three roles", () => {
+    it("roles topic mentions all presets", () => {
       const content = resolveSkillSource("manager", "roles")!;
       expect(content).toContain("manager");
       expect(content).toContain("employee");
-      expect(content).toContain("scheduled");
     });
 
-    it("roles topic reflects actual profile expectations", () => {
+    it("roles topic reflects actual preset expectations", () => {
       const content = resolveSkillSource("manager", "roles")!;
-      for (const exp of BUILTIN_PROFILES.manager.expectations) {
+      const expectations = BUILTIN_AGENT_PRESETS.manager.expectations as Array<{ tool: string }>;
+      for (const exp of expectations) {
         expect(content).toContain(exp.tool);
       }
     });
@@ -110,8 +110,8 @@ describe("skill system registry", () => {
       expect(ids).not.toContain("budgets");
     });
 
-    it("scheduled sees core topics", () => {
-      const topics = getTopicList("scheduled");
+    it("unknown preset sees only universal topics", () => {
+      const topics = getTopicList("custom-preset");
       const ids = topics.map((t) => t.id);
       expect(ids).toContain("roles");
       expect(ids).toContain("accountability");
@@ -136,7 +136,7 @@ describe("skill system registry", () => {
 
     it("returns topic content with valid topic", () => {
       const content = resolveSkillSource("manager", "roles")!;
-      expect(content).toContain("Agent Roles");
+      expect(content).toContain("Agent Presets");
     });
 
     it("returns error for unknown topic", () => {
@@ -146,9 +146,9 @@ describe("skill system registry", () => {
     });
 
     it("returns error for role-restricted topic", () => {
-      const content = resolveSkillSource("scheduled", "workflows")!;
+      const content = resolveSkillSource("employee", "workflows")!;
       expect(content).toContain("not available");
-      expect(content).toContain("scheduled");
+      expect(content).toContain("employee");
     });
 
     it("employee table of contents is role-filtered", () => {

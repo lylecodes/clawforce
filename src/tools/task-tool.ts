@@ -223,7 +223,7 @@ export function createClawforceTaskTool(options?: {
 
           // Auto-inject department filter for non-managers
           const callerEntry = options?.agentSessionKey ? getAgentConfig(actor) : null;
-          if (callerEntry && callerEntry.config.role !== "manager") {
+          if (callerEntry && callerEntry.config.extends !== "manager") {
             if (!department && callerEntry.config.department) {
               department = callerEntry.config.department;
             }

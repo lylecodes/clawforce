@@ -5,8 +5,6 @@
  * Each topic has a role filter so agents only see relevant knowledge.
  */
 
-import type { AgentRole } from "../types.js";
-
 import { generate as generateRoles } from "./topics/roles.js";
 import { generate as generateTasks } from "./topics/tasks.js";
 import { generate as generateAccountability } from "./topics/accountability.js";
@@ -27,8 +25,8 @@ export type SkillTopic = {
   id: string;
   title: string;
   description: string;
-  /** Which roles this topic is relevant for. Empty = all roles. */
-  roles: AgentRole[];
+  /** Which presets/roles this topic is relevant for. Empty = all. */
+  roles: string[];
   generate: () => string;
 };
 
@@ -39,8 +37,8 @@ export type CustomSkillTopic = {
   description: string;
   /** Absolute path to the markdown file. */
   filePath: string;
-  /** Which roles this topic is relevant for. Empty = all roles. */
-  roles: AgentRole[];
+  /** Which presets/roles this topic is relevant for. Empty = all. */
+  roles: string[];
 };
 
 /** Per-project store of custom skill topics. */
@@ -52,7 +50,7 @@ const customTopicsStore = new Map<string, CustomSkillTopic[]>();
  */
 export function registerCustomSkills(
   projectId: string,
-  skills: Record<string, { title: string; description: string; path: string; roles?: AgentRole[] }>,
+  skills: Record<string, { title: string; description: string; path: string; roles?: string[] }>,
   projectDir: string,
 ): void {
   const topics: CustomSkillTopic[] = [];
@@ -206,7 +204,7 @@ export const SKILL_TOPICS: SkillTopic[] = [
  * Empty roles array means the topic is available to all roles.
  * When projectId is provided, includes custom topics from that project.
  */
-export function getTopicList(role: AgentRole, projectId?: string): Array<{ id: string; title: string; description: string }> {
+export function getTopicList(role: string, projectId?: string): Array<{ id: string; title: string; description: string }> {
   const builtIn = SKILL_TOPICS
     .filter((t) => t.roles.length === 0 || t.roles.includes(role))
     .map((t) => ({ id: t.id, title: t.title, description: t.description }));
@@ -227,7 +225,7 @@ export function getTopicList(role: AgentRole, projectId?: string): Array<{ id: s
  * - With a topic ID: returns the full generated content for that topic.
  * - projectId enables custom topics from project config.
  */
-export function resolveSkillSource(role: AgentRole, topic?: string, excludeTopics?: string[], projectId?: string): string | null {
+export function resolveSkillSource(role: string, topic?: string, excludeTopics?: string[], projectId?: string): string | null {
   if (topic) {
     // Check built-in topics first
     const entry = SKILL_TOPICS.find((t) => t.id === topic);

@@ -1,13 +1,10 @@
 /**
  * Clawforce skill topic — Accountability
  *
- * Generated from profile constants and types.
+ * Generated from preset constants and types.
  */
 
-import { BUILTIN_PROFILES, ROLE_DEFAULTS } from "../../profiles.js";
-import type { AgentRole } from "../../types.js";
-
-const ROLES: AgentRole[] = ["manager", "employee", "scheduled"];
+import { BUILTIN_AGENT_PRESETS } from "../../presets.js";
 
 export function generate(): string {
   const sections: string[] = [
@@ -67,23 +64,24 @@ export function generate(): string {
     "",
   ];
 
-  // Per-role defaults
-  sections.push("## Role Defaults");
+  // Per-preset defaults
+  sections.push("## Preset Defaults");
   sections.push("");
 
-  for (const role of ROLES) {
-    const profile = BUILTIN_PROFILES[role];
-    const defaults = ROLE_DEFAULTS[role];
+  for (const [name, preset] of Object.entries(BUILTIN_AGENT_PRESETS)) {
+    const title = (preset.title as string) ?? name;
+    const expectations = (preset.expectations ?? []) as Array<{ tool: string; action: string | string[]; min_calls: number }>;
+    const policy = (preset.performance_policy ?? { action: "alert" }) as { action: string; max_retries?: number; then?: string };
 
-    sections.push(`### ${defaults.title} (\`${role}\`)`);
+    sections.push(`### ${title} (\`${name}\`)`);
     sections.push("");
 
     sections.push("**Expectations:**");
     sections.push("");
-    if (profile.expectations.length === 0) {
+    if (expectations.length === 0) {
       sections.push("_(none)_");
     } else {
-      for (const exp of profile.expectations) {
+      for (const exp of expectations) {
         const action = Array.isArray(exp.action) ? exp.action.join("` or `") : exp.action;
         sections.push(`- \`${exp.tool}\` action \`${action}\` — at least ${exp.min_calls} call(s)`);
       }
@@ -92,7 +90,6 @@ export function generate(): string {
 
     sections.push("**Performance policy:**");
     sections.push("");
-    const policy = profile.performance_policy;
     sections.push(`- action: \`${policy.action}\``);
     if (policy.max_retries !== undefined) {
       sections.push(`- max_retries: ${policy.max_retries}`);
@@ -103,15 +100,12 @@ export function generate(): string {
     sections.push("");
 
     // Explain what this means in plain language
-    switch (role) {
+    switch (name) {
       case "manager":
         sections.push("The manager must write at least one journal entry and update compaction docs. If non-compliant, an alert is sent (no retries — managers are trusted to self-correct).");
         break;
       case "employee":
         sections.push("Employees must transition (or fail) at least one task and write a journal entry. If non-compliant, the session is retried up to 3 times. After 3 failures, an alert is sent to the manager.");
-        break;
-      case "scheduled":
-        sections.push("Scheduled workers must log an outcome. If non-compliant, the session is retried up to 3 times. After 3 failures, the agent is terminated and an alert is sent.");
         break;
     }
     sections.push("");

@@ -168,7 +168,6 @@ export type {
   WorkflowPhase,
   AgentConfig,
   AgentPermissions,
-  AgentRole,
   ContextSource,
   Expectation,
   JobDefinition,

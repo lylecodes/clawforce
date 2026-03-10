@@ -62,13 +62,11 @@ describe("agent-docs resolvers", () => {
       expect(content).not.toContain("clawforce_task");
     });
 
-    it("auto-generates for scheduled role with restricted tools", () => {
-      const content = resolveToolsDocs("daily-sweep", makeConfig("scheduled"), tmpDir);
+    it("returns null for unknown preset with no scope", () => {
+      const content = resolveToolsDocs("daily-sweep", makeConfig("custom-preset"), tmpDir);
 
-      expect(content).not.toBeNull();
-      expect(content).toContain("clawforce_log");
-      expect(content).not.toContain("clawforce_task");
-      expect(content).not.toContain("clawforce_ops");
+      // Unknown presets have no entry in DEFAULT_ACTION_SCOPES, so auto-generation returns null
+      expect(content).toBeNull();
     });
 
     it("auto-generates for manager role with all tools", () => {
