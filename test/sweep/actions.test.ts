@@ -26,6 +26,14 @@ vi.mock("../../src/audit/stuck-detector.js", () => ({
   detectStuckAgents: vi.fn(() => []),
 }));
 
+// Mock dispatch modules to prevent actual spawning/cron creation
+vi.mock("../../src/dispatch/spawn.js", () => ({
+  buildTaskPrompt: vi.fn(() => "mock prompt"),
+}));
+vi.mock("../../src/dispatch/cron-dispatch.js", () => ({
+  dispatchViaCron: vi.fn(async () => ({ ok: false, error: "mock: not available in tests" })),
+}));
+
 const { getMemoryDb } = await import("../../src/db.js");
 const { sweep } = await import("../../src/sweep/actions.js");
 const { createTask, transitionTask } = await import("../../src/tasks/ops.js");

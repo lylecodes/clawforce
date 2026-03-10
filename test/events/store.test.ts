@@ -17,7 +17,7 @@ vi.mock("../../src/identity.js", () => ({
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");
-const { ingestEvent, claimPendingEvents, markHandled, markFailed, markIgnored, listEvents } =
+const { ingestEvent, claimPendingEvents, markHandled, markFailed, markIgnored, listEvents, reclaimStaleEvents } =
   await import("../../src/events/store.js");
 
 describe("events/store", () => {
@@ -120,5 +120,78 @@ describe("events/store", () => {
 
     const ciEvents = listEvents(PROJECT, { type: "ci_failed" }, db);
     expect(ciEvents).toHaveLength(2);
+  });
+
+  describe("reclaimStaleEvents", () => {
+    it("reclaims events stuck in processing for longer than threshold", () => {
+      // Ingest and claim an event
+      ingestEvent(PROJECT, "ci_failed", "tool", { a: 1 }, undefined, db);
+      const claimed = claimPendingEvents(PROJECT, 1, db);
+      expect(claimed).toHaveLength(1);
+
+      // Backdate the processed_at to simulate a stale event (10 minutes ago)
+      const staleTime = Date.now() - 10 * 60 * 1000;
+      db.prepare("UPDATE events SET processed_at = ? WHERE id = ?").run(staleTime, claimed[0]!.id);
+
+      // Reclaim with a 5-minute threshold
+      const reclaimed = reclaimStaleEvents(PROJECT, 5 * 60 * 1000, db);
+      expect(reclaimed).toBe(1);
+
+      // Event should be back to pending
+      const pending = listEvents(PROJECT, { status: "pending" }, db);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]!.id).toBe(claimed[0]!.id);
+    });
+
+    it("does not reclaim events still within threshold", () => {
+      ingestEvent(PROJECT, "ci_failed", "tool", {}, undefined, db);
+      claimPendingEvents(PROJECT, 1, db);
+
+      // Reclaim with default threshold — event was just claimed, so should not be reclaimed
+      const reclaimed = reclaimStaleEvents(PROJECT, 5 * 60 * 1000, db);
+      expect(reclaimed).toBe(0);
+    });
+
+    it("returns 0 when no processing events exist", () => {
+      const reclaimed = reclaimStaleEvents(PROJECT, 5 * 60 * 1000, db);
+      expect(reclaimed).toBe(0);
+    });
+  });
+
+  describe("atomic dedup", () => {
+    it("second ingest with same dedupKey returns deduplicated=true", () => {
+      const r1 = ingestEvent(PROJECT, "ci_failed", "tool", { x: 1 }, "key1", db);
+      const r2 = ingestEvent(PROJECT, "ci_failed", "tool", { x: 2 }, "key1", db);
+
+      expect(r1.deduplicated).toBe(false);
+      expect(r2.deduplicated).toBe(true);
+      expect(r2.id).toBe(r1.id);
+    });
+  });
+
+  describe("markHandled/markFailed/markIgnored require db", () => {
+    it("markHandled works with explicit db", () => {
+      const { id } = ingestEvent(PROJECT, "ci_failed", "tool", {}, undefined, db);
+      claimPendingEvents(PROJECT, 1, db);
+      markHandled(id, "test-handler", db);
+      const events = listEvents(PROJECT, { status: "handled" }, db);
+      expect(events).toHaveLength(1);
+    });
+
+    it("markFailed works with explicit db", () => {
+      const { id } = ingestEvent(PROJECT, "ci_failed", "tool", {}, undefined, db);
+      claimPendingEvents(PROJECT, 1, db);
+      markFailed(id, "test-error", db);
+      const events = listEvents(PROJECT, { status: "failed" }, db);
+      expect(events).toHaveLength(1);
+    });
+
+    it("markIgnored works with explicit db", () => {
+      const { id } = ingestEvent(PROJECT, "ci_failed", "tool", {}, undefined, db);
+      claimPendingEvents(PROJECT, 1, db);
+      markIgnored(id, db);
+      const events = listEvents(PROJECT, { status: "ignored" }, db);
+      expect(events).toHaveLength(1);
+    });
   });
 });

@@ -1,0 +1,71 @@
+
+ RUN  v3.2.4 /Users/lylejens/workplace/openclaw-agentops
+
+(node:41613) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ test/sweep/actions.test.ts (11 tests | 3 failed) 20446ms
+   × sweep > returns zero counts on empty project 5794ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+   × sweep > detects stale tasks 5615ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+   ✓ sweep > expires deadlines for active tasks  678ms
+   ✓ sweep > advances workflows when phase gate is satisfied  667ms
+   ✓ sweep > escalates exhausted failed tasks 35ms
+   ✓ sweep > calls stuck detection and kill  520ms
+   ✓ sweep > filters stuck agents to current project 35ms
+   × sweep > emits task_stale diagnostic event when a task is marked stale 6002ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+   ✓ sweep > auto-blocks severely stale task (already stale for 2x threshold)  681ms
+   ✓ sweep > returns autoBlocked: 0 when no severely stale tasks exist 180ms
+   ✓ sweep > emits task_escalated diagnostic event when task is escalated 216ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/sweep/actions.test.ts > sweep > returns zero counts on empty project
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ test/sweep/actions.test.ts:50:3
+     48|   });
+     49| 
+     50|   it("returns zero counts on empty project", async () => {
+       |   ^
+     51|     const result = await sweep({ projectId: PROJECT, dbOverride: db });
+     52|     expect(result.stale).toBe(0);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  test/sweep/actions.test.ts > sweep > detects stale tasks
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ test/sweep/actions.test.ts:61:3
+     59|   });
+     60| 
+     61|   it("detects stale tasks", async () => {
+       |   ^
+     62|     const task = createTask(
+     63|       { projectId: PROJECT, title: "Stale task", createdBy: "agent:a" …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  test/sweep/actions.test.ts > sweep > emits task_stale diagnostic event when a task is marked stale
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ test/sweep/actions.test.ts:173:3
+    171|   });
+    172| 
+    173|   it("emits task_stale diagnostic event when a task is marked stale", …
+       |   ^
+    174|     const task = createTask(
+    175|       { projectId: PROJECT, title: "Will go stale", createdBy: "agent:…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 8 passed (11)
+   Start at  23:40:20
+   Duration  97.51s (transform 41.66s, setup 0ms, collect 64.19s, tests 20.45s, environment 55ms, prepare 3.81s)
+

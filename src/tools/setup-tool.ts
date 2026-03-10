@@ -2,7 +2,7 @@
  * Clawforce — Setup tool
  *
  * Onboarding tool for agents to help users configure clawforce.
- * Actions: explain, status, validate, activate.
+ * Actions: explain, status, validate, activate, scaffold.
  */
 
 import fs from "node:fs";
@@ -26,21 +26,29 @@ import { recoverOrphanedSessions } from "../enforcement/tracker.js";
 import { generateDefaultScopePolicies } from "../profiles.js";
 import { registerPolicies } from "../policy/registry.js";
 import { buildExplainContent } from "../context/onboarding.js";
+import { resolveSkillSource } from "../skills/registry.js";
+import { resolveEffectiveScope } from "../scope.js";
+import { generateScoped } from "../skills/topics/tools.js";
+import { ensureAgentDocs } from "../context/sources/auto-generate.js";
+import { generateSoulTemplate, isSoulTemplateUnmodified } from "../context/sources/auto-generate.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readStringParam, safeExecute } from "./common.js";
 
-const SETUP_ACTIONS = ["explain", "status", "validate", "activate"] as const;
+const SETUP_ACTIONS = ["explain", "status", "validate", "activate", "scaffold"] as const;
 
 const ClawforceSetupSchema = Type.Object({
   action: stringEnum(SETUP_ACTIONS, { description: "Action to perform. Use 'explain' to get the full reference docs." }),
   yaml_content: Type.Optional(Type.String({ description: "Raw YAML content to validate (for validate action)." })),
   config_path: Type.Optional(Type.String({ description: "Path to a project.yaml file to validate (for validate action)." })),
-  project_id: Type.Optional(Type.String({ description: "Project ID — the subdirectory name under projectsDir (for activate action)." })),
+  project_id: Type.Optional(Type.String({ description: "Project ID — the subdirectory name under projectsDir (for activate/scaffold action)." })),
+  agent_id: Type.Optional(Type.String({ description: "Agent ID to target (for scaffold action). Omit to scaffold all agents in the project." })),
+  topic: Type.Optional(Type.String({ description: "Skill topic ID to query (e.g. 'roles', 'tasks', 'memory'). Omit for full reference." })),
 });
 
 export function createClawforceSetupTool(options: {
   projectsDir: string;
+  agentId?: string;
 }) {
   return {
     label: "Workforce Setup",
@@ -50,7 +58,8 @@ export function createClawforceSetupTool(options: {
       "explain: Full reference docs — project.yaml format, roles, accountability, examples. " +
       "status: What projects and employees are currently configured. " +
       "validate: Check a project.yaml config (pass yaml_content or config_path). " +
-      "activate: Register or reload a project from disk (pass project_id).",
+      "activate: Register or reload a project from disk (pass project_id). " +
+      "scaffold: Create SOUL.md templates for agent customization (pass project_id, optionally agent_id).",
     parameters: ClawforceSetupSchema,
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
@@ -58,16 +67,19 @@ export function createClawforceSetupTool(options: {
 
         switch (action) {
           case "explain":
-            return handleExplain(options.projectsDir);
+            return handleExplain(options.projectsDir, options.agentId, readStringParam(params, "topic"));
 
           case "status":
             return handleStatus(options.projectsDir);
 
           case "validate":
-            return handleValidate(params);
+            return handleValidate(params, options.projectsDir);
 
           case "activate":
             return handleActivate(params, options.projectsDir);
+
+          case "scaffold":
+            return handleScaffold(options.projectsDir, readStringParam(params, "project_id"), readStringParam(params, "agent_id"));
 
           default:
             return jsonResult({ ok: false, reason: `Unknown action: ${action}` });
@@ -77,7 +89,26 @@ export function createClawforceSetupTool(options: {
   };
 }
 
-function handleExplain(projectsDir: string): ToolResult {
+function handleExplain(projectsDir: string, agentId?: string, topic?: string | null): ToolResult {
+  if (topic) {
+    // When topic is "tools" and we have an agentId, return scoped content
+    if (topic === "tools" && agentId) {
+      const scope = resolveEffectiveScope(agentId);
+      if (scope) {
+        const content = generateScoped(scope);
+        return jsonResult({ ok: true, topic, reference: content });
+      }
+    }
+
+    // Resolve the agent's actual role for topic access checks
+    const agentEntry = agentId ? getAgentConfig(agentId) : null;
+    const role = agentEntry?.config.role ?? "manager";
+    const content = resolveSkillSource(role, topic, undefined, agentEntry?.projectId);
+    if (content === null) {
+      return jsonResult({ ok: false, reason: `Unknown topic: "${topic}".` });
+    }
+    return jsonResult({ ok: true, topic, reference: content });
+  }
   return jsonResult({
     ok: true,
     reference: buildExplainContent(projectsDir),
@@ -139,7 +170,7 @@ function handleStatus(projectsDir: string): ToolResult {
   });
 }
 
-function handleValidate(params: Record<string, unknown>): ToolResult {
+function handleValidate(params: Record<string, unknown>, projectsDir: string): ToolResult {
   const yamlContent = readStringParam(params, "yaml_content");
   const configPath = readStringParam(params, "config_path");
 
@@ -154,6 +185,15 @@ function handleValidate(params: Record<string, unknown>): ToolResult {
   if (yamlContent) {
     content = yamlContent;
   } else {
+    // Validate that config_path resolves within the projects directory or temp dir
+    const resolved = path.resolve(configPath!);
+    const allowedRoot = path.resolve(projectsDir);
+    if (!resolved.startsWith(allowedRoot + path.sep) && !resolved.startsWith(os.tmpdir())) {
+      return jsonResult({
+        ok: false,
+        reason: `config_path must be within the projects directory. Got: ${configPath}`,
+      });
+    }
     try {
       content = fs.readFileSync(configPath!, "utf-8");
     } catch (err) {
@@ -304,8 +344,12 @@ function handleActivate(params: Record<string, unknown>, projectsDir: string): T
       catch (err) { safeLog("setup.activate.registerPolicies", err); }
     }
 
+    // Bootstrap per-agent docs (SOUL.md templates)
     for (const [agentId, config] of Object.entries(wfConfig.agents)) {
       registeredAgents.push({ id: agentId, role: config.role });
+      try {
+        ensureAgentDocs(projectDir, agentId, config);
+      } catch (err) { safeLog("setup.activate.ensureAgentDocs", err); }
     }
   }
 
@@ -334,4 +378,86 @@ function handleActivate(params: Record<string, unknown>, projectsDir: string): T
     orphaned_sessions_recovered: orphans.length,
     message: `Project "${projectId}" ${verb} with ${registeredAgents.length} agent(s) registered.`,
   });
+}
+
+function handleScaffold(projectsDir: string, projectId?: string | null, agentId?: string | null): ToolResult {
+  // Auto-resolve project if not specified
+  let resolvedProjectId = projectId;
+  if (!resolvedProjectId) {
+    const activeIds = getActiveProjectIds();
+    if (activeIds.length === 0) {
+      return jsonResult({ ok: false, reason: "No active projects. Activate a project first." });
+    }
+    if (activeIds.length > 1) {
+      return jsonResult({ ok: false, reason: `Multiple projects active (${activeIds.join(", ")}). Specify project_id.` });
+    }
+    resolvedProjectId = activeIds[0]!;
+  }
+
+  const resolvedDir = resolveProjectDir(projectsDir);
+  const projectDir = path.join(resolvedDir, resolvedProjectId);
+
+  if (!fs.existsSync(projectDir)) {
+    return jsonResult({ ok: false, reason: `Project directory not found: ${projectDir}` });
+  }
+
+  const scaffolded: string[] = [];
+  const skipped: string[] = [];
+
+  if (agentId) {
+    // Scaffold single agent
+    const result = scaffoldAgent(projectDir, agentId);
+    if (result === "scaffolded") scaffolded.push(agentId);
+    else skipped.push(agentId);
+  } else {
+    // Scaffold all agents in the project
+    const allAgentIds = getRegisteredAgentIds();
+    for (const aid of allAgentIds) {
+      const entry = getAgentConfig(aid);
+      if (entry && entry.projectId === resolvedProjectId) {
+        const result = scaffoldAgent(projectDir, aid);
+        if (result === "scaffolded") scaffolded.push(aid);
+        else skipped.push(aid);
+      }
+    }
+  }
+
+  return jsonResult({
+    ok: true,
+    project_id: resolvedProjectId,
+    scaffolded,
+    skipped,
+    message: scaffolded.length > 0
+      ? `Scaffolded SOUL.md for: ${scaffolded.join(", ")}. Edit these files to customize each agent's identity and domain expertise.`
+      : "No agents needed scaffolding (all already have customized SOUL.md files).",
+  });
+}
+
+function scaffoldAgent(projectDir: string, agentId: string): "scaffolded" | "skipped" {
+  if (agentId.includes("..") || agentId.includes("/") || agentId.includes("\\")) {
+    return "skipped";
+  }
+
+  const agentDir = path.join(projectDir, "agents", agentId);
+  const soulPath = path.join(agentDir, "SOUL.md");
+
+  // Check if SOUL.md already exists and has been customized
+  if (fs.existsSync(soulPath)) {
+    try {
+      const content = fs.readFileSync(soulPath, "utf-8");
+      if (!isSoulTemplateUnmodified(content)) {
+        return "skipped"; // User has customized it
+      }
+    } catch {
+      return "skipped";
+    }
+  }
+
+  try {
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(soulPath, generateSoulTemplate(agentId), "utf-8");
+    return "scaffolded";
+  } catch {
+    return "skipped";
+  }
 }

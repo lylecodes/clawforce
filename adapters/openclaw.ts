@@ -391,21 +391,12 @@ const clawforcePlugin = {
         }
 
         // Refresh provider rate limits (non-blocking, best-effort)
-        try {
-          // Access OpenClaw's usage summary if available via runtime
-          const usageSummary = (api as any).runtime?.system?.getProviderUsageSummary?.();
-          if (usageSummary?.providers) {
-            for (const snapshot of usageSummary.providers) {
-              updateProviderUsage(snapshot.provider, {
-                windows: snapshot.windows,
-                plan: snapshot.plan,
-                error: snapshot.error,
-              });
-            }
-          }
-        } catch {
-          // Non-fatal — rate limit data is advisory
-        }
+        // TODO: OpenClaw has loadProviderUsageSummary() which fetches live rate
+        // limit data, but it's not exported from the plugin-sdk public API.
+        // When openclaw exposes this via plugin-sdk or api.runtime, wire it here:
+        //   const summary = await api.runtime.system.loadProviderUsageSummary?.();
+        //   for (const s of summary.providers) updateProviderUsage(s.provider, s);
+        // For now, rate limit data comes from llm_output hook headers if available.
 
         // H7: Assemble context first — only start tracking if context assembly succeeds
         let content: string | null = null;

@@ -20,11 +20,14 @@ import { resetDailyBudgets } from "../budget.js";
 import { getDb } from "../db.js";
 import { transitionTask } from "../tasks/ops.js";
 import type { Task, TaskState } from "../types.js";
+import { getExtendedProjectConfig } from "../project.js";
 import { enforceWorkerCompliance, getIncompliantWorkers } from "../tasks/compliance.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { advanceWorkflow, getPhaseStatus, listWorkflows } from "../workflow.js";
-import { ingestEvent } from "../events/store.js";
+import { ingestEvent, reclaimStaleEvents } from "../events/store.js";
 import { reclaimExpiredLeases } from "../dispatch/queue.js";
+import { createMessage } from "../messaging/store.js";
+import { findManagerAgent } from "../events/actions.js";
 import { processAndDispatch } from "../dispatch/dispatcher.js";
 
 export type SweepResult = {
@@ -36,14 +39,20 @@ export type SweepResult = {
   complianceBlocked: number;
   stuckKilled: number;
   proposalsExpired: number;
+  protocolsExpired: number;
+  goalsNeedingPlan: number;
+  goalsCascadeAchieved: number;
   leasesReclaimed: number;
   eventsProcessed: number;
   dispatched: number;
   budgetsReset: number;
+  autoAssigned: number;
   sloChecked: number;
   sloBreach: number;
   alertsFired: number;
   anomaliesDetected: number;
+  reviewEscalated: number;
+  meetingsStale: number;
 };
 
 export type SweepOptions = {
@@ -80,8 +89,20 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
   let escalated = 0;
   let complianceBlocked = 0;
   let proposalsExpired = 0;
+  let protocolsExpired = 0;
+  let goalsNeedingPlan = 0;
+  let goalsCascadeAchieved = 0;
   let leasesReclaimed = 0;
   let budgetsReset = 0;
+  let reviewEscalated = 0;
+  let meetingsStale = 0;
+
+  // Reclaim events stuck in 'processing' (e.g. from a previous crash)
+  try {
+    reclaimStaleEvents(projectId, undefined, db);
+  } catch (err) {
+    safeLog("sweep.reclaimStaleEvents", err);
+  }
 
   // Wrap all DB-mutating operations in a transaction for atomicity.
   // If the process crashes mid-sweep, all changes roll back together.
@@ -129,7 +150,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
             const staleSince = meta?.stale_since as number | undefined;
             if (staleSince && now - staleSince > staleThreshold) {
               const blockResult = transitionTask(
-                { projectId, taskId, toState: "BLOCKED", actor: "system:sweep", reason: `Auto-blocked: no activity for ${Math.round((now - lastActivity) / 3_600_000)}h`, verificationRequired: false },
+                { projectId, taskId, toState: "BLOCKED", actor: "system:sweep", reason: `Auto-blocked: no activity for ${Math.round((now - lastActivity) / 3_600_000)}h`, verificationRequired: false, withinTransaction: true },
                 db,
               );
               if (blockResult.ok) autoBlocked++;
@@ -154,6 +175,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
           actor: "system:sweep",
           reason: "Deadline exceeded",
           verificationRequired: false,
+          withinTransaction: true,
         },
         db,
       );
@@ -245,11 +267,13 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       }, sweepDedupKey("escalated", taskId, now), db);
     }
 
-    // 5. Expire stale proposals past TTL — stays direct (low-risk, no dispatch)
+    // 5. Expire stale proposals past TTL or explicit timeout — stays direct (low-risk, no dispatch)
     const ttlCutoff = now - proposalTtl;
     const staleProposals = db
-      .prepare("SELECT id FROM proposals WHERE project_id = ? AND status = 'pending' AND created_at < ?")
-      .all(projectId, ttlCutoff) as Record<string, unknown>[];
+      .prepare(
+        "SELECT id FROM proposals WHERE project_id = ? AND status = 'pending' AND (created_at < ? OR (timeout_at IS NOT NULL AND timeout_at < ?))",
+      )
+      .all(projectId, ttlCutoff, now) as Record<string, unknown>[];
 
     for (const row of staleProposals) {
       const proposalId = row.id as string;
@@ -258,6 +282,118 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       ).run("Auto-expired: exceeded TTL", now, proposalId, projectId);
       proposalsExpired++;
       emitDiagnosticEvent({ type: "proposal_expired", proposalId, projectId });
+      try {
+        ingestEvent(projectId, "proposal_rejected", "internal", {
+          proposalId, feedback: "Auto-expired: exceeded TTL",
+        }, `proposal-rejected:${proposalId}`, db);
+      } catch { /* non-fatal */ }
+    }
+
+    // 5.5. Expire timed-out protocols
+    try {
+      const { getExpiredProtocols, expireProtocol, escalateProtocol } = await import("../messaging/protocols.js");
+      const { createMessage: createMsg } = await import("../messaging/store.js");
+
+      const expired = getExpiredProtocols(projectId, now, db);
+      for (const msg of expired) {
+        expireProtocol(msg.id, db);
+
+        const escalationMsg = createMsg({
+          fromAgent: "system:sweep",
+          toAgent: msg.fromAgent,
+          projectId,
+          type: "escalation",
+          priority: "high",
+          content: `Protocol expired: your ${msg.type} to ${msg.toAgent} received no response within the deadline. Message ID: ${msg.id.slice(0, 8)}`,
+          parentMessageId: msg.id,
+        }, db);
+
+        escalateProtocol(msg.id, escalationMsg.id, db);
+        protocolsExpired++;
+
+        ingestEvent(projectId, "protocol_expired", "cron", {
+          messageId: msg.id, protocolType: msg.type,
+          fromAgent: msg.fromAgent, toAgent: msg.toAgent,
+        }, sweepDedupKey("proto-expired", msg.id, now), db);
+      }
+    } catch (err) {
+      safeLog("sweep.protocolTimeout", err);
+    }
+
+    // 5.7. Detect active goals with no decomposition plan
+    try {
+      const activeGoals = db.prepare(
+        "SELECT id, title FROM goals WHERE project_id = ? AND status = 'active'",
+      ).all(projectId) as Record<string, unknown>[];
+
+      for (const goal of activeGoals) {
+        const goalId = goal.id as string;
+        const hasChildren = db.prepare("SELECT 1 FROM goals WHERE parent_goal_id = ? LIMIT 1").get(goalId);
+        const hasTasks = db.prepare("SELECT 1 FROM tasks WHERE goal_id = ? LIMIT 1").get(goalId);
+        if (!hasChildren && !hasTasks) {
+          goalsNeedingPlan++;
+          ingestEvent(projectId, "sweep_finding", "cron", {
+            finding: "goal_no_plan", goalId, goalTitle: goal.title as string,
+          }, sweepDedupKey("goal-no-plan", goalId, now), db);
+        }
+      }
+    } catch (err) {
+      safeLog("sweep.goalsNoPlan", err);
+    }
+
+    // 5.8. Escalate stale REVIEW tasks past configured timeout
+    try {
+      const extConfig = getExtendedProjectConfig(projectId);
+      const reviewConfig = extConfig?.review;
+      if (reviewConfig?.autoEscalateAfterHours && reviewConfig.autoEscalateAfterHours > 0) {
+        const escalateThresholdMs = reviewConfig.autoEscalateAfterHours * 3_600_000;
+        const reviewTasks = db.prepare(
+          "SELECT id, title, assigned_to FROM tasks WHERE project_id = ? AND state = 'REVIEW' AND (metadata IS NULL OR json_extract(metadata, '$.review_escalated') IS NULL)",
+        ).all(projectId) as Record<string, unknown>[];
+
+        for (const row of reviewTasks) {
+          const taskId = row.id as string;
+
+          // Find when task entered REVIEW from last transition
+          const lastTransition = db.prepare(
+            "SELECT created_at FROM transitions WHERE task_id = ? AND to_state = 'REVIEW' ORDER BY created_at DESC LIMIT 1",
+          ).get(taskId) as Record<string, unknown> | undefined;
+          const reviewEnteredAt = lastTransition?.created_at as number | undefined;
+          if (!reviewEnteredAt) continue;
+
+          if (now - reviewEnteredAt > escalateThresholdMs) {
+            // Mark as review-escalated to prevent re-escalation
+            db.prepare(
+              "UPDATE tasks SET metadata = json_set(COALESCE(metadata, '{}'), '$.review_escalated', true, '$.review_escalated_at', ?) WHERE id = ?",
+            ).run(now, taskId);
+
+            // Send escalation message to manager
+            const managerAgent = findManagerAgent(projectId);
+            if (managerAgent) {
+              createMessage({
+                fromAgent: "system:sweep",
+                toAgent: managerAgent,
+                projectId,
+                type: "escalation",
+                priority: "high",
+                content: `Review timeout: Task "${row.title}" (${taskId.slice(0, 8)}) has been in REVIEW for ${Math.round((now - reviewEnteredAt) / 3_600_000)}h with no verifier action. Assigned to: ${row.assigned_to ?? "unassigned"}.`,
+              }, db);
+            }
+
+            // Emit event for user-defined handlers
+            ingestEvent(projectId, "sweep_finding", "cron", {
+              finding: "review_stale",
+              taskId,
+              reviewDurationHours: Math.round((now - reviewEnteredAt) / 3_600_000),
+              assignedTo: row.assigned_to,
+            }, sweepDedupKey("review-stale", taskId, now), db);
+
+            reviewEscalated++;
+          }
+        }
+      }
+    } catch (err) {
+      safeLog("sweep.reviewEscalation", err);
     }
 
     // 6. Enforce worker compliance — stays direct (enforcement, not dispatch)
@@ -323,10 +459,69 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     safeLog("sweep.monitoring", err);
   }
 
+  // 11. Goal completion cascade
+  try {
+    const { checkGoalCascade } = await import("../goals/cascade.js");
+    const cascadeResult = checkGoalCascade(projectId, db);
+    goalsCascadeAchieved = cascadeResult.achieved;
+  } catch (err) {
+    safeLog("sweep.goalCascade", err);
+  }
+
+  // 12. Auto-assign orphaned OPEN tasks (backstop for missed events)
+  let autoAssigned = 0;
+  try {
+    const extConfig = getExtendedProjectConfig(projectId);
+    if (extConfig?.assignment?.enabled) {
+      const { autoAssign } = await import("../assignment/engine.js");
+      const openTasks = db.prepare(
+        "SELECT id FROM tasks WHERE project_id = ? AND state = 'OPEN' AND assigned_to IS NULL",
+      ).all(projectId) as Record<string, unknown>[];
+
+      for (const row of openTasks) {
+        const taskId = row.id as string;
+        const result = autoAssign(projectId, taskId, extConfig.assignment, db);
+        if (result.assigned) autoAssigned++;
+      }
+    }
+  } catch (err) {
+    safeLog("sweep.autoAssign", err);
+  }
+
+  // 6. Detect stale meetings (no activity for >2h)
+  try {
+    const activeMeetings = db.prepare(
+      "SELECT id, name, created_at FROM channels WHERE project_id = ? AND type = 'meeting' AND status = 'active'",
+    ).all(projectId) as Record<string, unknown>[];
+
+    for (const row of activeMeetings) {
+      const channelId = row.id as string;
+      const lastMsg = db.prepare(
+        "SELECT created_at FROM messages WHERE channel_id = ? ORDER BY created_at DESC LIMIT 1",
+      ).get(channelId) as Record<string, unknown> | undefined;
+
+      const lastActivity = (lastMsg?.created_at as number) ?? (row.created_at as number);
+      if (now - lastActivity > 2 * 60 * 60 * 1000) {
+        ingestEvent(projectId, "sweep_finding", "cron", {
+          finding: "meeting_stale",
+          channelId,
+          channelName: row.name,
+          staleSinceMs: now - lastActivity,
+        }, sweepDedupKey("meeting-stale", channelId, now), db);
+        meetingsStale++;
+      }
+    }
+  } catch (err) {
+    safeLog("sweep.staleMeetings", err);
+  }
+
   return {
     stale, autoBlocked, deadlineExpired, workflowsAdvanced, escalated,
-    complianceBlocked, stuckKilled, proposalsExpired, leasesReclaimed,
-    eventsProcessed, dispatched, budgetsReset,
+    complianceBlocked, stuckKilled, proposalsExpired, protocolsExpired,
+    goalsNeedingPlan, goalsCascadeAchieved,
+    leasesReclaimed,
+    eventsProcessed, dispatched, budgetsReset, autoAssigned,
     sloChecked, sloBreach, alertsFired, anomaliesDetected,
+    reviewEscalated, meetingsStale,
   };
 }

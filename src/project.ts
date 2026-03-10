@@ -16,22 +16,37 @@ import { registerManagerProject } from "./manager-config.js";
 import { registerManagerCron } from "./manager-cron.js";
 import { resolveEscalationChain } from "./org.js";
 import { applyProfile, BUILTIN_PROFILES } from "./profiles.js";
+import { registerCustomSkills } from "./skills/registry.js";
 import type {
   AgentConfig,
   AgentRole,
   AlertRuleDefinition,
   AnomalyConfig,
   ApprovalPolicy,
+  AssignmentConfig,
+  AssignmentStrategy,
   BudgetConfig,
+  ChannelConfig,
+  ChannelType,
   CompactionConfig,
   ContextSource,
+  DispatchConfig,
   Expectation,
+  EventActionType,
+  EventActionConfig,
+  EventHandlerConfig,
+  ReviewConfig,
+  JobDefinition,
   PerformancePolicy,
   PolicyDefinition,
   RiskTierConfig,
+  SkillPack,
   SloDefinition,
+  TaskPriority,
+  ToolGatesConfig,
   WorkforceConfig,
 } from "./types.js";
+import { EVENT_ACTION_TYPES } from "./types.js";
 
 export type ProjectConfig = {
   id: string;
@@ -87,13 +102,18 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   );
   if (!hasWorkforceAgents) return null;
 
+  // Pre-parse skill_packs so they can be applied during agent normalization
+  const skillPacks = raw.skill_packs && typeof raw.skill_packs === "object"
+    ? normalizeSkillPacksConfig(raw.skill_packs as Record<string, unknown>)
+    : undefined;
+
   const agents: Record<string, AgentConfig> = {};
   for (const [agentId, rawAgent] of Object.entries(rawAgents)) {
     if (typeof rawAgent !== "object" || rawAgent === null) continue;
     const a = rawAgent as Record<string, unknown>;
     if (!a.role) continue;
 
-    agents[agentId] = normalizeAgentConfig(a);
+    agents[agentId] = normalizeAgentConfig(a, skillPacks);
   }
 
   if (Object.keys(agents).length === 0) return null;
@@ -124,6 +144,41 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   // Parse risk_tiers config
   if (raw.risk_tiers && typeof raw.risk_tiers === "object") {
     result.riskTiers = normalizeRiskTiersConfig(raw.risk_tiers as Record<string, unknown>);
+  }
+
+  // Parse skills (custom skill topics)
+  if (raw.skills && typeof raw.skills === "object") {
+    result.skills = normalizeSkillsConfig(raw.skills as Record<string, unknown>);
+  }
+
+  // Parse skill_packs
+  if (raw.skill_packs && typeof raw.skill_packs === "object") {
+    result.skill_packs = normalizeSkillPacksConfig(raw.skill_packs as Record<string, unknown>);
+  }
+
+  // Parse dispatch config
+  if (raw.dispatch && typeof raw.dispatch === "object") {
+    result.dispatch = normalizeDispatchConfig(raw.dispatch as Record<string, unknown>);
+  }
+
+  // Parse assignment config
+  if (raw.assignment && typeof raw.assignment === "object") {
+    result.assignment = normalizeAssignmentConfig(raw.assignment as Record<string, unknown>);
+  }
+
+  // Parse event_handlers config
+  if (raw.event_handlers && typeof raw.event_handlers === "object") {
+    result.event_handlers = normalizeEventHandlersConfig(raw.event_handlers as Record<string, unknown>);
+  }
+
+  // Parse review config
+  if (raw.review && typeof raw.review === "object") {
+    result.review = normalizeReviewConfig(raw.review as Record<string, unknown>);
+  }
+
+  // Parse channels config
+  if (raw.channels && Array.isArray(raw.channels)) {
+    result.channels = normalizeChannelsConfig(raw.channels);
   }
 
   return result;
@@ -247,20 +302,27 @@ const ROLE_ALIASES: Record<string, AgentRole> = {
   cron: "scheduled",
 };
 
-const VALID_ROLES: AgentRole[] = ["manager", "employee", "scheduled"];
+const VALID_ROLES: AgentRole[] = ["manager", "employee", "scheduled", "assistant"];
 const VALID_SOURCES: ContextSource["source"][] = [
   "instructions", "custom", "project_md", "task_board",
   "assigned_task", "knowledge", "file", "skill", "memory",
   "escalations", "workflows", "activity", "sweep_status",
   "proposals", "agent_status", "cost_summary", "policy_status", "health_status",
-  "team_status", "team_performance",
+  "team_status", "team_performance", "soul", "tools_reference",
+  "channel_messages",
 ];
 
-function normalizeAgentConfig(raw: Record<string, unknown>): AgentConfig {
+function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
   // Support old role names as aliases
   let rawRole = raw.role as string;
   if (rawRole in ROLE_ALIASES) {
     rawRole = ROLE_ALIASES[rawRole]!;
+  }
+  if (!VALID_ROLES.includes(rawRole as AgentRole)) {
+    emitDiagnosticEvent({
+      type: "config_warning",
+      message: `Unknown role "${rawRole}" — falling back to "employee". Valid roles: ${VALID_ROLES.join(", ")}`,
+    });
   }
   const role = VALID_ROLES.includes(rawRole as AgentRole)
     ? (rawRole as AgentRole)
@@ -283,6 +345,30 @@ function normalizeAgentConfig(raw: Record<string, unknown>): AgentConfig {
     expectations: hasExplicitExpectations ? expectations : null,
     performance_policy: hasExplicitPolicy ? performancePolicy : null,
   });
+
+  // Apply skill_pack if referenced
+  const skillPackName = typeof raw.skill_pack === "string" && raw.skill_pack.trim() ? raw.skill_pack.trim() : undefined;
+  if (skillPackName && skillPacks?.[skillPackName]) {
+    const pack = skillPacks[skillPackName]!;
+    // Append pack briefing (deduped by source)
+    if (pack.briefing && pack.briefing.length > 0) {
+      const existingSources = new Set(merged.briefing.map((s) => s.source));
+      for (const src of pack.briefing) {
+        if (!existingSources.has(src.source)) {
+          merged.briefing.push(src);
+          existingSources.add(src.source);
+        }
+      }
+    }
+    // Merge expectations (append if not explicitly set)
+    if (pack.expectations && pack.expectations.length > 0 && !hasExplicitExpectations) {
+      merged.expectations = [...merged.expectations, ...pack.expectations];
+    }
+    // Override performance_policy if not explicitly set
+    if (pack.performance_policy && !hasExplicitPolicy) {
+      merged.performance_policy = pack.performance_policy;
+    }
+  }
 
   // Always inject instructions source if not already present
   if (!merged.briefing.some((s) => s.source === "instructions")) {
@@ -323,6 +409,8 @@ function normalizeAgentConfig(raw: Record<string, unknown>): AgentConfig {
   const team = typeof raw.team === "string" && raw.team.trim() ? raw.team.trim() : undefined;
   const permissions = normalizePermissions(raw.permissions);
 
+  const jobs = normalizeJobs(raw.jobs);
+
   return {
     role,
     title,
@@ -339,7 +427,9 @@ function normalizeAgentConfig(raw: Record<string, unknown>): AgentConfig {
     expectations: merged.expectations,
     performance_policy: merged.performance_policy,
     reports_to: reportsTo,
+    skill_pack: skillPackName,
     compaction: compaction === false ? undefined : compaction,
+    jobs,
   };
 }
 
@@ -360,6 +450,12 @@ function normalizeContextSources(raw: unknown): ContextSource[] {
   return raw
     .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
     .map((item): ContextSource => {
+      if (!VALID_SOURCES.includes(item.source as ContextSource["source"])) {
+        emitDiagnosticEvent({
+          type: "config_warning",
+          message: `Unknown context source "${item.source as string}" — falling back to "custom". Valid sources: ${VALID_SOURCES.join(", ")}`,
+        });
+      }
       const source = VALID_SOURCES.includes(item.source as ContextSource["source"])
         ? (item.source as ContextSource["source"])
         : "custom";
@@ -438,6 +534,90 @@ function normalizeCompactionConfig(raw: unknown): boolean | CompactionConfig | u
     return { enabled, files: files?.length ? files : undefined };
   }
   return undefined;
+}
+
+function normalizeJobs(raw: unknown): Record<string, JobDefinition> | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const result: Record<string, JobDefinition> = {};
+  for (const [jobName, rawJob] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof rawJob !== "object" || rawJob === null) continue;
+    const j = rawJob as Record<string, unknown>;
+    const job: JobDefinition = {};
+
+    if (typeof j.cron === "string" && j.cron.trim()) {
+      job.cron = j.cron.trim();
+    }
+    if (j.briefing !== undefined || j.context_in !== undefined) {
+      job.briefing = normalizeContextSources(j.briefing ?? j.context_in);
+    }
+    if (j.exclude_briefing !== undefined || j.exclude_context !== undefined) {
+      job.exclude_briefing = normalizeExcludeContext(j.exclude_briefing ?? j.exclude_context);
+    }
+    if (j.expectations !== undefined || j.required_outputs !== undefined) {
+      job.expectations = normalizeExpectations(j.expectations ?? j.required_outputs);
+    }
+    if (j.performance_policy !== undefined || j.on_failure !== undefined) {
+      job.performance_policy = normalizePerformancePolicy(j.performance_policy ?? j.on_failure);
+    }
+    if (j.compaction !== undefined) {
+      const c = normalizeCompactionConfig(j.compaction);
+      if (c !== undefined) job.compaction = c;
+    }
+    if (typeof j.nudge === "string" && j.nudge.trim()) {
+      job.nudge = j.nudge.trim();
+    }
+    if (typeof j.cronTimezone === "string" && j.cronTimezone.trim()) {
+      job.cronTimezone = j.cronTimezone.trim();
+    }
+    if (typeof j.sessionTarget === "string" && (j.sessionTarget === "main" || j.sessionTarget === "isolated")) {
+      job.sessionTarget = j.sessionTarget;
+    }
+    if (typeof j.wakeMode === "string" && (j.wakeMode === "now" || j.wakeMode === "next-heartbeat")) {
+      job.wakeMode = j.wakeMode;
+    }
+    if (typeof j.delivery === "object" && j.delivery !== null) {
+      const d = j.delivery as Record<string, unknown>;
+      const mode = typeof d.mode === "string" && ["none", "announce", "webhook"].includes(d.mode)
+        ? (d.mode as "none" | "announce" | "webhook") : "none";
+      job.delivery = {
+        mode,
+        ...(typeof d.to === "string" && { to: d.to }),
+        ...(typeof d.channel === "string" && { channel: d.channel }),
+        ...(typeof d.accountId === "string" && { accountId: d.accountId }),
+        ...(typeof d.bestEffort === "boolean" && { bestEffort: d.bestEffort }),
+      };
+    }
+    if (j.failureAlert !== undefined) {
+      if (j.failureAlert === false) {
+        job.failureAlert = false;
+      } else if (typeof j.failureAlert === "object" && j.failureAlert !== null) {
+        const fa = j.failureAlert as Record<string, unknown>;
+        job.failureAlert = {
+          ...(typeof fa.after === "number" && { after: fa.after }),
+          ...(typeof fa.channel === "string" && { channel: fa.channel }),
+          ...(typeof fa.to === "string" && { to: fa.to }),
+          ...(typeof fa.cooldownMs === "number" && { cooldownMs: fa.cooldownMs }),
+          ...(typeof fa.mode === "string" && ["announce", "webhook"].includes(fa.mode) && { mode: fa.mode as "announce" | "webhook" }),
+          ...(typeof fa.accountId === "string" && { accountId: fa.accountId }),
+        };
+      }
+    }
+    if (typeof j.model === "string" && j.model.trim()) {
+      job.model = j.model.trim();
+    }
+    if (typeof j.timeoutSeconds === "number" && j.timeoutSeconds > 0) {
+      job.timeoutSeconds = j.timeoutSeconds;
+    }
+    if (typeof j.lightContext === "boolean") {
+      job.lightContext = j.lightContext;
+    }
+    if (typeof j.deleteAfterRun === "boolean") {
+      job.deleteAfterRun = j.deleteAfterRun;
+    }
+
+    result[jobName] = job;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function normalizeBudgetsConfig(raw: Record<string, unknown>): WorkforceConfig["budgets"] {
@@ -533,11 +713,218 @@ function normalizeRiskTiersConfig(raw: Record<string, unknown>): RiskTierConfig 
   };
 }
 
+function normalizeSkillsConfig(raw: Record<string, unknown>): WorkforceConfig["skills"] {
+  const result: NonNullable<WorkforceConfig["skills"]> = {};
+  for (const [id, skillRaw] of Object.entries(raw)) {
+    if (typeof skillRaw !== "object" || skillRaw === null) continue;
+    const s = skillRaw as Record<string, unknown>;
+    if (typeof s.title !== "string" || typeof s.path !== "string") continue;
+    result[id] = {
+      title: s.title,
+      description: typeof s.description === "string" ? s.description : s.title,
+      path: s.path,
+      roles: Array.isArray(s.roles)
+        ? s.roles.filter((r): r is AgentRole => typeof r === "string" && VALID_ROLES.includes(r as AgentRole))
+        : undefined,
+    };
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeSkillPacksConfig(raw: Record<string, unknown>): Record<string, SkillPack> | undefined {
+  const result: Record<string, SkillPack> = {};
+  for (const [id, packRaw] of Object.entries(raw)) {
+    if (typeof packRaw !== "object" || packRaw === null) continue;
+    const p = packRaw as Record<string, unknown>;
+    const pack: SkillPack = {};
+    if (p.briefing !== undefined) {
+      pack.briefing = normalizeContextSources(p.briefing);
+    }
+    if (p.expectations !== undefined) {
+      pack.expectations = normalizeExpectations(p.expectations);
+    }
+    if (p.performance_policy !== undefined) {
+      pack.performance_policy = normalizePerformancePolicy(p.performance_policy);
+    }
+    result[id] = pack;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function normalizeApprovalPolicy(raw: unknown): ApprovalPolicy | null {
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
   if (typeof r.policy !== "string") return null;
   return { policy: r.policy };
+}
+
+const VALID_ASSIGNMENT_STRATEGIES: AssignmentStrategy[] = ["workload_balanced", "round_robin", "skill_matched"];
+
+function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
+  const result: DispatchConfig = {};
+  if (typeof raw.max_concurrent_dispatches === "number" && raw.max_concurrent_dispatches > 0) {
+    result.maxConcurrentDispatches = raw.max_concurrent_dispatches;
+  }
+  if (typeof raw.max_dispatches_per_hour === "number" && raw.max_dispatches_per_hour > 0) {
+    result.maxDispatchesPerHour = raw.max_dispatches_per_hour;
+  }
+  if (raw.agent_limits && typeof raw.agent_limits === "object") {
+    result.agentLimits = {};
+    for (const [agentId, limits] of Object.entries(raw.agent_limits as Record<string, unknown>)) {
+      if (typeof limits !== "object" || limits === null) continue;
+      const l = limits as Record<string, unknown>;
+      const entry: NonNullable<DispatchConfig["agentLimits"]>[string] = {};
+      if (typeof l.max_concurrent === "number" && l.max_concurrent > 0) entry.maxConcurrent = l.max_concurrent;
+      if (typeof l.max_per_hour === "number" && l.max_per_hour > 0) entry.maxPerHour = l.max_per_hour;
+      if (Object.keys(entry).length > 0) result.agentLimits[agentId] = entry;
+    }
+    if (Object.keys(result.agentLimits).length === 0) delete result.agentLimits;
+  }
+  return result;
+}
+
+function normalizeAssignmentConfig(raw: Record<string, unknown>): AssignmentConfig {
+  const enabled = raw.enabled === true;
+  const rawStrategy = typeof raw.strategy === "string" ? raw.strategy : "workload_balanced";
+  const strategy = VALID_ASSIGNMENT_STRATEGIES.includes(rawStrategy as AssignmentStrategy)
+    ? (rawStrategy as AssignmentStrategy)
+    : "workload_balanced";
+  const autoDispatch = typeof raw.auto_dispatch_on_assign === "boolean"
+    ? raw.auto_dispatch_on_assign
+    : undefined;
+  return { enabled, strategy, autoDispatchOnAssign: autoDispatch };
+}
+
+function normalizeEventHandlersConfig(
+  raw: Record<string, unknown>,
+): Record<string, EventHandlerConfig> | undefined {
+  const result: Record<string, EventHandlerConfig> = {};
+
+  for (const [eventType, rawActions] of Object.entries(raw)) {
+    if (!Array.isArray(rawActions)) continue;
+
+    const actions: EventActionConfig[] = [];
+    for (const rawAction of rawActions) {
+      if (typeof rawAction !== "object" || rawAction === null) continue;
+      const a = rawAction as Record<string, unknown>;
+      const actionType = String(a.action ?? "");
+      if (!EVENT_ACTION_TYPES.includes(actionType as EventActionType)) continue;
+
+      switch (actionType) {
+        case "create_task":
+          actions.push({
+            action: "create_task",
+            template: String(a.template ?? ""),
+            description: typeof a.description === "string" ? a.description : undefined,
+            priority: typeof a.priority === "string" ? a.priority as TaskPriority : undefined,
+            assign_to: typeof a.assign_to === "string" ? a.assign_to : undefined,
+            department: typeof a.department === "string" ? a.department : undefined,
+            team: typeof a.team === "string" ? a.team : undefined,
+          });
+          break;
+        case "notify":
+          actions.push({
+            action: "notify",
+            message: String(a.message ?? ""),
+            to: typeof a.to === "string" ? a.to : undefined,
+            priority: typeof a.priority === "string" ? a.priority as "low" | "normal" | "high" | "urgent" : undefined,
+          });
+          break;
+        case "escalate":
+          actions.push({
+            action: "escalate",
+            to: String(a.to ?? "manager"),
+            message: typeof a.message === "string" ? a.message : undefined,
+          });
+          break;
+        case "enqueue_work":
+          actions.push({
+            action: "enqueue_work",
+            task_id: typeof a.task_id === "string" ? a.task_id : undefined,
+            priority: typeof a.priority === "number" ? a.priority : undefined,
+          });
+          break;
+        case "emit_event":
+          actions.push({
+            action: "emit_event",
+            event_type: String(a.event_type ?? "custom"),
+            event_payload: typeof a.event_payload === "object" && a.event_payload !== null
+              ? Object.fromEntries(Object.entries(a.event_payload as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+              : undefined,
+            dedup_key: typeof a.dedup_key === "string" ? a.dedup_key : undefined,
+          });
+          break;
+      }
+    }
+
+    if (actions.length > 0) {
+      result[eventType] = actions;
+    }
+  }
+
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeReviewConfig(raw: Record<string, unknown>): ReviewConfig {
+  const result: ReviewConfig = {};
+
+  if (typeof raw.verifier_agent === "string" && raw.verifier_agent.trim()) {
+    result.verifierAgent = raw.verifier_agent.trim();
+  }
+  if (typeof raw.auto_escalate_after_hours === "number" && raw.auto_escalate_after_hours > 0) {
+    result.autoEscalateAfterHours = raw.auto_escalate_after_hours;
+  }
+  if (typeof raw.self_review_allowed === "boolean") {
+    result.selfReviewAllowed = raw.self_review_allowed;
+  }
+  const VALID_PRIORITIES: string[] = ["P0", "P1", "P2", "P3"];
+  if (typeof raw.self_review_max_priority === "string" &&
+      VALID_PRIORITIES.includes(raw.self_review_max_priority)) {
+    result.selfReviewMaxPriority = raw.self_review_max_priority as TaskPriority;
+  }
+
+  return result;
+}
+
+const VALID_CHANNEL_TYPES: ChannelType[] = ["topic", "meeting"];
+
+function normalizeChannelsConfig(raw: unknown[]): ChannelConfig[] {
+  const result: ChannelConfig[] = [];
+
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const ch = item as Record<string, unknown>;
+
+    if (typeof ch.name !== "string" || !ch.name.trim()) continue;
+
+    const config: ChannelConfig = { name: ch.name.trim() };
+
+    if (typeof ch.type === "string" && VALID_CHANNEL_TYPES.includes(ch.type as ChannelType)) {
+      config.type = ch.type as ChannelType;
+    }
+    if (Array.isArray(ch.members)) {
+      config.members = ch.members.filter((m: unknown) => typeof m === "string") as string[];
+    }
+    if (Array.isArray(ch.departments)) {
+      config.departments = ch.departments.filter((d: unknown) => typeof d === "string") as string[];
+    }
+    if (Array.isArray(ch.teams)) {
+      config.teams = ch.teams.filter((t: unknown) => typeof t === "string") as string[];
+    }
+    if (Array.isArray(ch.roles)) {
+      config.roles = ch.roles.filter((r: unknown) => VALID_ROLES.includes(r as AgentRole)) as AgentRole[];
+    }
+    if (typeof ch.telegram_group_id === "string" && ch.telegram_group_id.trim()) {
+      config.telegramGroupId = ch.telegram_group_id.trim();
+    }
+    if (typeof ch.telegram_thread_id === "number") {
+      config.telegramThreadId = ch.telegram_thread_id;
+    }
+
+    result.push(config);
+  }
+
+  return result.length > 0 ? result : [];
 }
 
 // --- Agent config registry ---
@@ -560,6 +947,14 @@ type ExtendedProjectConfig = {
   policies?: WorkforceConfig["policies"];
   monitoring?: WorkforceConfig["monitoring"];
   riskTiers?: RiskTierConfig;
+  dispatch?: DispatchConfig;
+  assignment?: AssignmentConfig;
+  toolGates?: ToolGatesConfig;
+  bulkThresholds?: WorkforceConfig["bulkThresholds"];
+  eventHandlers?: Record<string, EventHandlerConfig>;
+  review?: ReviewConfig;
+  channels?: ChannelConfig[];
+  safety?: WorkforceConfig["safety"];
 };
 const projectExtendedConfig = new Map<string, ExtendedProjectConfig>();
 
@@ -582,6 +977,15 @@ export function registerWorkforceConfig(
   }
   if (wfConfig.approval) {
     approvalPolicies.set(projectId, wfConfig.approval);
+  }
+
+  // Register custom skill topics
+  if (wfConfig.skills && projectDir) {
+    try {
+      registerCustomSkills(projectId, wfConfig.skills, projectDir);
+    } catch (err) {
+      safeLog("project.customSkills", err);
+    }
   }
 
   // Register budgets
@@ -615,11 +1019,19 @@ export function registerWorkforceConfig(
   }
 
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers) {
+  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.review || wfConfig.channels || wfConfig.safety) {
     projectExtendedConfig.set(projectId, {
       policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
       riskTiers: wfConfig.riskTiers,
+      dispatch: wfConfig.dispatch,
+      assignment: wfConfig.assignment,
+      toolGates: wfConfig.toolGates,
+      bulkThresholds: wfConfig.bulkThresholds,
+      eventHandlers: wfConfig.event_handlers,
+      review: wfConfig.review,
+      channels: wfConfig.channels,
+      safety: wfConfig.safety,
     });
   }
 }

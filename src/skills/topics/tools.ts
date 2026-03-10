@@ -6,7 +6,7 @@
  * (since they are not exported as constants).
  */
 
-import { MEMORY_ACTIONS, MEMORY_CATEGORIES } from "../../tools/memory-tool.js";
+import type { ActionScope } from "../../types.js";
 
 // These action arrays mirror the source tool implementations.
 // If the source changes, these must be updated to match.
@@ -42,6 +42,10 @@ const OPS_ACTIONS = [
   "emit_event", "list_events", "enqueue_work", "queue_status", "process_events",
   "dispatch_metrics",
 ] as const;
+
+const MEMORY_SEARCH_ACTIONS = ["search"] as const;
+
+const MEMORY_GET_ACTIONS = ["get"] as const;
 
 type ToolDef = {
   name: string;
@@ -94,10 +98,16 @@ const TOOLS: ToolDef[] = [
     roleAccess: "manager",
   },
   {
-    name: "clawforce_memory",
-    description: "Shared memory — save and recall learnings across sessions and agents.",
-    actions: MEMORY_ACTIONS,
-    roleAccess: "all (when added to agent tools)",
+    name: "memory_search",
+    description: "OpenClaw RAG memory — semantic search for relevant memories from previous sessions.",
+    actions: MEMORY_SEARCH_ACTIONS,
+    roleAccess: "all",
+  },
+  {
+    name: "memory_get",
+    description: "OpenClaw RAG memory — retrieve a specific memory entry by ID.",
+    actions: MEMORY_GET_ACTIONS,
+    roleAccess: "all",
   },
 ];
 
@@ -105,7 +115,7 @@ export function generate(): string {
   const sections: string[] = [
     "# Clawforce Tools",
     "",
-    "Clawforce provides 8 tools. Each tool supports multiple actions. Access is controlled by the agent's role through action_scope policies.",
+    `Clawforce provides ${TOOLS.length} tools. Each tool supports multiple actions. Access is controlled by the agent's role through action_scope policies.`,
     "",
     "## Tool Summary",
     "",
@@ -136,15 +146,63 @@ export function generate(): string {
     sections.push("");
   }
 
-  // Memory-specific extras
-  sections.push("## Memory Categories");
-  sections.push("");
-  sections.push("The `clawforce_memory` tool uses these categories for organizing memories:");
-  sections.push("");
-  for (const cat of MEMORY_CATEGORIES) {
-    sections.push(`- \`${cat}\``);
+  return sections.join("\n");
+}
+
+/**
+ * Generate a role-scoped tools reference filtered by an ActionScope.
+ * Only documents tools and actions the agent can actually use.
+ */
+export function generateScoped(scope: ActionScope): string {
+  // Filter TOOLS to those present in the scope
+  const scopedTools: Array<{ tool: ToolDef; actions: readonly string[] }> = [];
+
+  for (const tool of TOOLS) {
+    const allowed = scope[tool.name];
+    if (allowed === undefined) continue; // tool not in scope — hidden
+
+    let actions: readonly string[];
+    if (allowed === "*") {
+      actions = tool.actions;
+    } else if (Array.isArray(allowed)) {
+      actions = tool.actions.filter((a) => allowed.includes(a));
+      if (actions.length === 0) continue; // no allowed actions — hide tool
+    } else {
+      // ActionConstraint — unwrap .actions
+      const constraint = allowed.actions;
+      actions = constraint === "*" ? tool.actions : tool.actions.filter((a) => constraint.includes(a));
+      if (actions.length === 0) continue;
+    }
+
+    scopedTools.push({ tool, actions });
   }
-  sections.push("");
+
+  if (scopedTools.length === 0) {
+    return "## Your Tools\n\nNo Clawforce tools are available for your role.";
+  }
+
+  const totalActions = scopedTools.reduce((sum, t) => sum + t.actions.length, 0);
+
+  const sections: string[] = [
+    "## Your Tools",
+    "",
+    `Clawforce provides ${scopedTools.length} tool${scopedTools.length === 1 ? "" : "s"} for your role (${totalActions} action${totalActions === 1 ? "" : "s"} total).`,
+    "",
+  ];
+
+  for (const { tool, actions } of scopedTools) {
+    sections.push(`### \`${tool.name}\``);
+    sections.push("");
+    sections.push(tool.description);
+    sections.push("");
+
+    for (const action of actions) {
+      const desc = getActionDescription(tool.name, action as string);
+      sections.push(`- **\`${action}\`**: ${desc}`);
+    }
+
+    sections.push("");
+  }
 
   return sections.join("\n");
 }
@@ -213,12 +271,11 @@ function getActionDescription(tool: string, action: string): string {
       process_events: "Process pending events through the event router",
       dispatch_metrics: "Get dispatch and queue metrics",
     },
-    clawforce_memory: {
-      save: "Save a learning with scope, category, and confidence",
-      recall: "Query memories filtered by scope and category",
-      validate: "Confirm a memory is still accurate (boosts ranking)",
-      deprecate: "Mark a memory as outdated",
-      list: "Browse memories by scope and category",
+    memory_search: {
+      search: "Semantic search for relevant memories using hybrid BM25 + vector similarity",
+    },
+    memory_get: {
+      get: "Retrieve a specific memory entry by its ID",
     },
   };
 

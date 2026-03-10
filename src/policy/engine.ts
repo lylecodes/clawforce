@@ -66,10 +66,10 @@ function evaluateActionScope(
   context: PolicyContext,
 ): PolicyCheckResult {
   const config = policy.config;
-  const allowedTools = config.allowed_tools as string[] | undefined;
+  const rawAllowed = config.allowed_tools;
   const deniedTools = config.denied_tools as string[] | undefined;
 
-  // Deny list takes precedence
+  // Deny list takes precedence (always string[])
   if (deniedTools && deniedTools.includes(context.toolName)) {
     return {
       allowed: false,
@@ -78,13 +78,56 @@ function evaluateActionScope(
     };
   }
 
-  // If allowed list exists, tool must be in it
-  if (allowedTools && !allowedTools.includes(context.toolName)) {
-    return {
-      allowed: false,
-      reason: `Tool "${context.toolName}" is not in the allowed list for policy "${policy.name}"`,
-      policyId: policy.id,
-    };
+  if (!rawAllowed) return { allowed: true };
+
+  // Legacy format: string[] — tool-name-only check
+  if (Array.isArray(rawAllowed)) {
+    if (!(rawAllowed as string[]).includes(context.toolName)) {
+      return {
+        allowed: false,
+        reason: `Tool "${context.toolName}" is not in the allowed list for policy "${policy.name}"`,
+        policyId: policy.id,
+      };
+    }
+    return { allowed: true };
+  }
+
+  // New ActionScope format: Record<string, string[] | "*" | ActionConstraint>
+  if (typeof rawAllowed === "object") {
+    const scope = rawAllowed as Record<string, unknown>;
+
+    // Tool must be a key in the scope
+    if (!(context.toolName in scope)) {
+      return {
+        allowed: false,
+        reason: `Tool "${context.toolName}" is not in the allowed list for policy "${policy.name}"`,
+        policyId: policy.id,
+      };
+    }
+
+    let allowedActions: string[] | "*";
+    const entry = scope[context.toolName]!;
+
+    // ActionConstraint shape: { actions: ..., constraints?: ... }
+    if (typeof entry === "object" && !Array.isArray(entry) && entry !== null && "actions" in (entry as Record<string, unknown>)) {
+      allowedActions = (entry as { actions: string[] | "*" }).actions;
+    } else {
+      allowedActions = entry as string[] | "*";
+    }
+
+    // Wildcard: all actions allowed
+    if (allowedActions === "*") return { allowed: true };
+
+    // Action-level check (only if toolAction is provided)
+    if (context.toolAction && !allowedActions.includes(context.toolAction)) {
+      return {
+        allowed: false,
+        reason: `Action "${context.toolAction}" on tool "${context.toolName}" is not allowed by policy "${policy.name}"`,
+        policyId: policy.id,
+      };
+    }
+
+    return { allowed: true };
   }
 
   return { allowed: true };
@@ -94,7 +137,7 @@ function evaluateTransitionGate(
   policy: PolicyDefinition,
   context: PolicyContext,
 ): PolicyCheckResult {
-  if (context.toolName !== "clawforce_task" || context.toolAction !== "transition") {
+  if (context.toolName !== "clawforce_task" || (context.toolAction !== "transition" && context.toolAction !== "bulk_transition")) {
     return { allowed: true };
   }
 
@@ -163,7 +206,7 @@ function evaluateApprovalRequired(
   const actions = config.actions as string[] | undefined;
 
   const toolMatch = !tools || tools.includes(context.toolName);
-  const actionMatch = !actions || (context.toolAction && actions.includes(context.toolAction));
+  const actionMatch = !actions || (context.toolAction !== undefined && actions.includes(context.toolAction));
 
   if (toolMatch && actionMatch) {
     return {

@@ -12,6 +12,8 @@ export type ComplianceResult = {
   sessionKey: string;
   agentId: string;
   projectId: string;
+  /** Job name if this session ran a scoped job. */
+  jobName?: string;
   /** Which requirements were satisfied and which weren't. */
   requirements: RequirementResult[];
   /** Full metrics snapshot. */
@@ -62,6 +64,7 @@ export function checkCompliance(session: SessionCompliance): ComplianceResult {
     sessionKey: session.sessionKey,
     agentId: session.agentId,
     projectId: session.projectId,
+    jobName: session.jobName,
     requirements,
     metrics: session.metrics,
     violations,

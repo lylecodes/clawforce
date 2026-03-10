@@ -15,6 +15,7 @@ import { getExtendedProjectConfig } from "../project.js";
 import { classifyRisk } from "../risk/classifier.js";
 import { getRiskConfig } from "../risk/config.js";
 import { applyRiskGate } from "../risk/gate.js";
+import { getApprovalNotifier } from "../approval/notify.js";
 import { isTaskInFuturePhase } from "../workflow.js";
 import { validateTransition } from "./state-machine.js";
 import type {
@@ -193,6 +194,28 @@ export function createTask(
     safeLog("task.create.audit", err);
   }
 
+  // Emit task_created event (for auto-assignment)
+  try {
+    ingestEvent(params.projectId, "task_created", "internal", {
+      taskId: id,
+      state,
+      assignedTo: params.assignedTo,
+      department: params.department,
+      team: params.team,
+    }, `task-created:${id}`, db);
+  } catch (err) { safeLog("task.create.event", err); }
+
+  // Emit task_assigned event when created directly in ASSIGNED state
+  if (state === "ASSIGNED" && params.assignedTo) {
+    try {
+      ingestEvent(params.projectId, "task_assigned", "internal", {
+        taskId: id,
+        assignedTo: params.assignedTo,
+        fromState: "OPEN",
+      }, `task-assigned:${id}`, db);
+    } catch (err) { safeLog("task.create.assignedEvent", err); }
+  }
+
   return task;
 }
 
@@ -206,6 +229,8 @@ export function transitionTask(
     evidenceId?: string;
     verificationRequired?: boolean;
     assignedTo?: string;
+    /** Skip BEGIN/COMMIT wrapping when caller already holds a transaction. */
+    withinTransaction?: boolean;
   },
   dbOverride?: DatabaseSync,
 ): TransitionResult {
@@ -244,14 +269,36 @@ export function transitionTask(
           // Create a proposal for this action
           try {
             const proposalId = crypto.randomUUID();
+            const proposalDesc = `Risk-gated transition: ${task.state} → ${params.toState} on task ${task.id}`;
             db.prepare(`
               INSERT INTO proposals (id, project_id, title, description, proposed_by, status, risk_tier, created_at)
               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
             `).run(
               proposalId, params.projectId, gateResult.proposalTitle,
-              `Risk-gated transition: ${task.state} → ${params.toState} on task ${task.id}`,
-              params.actor, classification.tier, Date.now(),
+              proposalDesc, params.actor, classification.tier, Date.now(),
             );
+
+            // Notify via configured channel (async, non-blocking)
+            getApprovalNotifier()?.sendProposalNotification({
+              proposalId,
+              projectId: params.projectId,
+              title: gateResult.proposalTitle,
+              description: proposalDesc,
+              proposedBy: params.actor,
+              riskTier: classification.tier,
+            }).catch(err => safeLog("transition.proposalNotify", err));
+
+            // Emit proposal_created event
+            try {
+              ingestEvent(params.projectId, "proposal_created", "internal", {
+                proposalId,
+                proposedBy: params.actor,
+                riskTier: classification.tier,
+                title: gateResult.proposalTitle,
+              }, `proposal-created:${proposalId}`, db);
+            } catch (err2) {
+              safeLog("transition.proposalEvent", err2);
+            }
           } catch (err) {
             safeLog("transition.riskProposal", err);
           }
@@ -282,12 +329,27 @@ export function transitionTask(
     hasEvidence = !!evidenceRow && (evidenceRow.cnt as number) > 0;
   }
 
+  // Compute verificationRequired: respect explicit param, then check self-review config
+  let verificationRequired = params.verificationRequired ?? true;
+
+  if (verificationRequired && task.state === "REVIEW" &&
+      (params.toState === "DONE" || params.toState === "FAILED" || params.toState === "IN_PROGRESS") &&
+      params.actor === task.assignedTo) {
+    const reviewConfig = getExtendedProjectConfig(params.projectId)?.review;
+    if (reviewConfig?.selfReviewAllowed) {
+      const maxPriority = reviewConfig.selfReviewMaxPriority ?? "P3";
+      if (isSelfReviewEligible(task.priority, maxPriority)) {
+        verificationRequired = false;
+      }
+    }
+  }
+
   const error = validateTransition({
     task,
     toState: params.toState,
     actor: params.actor,
     hasEvidence,
-    verificationRequired: params.verificationRequired ?? true,
+    verificationRequired,
   });
 
   if (error) return { ok: false, reason: error.message };
@@ -350,30 +412,44 @@ export function transitionTask(
   }
 
   updateValues.push(params.taskId, task.state, params.projectId);
-  const updateResult = db.prepare(
-    `UPDATE tasks SET ${updateFields.join(", ")} WHERE id = ? AND state = ? AND project_id = ?`
-  ).run(...updateValues);
-  if (updateResult.changes === 0) {
-    return { ok: false, reason: `Concurrent state change: task no longer in state "${task.state}"` };
+
+  // D1: Wrap UPDATE + INSERT in a transaction for atomicity
+  const ownTransaction = !params.withinTransaction;
+  if (ownTransaction) db.prepare("BEGIN IMMEDIATE").run();
+  try {
+    const updateResult = db.prepare(
+      `UPDATE tasks SET ${updateFields.join(", ")} WHERE id = ? AND state = ? AND project_id = ?`
+    ).run(...updateValues);
+    if (updateResult.changes === 0) {
+      if (ownTransaction) db.prepare("ROLLBACK").run();
+      return { ok: false, reason: `Concurrent state change: task no longer in state "${task.state}"` };
+    }
+
+    // Record transition
+    db.prepare(`
+      INSERT INTO transitions (id, task_id, from_state, to_state, actor, actor_signature, reason, evidence_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      transitionId,
+      params.taskId,
+      task.state,
+      params.toState,
+      params.actor,
+      actorSignature ?? null,
+      params.reason ?? null,
+      params.evidenceId ?? null,
+      now,
+    );
+
+    if (ownTransaction) db.prepare("COMMIT").run();
+  } catch (err) {
+    if (ownTransaction) {
+      try { db.prepare("ROLLBACK").run(); } catch { /* already rolled back */ }
+    }
+    throw err;
   }
 
-  // Record transition
-  db.prepare(`
-    INSERT INTO transitions (id, task_id, from_state, to_state, actor, actor_signature, reason, evidence_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    transitionId,
-    params.taskId,
-    task.state,
-    params.toState,
-    params.actor,
-    actorSignature ?? null,
-    params.reason ?? null,
-    params.evidenceId ?? null,
-    now,
-  );
-
-  // Audit log entry for transition (fills gap: transitions table has records but audit log didn't)
+  // Audit log entry — called AFTER commit (writeAuditEntry manages its own BEGIN IMMEDIATE)
   try {
     writeAuditEntry({
       projectId: params.projectId,
@@ -391,6 +467,15 @@ export function transitionTask(
   if (params.toState === "ASSIGNED") {
     const assignee = params.assignedTo ?? params.actor;
     registerWorkerAssignment(assignee, params.projectId, params.taskId);
+
+    // Emit task_assigned event (for auto-dispatch)
+    try {
+      ingestEvent(params.projectId, "task_assigned", "internal", {
+        taskId: params.taskId,
+        assignedTo: assignee,
+        fromState: task.state,
+      }, `task-assigned:${params.taskId}:${transitionId}`, db);
+    } catch (err) { safeLog("transition.assignedEvent", err); }
   }
   if (params.toState === "DONE" || params.toState === "FAILED" || params.toState === "CANCELLED") {
     if (task.assignedTo) clearWorkerAssignment(task.assignedTo, db);
@@ -686,6 +771,8 @@ export type ListTasksFilter = {
   priority?: TaskPriority;
   tags?: string[];
   workflowId?: string;
+  department?: string;
+  team?: string;
   limit?: number;
 };
 
@@ -717,6 +804,14 @@ export function listTasks(
   if (filter?.workflowId) {
     conditions.push("workflow_id = ?");
     values.push(filter.workflowId);
+  }
+  if (filter?.department) {
+    conditions.push("department = ?");
+    values.push(filter.department);
+  }
+  if (filter?.team) {
+    conditions.push("team = ?");
+    values.push(filter.team);
   }
 
   const limit = filter?.limit ?? 100;
@@ -809,4 +904,11 @@ export function renewTaskLease(
   ).run(expiresAt, taskId, projectId, holder);
 
   return result.changes > 0;
+}
+
+/** Priority ordering: P0=highest, P3=lowest. Returns true if taskPriority is at or below maxPriority. */
+const PRIORITY_ORDER: Record<TaskPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+export function isSelfReviewEligible(taskPriority: TaskPriority, maxPriority: TaskPriority): boolean {
+  return PRIORITY_ORDER[taskPriority] >= PRIORITY_ORDER[maxPriority];
 }

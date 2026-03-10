@@ -10,7 +10,7 @@ Accountability layer for autonomous AI agents — treats them like employees wit
 - **Context briefing** -- each role gets default context sources injected automatically at session start
 - **Task lifecycle** -- full state machine: OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE
 - **Workflows** -- multi-phase execution with automatic gating between phases
-- **Shared memory** -- agents save and recall learnings across sessions, scoped by identity (agent, team, department, role)
+- **Shared memory** -- agents search and retrieve learnings across sessions via OpenClaw's RAG engine (vector embeddings, hybrid BM25+vector search)
 - **Skill system** -- role-aware domain knowledge generated from source code, never drifts from reality
 - **Cost tracking** -- token spending by agent and task, with budget enforcement
 - **Policy enforcement** -- approval flows, risk classification, SLO monitoring
@@ -170,7 +170,7 @@ Context briefing injects information into an agent's prompt at session start. Ea
 | `task_board` | Active tasks grouped by state |
 | `assigned_task` | Full task details for this agent's assigned work |
 | `knowledge` | Knowledge base entries (filterable by category, tags) |
-| `memory` | Shared memories from past sessions, scoped by identity |
+| `memory` | Directs agents to use `memory_search` and `memory_get` RAG tools |
 | `skill` | Role-filtered domain knowledge (table of contents at session start) |
 | `file` | File contents from the project directory |
 | `escalations` | Failed tasks that exhausted retries |
@@ -199,18 +199,16 @@ agents:
         path: "SALES_PLAYBOOK.md"
 ```
 
-## Shared Memory
+## Shared Memory (RAG)
 
-Agents save and recall learnings across sessions. Memories are scoped by identity:
+Agents search and retrieve persistent learnings via OpenClaw's native RAG memory engine. Two tools are available:
 
-| Scope | Shared With |
-|-------|-------------|
-| `agent:<id>` | Only this specific agent |
-| `team:<name>` | All agents in the same team |
-| `dept:<name>` | All agents in the same department |
-| `role:<role>` | All agents with the same role |
+| Tool | Purpose |
+|------|---------|
+| `memory_search` | Semantic search using hybrid BM25 + vector similarity with MMR re-ranking |
+| `memory_get` | Retrieve a specific memory entry by ID |
 
-Memories are ranked by quality (`confidence * validation_count`) and auto-injected at session start via the `memory` context source.
+The `memory` context source injects guidance directing agents to use these tools on-demand rather than pre-loading memories. OpenClaw handles persistence, embedding, and lifecycle management automatically.
 
 ## Task Lifecycle
 
@@ -238,7 +236,8 @@ With additional states: BLOCKED, FAILED, CANCELLED. Policy rules enforced by the
 | `clawforce_setup` | Onboard projects, validate configs, activate |
 | `clawforce_compact` | Session compaction for long-running agents |
 | `clawforce_ops` | Operational actions (enqueue work, process events, kill agents) |
-| `clawforce_memory` | Save, recall, validate, and deprecate shared memories |
+| `memory_search` | Semantic search for relevant memories from previous sessions (OpenClaw RAG) |
+| `memory_get` | Retrieve a specific memory entry by ID (OpenClaw RAG) |
 
 ## Installation
 

@@ -1,12 +1,12 @@
 /**
  * Clawforce — Verification
  *
- * Dispatches a verifier session to check task output.
+ * Enqueues a verifier session to check task output via the dispatch queue.
  * Enforces different-actor requirement for the verifier gate.
  */
 
 import { getTask, getTaskEvidence, transitionTask } from "./ops.js";
-import { dispatchClaudeCode } from "../dispatch/spawn.js";
+import { enqueue } from "../dispatch/queue.js";
 import type { TransitionResult } from "../types.js";
 
 export type VerificationRequest = {
@@ -21,22 +21,25 @@ export type VerificationRequest = {
 
 export type VerificationResult = {
   ok: boolean;
-  passed: boolean;
+  queued: boolean;
   reason: string;
-  verifierOutput?: string;
-  transitionResult?: TransitionResult;
+  queueItemId?: string;
 };
 
-export async function requestVerification(request: VerificationRequest): Promise<VerificationResult> {
+/**
+ * Enqueue a verification request through the dispatch queue.
+ * Returns immediately — verification runs asynchronously via the dispatch loop.
+ */
+export function requestVerification(request: VerificationRequest): VerificationResult {
   const { projectId, taskId, projectDir, verifierProfile, verifierModel, timeoutMs } = request;
 
   const task = getTask(projectId, taskId);
   if (!task) {
-    return { ok: false, passed: false, reason: "Task not found" };
+    return { ok: false, queued: false, reason: "Task not found" };
   }
 
   if (task.state !== "REVIEW") {
-    return { ok: false, passed: false, reason: `Task is in ${task.state}, expected REVIEW` };
+    return { ok: false, queued: false, reason: `Task is in ${task.state}, expected REVIEW` };
   }
 
   const evidence = getTaskEvidence(projectId, taskId);
@@ -46,33 +49,17 @@ export async function requestVerification(request: VerificationRequest): Promise
 
   const prompt = request.verificationPrompt ?? buildVerificationPrompt(task.title, task.description, evidenceSummary);
 
-  const result = await dispatchClaudeCode({
-    task,
-    projectDir,
-    prompt,
-    profile: verifierProfile,
-    model: verifierModel,
-    timeoutMs,
-  });
+  const payload: Record<string, unknown> = { prompt, projectDir };
+  if (verifierProfile) payload.profile = verifierProfile;
+  if (verifierModel) payload.model = verifierModel;
+  if (timeoutMs) payload.timeoutMs = timeoutMs;
 
-  if (!result.ok) {
-    return {
-      ok: false,
-      passed: false,
-      reason: `Verifier dispatch failed: exit code ${result.exitCode}`,
-      verifierOutput: result.stderr,
-    };
+  const queueItem = enqueue(projectId, taskId, payload);
+  if (!queueItem) {
+    return { ok: true, queued: false, reason: "Verification already queued (dedup)" };
   }
 
-  // Parse verdict from output — look for PASS/FAIL markers
-  const verdict = parseVerdict(result.stdout);
-
-  return {
-    ok: true,
-    passed: verdict.passed,
-    reason: verdict.reason,
-    verifierOutput: result.stdout,
-  };
+  return { ok: true, queued: true, reason: "Verification enqueued", queueItemId: queueItem.id };
 }
 
 /**
@@ -128,29 +115,4 @@ function buildVerificationPrompt(title: string, description: string | undefined,
     ``,
     `Include a brief explanation of your reasoning.`,
   ].join("\n");
-}
-
-function parseVerdict(output: string): { passed: boolean; reason: string } {
-  const lines = output.split("\n");
-  for (const line of lines) {
-    const trimmed = line.trim().toUpperCase();
-    if (!trimmed.includes("VERDICT:")) continue;
-    // Extract the portion after "VERDICT:" to avoid matching stray words before it
-    const afterVerdict = trimmed.slice(trimmed.indexOf("VERDICT:") + "VERDICT:".length);
-    // Check FAIL first since "PASS" could appear in words like "PASSED" alongside "FAIL"
-    if (afterVerdict.includes("FAIL")) {
-      return { passed: false, reason: extractReason(output) };
-    }
-    if (afterVerdict.includes("PASS")) {
-      return { passed: true, reason: extractReason(output) };
-    }
-  }
-  // Default to fail if no clear verdict
-  return { passed: false, reason: "No clear PASS/FAIL verdict in verifier output" };
-}
-
-function extractReason(output: string): string {
-  // Take the last paragraph as the reason summary
-  const paragraphs = output.trim().split(/\n\n+/);
-  return paragraphs[paragraphs.length - 1]?.trim().slice(0, 500) ?? "No reason provided";
 }

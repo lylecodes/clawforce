@@ -79,7 +79,9 @@ function evaluateSingleSlo(
   }, db);
 
   if (agg.length === 0 || agg[0]!.count === 0) {
-    return { sloName: name, metricKey: slo.metricKey, threshold: slo.threshold, actual: null, passed: true, noData: true };
+    const noDataPolicy = slo.noDataPolicy ?? "pass";
+    const passed = noDataPolicy !== "fail";
+    return { sloName: name, metricKey: slo.metricKey, threshold: slo.threshold, actual: null, passed, noData: true };
   }
 
   const aggResult = agg[0]!;

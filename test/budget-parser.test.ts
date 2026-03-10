@@ -31,4 +31,21 @@ describe("budget parser", () => {
     const result = parseBudgetShorthand("2000");
     expect(result).toEqual({ dailyLimitCents: 2000 });
   });
+
+  it("parses combined windows with +", () => {
+    const result = parseBudgetShorthand("$5/hour + $100/day + $500/month");
+    expect(result).toEqual({
+      hourlyLimitCents: 500,
+      dailyLimitCents: 10000,
+      monthlyLimitCents: 50000,
+    });
+  });
+
+  it("parses combined windows without spaces", () => {
+    const result = parseBudgetShorthand("$5/hour+$100/day");
+    expect(result).toEqual({
+      hourlyLimitCents: 500,
+      dailyLimitCents: 10000,
+    });
+  });
 });

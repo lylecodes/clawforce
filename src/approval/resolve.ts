@@ -9,6 +9,7 @@ import { writeAuditEntry } from "../audit.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { ingestEvent } from "../events/store.js";
+import { getApprovalNotifier } from "./notify.js";
 
 export type ProposalStatus = "pending" | "approved" | "rejected";
 
@@ -74,11 +75,15 @@ export function approveProposal(projectId: string, proposalId: string, feedback?
     safeLog("approval.approve.audit", err);
   }
 
+  // Edit Telegram notification to show resolution
+  getApprovalNotifier()?.editProposalMessage(proposalId, projectId, "approved", feedback)
+    .catch(err => safeLog("approval.approve.editMessage", err));
+
   // Emit event so the router can re-attempt the gated action
   try {
     const proposal = getProposal(projectId, proposalId);
     if (proposal) {
-      ingestEvent(projectId, "proposal_approved" as Parameters<typeof ingestEvent>[1], "internal", {
+      ingestEvent(projectId, "proposal_approved", "internal", {
         proposalId,
         proposedBy: proposal.proposed_by,
         riskTier: proposal.risk_tier,
@@ -116,6 +121,20 @@ export function rejectProposal(projectId: string, proposalId: string, feedback?:
     });
   } catch (err) {
     safeLog("approval.reject.audit", err);
+  }
+
+  // Edit Telegram notification to show rejection
+  getApprovalNotifier()?.editProposalMessage(proposalId, projectId, "rejected", feedback)
+    .catch(err => safeLog("approval.reject.editMessage", err));
+
+  // Emit proposal_rejected event
+  try {
+    ingestEvent(projectId, "proposal_rejected", "internal", {
+      proposalId,
+      feedback,
+    }, `proposal-rejected:${proposalId}`);
+  } catch (err) {
+    safeLog("approval.reject.event", err);
   }
 
   return getProposal(projectId, proposalId);

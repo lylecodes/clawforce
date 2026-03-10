@@ -249,8 +249,8 @@ describe("orchestrator-cron", () => {
     expect(job.schedule).toBe("every:300000");
     expect(job.agentId).toBe("myproject-agent");
     expect(job.payload).toContain("manager");
-    expect(job.payload).toContain("Handle pending escalations");
-    expect(job.payload).toContain("Assign OPEN tasks");
+    expect(job.payload).toContain("OBSERVE");
+    expect(job.payload).toContain("DECIDE");
   });
 
   test("parseScheduleMs handles duration shorthands", () => {

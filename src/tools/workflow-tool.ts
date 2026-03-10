@@ -16,7 +16,7 @@ import {
 } from "../workflow.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
-import { errorResult, jsonResult, readNumberParam, readStringParam, safeExecute } from "./common.js";
+import { errorResult, jsonResult, readNumberParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
 
 const WORKFLOW_ACTIONS = [
   "create", "get", "list", "add_task", "advance", "force_advance", "phase_status",
@@ -41,6 +41,7 @@ const ClawforceWorkflowSchema = Type.Object({
 
 export function createClawforceWorkflowTool(options?: {
   agentSessionKey?: string;
+  projectId?: string;
 }) {
   return {
     label: "Process Management",
@@ -54,7 +55,10 @@ export function createClawforceWorkflowTool(options?: {
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
         const action = readStringParam(params, "action", { required: true })!;
-        const projectId = readStringParam(params, "project_id", { required: true })!;
+        const resolved = resolveProjectId(params, options?.projectId, "");
+        if (resolved.error) return jsonResult({ ok: false, reason: resolved.error });
+        if (!resolved.projectId) return errorResult("Missing required parameter: project_id");
+        const projectId = resolved.projectId!;
         const actor = options?.agentSessionKey ?? "unknown";
 
         switch (action) {

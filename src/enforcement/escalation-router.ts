@@ -11,6 +11,8 @@
 
 import type { AgentConfig } from "../types.js";
 import { emitDiagnosticEvent } from "../diagnostics.js";
+import { createMessage, markDelivered } from "../messaging/store.js";
+import { notifyMessage } from "../messaging/notify.js";
 import { resolveEscalationChain } from "../org.js";
 
 export type EscalationTarget =
@@ -69,6 +71,41 @@ export async function routeEscalation(params: EscalationParams): Promise<void> {
 
   // Try each level in the chain until one succeeds
   for (const targetAgentId of targets) {
+    // Persist as message for delivery tracking
+    if (params.projectId) {
+      try {
+        const msg = createMessage({
+          fromAgent: `system:escalation:${sourceAgentId}`,
+          toAgent: targetAgentId,
+          projectId: params.projectId,
+          type: "escalation",
+          priority: "urgent",
+          content: message,
+        });
+        emitDiagnosticEvent({ type: "escalation_queued_as_message", targetAgentId, sourceAgentId, messageId: msg.id });
+
+        // Attempt immediate delivery for active sessions
+        const sessionKey = `agent:${targetAgentId}`;
+        try {
+          await params.injectAgentMessage({ sessionKey, message });
+          markDelivered(msg.id);
+          emitDiagnosticEvent({ type: "escalation_delivered", targetAgentId, sourceAgentId });
+        } catch {
+          // Message stays queued — will be delivered at next session start via pending_messages
+          emitDiagnosticEvent({ type: "escalation_queued_for_delivery", targetAgentId, sourceAgentId });
+        }
+
+        // Mirror to Telegram (fire-and-forget)
+        notifyMessage(msg).catch(() => {});
+
+        return; // Message persisted — stop escalating up the chain
+      } catch (err) {
+        logger.warn(`Clawforce: failed to persist escalation as message: ${err instanceof Error ? err.message : String(err)}`);
+        // Fall through to legacy injection path
+      }
+    }
+
+    // Legacy fallback: direct injection without persistence
     const sessionKey = `agent:${targetAgentId}`;
     try {
       await params.injectAgentMessage({ sessionKey, message });

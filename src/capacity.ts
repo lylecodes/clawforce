@@ -25,10 +25,11 @@ export type CapacityReport = {
  */
 export function getCapacityReport(
   projectId: string,
+  agentId?: string,
   dbOverride?: DatabaseSync,
 ): CapacityReport {
   const db = dbOverride ?? getDb(projectId);
-  const budget = getBudgetStatus(projectId, undefined, db);
+  const budget = getBudgetStatus(projectId, agentId, db);
   const providers = getAllProviderUsage();
 
   // Determine throttle risk from provider usage
@@ -46,11 +47,17 @@ export function getCapacityReport(
     if (throttleRisk === "critical") break;
   }
 
-  // Estimate remaining sessions from historical average
+  // Estimate remaining sessions from historical average using tightest budget window
   const avgCost = getAverageSessionCost(projectId, db);
   let estimatedRemainingSessions: number | undefined;
-  if (avgCost > 0 && budget.daily?.remainingCents) {
-    estimatedRemainingSessions = Math.floor(budget.daily.remainingCents / avgCost);
+  if (avgCost > 0) {
+    const windowRemaining = [budget.hourly, budget.daily, budget.monthly]
+      .filter(Boolean)
+      .map(w => w!.remainingCents);
+    if (windowRemaining.length > 0) {
+      const tightest = Math.min(...windowRemaining);
+      estimatedRemainingSessions = Math.floor(tightest / avgCost);
+    }
   }
 
   return {

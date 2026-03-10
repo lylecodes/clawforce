@@ -228,6 +228,162 @@ describe("spend_limit policy", () => {
   });
 });
 
+describe("action_scope policy — ActionScope object format", () => {
+  it("allows tool with wildcard actions", () => {
+    registerPolicies("p1", [
+      {
+        name: "scope",
+        type: "action_scope",
+        target: "worker-1",
+        config: { allowed_tools: { clawforce_task: "*", clawforce_log: "*" } },
+      },
+    ], db);
+
+    const result = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_task",
+      toolAction: "create",
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  it("blocks tool not in ActionScope", () => {
+    registerPolicies("p1", [
+      {
+        name: "scope",
+        type: "action_scope",
+        target: "worker-1",
+        config: { allowed_tools: { clawforce_task: "*" } },
+      },
+    ], db);
+
+    const result = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_ops",
+      toolAction: "kill_agent",
+    });
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result.reason).toContain("not in the allowed list");
+    }
+  });
+
+  it("allows action in scope", () => {
+    registerPolicies("p1", [
+      {
+        name: "scope",
+        type: "action_scope",
+        target: "worker-1",
+        config: { allowed_tools: { clawforce_task: ["get", "list", "transition"] } },
+      },
+    ], db);
+
+    const result = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_task",
+      toolAction: "get",
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  it("blocks action not in scope with clear message", () => {
+    registerPolicies("p1", [
+      {
+        name: "scope",
+        type: "action_scope",
+        target: "worker-1",
+        config: { allowed_tools: { clawforce_task: ["get", "list"] } },
+      },
+    ], db);
+
+    const result = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_task",
+      toolAction: "create",
+    });
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result.reason).toContain('"create"');
+      expect(result.reason).toContain("clawforce_task");
+      expect(result.reason).toContain("not allowed");
+    }
+  });
+
+  it("allows when toolAction is undefined (schema filtering prevents this in practice)", () => {
+    registerPolicies("p1", [
+      {
+        name: "scope",
+        type: "action_scope",
+        target: "worker-1",
+        config: { allowed_tools: { clawforce_task: ["get"] } },
+      },
+    ], db);
+
+    const result = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_task",
+      // toolAction is undefined
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  it("denied_tools takes precedence over ActionScope allowed", () => {
+    registerPolicies("p1", [
+      {
+        name: "scope",
+        type: "action_scope",
+        target: "worker-1",
+        config: {
+          allowed_tools: { clawforce_task: "*" },
+          denied_tools: ["clawforce_task"],
+        },
+      },
+    ], db);
+
+    const result = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_task",
+      toolAction: "get",
+    });
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result.reason).toContain("denied");
+    }
+  });
+
+  it("backward compat — legacy string[] still works for tool-level only", () => {
+    registerPolicies("p1", [
+      {
+        name: "scope",
+        type: "action_scope",
+        target: "worker-1",
+        config: { allowed_tools: ["clawforce_task", "clawforce_log"] },
+      },
+    ], db);
+
+    const allowed = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_task",
+      toolAction: "create", // not restricted in legacy format
+    });
+    expect(allowed.allowed).toBe(true);
+
+    const blocked = checkPolicies({
+      projectId: "p1",
+      agentId: "worker-1",
+      toolName: "clawforce_ops",
+    });
+    expect(blocked.allowed).toBe(false);
+  });
+});
+
 describe("no policies", () => {
   it("allows everything when no policies are registered", () => {
     const result = checkPolicies({

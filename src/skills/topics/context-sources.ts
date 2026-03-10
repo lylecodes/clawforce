@@ -9,7 +9,8 @@ export function generate(): string {
   // "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" |
   // "knowledge" | "file" | "skill" | "memory" | "escalations" | "workflows" |
   // "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" |
-  // "policy_status" | "health_status" | "team_status" | "team_performance"
+  // "policy_status" | "health_status" | "team_status" | "team_performance" |
+  // "soul" | "tools_reference"
   const sources: Array<{ name: string; description: string; extra?: string }> = [
     { name: "instructions", description: "System instructions for the agent role. Always auto-injected regardless of profile." },
     { name: "custom", description: "Raw markdown content specified inline.", extra: "`content` (string) — the markdown text to inject" },
@@ -31,6 +32,9 @@ export function generate(): string {
     { name: "health_status", description: "System health — SLO status, anomalies, alerts." },
     { name: "team_status", description: "Status of agents in the manager's team/department." },
     { name: "team_performance", description: "Performance metrics for the manager's team." },
+    { name: "soul", description: "Agent's SOUL.md identity document. Overrides config.persona when present on disk at `agents/{id}/SOUL.md`." },
+    { name: "tools_reference", description: "Scoped tools reference for the agent. Auto-generated from effective action scope; can be overridden with `agents/{id}/TOOLS.md`." },
+    { name: "goal_hierarchy", description: "Active goal hierarchy with progress tracking and cascade status." },
   ];
 
   const sections: string[] = [

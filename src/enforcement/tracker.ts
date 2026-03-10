@@ -5,7 +5,7 @@
  * Updated via after_tool_call hook, checked at agent_end.
  */
 
-import type { AgentConfig, Expectation } from "../types.js";
+import type { AgentConfig, Expectation, PerformancePolicy } from "../types.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 
@@ -37,7 +37,16 @@ export type SessionCompliance = {
   /** requirement key → call count */
   satisfied: Map<string, number>;
   metrics: SessionMetrics;
+  /** Effective performance policy for this session (may differ from base if job-scoped). */
+  performancePolicy?: PerformancePolicy;
+  /** Job name if this session is running a scoped job. */
+  jobName?: string;
+  /** Dispatch context if this session was spawned via the dispatch queue. */
+  dispatchContext?: { queueItemId: string; taskId: string };
 };
+
+/** Persist session state every N tool calls (when compliance state hasn't changed). */
+const PERSIST_EVERY_N_CALLS = 5;
 
 /** In-memory store of active sessions. */
 const sessions = new Map<string, SessionCompliance>();
@@ -51,12 +60,15 @@ export function startTracking(
   agentId: string,
   projectId: string,
   config: AgentConfig,
+  jobName?: string,
 ): void {
   const compliance: SessionCompliance = {
     sessionKey,
     agentId,
     projectId,
     requirements: config.expectations,
+    performancePolicy: config.performance_policy,
+    jobName,
     satisfied: new Map(),
     metrics: {
       startedAt: Date.now(),
@@ -109,12 +121,8 @@ export function recordToolCall(
     session.metrics.errorCount++;
   }
 
-  // Persist every 5th tool call to reduce write amplification
-  if (session.metrics.toolCalls.length % 5 === 0) {
-    persistSession(sessionKey);
-  }
-
   // Check if this satisfies any requirement (only successful calls count)
+  let satisfiedChanged = false;
   if (success) {
     for (const req of session.requirements) {
       if (matchesRequirement(req, toolName, action)) {
@@ -122,8 +130,14 @@ export function recordToolCall(
         const current = session.satisfied.get(key) ?? 0;
         session.satisfied.set(key, current + 1);
         session.metrics.requiredCallTimings.push(now);
+        satisfiedChanged = true;
       }
     }
+  }
+
+  // Persist when compliance state changes OR every Nth call
+  if (satisfiedChanged || session.metrics.toolCalls.length % PERSIST_EVERY_N_CALLS === 0) {
+    persistSession(sessionKey);
   }
 }
 
@@ -132,6 +146,17 @@ export function recordToolCall(
  */
 export function getSession(sessionKey: string): SessionCompliance | null {
   return sessions.get(sessionKey) ?? null;
+}
+
+/**
+ * Set dispatch context on an active session.
+ * Called from before_prompt_build when a dispatch tag is detected.
+ */
+export function setDispatchContext(sessionKey: string, context: { queueItemId: string; taskId: string }): void {
+  const session = sessions.get(sessionKey);
+  if (!session) return;
+  session.dispatchContext = context;
+  persistSession(sessionKey);
 }
 
 /**
@@ -172,8 +197,8 @@ export function persistSession(sessionKey: string): void {
   try {
     const db = getDb(session.projectId);
     db.prepare(`
-      INSERT OR REPLACE INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at, dispatch_context)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.sessionKey,
       session.agentId,
@@ -183,6 +208,7 @@ export function persistSession(sessionKey: string): void {
       JSON.stringify(Object.fromEntries(session.satisfied)),
       session.metrics.toolCalls.length,
       Date.now(),
+      session.dispatchContext ? JSON.stringify(session.dispatchContext) : null,
     );
   } catch (err) {
     safeLog("tracker.persist", err);
@@ -207,6 +233,7 @@ export type OrphanedSession = {
   projectId: string;
   startedAt: number;
   toolCallCount: number;
+  dispatchContext?: { queueItemId: string; taskId: string };
 };
 
 /**
@@ -217,18 +244,25 @@ export function recoverOrphanedSessions(projectId: string): OrphanedSession[] {
   try {
     const db = getDb(projectId);
     const rows = db.prepare(
-      "SELECT session_key, agent_id, project_id, started_at, tool_call_count FROM tracked_sessions WHERE project_id = ?"
+      "SELECT session_key, agent_id, project_id, started_at, tool_call_count, dispatch_context FROM tracked_sessions WHERE project_id = ?"
     ).all(projectId) as Record<string, unknown>[];
 
     if (rows.length === 0) return [];
 
-    const orphans: OrphanedSession[] = rows.map(row => ({
-      sessionKey: row.session_key as string,
-      agentId: row.agent_id as string,
-      projectId: row.project_id as string,
-      startedAt: row.started_at as number,
-      toolCallCount: row.tool_call_count as number,
-    }));
+    const orphans: OrphanedSession[] = rows.map(row => {
+      let dispatchContext: { queueItemId: string; taskId: string } | undefined;
+      if (row.dispatch_context) {
+        try { dispatchContext = JSON.parse(row.dispatch_context as string); } catch { /* ignore */ }
+      }
+      return {
+        sessionKey: row.session_key as string,
+        agentId: row.agent_id as string,
+        projectId: row.project_id as string,
+        startedAt: row.started_at as number,
+        toolCallCount: row.tool_call_count as number,
+        dispatchContext,
+      };
+    });
 
     // Clean up orphaned rows
     db.prepare("DELETE FROM tracked_sessions WHERE project_id = ?").run(projectId);

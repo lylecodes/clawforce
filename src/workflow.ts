@@ -9,7 +9,8 @@ import crypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { writeAuditEntry } from "./audit.js";
 import { getDb } from "./db.js";
-import { safeLog } from "./diagnostics.js";
+import { emitDiagnosticEvent, safeLog } from "./diagnostics.js";
+import { ingestEvent } from "./events/store.js";
 import { getTask, listTasks } from "./tasks/ops.js";
 import type { Task, Workflow, WorkflowPhase } from "./types.js";
 
@@ -175,8 +176,21 @@ export function advanceWorkflow(projectId: string, workflowId: string, dbOverrid
 
   if (nextPhase >= workflow.phases.length) {
     // All phases complete — mark workflow as completed
+    const now = Date.now();
     db.prepare("UPDATE workflows SET state = 'completed', current_phase = ?, updated_at = ? WHERE id = ?")
-      .run(workflow.currentPhase, Date.now(), workflowId);
+      .run(workflow.currentPhase, now, workflowId);
+
+    // Emit workflow_completed event
+    try {
+      ingestEvent(projectId, "workflow_completed", "internal", {
+        workflowId,
+        workflowName: workflow.name,
+        totalPhases: workflow.phases.length,
+      }, `workflow-completed:${workflowId}`, db);
+    } catch (err) { safeLog("workflow.completedEvent", err); }
+
+    emitDiagnosticEvent({ type: "workflow_completed", workflowId, projectId, name: workflow.name });
+
     return workflow.currentPhase;
   }
 

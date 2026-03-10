@@ -8,13 +8,13 @@
 import crypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "../db.js";
-import type { ClawforceEvent, EventSource, EventStatus, EventType } from "../types.js";
+import type { ClawforceEvent, EventSource, EventStatus } from "../types.js";
 
 function rowToEvent(row: Record<string, unknown>): ClawforceEvent {
   return {
     id: row.id as string,
     projectId: row.project_id as string,
-    type: row.type as EventType,
+    type: row.type as string,
     source: row.source as EventSource,
     payload: JSON.parse(row.payload as string),
     dedupKey: (row.dedup_key as string) ?? undefined,
@@ -32,31 +32,37 @@ function rowToEvent(row: Record<string, unknown>): ClawforceEvent {
  */
 export function ingestEvent(
   projectId: string,
-  type: EventType,
+  type: string,
   source: EventSource,
   payload: Record<string, unknown>,
   dedupKey?: string,
   dbOverride?: DatabaseSync,
 ): { id: string; deduplicated: boolean } {
   const db = dbOverride ?? getDb(projectId);
-
-  // Check dedup
-  if (dedupKey) {
-    const existing = db.prepare(
-      "SELECT id FROM events WHERE project_id = ? AND dedup_key = ?",
-    ).get(projectId, dedupKey) as Record<string, unknown> | undefined;
-    if (existing) {
-      return { id: existing.id as string, deduplicated: true };
-    }
-  }
-
   const id = crypto.randomUUID();
   const now = Date.now();
+
+  // Use INSERT OR IGNORE with the unique index on (project_id, dedup_key) for atomic dedup
+  if (dedupKey) {
+    const result = db.prepare(`
+      INSERT OR IGNORE INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(id, projectId, type, source, JSON.stringify(payload), dedupKey, now);
+
+    if (result.changes === 0) {
+      // Row already exists — fetch existing ID
+      const existing = db.prepare(
+        "SELECT id FROM events WHERE project_id = ? AND dedup_key = ?",
+      ).get(projectId, dedupKey) as Record<string, unknown>;
+      return { id: existing.id as string, deduplicated: true };
+    }
+    return { id, deduplicated: false };
+  }
 
   db.prepare(`
     INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-  `).run(id, projectId, type, source, JSON.stringify(payload), dedupKey ?? null, now);
+  `).run(id, projectId, type, source, JSON.stringify(payload), null, now);
 
   return { id, deduplicated: false };
 }
@@ -69,72 +75,100 @@ export function claimPendingEvents(
   projectId: string,
   limit: number,
   dbOverride?: DatabaseSync,
+  withinTransaction?: boolean,
 ): ClawforceEvent[] {
   const db = dbOverride ?? getDb(projectId);
   const now = Date.now();
 
-  // Select pending events ordered by creation time
-  const pending = db.prepare(
-    "SELECT id FROM events WHERE project_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?",
-  ).all(projectId, limit) as Record<string, unknown>[];
+  // D2: Wrap SELECT + UPDATE in BEGIN IMMEDIATE to prevent double-claiming
+  if (!withinTransaction) db.prepare("BEGIN IMMEDIATE").run();
+  try {
+    const pending = db.prepare(
+      "SELECT id FROM events WHERE project_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?",
+    ).all(projectId, limit) as Record<string, unknown>[];
 
-  if (pending.length === 0) return [];
+    if (pending.length === 0) {
+      if (!withinTransaction) db.prepare("ROLLBACK").run();
+      return [];
+    }
 
-  const ids = pending.map((r) => r.id as string);
-  const placeholders = ids.map(() => "?").join(", ");
+    const ids = pending.map((r) => r.id as string);
+    const placeholders = ids.map(() => "?").join(", ");
 
-  // Atomically update to processing
-  db.prepare(
-    `UPDATE events SET status = 'processing', processed_at = ? WHERE id IN (${placeholders})`,
-  ).run(now, ...ids);
+    db.prepare(
+      `UPDATE events SET status = 'processing', processed_at = ? WHERE id IN (${placeholders})`,
+    ).run(now, ...ids);
 
-  // Return the claimed events
-  const rows = db.prepare(
-    `SELECT * FROM events WHERE id IN (${placeholders})`,
-  ).all(...ids) as Record<string, unknown>[];
+    const rows = db.prepare(
+      `SELECT * FROM events WHERE id IN (${placeholders})`,
+    ).all(...ids) as Record<string, unknown>[];
 
-  return rows.map(rowToEvent);
+    if (!withinTransaction) db.prepare("COMMIT").run();
+    return rows.map(rowToEvent);
+  } catch (err) {
+    if (!withinTransaction) {
+      try { db.prepare("ROLLBACK").run(); } catch { /* already rolled back */ }
+    }
+    throw err;
+  }
 }
 
-/** Mark an event as handled. */
+/** Mark an event as handled. Requires a db instance (always called from the event router). */
 export function markHandled(
   id: string,
   handledBy: string,
-  dbOverride?: DatabaseSync,
+  db: DatabaseSync,
 ): void {
-  const db = dbOverride ?? getDb("");
   db.prepare(
     "UPDATE events SET status = 'handled', handled_by = ?, processed_at = ? WHERE id = ?",
   ).run(handledBy, Date.now(), id);
 }
 
-/** Mark an event as failed. */
+/** Mark an event as failed. Requires a db instance (always called from the event router). */
 export function markFailed(
   id: string,
   error: string,
-  dbOverride?: DatabaseSync,
+  db: DatabaseSync,
 ): void {
-  const db = dbOverride ?? getDb("");
   db.prepare(
     "UPDATE events SET status = 'failed', error = ?, processed_at = ? WHERE id = ?",
   ).run(error, Date.now(), id);
 }
 
-/** Mark an event as ignored. */
+/** Mark an event as ignored. Requires a db instance (always called from the event router). */
 export function markIgnored(
   id: string,
-  dbOverride?: DatabaseSync,
+  db: DatabaseSync,
 ): void {
-  const db = dbOverride ?? getDb("");
   db.prepare(
     "UPDATE events SET status = 'ignored', processed_at = ? WHERE id = ?",
   ).run(Date.now(), id);
 }
 
+/** Default threshold for considering a processing event stale. */
+export const STALE_EVENT_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
+ * Reclaim events stuck in 'processing' state for longer than the threshold.
+ * Returns the number of events reclaimed back to 'pending'.
+ */
+export function reclaimStaleEvents(
+  projectId: string,
+  staleThresholdMs: number = STALE_EVENT_THRESHOLD_MS,
+  dbOverride?: DatabaseSync,
+): number {
+  const db = dbOverride ?? getDb(projectId);
+  const cutoff = Date.now() - staleThresholdMs;
+  const result = db.prepare(
+    "UPDATE events SET status = 'pending', processed_at = NULL WHERE project_id = ? AND status = 'processing' AND processed_at < ?",
+  ).run(projectId, cutoff);
+  return Number(result.changes);
+}
+
 /** List events with optional filtering. */
 export function listEvents(
   projectId: string,
-  filter?: { status?: EventStatus; type?: EventType; limit?: number },
+  filter?: { status?: EventStatus; type?: string; limit?: number },
   dbOverride?: DatabaseSync,
 ): ClawforceEvent[] {
   const db = dbOverride ?? getDb(projectId);

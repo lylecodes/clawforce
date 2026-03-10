@@ -157,6 +157,65 @@ describe("evaluateAlertRules", () => {
     expect(payload.metricKey).toBe("cpu_usage");
   });
 
+  it("escalate action creates a P0 task", () => {
+    recordMetric({ projectId: PROJECT, type: "system", key: "critical_errors", value: 200 }, db);
+
+    const results = evaluateAlertRules(PROJECT, {
+      critical_alert: {
+        name: "critical_alert",
+        metricType: "system",
+        metricKey: "critical_errors",
+        condition: "gt",
+        threshold: 100,
+        windowMs: 3600000,
+        action: "escalate",
+        cooldownMs: 60000,
+      },
+    }, db);
+
+    expect(results[0]!.fired).toBe(true);
+
+    // Verify a P0 task was created
+    const tasks = db.prepare(
+      "SELECT * FROM tasks WHERE project_id = ? AND title LIKE '%escalation%'",
+    ).all(PROJECT) as Record<string, unknown>[];
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.priority).toBe("P0");
+    expect(tasks[0]!.state).toBe("OPEN");
+    expect((tasks[0]!.tags as string)).toContain("alert-escalation");
+
+    // Verify the event was also emitted
+    const events = db.prepare(
+      "SELECT * FROM events WHERE project_id = ? AND type = 'sweep_finding'",
+    ).all(PROJECT) as Record<string, unknown>[];
+    expect(events.length).toBeGreaterThan(0);
+  });
+
+  it("escalate action deduplicates tasks", () => {
+    recordMetric({ projectId: PROJECT, type: "system", key: "dedup_metric", value: 200 }, db);
+
+    const rule = {
+      dedup_alert: {
+        name: "dedup_alert",
+        metricType: "system",
+        metricKey: "dedup_metric",
+        condition: "gt" as const,
+        threshold: 100,
+        windowMs: 3600000,
+        action: "escalate" as const,
+        cooldownMs: 0, // disable cooldown for this test
+      },
+    };
+
+    evaluateAlertRules(PROJECT, rule, db);
+    evaluateAlertRules(PROJECT, rule, db);
+
+    const tasks = db.prepare(
+      "SELECT * FROM tasks WHERE project_id = ? AND title LIKE '%dedup_alert%'",
+    ).all(PROJECT) as Record<string, unknown>[];
+    expect(tasks).toHaveLength(1);
+  });
+
   describe("comparison operators", () => {
     it("gt: fires when value > threshold", () => {
       recordMetric({ projectId: PROJECT, type: "system", key: "m_gt", value: 51 }, db);

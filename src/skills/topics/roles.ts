@@ -7,13 +7,13 @@
 import { BUILTIN_PROFILES, ROLE_DEFAULTS, DEFAULT_ACTION_SCOPES } from "../../profiles.js";
 import type { AgentRole } from "../../types.js";
 
-const ROLES: AgentRole[] = ["manager", "employee", "scheduled"];
+const ROLES: AgentRole[] = ["manager", "employee", "scheduled", "assistant"];
 
 export function generate(): string {
   const sections: string[] = [
     "# Agent Roles",
     "",
-    "Clawforce defines three built-in roles. Each role has a default profile that provides sensible defaults for briefing sources, expectations, performance policy, and allowed tools. Agents inherit from their role's profile and only need to specify what's different.",
+    "Clawforce defines four built-in roles. Each role has a default profile that provides sensible defaults for briefing sources, expectations, performance policy, and allowed tools. Agents inherit from their role's profile and only need to specify what's different.",
     "",
   ];
 
@@ -78,8 +78,12 @@ export function generate(): string {
     // Allowed tools (action scopes)
     sections.push("### Default Allowed Tools");
     sections.push("");
-    for (const tool of scopes) {
-      sections.push(`- \`${tool}\``);
+    for (const [tool, actions] of Object.entries(scopes)) {
+      if (actions === "*") {
+        sections.push(`- \`${tool}\` — all actions`);
+      } else {
+        sections.push(`- \`${tool}\` — ${(actions as string[]).join(", ")}`);
+      }
     }
     sections.push("");
   }

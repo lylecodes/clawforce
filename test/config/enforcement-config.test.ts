@@ -617,10 +617,14 @@ agents:
     const config = loadWorkforceConfig(configPath);
     const cron = config!.agents.cron1!;
 
-    // instructions (auto-injected) + memory (scheduled baseline)
-    expect(cron.briefing).toHaveLength(2);
+    // instructions (auto-injected) + soul + tools_reference + pending_messages + memory + skill (scheduled baseline)
+    expect(cron.briefing).toHaveLength(6);
     expect(cron.briefing[0]!.source).toBe("instructions");
-    expect(cron.briefing[1]!.source).toBe("memory");
+    const sourceNames = cron.briefing.map((s) => s.source);
+    expect(sourceNames).toContain("soul");
+    expect(sourceNames).toContain("tools_reference");
+    expect(sourceNames).toContain("memory");
+    expect(sourceNames).toContain("skill");
     // Inherits scheduled profile expectations
     expect(cron.expectations.some((r) => r.tool === "clawforce_log" &&
       (Array.isArray(r.action) ? r.action.includes("outcome") : r.action === "outcome"),

@@ -141,6 +141,15 @@ export type { CapacityReport, ThrottleRisk } from "./capacity.js";
 // --- Resources Context ---
 export { buildResourcesContext } from "./context/sources/resources.js";
 
+// --- Budget Parser ---
+export { parseBudgetShorthand } from "./budget-parser.js";
+
+// --- Cost Auto-Capture ---
+export { recordCostFromLlmOutput } from "./cost.js";
+
+// --- Dispatch Gate ---
+export { shouldDispatch } from "./dispatch/dispatcher.js";
+
 // --- Dashboard ---
 export { createDashboardServer, handleRequest } from "./dashboard/index.js";
 export type { DashboardOptions } from "./dashboard/index.js";

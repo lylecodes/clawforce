@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   updateProviderUsage,
   getProviderUsage,
   getAllProviderUsage,
   isProviderThrottled,
+  getMaxUsagePercent,
   clearAllUsage,
 } from "../src/rate-limits.js";
 
@@ -44,5 +45,22 @@ describe("rate limit tracker", () => {
 
     const all = getAllProviderUsage();
     expect(all).toHaveLength(2);
+  });
+
+  it("ignores stale data for throttle checks", () => {
+    updateProviderUsage("anthropic", {
+      windows: [{ label: "RPM", usedPercent: 99 }],
+    });
+
+    // Should be throttled when fresh
+    expect(isProviderThrottled("anthropic", 90)).toBe(true);
+
+    // Simulate staleness by manipulating updatedAt
+    const usage = getProviderUsage("anthropic")!;
+    (usage as Record<string, unknown>).updatedAt = Date.now() - 11 * 60 * 1000; // 11 minutes ago
+
+    // Should not be throttled when stale
+    expect(isProviderThrottled("anthropic", 90)).toBe(false);
+    expect(getMaxUsagePercent("anthropic")).toBe(0);
   });
 });

@@ -13,13 +13,13 @@
 
 import { randomUUID } from "node:crypto";
 import { Type } from "@sinclair/typebox";
-import { verifyAuditChain } from "../audit.js";
+import { verifyAuditChain, writeAuditEntry } from "../audit.js";
 import { getDb } from "../db.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
-import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, safeExecute } from "./common.js";
+import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
 
-const LOG_ACTIONS = ["write", "outcome", "search", "list", "verify_audit"] as const;
+const LOG_ACTIONS = ["write", "outcome", "search", "list", "verify_audit", "record_decision"] as const;
 
 const CATEGORIES = ["decision", "pattern", "issue", "outcome", "context"] as const;
 
@@ -39,6 +39,11 @@ const ClawforceLogSchema = Type.Object({
   summary: Type.Optional(Type.String({ description: "Outcome summary (for outcome)." })),
   details: Type.Optional(Type.String({ description: "Outcome details (for outcome)." })),
   artifacts: Type.Optional(Type.Array(Type.String(), { description: "Artifact references (for outcome)." })),
+  // record_decision params (OODA)
+  observation: Type.Optional(Type.String({ description: "What was observed (OODA Observe phase)." })),
+  orientation: Type.Optional(Type.String({ description: "How the situation was interpreted (OODA Orient phase)." })),
+  decision: Type.Optional(Type.String({ description: "What was decided (OODA Decide phase)." })),
+  rationale: Type.Optional(Type.String({ description: "Why this decision was made." })),
   // search/list params
   query: Type.Optional(Type.String({ description: "Search query text. Uses substring matching, not semantic search. Use specific terms for best results." })),
   limit: Type.Optional(Type.Number({ description: "Max results (default 20)." })),
@@ -47,6 +52,7 @@ const ClawforceLogSchema = Type.Object({
 export function createClawforceLogTool(options?: {
   agentSessionKey?: string;
   agentId?: string;
+  projectId?: string;
 }) {
   return {
     label: "Work Journal",
@@ -54,6 +60,7 @@ export function createClawforceLogTool(options?: {
     description:
       "Record work journal entries and query past records. " +
       "Write: write — Record decisions, patterns, and issues. " +
+      "Planning: record_decision — Record structured OODA planning decisions (observation, orientation, decision, rationale). " +
       "Report: outcome — Log session results. " +
       "Query: search, list — Find past entries (keyword-based substring matching). " +
       "Audit: verify_audit — Check chain integrity.",
@@ -61,7 +68,9 @@ export function createClawforceLogTool(options?: {
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
         const action = readStringParam(params, "action", { required: true })!;
-        const projectId = readStringParam(params, "project_id") ?? "default";
+        const resolved = resolveProjectId(params, options?.projectId);
+        if (resolved.error) return jsonResult({ ok: false, reason: resolved.error });
+        const projectId = resolved.projectId!;
         const actor = options?.agentId ?? options?.agentSessionKey ?? "unknown";
         const sessionKey = options?.agentSessionKey ?? "unknown";
 
@@ -80,6 +89,9 @@ export function createClawforceLogTool(options?: {
 
           case "verify_audit":
             return handleVerifyAudit(projectId);
+
+          case "record_decision":
+            return handleRecordDecision(projectId, actor, sessionKey, params);
 
           default:
             return jsonResult({ ok: false, reason: `Unknown action: ${action}` });
@@ -235,6 +247,54 @@ function handleList(projectId: string, params: Record<string, unknown>): ToolRes
 function handleVerifyAudit(projectId: string): ToolResult {
   const result = verifyAuditChain(projectId);
   return jsonResult({ ok: true, ...result });
+}
+
+function handleRecordDecision(
+  projectId: string,
+  actor: string,
+  sessionKey: string,
+  params: Record<string, unknown>,
+): ToolResult {
+  const title = readStringParam(params, "title", { required: true })!;
+  const observation = readStringParam(params, "observation") ?? "";
+  const orientation = readStringParam(params, "orientation") ?? "";
+  const decision = readStringParam(params, "decision") ?? "";
+  const rationale = readStringParam(params, "rationale") ?? "";
+  const tags = readStringArrayParam(params, "tags");
+
+  const db = getDb(projectId);
+  const id = randomUUID();
+  const now = Date.now();
+
+  // Build structured content
+  const contentParts: string[] = [];
+  if (observation) contentParts.push(`**Observe:** ${observation}`);
+  if (orientation) contentParts.push(`**Orient:** ${orientation}`);
+  if (decision) contentParts.push(`**Decide:** ${decision}`);
+  if (rationale) contentParts.push(`**Rationale:** ${rationale}`);
+  const content = contentParts.join("\n\n");
+
+  // Store as knowledge entry (category: decision) for cross-session retrieval
+  db.prepare(`
+    INSERT INTO knowledge (id, project_id, category, title, content, tags, source_agent, source_session, created_at)
+    VALUES (?, ?, 'decision', ?, ?, ?, ?, ?, ?)
+  `).run(id, projectId, title, content, tags ? JSON.stringify(tags) : null, actor, sessionKey, now);
+
+  // Also record as audit entry for accountability
+  writeAuditEntry({
+    projectId,
+    actor,
+    action: "planning_decision",
+    targetType: "planning",
+    targetId: id,
+    detail: JSON.stringify({ title, observation, orientation, decision, rationale }),
+  }, db);
+
+  return jsonResult({
+    ok: true,
+    entry: { id, category: "decision", title, tags, created_at: now },
+    message: "Planning decision recorded to knowledge base and audit trail.",
+  });
 }
 
 // --- Helpers ---

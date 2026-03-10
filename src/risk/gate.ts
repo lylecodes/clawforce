@@ -39,6 +39,12 @@ export function applyRiskGate(context: RiskGateContext): RiskGateResult {
     case "delay":
       result = { action: "delay", delayMs: tierPolicy.delayMs ?? 30000 };
       break;
+    case "confirm":
+      result = {
+        action: "require_approval",
+        proposalTitle: `Confirm: ${context.actionDetail} (${classification.tier})`,
+      };
+      break;
     case "approval":
       result = {
         action: "require_approval",

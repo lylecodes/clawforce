@@ -1,0 +1,317 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  buildOpenClawAgentEntry,
+  mergeAgentEntry,
+  syncAgentsToOpenClaw,
+  type OpenClawAgentEntry,
+  type OpenClawConfigSubset,
+} from "../src/agent-sync.js";
+import type { AgentConfig } from "../src/types.js";
+
+function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
+  return {
+    role: "employee",
+    briefing: [{ source: "instructions" }],
+    expectations: [],
+    performance_policy: { action: "alert" },
+    ...overrides,
+  };
+}
+
+// --- buildOpenClawAgentEntry ---
+
+describe("buildOpenClawAgentEntry", () => {
+  it("maps title to name and identity.name", () => {
+    const entry = buildOpenClawAgentEntry(
+      "eng-lead",
+      makeAgentConfig({ title: "VP of Engineering" }),
+    );
+    expect(entry.id).toBe("eng-lead");
+    expect(entry.name).toBe("VP of Engineering");
+    expect(entry.identity).toEqual({ name: "VP of Engineering" });
+  });
+
+  it("maps model to model.primary", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig({ model: "claude-opus-4-6" }),
+    );
+    expect(entry.model).toEqual({ primary: "claude-opus-4-6" });
+  });
+
+  it("maps projectDir to workspace", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig(),
+      "/home/user/project",
+    );
+    expect(entry.workspace).toBe("/home/user/project");
+  });
+
+  it("sets subagents.allowAgents for manager role", () => {
+    const entry = buildOpenClawAgentEntry(
+      "mgr",
+      makeAgentConfig({ role: "manager" }),
+    );
+    expect(entry.subagents).toEqual({ allowAgents: ["*"] });
+  });
+
+  it("does not set subagents for non-manager roles", () => {
+    const entry = buildOpenClawAgentEntry(
+      "worker",
+      makeAgentConfig({ role: "employee" }),
+    );
+    expect(entry.subagents).toBeUndefined();
+  });
+
+  it("handles minimal config (just id)", () => {
+    const entry = buildOpenClawAgentEntry("bare", makeAgentConfig());
+    expect(entry.id).toBe("bare");
+    expect(entry.name).toBeUndefined();
+    expect(entry.model).toBeUndefined();
+    expect(entry.workspace).toBeUndefined();
+    expect(entry.identity).toBeUndefined();
+  });
+});
+
+// --- mergeAgentEntry ---
+
+describe("mergeAgentEntry", () => {
+  it("preserves all existing user fields (user-wins)", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "agent1",
+      name: "Custom Name",
+      model: "my-custom-model",
+      workspace: "/custom/path",
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "agent1",
+      name: "Auto Name",
+      model: { primary: "claude-opus-4-6" },
+      workspace: "/auto/path",
+      identity: { name: "Auto Name" },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+
+    expect(merged.name).toBe("Custom Name");
+    expect(merged.model).toBe("my-custom-model");
+    expect(merged.workspace).toBe("/custom/path");
+    // identity was missing in existing, so it gets filled
+    expect(merged.identity).toEqual({ name: "Auto Name" });
+  });
+
+  it("fills in missing fields from incoming", () => {
+    const existing: OpenClawAgentEntry = { id: "agent1" };
+    const incoming: OpenClawAgentEntry = {
+      id: "agent1",
+      name: "Bot",
+      model: { primary: "gpt-4o" },
+      identity: { name: "Bot" },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+
+    expect(merged.name).toBe("Bot");
+    expect(merged.model).toEqual({ primary: "gpt-4o" });
+    expect(merged.identity).toEqual({ name: "Bot" });
+  });
+
+  it("empty existing entry gets fully populated", () => {
+    const existing: OpenClawAgentEntry = { id: "x" };
+    const incoming: OpenClawAgentEntry = {
+      id: "x",
+      name: "X Agent",
+      workspace: "/ws",
+      subagents: { allowAgents: ["*"] },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+
+    expect(merged).toEqual({
+      id: "x",
+      name: "X Agent",
+      workspace: "/ws",
+      subagents: { allowAgents: ["*"] },
+    });
+  });
+});
+
+// --- syncAgentsToOpenClaw ---
+
+describe("syncAgentsToOpenClaw", () => {
+  function makeMocks(initialConfig: OpenClawConfigSubset = {}) {
+    const config = structuredClone(initialConfig);
+    const loadConfig = vi.fn(() => config);
+    const writeConfigFile = vi.fn(async () => {});
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    return { config, loadConfig, writeConfigFile, logger };
+  }
+
+  it("first sync creates agents in empty config", async () => {
+    const { loadConfig, writeConfigFile, logger } = makeMocks({});
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "bot1", config: makeAgentConfig({ title: "Bot One", model: "claude-opus-4-6" }) },
+        { agentId: "bot2", config: makeAgentConfig({ role: "manager", title: "Manager" }), projectDir: "/proj" },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.synced).toBe(2);
+    expect(result.skipped).toBe(0);
+    expect(result.errors).toHaveLength(0);
+    expect(writeConfigFile).toHaveBeenCalledTimes(1);
+
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written.agents!.list).toHaveLength(2);
+    expect(written.agents!.list![0]!.id).toBe("bot1");
+    expect(written.agents!.list![0]!.name).toBe("Bot One");
+    expect(written.agents!.list![1]!.id).toBe("bot2");
+    expect(written.agents!.list![1]!.subagents).toEqual({ allowAgents: ["*"] });
+    expect(written.agents!.list![1]!.workspace).toBe("/proj");
+  });
+
+  it("idempotent re-sync skips and does not write", async () => {
+    const existingConfig: OpenClawConfigSubset = {
+      agents: {
+        list: [
+          { id: "bot1", name: "Bot One", model: { primary: "claude-opus-4-6" }, identity: { name: "Bot One" } },
+        ],
+      },
+    };
+    const { loadConfig, writeConfigFile, logger } = makeMocks(existingConfig);
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "bot1", config: makeAgentConfig({ title: "Bot One", model: "claude-opus-4-6" }) },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.synced).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(writeConfigFile).not.toHaveBeenCalled();
+  });
+
+  it("merge preserves existing customizations", async () => {
+    const existingConfig: OpenClawConfigSubset = {
+      agents: {
+        list: [
+          { id: "bot1", name: "My Custom Name", model: "custom-model" },
+        ],
+      },
+    };
+    const { loadConfig, writeConfigFile, logger } = makeMocks(existingConfig);
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "bot1", config: makeAgentConfig({ title: "Auto Name", model: "claude-opus-4-6" }), projectDir: "/ws" },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    // workspace was missing, so it should be filled in → counts as synced
+    expect(result.synced).toBe(1);
+    expect(writeConfigFile).toHaveBeenCalledTimes(1);
+
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    const agent = written.agents!.list![0]!;
+    expect(agent.name).toBe("My Custom Name"); // preserved
+    expect(agent.model).toBe("custom-model"); // preserved
+    expect(agent.workspace).toBe("/ws"); // filled in
+    expect(agent.identity).toEqual({ name: "Auto Name" }); // filled in
+  });
+
+  it("error in one agent does not block others", async () => {
+    const { loadConfig, writeConfigFile, logger } = makeMocks({});
+
+    // Monkey-patch loadConfig to return config, but make one agent blow up
+    // by using a getter that throws on a specific property access
+    const badConfig = makeAgentConfig({ title: "Good" });
+    const goodConfig = makeAgentConfig({ title: "Also Good" });
+
+    // Simulate an error by passing a config where buildOpenClawAgentEntry will throw
+    const throwingConfig = new Proxy(badConfig, {
+      get(target, prop) {
+        if (prop === "title") throw new Error("bad agent config");
+        return (target as Record<string | symbol, unknown>)[prop];
+      },
+    });
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "bad-bot", config: throwingConfig as AgentConfig },
+        { agentId: "good-bot", config: goodConfig },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("bad-bot");
+    expect(result.synced).toBe(1); // good-bot still synced
+    expect(writeConfigFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("empty agents list is a no-op", async () => {
+    const { loadConfig, writeConfigFile, logger } = makeMocks({});
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.synced).toBe(0);
+    expect(result.skipped).toBe(0);
+    expect(result.errors).toHaveLength(0);
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(writeConfigFile).not.toHaveBeenCalled();
+  });
+
+  it("config write failure caught gracefully", async () => {
+    const { loadConfig, logger } = makeMocks({});
+    const writeConfigFile = vi.fn(async () => { throw new Error("disk full"); });
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "bot1", config: makeAgentConfig({ title: "Bot" }) },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.synced).toBe(1); // it was synced in memory
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("disk full");
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("config load failure caught gracefully", async () => {
+    const loadConfig = vi.fn(() => { throw new Error("config corrupt"); });
+    const writeConfigFile = vi.fn(async () => {});
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "bot1", config: makeAgentConfig({ title: "Bot" }) },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.synced).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("config corrupt");
+    expect(writeConfigFile).not.toHaveBeenCalled();
+  });
+});

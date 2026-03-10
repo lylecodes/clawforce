@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { SKILL_TOPICS, getTopicList, resolveSkillSource } from "../../src/skills/registry.js";
 import { TASK_STATES, EVIDENCE_TYPES } from "../../src/types.js";
 import { BUILTIN_PROFILES } from "../../src/profiles.js";
-import { MEMORY_ACTIONS, MEMORY_CATEGORIES } from "../../src/tools/memory-tool.js";
 
 describe("skill system registry", () => {
   describe("SKILL_TOPICS", () => {
@@ -62,23 +61,20 @@ describe("skill system registry", () => {
       }
     });
 
-    it("memory topic mentions all memory actions", () => {
+    it("memory topic mentions memory_search and memory_get", () => {
       const content = resolveSkillSource("manager", "memory")!;
-      for (const action of MEMORY_ACTIONS) {
-        expect(content).toContain(action);
-      }
+      expect(content).toContain("memory_search");
+      expect(content).toContain("memory_get");
     });
 
-    it("memory topic mentions all memory categories", () => {
+    it("memory topic mentions RAG", () => {
       const content = resolveSkillSource("manager", "memory")!;
-      for (const cat of MEMORY_CATEGORIES) {
-        expect(content).toContain(cat);
-      }
+      expect(content).toContain("RAG");
     });
 
-    it("tools topic mentions clawforce_memory", () => {
+    it("tools topic mentions memory_search", () => {
       const content = resolveSkillSource("manager", "tools")!;
-      expect(content).toContain("clawforce_memory");
+      expect(content).toContain("memory_search");
     });
 
     it("tools topic mentions clawforce_task", () => {
@@ -160,6 +156,26 @@ describe("skill system registry", () => {
       expect(content).toContain("roles");
       expect(content).toContain("memory");
       expect(content).not.toContain("— Proposals"); // approval topic description
+    });
+
+    it("excludeTopics omits topics from TOC", () => {
+      const content = resolveSkillSource("manager", undefined, ["tools"])!;
+      expect(content).toContain("System Knowledge");
+      expect(content).toContain("roles");
+      expect(content).not.toContain("— All tools and their actions"); // tools topic description
+    });
+
+    it("excludeTopics does not affect direct topic queries", () => {
+      const content = resolveSkillSource("manager", "tools", ["tools"])!;
+      // Direct query should still work even if the topic is in excludeTopics
+      expect(content).toContain("clawforce_task");
+    });
+
+    it("excludeTopics with multiple topics", () => {
+      const content = resolveSkillSource("manager", undefined, ["tools", "memory"])!;
+      expect(content).toContain("roles");
+      expect(content).not.toContain("— All tools and their actions");
+      expect(content).not.toContain("— Save and recall learnings");
     });
   });
 });

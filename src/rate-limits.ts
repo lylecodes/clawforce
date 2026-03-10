@@ -22,6 +22,9 @@ export type ProviderUsage = {
 
 const store = new Map<string, ProviderUsage>();
 
+/** Data older than this is considered stale and ignored. */
+const STALENESS_MS = 10 * 60 * 1000; // 10 minutes
+
 export function updateProviderUsage(
   provider: string,
   data: { windows: UsageWindow[]; plan?: string; error?: string },
@@ -43,19 +46,24 @@ export function getAllProviderUsage(): ProviderUsage[] {
   return [...store.values()];
 }
 
+function isStale(usage: ProviderUsage): boolean {
+  return Date.now() - usage.updatedAt > STALENESS_MS;
+}
+
 /**
  * Check if any rate limit window for a provider exceeds the threshold.
+ * Ignores stale data (older than 10 minutes).
  */
 export function isProviderThrottled(provider: string, thresholdPercent: number = 90): boolean {
   const usage = store.get(provider);
-  if (!usage) return false;
+  if (!usage || isStale(usage)) return false;
   return usage.windows.some(w => w.usedPercent >= thresholdPercent);
 }
 
-/** Get the highest used percent across all windows for a provider. */
+/** Get the highest used percent across all windows for a provider. Ignores stale data. */
 export function getMaxUsagePercent(provider: string): number {
   const usage = store.get(provider);
-  if (!usage || usage.windows.length === 0) return 0;
+  if (!usage || usage.windows.length === 0 || isStale(usage)) return 0;
   return Math.max(...usage.windows.map(w => w.usedPercent));
 }
 

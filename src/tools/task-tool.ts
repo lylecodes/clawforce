@@ -9,6 +9,13 @@ import {
   listTasks,
   transitionTask,
 } from "../tasks/ops.js";
+import {
+  addDependency,
+  removeDependency,
+  getTaskDependencies,
+  getTaskDependents,
+  getUnresolvedBlockers,
+} from "../tasks/deps.js";
 import { markWorkerCompliant } from "../tasks/compliance.js";
 import { getDb } from "../db.js";
 import { getApprovalPolicy } from "../project.js";
@@ -17,14 +24,16 @@ import { queryMetrics } from "../metrics.js";
 import type { MetricType } from "../metrics.js";
 import { EVIDENCE_TYPES, TASK_PRIORITIES, TASK_STATES } from "../types.js";
 import type { EvidenceType, TaskPriority, TaskState } from "../types.js";
+import { getAgentConfig } from "../project.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
-import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, safeExecute } from "./common.js";
+import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
 
 const TASK_ACTIONS = [
   "create", "transition", "attach_evidence", "get", "list", "history", "fail",
   "get_approval_context", "submit_proposal", "check_proposal", "metrics",
   "bulk_create", "bulk_transition",
+  "add_dep", "remove_dep", "list_deps", "list_dependents", "list_blockers",
 ] as const;
 
 const ClawforceTaskSchema = Type.Object({
@@ -45,11 +54,16 @@ const ClawforceTaskSchema = Type.Object({
   deadline: Type.Optional(Type.Number({ description: "Deadline as Unix timestamp ms (for create)." })),
   workflow_id: Type.Optional(Type.String({ description: "Workflow ID (for create/list)." })),
   state: Type.Optional(Type.Array(Type.String(), { description: "Filter by state(s): OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE, FAILED, BLOCKED." })),
+  department: Type.Optional(Type.String({ description: "Filter by department (for list)." })),
+  team: Type.Optional(Type.String({ description: "Filter by team (for list)." })),
   limit: Type.Optional(Type.Number({ description: "Max results (for list, default 100)." })),
   proposal_id: Type.Optional(Type.String({ description: "Proposal ID (for submit_proposal)." })),
   type: Type.Optional(Type.String({ description: "Metric type filter: task_cycle, agent_performance, dispatch, sweep, system (for metrics)." })),
   key: Type.Optional(Type.String({ description: "Metric key filter (for metrics)." })),
   since: Type.Optional(Type.Number({ description: "Start timestamp ms (for metrics)." })),
+  // dependency params
+  depends_on_task_id: Type.Optional(Type.String({ description: "Task ID that this task depends on (for add_dep/remove_dep)." })),
+  dep_type: Type.Optional(Type.String({ description: "Dependency type: blocks (hard, default) or soft (advisory)." })),
   // bulk operation params
   tasks: Type.Optional(Type.Array(
     Type.Object({
@@ -76,6 +90,7 @@ const ClawforceTaskSchema = Type.Object({
 
 export function createClawforceTaskTool(options?: {
   agentSessionKey?: string;
+  projectId?: string;
 }) {
   return {
     label: "Work Management",
@@ -84,13 +99,16 @@ export function createClawforceTaskTool(options?: {
       "Manage work assignments. " +
       "CRUD: create, get, list, history, bulk_create. " +
       "Lifecycle: transition, fail, attach_evidence, bulk_transition. " +
+      "Dependencies: add_dep, remove_dep, list_deps, list_dependents, list_blockers. " +
       "Approval: get_approval_context, submit_proposal, check_proposal. " +
       "Tasks follow OPEN → ASSIGNED → IN_PROGRESS → REVIEW → DONE lifecycle with mandatory cross-team verification.",
     parameters: ClawforceTaskSchema,
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
       const action = readStringParam(params, "action", { required: true })!;
-      const projectId = readStringParam(params, "project_id") ?? "default";
+      const resolved = resolveProjectId(params, options?.projectId);
+      if (resolved.error) return jsonResult({ ok: false, reason: resolved.error });
+      const projectId = resolved.projectId!;
       const actor = options?.agentSessionKey ?? "unknown";
 
       switch (action) {
@@ -200,6 +218,19 @@ export function createClawforceTaskTool(options?: {
           const tags = readStringArrayParam(params, "tags");
           const workflowId = readStringParam(params, "workflow_id");
           const limit = readNumberParam(params, "limit", { integer: true });
+          let department = readStringParam(params, "department") ?? undefined;
+          let team = readStringParam(params, "team") ?? undefined;
+
+          // Auto-inject department filter for non-managers
+          const callerEntry = options?.agentSessionKey ? getAgentConfig(actor) : null;
+          if (callerEntry && callerEntry.config.role !== "manager") {
+            if (!department && callerEntry.config.department) {
+              department = callerEntry.config.department;
+            }
+            if (!team && callerEntry.config.team) {
+              team = callerEntry.config.team;
+            }
+          }
 
           const tasks = listTasks(projectId, {
             states: statesRaw && statesRaw.length > 0 ? statesRaw as TaskState[] : undefined,
@@ -207,6 +238,8 @@ export function createClawforceTaskTool(options?: {
             priority: priority ?? undefined,
             tags: tags ?? undefined,
             workflowId: workflowId ?? undefined,
+            department,
+            team,
             limit: limit ?? undefined,
           });
           return jsonResult({ ok: true, tasks, count: tasks.length });
@@ -394,6 +427,48 @@ export function createClawforceTaskTool(options?: {
           }
           const successCount = results.filter((r) => r.ok).length;
           return jsonResult({ ok: true, transitioned: successCount, total: transitionsRaw.length, results });
+        }
+
+        case "add_dep": {
+          const taskId = readStringParam(params, "task_id", { required: true })!;
+          const dependsOn = readStringParam(params, "depends_on_task_id", { required: true })!;
+          const depTypeRaw = readStringParam(params, "dep_type") ?? "blocks";
+          if (depTypeRaw !== "blocks" && depTypeRaw !== "soft") {
+            return jsonResult({ ok: false, reason: `Invalid dep_type: ${depTypeRaw}. Must be "blocks" or "soft".` });
+          }
+          const result = addDependency({
+            projectId,
+            taskId,
+            dependsOnTaskId: dependsOn,
+            type: depTypeRaw,
+            createdBy: actor,
+          });
+          return jsonResult(result);
+        }
+
+        case "remove_dep": {
+          const taskId = readStringParam(params, "task_id", { required: true })!;
+          const dependsOn = readStringParam(params, "depends_on_task_id", { required: true })!;
+          const result = removeDependency({ projectId, taskId, dependsOnTaskId: dependsOn });
+          return jsonResult(result);
+        }
+
+        case "list_deps": {
+          const taskId = readStringParam(params, "task_id", { required: true })!;
+          const deps = getTaskDependencies(projectId, taskId);
+          return jsonResult({ ok: true, dependencies: deps, count: deps.length });
+        }
+
+        case "list_dependents": {
+          const taskId = readStringParam(params, "task_id", { required: true })!;
+          const deps = getTaskDependents(projectId, taskId);
+          return jsonResult({ ok: true, dependents: deps, count: deps.length });
+        }
+
+        case "list_blockers": {
+          const taskId = readStringParam(params, "task_id", { required: true })!;
+          const blockers = getUnresolvedBlockers(projectId, taskId);
+          return jsonResult({ ok: true, blockers, count: blockers.length });
         }
 
         default:

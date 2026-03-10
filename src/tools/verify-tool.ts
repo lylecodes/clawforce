@@ -9,7 +9,7 @@ import { Type } from "@sinclair/typebox";
 import { requestVerification, submitVerdict } from "../tasks/verify.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
-import { errorResult, jsonResult, readBooleanParam, readStringParam, safeExecute } from "./common.js";
+import { errorResult, jsonResult, readBooleanParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
 
 const VERIFY_ACTIONS = ["request", "verdict"] as const;
 
@@ -27,6 +27,7 @@ const ClawforceVerifySchema = Type.Object({
 
 export function createClawforceVerifyTool(options?: {
   agentSessionKey?: string;
+  projectId?: string;
 }) {
   return {
     label: "Work Review",
@@ -39,14 +40,16 @@ export function createClawforceVerifyTool(options?: {
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
         const action = readStringParam(params, "action", { required: true })!;
-        const projectId = readStringParam(params, "project_id") ?? "default";
+        const resolved = resolveProjectId(params, options?.projectId);
+        if (resolved.error) return jsonResult({ ok: false, reason: resolved.error });
+        const projectId = resolved.projectId!;
         const taskId = readStringParam(params, "task_id", { required: true })!;
         const actor = options?.agentSessionKey ?? "unknown";
 
         switch (action) {
           case "request": {
             const projectDir = readStringParam(params, "project_dir") ?? process.cwd();
-            const result = await requestVerification({
+            const result = requestVerification({
               projectId,
               taskId,
               projectDir,

@@ -263,6 +263,27 @@ async function dispatchItem(
     // Budget check failure is non-fatal — proceed with dispatch
   }
 
+  // Multi-window budget + rate limit gate
+  try {
+    const multiWindowResult = checkMultiWindowBudget({ projectId, agentId: resolvedAgentId });
+    if (!multiWindowResult.ok) {
+      failItem(item.id, `Budget exceeded: ${multiWindowResult.reason}`, db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: multiWindowResult.reason, budgetExceeded: true }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "multi_window_budget" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      return;
+    }
+
+    const provider = (item.payload?.provider as string) ?? "anthropic";
+    if (isProviderThrottled(provider, 95)) {
+      failItem(item.id, `Provider ${provider} rate limit exceeded (>95% used)`, db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: `rate_limit_${provider}`, rateLimited: true }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "rate_limited" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      return;
+    }
+  } catch (err) {
+    safeLog("dispatcher.multiWindowCheck", err);
+  }
+
   // Safety checks: spawn depth, cost circuit breaker, loop detection
   try {
     const spawnCheck = checkSpawnDepth(projectId, item.taskId, db);

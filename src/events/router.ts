@@ -8,6 +8,7 @@
  * - custom → no-op (extensibility point)
  */
 
+import crypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "../db.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
@@ -15,11 +16,18 @@ import type { ClawforceEvent } from "../types.js";
 import { claimPendingEvents, ingestEvent, markFailed, markHandled, markIgnored } from "./store.js";
 import { enqueue } from "../dispatch/queue.js";
 import { getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
+import { cascadeUnblock } from "../tasks/deps.js";
+import { gatherFailureAnalysis, recordReplanAttempt } from "../planning/replan.js";
+import { handleWorkflowCompletion, handleGoalAchieved } from "../planning/completion.js";
 import { advanceWorkflow, getWorkflow } from "../workflow.js";
-import { getRegisteredAgentIds, getAgentConfig } from "../project.js";
+import { getRegisteredAgentIds, getAgentConfig, getExtendedProjectConfig } from "../project.js";
 import { recordMetric } from "../metrics.js";
+import { executeAction, type ActionResult } from "./actions.js";
 import { writeAuditEntry } from "../audit.js";
 import { getProposal } from "../approval/resolve.js";
+import { getIntentByProposalForProject, resolveIntentForProject } from "../approval/intent-store.js";
+import { addPreApproval } from "../approval/pre-approved.js";
+import { recordTrustDecision } from "../trust/tracker.js";
 
 export type EventHandlerResult = {
   action: "handled" | "ignored" | "enqueued";
@@ -35,12 +43,24 @@ type EventHandler = (
 const handlers: Record<string, EventHandler> = {
   task_completed: handleTaskCompleted,
   task_failed: handleTaskFailed,
+  task_assigned: handleTaskAssigned,
+  task_created: handleTaskCreated,
   sweep_finding: handleSweepFinding,
   dispatch_succeeded: handleDispatchSucceeded,
   dispatch_failed: handleDispatchFailed,
   task_review_ready: handleTaskReviewReady,
   dispatch_dead_letter: handleDispatchDeadLetter,
   proposal_approved: handleProposalApproved,
+  proposal_created: handleProposalCreated,
+  proposal_rejected: handleProposalRejected,
+  meeting_turn_completed: handleMeetingTurnCompleted,
+  replan_needed: handleReplanNeeded,
+  workflow_completed: handleWorkflowCompleted,
+  goal_achieved: handleGoalAchievedEvent,
+  project_completed: handleCustom,
+  meeting_started: handleCustom,
+  meeting_concluded: handleCustom,
+  channel_created: handleCustom,
   custom: handleCustom,
   ci_failed: handleCustom,
   pr_opened: handleCustom,
@@ -58,23 +78,48 @@ export function processEvents(
   const db = dbOverride ?? getDb(projectId);
   const events = claimPendingEvents(projectId, 50, db);
 
+  // Load user event handlers once per batch
+  const extConfig = getExtendedProjectConfig(projectId);
+  const userHandlers = extConfig?.eventHandlers ?? null;
+
   const outcomes = { handled: 0, ignored: 0, enqueued: 0, failed: 0 };
 
   for (const event of events) {
     const handler = handlers[event.type] ?? handleCustom;
     try {
       const result = handler(event, db);
-      if (result.action === "ignored") {
+
+      // Run user-defined handlers AFTER built-in handler
+      let userResults: ActionResult[] | undefined;
+      if (userHandlers?.[event.type]) {
+        userResults = [];
+        for (const actionConfig of userHandlers[event.type]!) {
+          try {
+            userResults.push(executeAction(event, actionConfig, db));
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            userResults.push({ action: actionConfig.action, ok: false, error: msg });
+            safeLog("event.router.userAction", err);
+          }
+        }
+      }
+
+      // If built-in said "ignored" but user handlers ran, mark as "handled"
+      const hasUserActions = userResults && userResults.length > 0;
+      if (result.action === "ignored" && !hasUserActions) {
         markIgnored(event.id, db);
         outcomes.ignored++;
       } else {
-        markHandled(event.id, result.action, db);
-        if (result.action === "enqueued") outcomes.enqueued++;
+        const effectiveAction = result.action === "ignored" && hasUserActions
+          ? "handled"
+          : result.action;
+        markHandled(event.id, effectiveAction, db);
+        if (effectiveAction === "enqueued") outcomes.enqueued++;
         else outcomes.handled++;
       }
 
       try {
-        recordMetric({ projectId, type: "system", subject: event.type, key: "event_processed", value: 1, tags: { eventId: event.id, outcome: result.action, taskId: result.taskId } }, db);
+        recordMetric({ projectId, type: "system", subject: event.type, key: "event_processed", value: 1, tags: { eventId: event.id, outcome: result.action, taskId: result.taskId, userActionsCount: userResults?.length ?? 0 } }, db);
       } catch (e) { safeLog("event.router.metric", e); }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -103,6 +148,15 @@ export function processEvents(
 function handleTaskCompleted(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
   const taskId = event.payload.taskId as string | undefined;
   if (!taskId) return { action: "ignored" };
+
+  // Cascade unblock: auto-transition BLOCKED → OPEN for dependents
+  try {
+    const actor = (event.payload.actor as string) ?? "system:dep-cascade";
+    const unblocked = cascadeUnblock(event.projectId, taskId, actor, db);
+    if (unblocked.length > 0) {
+      safeLog("event.router.depCascade", `Unblocked ${unblocked.length} task(s): ${unblocked.join(", ")}`);
+    }
+  } catch (err) { safeLog("event.router.depCascade", err); }
 
   const task = getTask(event.projectId, taskId, db);
   if (!task?.workflowId) return { action: "handled", taskId };
@@ -156,12 +210,107 @@ function handleSweepFinding(event: ClawforceEvent, db: DatabaseSync): EventHandl
       }
     }
     case "retry_exhausted": {
-      // Already escalated by sweep — just acknowledge
+      // Gather failure evidence and emit replan_needed event
+      try {
+        const analysis = gatherFailureAnalysis(event.projectId, taskId, db);
+        if (analysis) {
+          ingestEvent(event.projectId, "replan_needed", "internal", {
+            taskId,
+            taskTitle: analysis.taskTitle,
+            priority: analysis.priority,
+            totalAttempts: analysis.totalAttempts,
+            replanCount: analysis.replanCount,
+          }, `replan-needed:${taskId}:${Date.now()}`, db);
+        }
+      } catch (err) { safeLog("event.router.replanEmit", err); }
       return { action: "handled", taskId };
     }
     default:
       return { action: "handled", taskId };
   }
+}
+
+function handleWorkflowCompleted(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const workflowId = event.payload.workflowId as string | undefined;
+  if (!workflowId) return { action: "ignored" };
+
+  // Check for goals with acceptance criteria that need verification
+  try {
+    const verificationTasks = handleWorkflowCompletion(event.projectId, workflowId, db);
+    if (verificationTasks.length > 0) {
+      safeLog("event.router.workflowCompletion", `Created ${verificationTasks.length} verification task(s) for workflow ${workflowId}`);
+    }
+  } catch (err) { safeLog("event.router.workflowCompletion", err); }
+
+  return { action: "handled" };
+}
+
+function handleGoalAchievedEvent(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const goalId = event.payload.goalId as string | undefined;
+  if (!goalId) return { action: "ignored" };
+
+  // Check if project is now complete
+  try {
+    const result = handleGoalAchieved(event.projectId, goalId, db);
+    if (result.projectComplete) {
+      safeLog("event.router.projectComplete", `Project ${event.projectId} is complete`);
+    }
+  } catch (err) { safeLog("event.router.goalAchieved", err); }
+
+  return { action: "handled" };
+}
+
+function handleReplanNeeded(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const taskId = event.payload.taskId as string | undefined;
+  if (!taskId) return { action: "ignored" };
+
+  // Check replan limit
+  const replanResult = recordReplanAttempt(event.projectId, taskId, 3, db);
+
+  if (!replanResult.ok) {
+    // Max replans hit — escalate to human via proposal
+    try {
+      const proposalId = crypto.randomUUID();
+      db.prepare(`
+        INSERT INTO proposals (id, project_id, title, description, proposed_by, status, risk_tier, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', 'critical', ?)
+      `).run(
+        proposalId, event.projectId,
+        `Human intervention: ${event.payload.taskTitle ?? taskId}`,
+        `Task ${taskId} has exhausted all retries and re-plan attempts. Requires human decision.`,
+        "system:replan", Date.now(),
+      );
+
+      ingestEvent(event.projectId, "proposal_created", "internal", {
+        proposalId,
+        proposedBy: "system:replan",
+        riskTier: "critical",
+        title: `Human intervention: ${event.payload.taskTitle ?? taskId}`,
+      }, `proposal-created:${proposalId}`, db);
+    } catch (err) { safeLog("event.router.replanEscalate", err); }
+
+    return { action: "handled", taskId };
+  }
+
+  // Default strategy: manager handles it via OODA
+  // The failure analysis is already available via planning_delta context source.
+  // Record an audit entry so the delta report picks it up.
+  try {
+    writeAuditEntry({
+      projectId: event.projectId,
+      actor: "system:replan",
+      action: "replan_triggered",
+      targetType: "task",
+      targetId: taskId,
+      detail: JSON.stringify({
+        replanCount: replanResult.replanCount,
+        taskTitle: event.payload.taskTitle,
+        priority: event.payload.priority,
+      }),
+    }, db);
+  } catch (err) { safeLog("event.router.replanAudit", err); }
+
+  return { action: "handled", taskId };
 }
 
 function handleDispatchSucceeded(_event: ClawforceEvent, _db: DatabaseSync): EventHandlerResult {
@@ -193,18 +342,31 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   const task = getTask(event.projectId, taskId, db);
   if (!task || task.state !== "REVIEW") return { action: "handled", taskId };
 
-  // Look for a registered verifier/reviewer agent in the same project
-  const agentIds = getRegisteredAgentIds();
+  // Look for a verifier: config-driven first, then regex fallback
+  const extCfg = getExtendedProjectConfig(event.projectId);
   let verifierAgentId: string | null = null;
   let verifierProjectDir: string | undefined;
 
-  for (const agentId of agentIds) {
-    const entry = getAgentConfig(agentId);
-    if (!entry || entry.projectId !== event.projectId) continue;
-    if (/verifier|reviewer/i.test(agentId)) {
-      verifierAgentId = agentId;
+  // 1. Try explicit review.verifierAgent config
+  if (extCfg?.review?.verifierAgent) {
+    const entry = getAgentConfig(extCfg.review.verifierAgent);
+    if (entry && entry.projectId === event.projectId) {
+      verifierAgentId = extCfg.review.verifierAgent;
       verifierProjectDir = entry.projectDir;
-      break;
+    }
+  }
+
+  // 2. Fallback: regex pattern matching (backward compat)
+  if (!verifierAgentId) {
+    const agentIds = getRegisteredAgentIds();
+    for (const agentId of agentIds) {
+      const entry = getAgentConfig(agentId);
+      if (!entry || entry.projectId !== event.projectId) continue;
+      if (/verifier|reviewer/i.test(agentId)) {
+        verifierAgentId = agentId;
+        verifierProjectDir = entry.projectDir;
+        break;
+      }
     }
   }
 
@@ -281,6 +443,53 @@ function handleProposalApproved(event: ClawforceEvent, db: DatabaseSync): EventH
   const proposal = getProposal(event.projectId, proposalId);
   if (!proposal || proposal.status !== "approved") return { action: "handled" };
 
+  // Record trust decision for the category
+  try {
+    const intent = getIntentByProposalForProject(event.projectId, proposalId, db);
+    if (intent) {
+      recordTrustDecision({
+        projectId: event.projectId,
+        category: intent.category,
+        decision: "approved",
+        agentId: intent.agentId,
+        proposalId,
+        toolName: intent.toolName,
+        riskTier: intent.riskTier,
+      }, db);
+    }
+  } catch (err) { safeLog("event.router.trustDecision", err); }
+
+  // Check for linked tool call intent (tool gate approval → re-dispatch)
+  try {
+    const intent = getIntentByProposalForProject(event.projectId, proposalId, db);
+    if (intent && intent.taskId) {
+      // Resolve the intent
+      resolveIntentForProject(event.projectId, intent.id, "approved", db);
+
+      // Add pre-approval so the re-dispatched agent can proceed past the gate
+      addPreApproval({
+        projectId: event.projectId,
+        taskId: intent.taskId,
+        toolName: intent.toolName,
+        category: intent.category,
+      }, db);
+
+      // Re-enqueue the task for dispatch (priority 0 = high priority)
+      try {
+        const result = enqueue(event.projectId, intent.taskId, undefined, 0, db);
+        if (result) {
+          return { action: "enqueued", taskId: intent.taskId, queueItemId: result.id };
+        }
+      } catch (err) {
+        safeLog("event.router.approvalReDispatch", err);
+      }
+
+      return { action: "handled", taskId: intent.taskId };
+    }
+  } catch (err) {
+    safeLog("event.router.intentCheck", err);
+  }
+
   // Try to re-attempt the gated action from the policy snapshot
   if (proposal.approval_policy_snapshot) {
     try {
@@ -317,6 +526,107 @@ function handleProposalApproved(event: ClawforceEvent, db: DatabaseSync): EventH
   }
 
   return { action: "handled" };
+}
+
+function handleProposalCreated(_event: ClawforceEvent, _db: DatabaseSync): EventHandlerResult {
+  // Acknowledged for metrics/audit — no action needed
+  return { action: "handled" };
+}
+
+function handleProposalRejected(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const proposalId = event.payload.proposalId as string | undefined;
+  if (!proposalId) return { action: "ignored" };
+
+  // Record trust decision + resolve any linked tool call intent
+  try {
+    const intent = getIntentByProposalForProject(event.projectId, proposalId, db);
+    if (intent) {
+      recordTrustDecision({
+        projectId: event.projectId,
+        category: intent.category,
+        decision: "rejected",
+        agentId: intent.agentId,
+        proposalId,
+        toolName: intent.toolName,
+        riskTier: intent.riskTier,
+      }, db);
+      resolveIntentForProject(event.projectId, intent.id, "rejected", db);
+    }
+  } catch (err) {
+    safeLog("event.router.rejectIntent", err);
+  }
+
+  return { action: "handled" };
+}
+
+function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const taskId = event.payload.taskId as string | undefined;
+  if (!taskId) return { action: "ignored" };
+
+  // Check if auto-dispatch is disabled for this project
+  const extConfig = getExtendedProjectConfig(event.projectId);
+  if (extConfig?.assignment?.autoDispatchOnAssign === false) {
+    return { action: "handled", taskId };
+  }
+
+  const task = getTask(event.projectId, taskId, db);
+  if (!task || task.state !== "ASSIGNED") return { action: "handled", taskId };
+
+  // Build dispatch payload from agent config
+  const agentEntry = task.assignedTo ? getAgentConfig(task.assignedTo) : null;
+  const payload: Record<string, unknown> = {};
+  if (agentEntry?.config.model) payload.model = agentEntry.config.model;
+
+  try {
+    const result = enqueue(event.projectId, taskId, payload, undefined, db);
+    if (result) return { action: "enqueued", taskId, queueItemId: result.id };
+  } catch (err) { safeLog("event.router.autoDispatch", err); }
+
+  return { action: "handled", taskId };
+}
+
+function handleTaskCreated(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const taskId = event.payload.taskId as string | undefined;
+  const state = event.payload.state as string | undefined;
+  if (!taskId) return { action: "ignored" };
+
+  // Only auto-assign OPEN tasks (not already ASSIGNED)
+  if (state !== "OPEN") return { action: "handled", taskId };
+
+  const extConfig = getExtendedProjectConfig(event.projectId);
+  if (!extConfig?.assignment?.enabled) return { action: "handled", taskId };
+
+  try {
+    // Dynamic import to avoid circular dependency
+    // (assignment → tasks/ops → events/store → router → assignment)
+    const { autoAssign } = require("../assignment/engine.js") as typeof import("../assignment/engine.js");
+    const result = autoAssign(event.projectId, taskId, extConfig.assignment, db);
+    if (result.assigned) return { action: "handled", taskId };
+  } catch (err) { safeLog("event.router.autoAssign", err); }
+
+  return { action: "handled", taskId };
+}
+
+function handleMeetingTurnCompleted(event: ClawforceEvent, _db: DatabaseSync): EventHandlerResult {
+  const payload = event.payload as Record<string, unknown>;
+  const channelId = payload.channelId as string;
+  if (!channelId) return { action: "ignored" };
+
+  try {
+    const { advanceMeetingTurn, concludeMeeting } = require("../channels/meeting.js") as {
+      advanceMeetingTurn: (p: string, c: string) => { nextAgent: string | null; turnIndex: number; done: boolean };
+      concludeMeeting: (p: string, c: string, a: string) => unknown;
+    };
+
+    const result = advanceMeetingTurn(event.projectId, channelId);
+    if (result.done) {
+      concludeMeeting(event.projectId, channelId, "system");
+    }
+    return { action: "handled" };
+  } catch (err) {
+    safeLog("event.router.meetingTurn", err);
+    return { action: "ignored" };
+  }
 }
 
 function handleCustom(_event: ClawforceEvent, _db: DatabaseSync): EventHandlerResult {

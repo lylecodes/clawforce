@@ -90,6 +90,26 @@ export function readBooleanParam(
   return null;
 }
 
+/**
+ * Resolve project ID with cross-project access protection.
+ * If a bound projectId exists (from tool creation), it takes precedence.
+ * Callers can still pass project_id but it must match the bound value.
+ */
+export function resolveProjectId(
+  params: Record<string, unknown>,
+  boundProjectId: string | undefined,
+  fallback = "default",
+): { projectId: string; error?: never } | { projectId?: never; error: string } {
+  const callerProjectId = readStringParam(params, "project_id");
+  if (boundProjectId) {
+    if (callerProjectId && callerProjectId !== boundProjectId) {
+      return { error: `Cross-project access denied: this session is bound to project "${boundProjectId}".` };
+    }
+    return { projectId: boundProjectId };
+  }
+  return { projectId: callerProjectId ?? fallback };
+}
+
 /** Read a string array parameter. */
 export function readStringArrayParam(
   params: Record<string, unknown>,

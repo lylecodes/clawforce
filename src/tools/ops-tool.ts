@@ -17,7 +17,7 @@ import { writeAuditEntry, queryAuditLog } from "../audit.js";
 import { getDb } from "../db.js";
 import { getTask, reassignTask } from "../tasks/ops.js";
 import { sweep } from "../sweep/actions.js";
-import { dispatchAndTransition } from "../dispatch/spawn.js";
+import { buildTaskPrompt } from "../dispatch/spawn.js";
 import { assembleContext } from "../context/assembler.js";
 import { getAgentConfig } from "../project.js";
 import {
@@ -30,6 +30,9 @@ import { ingestEvent, listEvents } from "../events/store.js";
 import { enqueue, getQueueStatus } from "../dispatch/queue.js";
 import { processAndDispatch, getConcurrencyInfo } from "../dispatch/dispatcher.js";
 import { aggregateMetrics, queryMetrics } from "../metrics.js";
+import { canManageJobs, listJobs, upsertJob, deleteJob } from "../jobs.js";
+import { getCronService, buildJobCronJob, toCronJobCreate } from "../manager-cron.js";
+import { checkBudget } from "../budget.js";
 import { safeLog } from "../diagnostics.js";
 import type { ToolResult } from "./common.js";
 import {
@@ -38,14 +41,19 @@ import {
   readNumberParam,
   readStringParam,
   readStringArrayParam,
+  resolveProjectId,
   safeExecute,
 } from "./common.js";
+import { EVENT_STATUSES } from "../types.js";
+import type { EventStatus } from "../types.js";
 
 const OPS_ACTIONS = [
   "agent_status", "kill_agent", "disable_agent", "enable_agent",
   "reassign", "query_audit", "trigger_sweep", "dispatch_worker",
   "refresh_context", "emit_event", "list_events", "enqueue_work",
   "queue_status", "process_events", "dispatch_metrics",
+  "list_jobs", "create_job", "update_job", "delete_job", "toggle_job_cron",
+  "cron_status", "introspect",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -86,28 +94,40 @@ const ClawforceOpsSchema = Type.Object({
   enqueue_task_id: Type.Optional(Type.String({ description: "Task ID to enqueue (for enqueue_work)." })),
   enqueue_priority: Type.Optional(Type.Number({ description: "Priority 0-3 (for enqueue_work, default 2)." })),
   enqueue_payload: Type.Optional(Type.String({ description: "JSON payload with dispatch params: prompt, projectDir, profile, model, timeoutMs (for enqueue_work)." })),
+  // job management params
+  target_agent_id: Type.Optional(Type.String({ description: "Target agent ID (for list_jobs, create_job, update_job, delete_job, toggle_job_cron)." })),
+  job_name: Type.Optional(Type.String({ description: "Job name (for create_job, update_job, delete_job, toggle_job_cron)." })),
+  job_config: Type.Optional(Type.String({ description: "JSON object with job fields: cron, cronTimezone, briefing, exclude_briefing, expectations, performance_policy, compaction, nudge, sessionTarget, wakeMode, delivery, failureAlert, model, timeoutSeconds, lightContext, deleteAfterRun (for create_job, update_job)." })),
+  job_enabled: Type.Optional(Type.Boolean({ description: "Enable (true) or disable (false) the job cron (for toggle_job_cron)." })),
+  cron_job_name: Type.Optional(Type.String({ description: "Cron job name filter (for cron_status). If omitted, returns all project crons." })),
+  filter_job_name: Type.Optional(Type.String({ description: "Filter audit_runs by job name (for query_audit with audit_table=audit_runs)." })),
 });
 
 export function createClawforceOpsTool(options?: {
   agentSessionKey?: string;
+  projectId?: string;
+  projectDir?: string;
 }) {
   return {
     label: "Team Operations",
     name: "clawforce_ops",
     description:
       "Team observability and control. " +
-      "Read: agent_status, query_audit, refresh_context, list_events, queue_status, dispatch_metrics. " +
-      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events. " +
+      "Read: agent_status, query_audit, refresh_context, list_events, queue_status, dispatch_metrics, list_jobs, cron_status, introspect. " +
+      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, toggle_job_cron. " +
+      "Job management: list_jobs (view agent jobs), create_job/update_job/delete_job (manage scoped sessions), toggle_job_cron (enable/disable job cron), cron_status (view cron run state). " +
+      "introspect: view your own config, expectations, budget, and SLO status. " +
       "Use emit_event to ingest external events (CI failures, PR opens, etc). " +
       "Use enqueue_work to add tasks to the dispatch queue with priority. " +
-      "Use process_events to trigger event processing + dispatch. " +
-      "Use queue_status to see dispatch queue depth and recent items. " +
-      "Use dispatch_metrics for a health dashboard of the dispatch system.",
+      "Use process_events to trigger event processing + dispatch.",
     parameters: ClawforceOpsSchema,
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
         const action = readStringParam(params, "action", { required: true })!;
-        const projectId = readStringParam(params, "project_id", { required: true })!;
+        const resolved = resolveProjectId(params, options?.projectId, "");
+        if (resolved.error) return jsonResult({ ok: false, reason: resolved.error });
+        if (!resolved.projectId) return jsonResult({ ok: false, reason: "Missing required parameter: project_id" });
+        const projectId = resolved.projectId!;
         const caller = options?.agentSessionKey ?? "unknown";
 
         switch (action) {
@@ -345,6 +365,11 @@ export function createClawforceOpsTool(options?: {
                 query += " AND started_at >= ?";
                 queryParams.push(since);
               }
+              const filterJobName = readStringParam(params, "filter_job_name");
+              if (filterJobName) {
+                query += " AND job_name = ?";
+                queryParams.push(filterJobName);
+              }
 
               query += " ORDER BY started_at DESC LIMIT ?";
               queryParams.push(limit);
@@ -384,13 +409,8 @@ export function createClawforceOpsTool(options?: {
 
           case "dispatch_worker": {
             const taskId = readStringParam(params, "task_id_dispatch", { required: true })!;
-            const projectDir = readStringParam(params, "project_dir", { required: true })!;
             const prompt = readStringParam(params, "prompt", { required: true })!;
-            const profile = readStringParam(params, "profile");
             const model = readStringParam(params, "model");
-            const timeoutMs = readNumberParam(params, "timeout_ms", { integer: true });
-            const allowedTools = readStringArrayParam(params, "allowed_tools");
-            const maxTurns = readNumberParam(params, "max_turns", { integer: true });
 
             const task = getTask(projectId, taskId);
             if (!task) {
@@ -404,16 +424,16 @@ export function createClawforceOpsTool(options?: {
               });
             }
 
-            const dispatchResult = await dispatchAndTransition({
-              task,
-              projectDir,
-              prompt,
-              profile: profile ?? undefined,
+            // Enqueue through the dispatch queue (no more direct CLI spawn bypass)
+            const priority = task.priority === "P0" ? 0 : task.priority === "P1" ? 1 : task.priority === "P3" ? 3 : 2;
+            const queueItem = enqueue(projectId, taskId, {
+              prompt: buildTaskPrompt(task, prompt),
               model: model ?? undefined,
-              timeoutMs: timeoutMs ?? undefined,
-              allowedTools: allowedTools ?? undefined,
-              maxTurns: maxTurns ?? undefined,
-            });
+            }, priority);
+
+            if (!queueItem) {
+              return jsonResult({ ok: false, reason: "Task already has a pending dispatch queue item" });
+            }
 
             writeAuditEntry({
               projectId,
@@ -421,21 +441,14 @@ export function createClawforceOpsTool(options?: {
               action: "dispatch_worker",
               targetType: "task",
               targetId: taskId,
-              detail: JSON.stringify({
-                ok: dispatchResult.ok,
-                exitCode: dispatchResult.exitCode,
-                durationMs: dispatchResult.durationMs,
-                evidenceId: dispatchResult.evidenceId,
-              }),
+              detail: JSON.stringify({ queued: true, queueItemId: queueItem.id }),
             });
 
             return jsonResult({
-              ok: dispatchResult.ok,
+              ok: true,
+              queued: true,
+              queueItemId: queueItem.id,
               taskId,
-              exitCode: dispatchResult.exitCode,
-              durationMs: dispatchResult.durationMs,
-              evidenceId: dispatchResult.evidenceId,
-              stderr: dispatchResult.ok ? undefined : dispatchResult.stderr.slice(0, 500),
             });
           }
 
@@ -468,7 +481,7 @@ export function createClawforceOpsTool(options?: {
 
             const result = ingestEvent(
               projectId,
-              eventType as import("../types.js").EventType,
+              eventType,
               "tool",
               payload,
               dedupKey ?? undefined,
@@ -491,9 +504,17 @@ export function createClawforceOpsTool(options?: {
             const type = readStringParam(params, "event_type_filter");
             const limit = readNumberParam(params, "limit", { integer: true });
 
+            // Validate event_status against known values
+            if (status && !EVENT_STATUSES.includes(status as EventStatus)) {
+              return jsonResult({
+                ok: false,
+                reason: `Invalid event_status "${status}". Valid values: ${EVENT_STATUSES.join(", ")}`,
+              });
+            }
+
             const events = listEvents(projectId, {
-              status: status as import("../types.js").EventStatus | undefined,
-              type: type as import("../types.js").EventType | undefined,
+              status: status as EventStatus | undefined,
+              type: type ?? undefined,
               limit: limit ?? undefined,
             });
 
@@ -620,10 +641,419 @@ export function createClawforceOpsTool(options?: {
             return jsonResult({ ok: true, ...result });
           }
 
+          // --- Job Management ---
+
+          case "list_jobs": {
+            const targetAgentId = readStringParam(params, "target_agent_id", { required: true })!;
+            const jobs = listJobs(targetAgentId);
+            if (jobs === null) {
+              return jsonResult({ ok: false, reason: `Agent not found: ${targetAgentId}` });
+            }
+
+            // Enrich with cron status if service available
+            const cronSvc = getCronService();
+            let cronStatuses: Record<string, Record<string, unknown>> = {};
+            if (cronSvc) {
+              try {
+                const allCrons = await cronSvc.list({ includeDisabled: true });
+                for (const [jobName] of Object.entries(jobs)) {
+                  const cronName = `job-${projectId}-${targetAgentId}-${jobName}`;
+                  const found = allCrons.find((c) => c.name === cronName);
+                  if (found) {
+                    cronStatuses[jobName] = {
+                      enabled: found.enabled,
+                      cronId: found.id,
+                      schedule: found.schedule,
+                      lastRunStatus: found.state?.lastRunStatus,
+                      lastRunAtMs: found.state?.lastRunAtMs,
+                      nextRunAtMs: found.state?.nextRunAtMs,
+                      consecutiveErrors: found.state?.consecutiveErrors,
+                      lastDeliveryStatus: found.state?.lastDeliveryStatus,
+                    };
+                  }
+                }
+              } catch (err) {
+                safeLog("ops.listJobs.cronStatus", err);
+              }
+            }
+
+            return jsonResult({ ok: true, agentId: targetAgentId, jobs, cronStatuses });
+          }
+
+          case "create_job": {
+            const targetAgentId = readStringParam(params, "target_agent_id", { required: true })!;
+            const jobName = readStringParam(params, "job_name", { required: true })!;
+            const jobConfigStr = readStringParam(params, "job_config", { required: true })!;
+
+            // Resolve caller agent ID from session key
+            const callerSession = getSession(caller);
+            const callerAgentId = callerSession?.agentId ?? caller;
+
+            if (!canManageJobs(projectId, callerAgentId, targetAgentId)) {
+              return jsonResult({ ok: false, reason: `Not authorized to manage jobs for agent ${targetAgentId}` });
+            }
+
+            // Validate job name format
+            if (!/^[a-z][a-z0-9_-]*$/.test(jobName)) {
+              return jsonResult({ ok: false, reason: `Invalid job name "${jobName}" — use lowercase alphanumeric with hyphens/underscores, starting with a letter.` });
+            }
+
+            // Check job doesn't already exist
+            const existingJobs = listJobs(targetAgentId);
+            if (existingJobs && existingJobs[jobName]) {
+              return jsonResult({ ok: false, reason: `Job "${jobName}" already exists on agent ${targetAgentId}. Use update_job to modify it.` });
+            }
+
+            let jobConfig: Record<string, unknown>;
+            try {
+              jobConfig = JSON.parse(jobConfigStr);
+            } catch {
+              return jsonResult({ ok: false, reason: "Invalid JSON in job_config" });
+            }
+
+            const job = parseJobConfig(jobConfig);
+            if (!upsertJob(targetAgentId, jobName, job)) {
+              return jsonResult({ ok: false, reason: `Agent not found: ${targetAgentId}` });
+            }
+
+            // Register cron if specified
+            let cronRegistered = false;
+            if (job.cron) {
+              const cronSvc = getCronService();
+              if (cronSvc) {
+                try {
+                  const cronJob = buildJobCronJob(projectId, targetAgentId, jobName, job, job.cron);
+                  await cronSvc.add(toCronJobCreate(cronJob));
+                  cronRegistered = true;
+                } catch (err) {
+                  safeLog("ops.createJob.cronRegister", err);
+                }
+              }
+            }
+
+            writeAuditEntry({
+              projectId,
+              actor: caller,
+              action: "create_job",
+              targetType: "agent",
+              targetId: targetAgentId,
+              detail: JSON.stringify({ jobName, cron: job.cron, cronRegistered }),
+            });
+
+            return jsonResult({
+              ok: true,
+              agentId: targetAgentId,
+              jobName,
+              job,
+              cronRegistered,
+              note: "Runtime change — will reset on restart. Update project YAML for persistence.",
+            });
+          }
+
+          case "update_job": {
+            const targetAgentId = readStringParam(params, "target_agent_id", { required: true })!;
+            const jobName = readStringParam(params, "job_name", { required: true })!;
+            const jobConfigStr = readStringParam(params, "job_config", { required: true })!;
+
+            const callerSession = getSession(caller);
+            const callerAgentId = callerSession?.agentId ?? caller;
+
+            if (!canManageJobs(projectId, callerAgentId, targetAgentId)) {
+              return jsonResult({ ok: false, reason: `Not authorized to manage jobs for agent ${targetAgentId}` });
+            }
+
+            const currentJobs = listJobs(targetAgentId);
+            if (!currentJobs || !currentJobs[jobName]) {
+              return jsonResult({ ok: false, reason: `Job "${jobName}" not found on agent ${targetAgentId}` });
+            }
+
+            let updates: Record<string, unknown>;
+            try {
+              updates = JSON.parse(jobConfigStr);
+            } catch {
+              return jsonResult({ ok: false, reason: "Invalid JSON in job_config" });
+            }
+
+            // Merge updates with existing job
+            const existingJob = currentJobs[jobName]!;
+            const merged = { ...existingJob, ...parseJobConfig(updates) };
+            upsertJob(targetAgentId, jobName, merged);
+
+            // Re-register cron if schedule changed
+            let cronUpdated = false;
+            if (updates.cron !== undefined && merged.cron) {
+              const cronSvc = getCronService();
+              if (cronSvc) {
+                try {
+                  const cronJob = buildJobCronJob(projectId, targetAgentId, jobName, merged, merged.cron);
+                  await cronSvc.add(toCronJobCreate(cronJob));
+                  cronUpdated = true;
+                } catch (err) {
+                  safeLog("ops.updateJob.cronUpdate", err);
+                }
+              }
+            }
+
+            writeAuditEntry({
+              projectId,
+              actor: caller,
+              action: "update_job",
+              targetType: "agent",
+              targetId: targetAgentId,
+              detail: JSON.stringify({ jobName, updatedFields: Object.keys(updates), cronUpdated }),
+            });
+
+            return jsonResult({
+              ok: true,
+              agentId: targetAgentId,
+              jobName,
+              job: merged,
+              cronUpdated,
+              note: "Runtime change — will reset on restart. Update project YAML for persistence.",
+            });
+          }
+
+          case "delete_job": {
+            const targetAgentId = readStringParam(params, "target_agent_id", { required: true })!;
+            const jobName = readStringParam(params, "job_name", { required: true })!;
+
+            const callerSession = getSession(caller);
+            const callerAgentId = callerSession?.agentId ?? caller;
+
+            if (!canManageJobs(projectId, callerAgentId, targetAgentId)) {
+              return jsonResult({ ok: false, reason: `Not authorized to manage jobs for agent ${targetAgentId}` });
+            }
+
+            if (!deleteJob(targetAgentId, jobName)) {
+              return jsonResult({ ok: false, reason: `Job "${jobName}" not found on agent ${targetAgentId}` });
+            }
+
+            // Disable the cron if it exists
+            let cronDisabled = false;
+            const cronSvc = getCronService();
+            if (cronSvc) {
+              try {
+                const cronName = `job-${projectId}-${targetAgentId}-${jobName}`;
+                const allCrons = await cronSvc.list({ includeDisabled: true });
+                const found = allCrons.find((c) => c.name === cronName);
+                if (found) {
+                  await cronSvc.update(found.id, { enabled: false });
+                  cronDisabled = true;
+                }
+              } catch (err) {
+                safeLog("ops.deleteJob.cronDisable", err);
+              }
+            }
+
+            writeAuditEntry({
+              projectId,
+              actor: caller,
+              action: "delete_job",
+              targetType: "agent",
+              targetId: targetAgentId,
+              detail: JSON.stringify({ jobName, cronDisabled }),
+            });
+
+            return jsonResult({
+              ok: true,
+              agentId: targetAgentId,
+              jobName,
+              deleted: true,
+              cronDisabled,
+              note: "Runtime change — will reset on restart. Update project YAML for persistence.",
+            });
+          }
+
+          case "toggle_job_cron": {
+            const targetAgentId = readStringParam(params, "target_agent_id", { required: true })!;
+            const jobName = readStringParam(params, "job_name", { required: true })!;
+            const enabled = readBooleanParam(params, "job_enabled");
+
+            if (enabled === undefined || enabled === null) {
+              return jsonResult({ ok: false, reason: "Missing required parameter: job_enabled (true or false)" });
+            }
+
+            const callerSession = getSession(caller);
+            const callerAgentId = callerSession?.agentId ?? caller;
+
+            if (!canManageJobs(projectId, callerAgentId, targetAgentId)) {
+              return jsonResult({ ok: false, reason: `Not authorized to manage jobs for agent ${targetAgentId}` });
+            }
+
+            const cronSvc = getCronService();
+            if (!cronSvc) {
+              return jsonResult({ ok: false, reason: "Cron service not available" });
+            }
+
+            const cronName = `job-${projectId}-${targetAgentId}-${jobName}`;
+            try {
+              const allCrons = await cronSvc.list({ includeDisabled: true });
+              const found = allCrons.find((c) => c.name === cronName);
+              if (!found) {
+                return jsonResult({ ok: false, reason: `No cron found for job "${jobName}" on agent ${targetAgentId}` });
+              }
+
+              await cronSvc.update(found.id, { enabled });
+
+              writeAuditEntry({
+                projectId,
+                actor: caller,
+                action: "toggle_job_cron",
+                targetType: "agent",
+                targetId: targetAgentId,
+                detail: JSON.stringify({ jobName, enabled }),
+              });
+
+              return jsonResult({ ok: true, agentId: targetAgentId, jobName, cronEnabled: enabled });
+            } catch (err) {
+              return jsonResult({ ok: false, reason: `Failed to toggle cron: ${err instanceof Error ? err.message : String(err)}` });
+            }
+          }
+
+          case "cron_status": {
+            const cronSvc = getCronService();
+            if (!cronSvc) {
+              return jsonResult({ ok: false, reason: "Cron service not available" });
+            }
+
+            const targetJobName = readStringParam(params, "cron_job_name");
+
+            try {
+              const allCrons = await cronSvc.list({ includeDisabled: true });
+              const projectPrefix = `manager-${projectId}`;
+              const jobPrefix = `job-${projectId}-`;
+              const projectCrons = allCrons.filter(
+                (c) => c.name === projectPrefix || c.name.startsWith(jobPrefix),
+              );
+
+              if (targetJobName) {
+                const found = projectCrons.find((c) => c.name === targetJobName || c.name.endsWith(`-${targetJobName}`));
+                if (!found) {
+                  return jsonResult({ ok: false, reason: `Cron job not found: ${targetJobName}` });
+                }
+                return jsonResult({
+                  ok: true,
+                  job: {
+                    id: found.id,
+                    name: found.name,
+                    enabled: found.enabled,
+                    schedule: found.schedule,
+                    state: found.state,
+                  },
+                });
+              }
+
+              const summary = projectCrons.map((c) => ({
+                id: c.id,
+                name: c.name,
+                enabled: c.enabled,
+                schedule: c.schedule,
+                lastRunStatus: c.state?.lastRunStatus,
+                lastRunAtMs: c.state?.lastRunAtMs,
+                nextRunAtMs: c.state?.nextRunAtMs,
+                consecutiveErrors: c.state?.consecutiveErrors,
+                lastDeliveryStatus: c.state?.lastDeliveryStatus,
+              }));
+
+              return jsonResult({ ok: true, crons: summary, count: summary.length });
+            } catch (err) {
+              return jsonResult({ ok: false, reason: `Failed to query cron status: ${err instanceof Error ? err.message : String(err)}` });
+            }
+          }
+
+          case "introspect": {
+            // Returns the calling agent's own config summary
+            const callerSession = getSession(caller);
+            const callerAgentId = callerSession?.agentId ?? caller;
+
+            const entry = getAgentConfig(callerAgentId);
+            if (!entry) {
+              return jsonResult({ ok: false, reason: `Agent config not found for "${callerAgentId}"` });
+            }
+
+            const config = entry.config;
+            const db = getDb(projectId);
+
+            // Budget status
+            let budget: unknown = null;
+            try {
+              budget = checkBudget({ projectId, agentId: callerAgentId });
+            } catch (err) {
+              safeLog("ops.introspect.budget", err);
+            }
+
+            // Recent SLO evaluations
+            let sloEvals: unknown[] = [];
+            try {
+              const rows = db.prepare(
+                `SELECT slo_name, passed, actual, threshold, evaluated_at
+                 FROM slo_evaluations WHERE project_id = ?
+                 ORDER BY evaluated_at DESC LIMIT 10`,
+              ).all(projectId) as Record<string, unknown>[];
+              sloEvals = rows;
+            } catch (err) {
+              safeLog("ops.introspect.slo", err);
+            }
+
+            // Active policies for this agent
+            let policies: unknown[] = [];
+            try {
+              const rows = db.prepare(
+                `SELECT name, type, enabled FROM policies
+                 WHERE project_id = ? AND (target_agent IS NULL OR target_agent = ?)
+                 AND enabled = 1`,
+              ).all(projectId, callerAgentId) as Record<string, unknown>[];
+              policies = rows;
+            } catch (err) {
+              safeLog("ops.introspect.policies", err);
+            }
+
+            return jsonResult({
+              ok: true,
+              agentId: callerAgentId,
+              role: config.role,
+              title: config.title,
+              expectations: config.expectations,
+              performance_policy: config.performance_policy,
+              jobs: config.jobs ? Object.keys(config.jobs) : [],
+              budget,
+              recentSloEvaluations: sloEvals,
+              activePolicies: policies,
+            });
+          }
+
           default:
             return jsonResult({ ok: false, reason: `Unknown action: ${action}` });
         }
       });
     },
   };
+}
+
+// --- Helpers ---
+
+import type { JobDefinition, ContextSource, Expectation, PerformancePolicy, CronDelivery, CronFailureAlert } from "../types.js";
+
+/** Parse a raw JSON object into a JobDefinition. */
+function parseJobConfig(raw: Record<string, unknown>): JobDefinition {
+  const job: JobDefinition = {};
+  if (typeof raw.cron === "string" && raw.cron.trim()) job.cron = raw.cron.trim();
+  if (Array.isArray(raw.briefing)) job.briefing = raw.briefing as ContextSource[];
+  if (Array.isArray(raw.exclude_briefing)) job.exclude_briefing = raw.exclude_briefing as string[];
+  if (Array.isArray(raw.expectations)) job.expectations = raw.expectations as Expectation[];
+  if (raw.performance_policy && typeof raw.performance_policy === "object") {
+    job.performance_policy = raw.performance_policy as PerformancePolicy;
+  }
+  if (raw.compaction !== undefined) job.compaction = raw.compaction as boolean;
+  if (typeof raw.nudge === "string" && raw.nudge.trim()) job.nudge = raw.nudge.trim();
+  if (typeof raw.cronTimezone === "string" && raw.cronTimezone.trim()) job.cronTimezone = raw.cronTimezone.trim();
+  if (typeof raw.sessionTarget === "string") job.sessionTarget = raw.sessionTarget as "main" | "isolated";
+  if (typeof raw.wakeMode === "string") job.wakeMode = raw.wakeMode as "next-heartbeat" | "now";
+  if (typeof raw.delivery === "object" && raw.delivery !== null) job.delivery = raw.delivery as CronDelivery;
+  if (raw.failureAlert !== undefined) job.failureAlert = raw.failureAlert as CronFailureAlert;
+  if (typeof raw.model === "string" && raw.model.trim()) job.model = raw.model.trim();
+  if (typeof raw.timeoutSeconds === "number") job.timeoutSeconds = raw.timeoutSeconds;
+  if (typeof raw.lightContext === "boolean") job.lightContext = raw.lightContext;
+  if (typeof raw.deleteAfterRun === "boolean") job.deleteAfterRun = raw.deleteAfterRun;
+  return job;
 }

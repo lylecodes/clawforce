@@ -42,55 +42,65 @@ export function writeAuditEntry(
   const id = crypto.randomUUID();
   const now = Date.now();
 
-  // Get previous entry hash for chain (ROWID guarantees deterministic order
-  // even when two entries share the same created_at timestamp)
-  const prevRow = db
-    .prepare("SELECT entry_hash FROM audit_log WHERE project_id = ? ORDER BY ROWID DESC LIMIT 1")
-    .get(params.projectId) as Record<string, unknown> | undefined;
-  const prevHash = (prevRow?.entry_hash as string) ?? null;
-
-  // Compute entry hash (includes previous hash for chain integrity)
-  const hashData = `${id}:${params.actor}:${params.action}:${params.targetType}:${params.targetId}:${now}:${prevHash ?? "genesis"}`;
-  const entryHash = crypto.createHash("sha256").update(hashData).digest("hex");
-
-  // Sign the entry
-  let signature: string | undefined;
+  // Use BEGIN IMMEDIATE to acquire a write lock upfront, preventing
+  // concurrent writes from getting the same prevHash (fork in the chain).
+  db.prepare("BEGIN IMMEDIATE").run();
   try {
-    signature = signAction(params.actor, hashData);
+    // Get previous entry hash for chain (ROWID guarantees deterministic order
+    // even when two entries share the same created_at timestamp)
+    const prevRow = db
+      .prepare("SELECT entry_hash FROM audit_log WHERE project_id = ? ORDER BY ROWID DESC LIMIT 1")
+      .get(params.projectId) as Record<string, unknown> | undefined;
+    const prevHash = (prevRow?.entry_hash as string) ?? null;
+
+    // Compute entry hash — v2 format includes detail + projectId for tamper resistance
+    const hashData = `${id}:${params.actor}:${params.action}:${params.targetType}:${params.targetId}:${now}:${prevHash ?? "genesis"}:${params.detail ?? ""}:${params.projectId}`;
+    const entryHash = crypto.createHash("sha256").update(hashData).digest("hex");
+
+    // Sign the entry
+    let signature: string | undefined;
+    try {
+      signature = signAction(params.actor, hashData);
+    } catch (err) {
+      safeLog("audit.sign", err);
+    }
+
+    db.prepare(`
+      INSERT INTO audit_log (id, project_id, actor, action, target_type, target_id, detail, signature, prev_hash, entry_hash, created_at, hash_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+    `).run(
+      id,
+      params.projectId,
+      params.actor,
+      params.action,
+      params.targetType,
+      params.targetId,
+      params.detail ?? null,
+      signature ?? null,
+      prevHash,
+      entryHash,
+      now,
+    );
+
+    db.prepare("COMMIT").run();
+
+    return {
+      id,
+      projectId: params.projectId,
+      actor: params.actor,
+      action: params.action,
+      targetType: params.targetType,
+      targetId: params.targetId,
+      detail: params.detail,
+      signature,
+      prevHash: prevHash ?? undefined,
+      entryHash,
+      createdAt: now,
+    };
   } catch (err) {
-    safeLog("audit.sign", err);
+    try { db.prepare("ROLLBACK").run(); } catch { /* ROLLBACK may fail if already rolled back */ }
+    throw err;
   }
-
-  db.prepare(`
-    INSERT INTO audit_log (id, project_id, actor, action, target_type, target_id, detail, signature, prev_hash, entry_hash, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    params.projectId,
-    params.actor,
-    params.action,
-    params.targetType,
-    params.targetId,
-    params.detail ?? null,
-    signature ?? null,
-    prevHash,
-    entryHash,
-    now,
-  );
-
-  return {
-    id,
-    projectId: params.projectId,
-    actor: params.actor,
-    action: params.action,
-    targetType: params.targetType,
-    targetId: params.targetId,
-    detail: params.detail,
-    signature,
-    prevHash: prevHash ?? undefined,
-    entryHash,
-    createdAt: now,
-  };
 }
 
 export type AuditQuery = {
@@ -150,7 +160,7 @@ export function queryAuditLog(query: AuditQuery, dbOverride?: DatabaseSync): Aud
 export function verifyAuditChain(
   projectId: string,
   dbOverride?: DatabaseSync,
-): { intact: boolean; brokenAt?: string; entries: number; signatureFailures: string[] } {
+): { intact: boolean; signatureIntact: boolean; brokenAt?: string; entries: number; signatureFailures: string[]; unsignedCount: number } {
   const db = dbOverride ?? getDb(projectId);
   const rows = db
     .prepare("SELECT * FROM audit_log WHERE project_id = ? ORDER BY ROWID ASC")
@@ -158,27 +168,34 @@ export function verifyAuditChain(
 
   let prevHash: string | null = null;
   const signatureFailures: string[] = [];
+  let unsignedCount = 0;
 
   for (const row of rows) {
     const entry = rowToAuditEntry(row);
+    const hashVersion = (row.hash_version as number) ?? 1;
 
     // Verify prev_hash matches
     if (entry.prevHash !== (prevHash ?? undefined)) {
       // First entry should have no prev_hash
       if (prevHash !== null || entry.prevHash !== undefined) {
-        return { intact: false, brokenAt: entry.id, entries: rows.length, signatureFailures };
+        return { intact: false, signatureIntact: false, brokenAt: entry.id, entries: rows.length, signatureFailures, unsignedCount };
       }
     }
 
-    // Verify entry hash
-    const hashData: string = `${entry.id}:${entry.actor}:${entry.action}:${entry.targetType}:${entry.targetId}:${entry.createdAt}:${prevHash ?? "genesis"}`;
+    // Reconstruct hash based on version (v1 = original, v2 = includes detail + projectId)
+    let hashData: string;
+    if (hashVersion >= 2) {
+      hashData = `${entry.id}:${entry.actor}:${entry.action}:${entry.targetType}:${entry.targetId}:${entry.createdAt}:${prevHash ?? "genesis"}:${entry.detail ?? ""}:${entry.projectId}`;
+    } else {
+      hashData = `${entry.id}:${entry.actor}:${entry.action}:${entry.targetType}:${entry.targetId}:${entry.createdAt}:${prevHash ?? "genesis"}`;
+    }
     const expectedHash: string = crypto.createHash("sha256").update(hashData).digest("hex");
 
     if (entry.entryHash !== expectedHash) {
-      return { intact: false, brokenAt: entry.id, entries: rows.length, signatureFailures };
+      return { intact: false, signatureIntact: false, brokenAt: entry.id, entries: rows.length, signatureFailures, unsignedCount };
     }
 
-    // Verify signature if present (entries without signatures are system-generated)
+    // Verify signature if present; count unsigned entries
     if (entry.signature) {
       try {
         if (!verifyAction(entry.actor, hashData, entry.signature)) {
@@ -187,12 +204,14 @@ export function verifyAuditChain(
       } catch {
         signatureFailures.push(entry.id);
       }
+    } else {
+      unsignedCount++;
     }
 
     prevHash = entry.entryHash;
   }
 
-  return { intact: true, entries: rows.length, signatureFailures };
+  return { intact: true, signatureIntact: signatureFailures.length === 0, entries: rows.length, signatureFailures, unsignedCount };
 }
 
 function rowToAuditEntry(row: Record<string, unknown>): AuditEntry {

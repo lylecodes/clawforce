@@ -46,12 +46,12 @@ describe("session persistence (crash recovery)", () => {
     expect(rows[0]!.tool_call_count).toBe(0);
   });
 
-  it("persists every 5th tool call", () => {
+  it("persists every 5th tool call (for non-requirement-satisfying calls)", () => {
     startTracking("sess1", "coder", "proj1", workerConfig);
 
-    // Record 4 tool calls — should not update the persisted row's tool_call_count beyond initial
+    // Record 4 tool calls with a tool that does NOT satisfy any requirement
     for (let i = 0; i < 4; i++) {
-      recordToolCall("sess1", "clawforce_task", "transition", 50, true);
+      recordToolCall("sess1", "some_other_tool", null, 50, true);
     }
 
     let rows = db.prepare("SELECT tool_call_count FROM tracked_sessions WHERE session_key = ?").all("sess1") as Record<string, unknown>[];
@@ -59,10 +59,21 @@ describe("session persistence (crash recovery)", () => {
     expect(rows[0]!.tool_call_count).toBe(0);
 
     // 5th call triggers persist
-    recordToolCall("sess1", "clawforce_task", "transition", 50, true);
+    recordToolCall("sess1", "some_other_tool", null, 50, true);
 
     rows = db.prepare("SELECT tool_call_count FROM tracked_sessions WHERE session_key = ?").all("sess1") as Record<string, unknown>[];
     expect(rows[0]!.tool_call_count).toBe(5);
+  });
+
+  it("persists immediately when a requirement-satisfying call is made", () => {
+    startTracking("sess1", "coder", "proj1", workerConfig);
+
+    // Record a single tool call that satisfies a requirement
+    recordToolCall("sess1", "clawforce_task", "transition", 50, true);
+
+    const rows = db.prepare("SELECT tool_call_count FROM tracked_sessions WHERE session_key = ?").all("sess1") as Record<string, unknown>[];
+    // Should have persisted immediately (tool_call_count = 1)
+    expect(rows[0]!.tool_call_count).toBe(1);
   });
 
   it("removes persisted row on endSession", () => {

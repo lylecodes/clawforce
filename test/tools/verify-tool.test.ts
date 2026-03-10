@@ -16,14 +16,10 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
-const mockDispatch = vi.hoisted(() => vi.fn());
-vi.mock("../../src/dispatch/spawn.js", () => ({
-  dispatchClaudeCode: mockDispatch,
-}));
-
 const { getMemoryDb } = await import("../../src/db.js");
 const { createClawforceVerifyTool } = await import("../../src/tools/verify-tool.js");
 const { createTask, transitionTask, attachEvidence } = await import("../../src/tasks/ops.js");
+const { getQueueStatus } = await import("../../src/dispatch/queue.js");
 
 describe("clawforce_verify tool", () => {
   let db: DatabaseSync;
@@ -58,16 +54,9 @@ describe("clawforce_verify tool", () => {
     transitionTask({ projectId: PROJECT, taskId, toState: "REVIEW", actor: "agent:a" }, db);
   }
 
-  it("dispatches verification request for a REVIEW task", async () => {
+  it("enqueues verification request for a REVIEW task", async () => {
     const task = createTask({ projectId: PROJECT, title: "Verify me", createdBy: "agent:a" }, db);
     moveToReview(task.id);
-
-    mockDispatch.mockResolvedValue({
-      ok: true,
-      exitCode: 0,
-      stdout: "VERDICT: PASS\n\nThe work meets all requirements.",
-      stderr: "",
-    });
 
     const result = await exec({
       action: "request",
@@ -78,8 +67,12 @@ describe("clawforce_verify tool", () => {
 
     const data = parseResult(result);
     expect(data.ok).toBe(true);
-    expect(data.passed).toBe(true);
-    expect(mockDispatch).toHaveBeenCalledOnce();
+    expect(data.queued).toBe(true);
+    expect(data.queueItemId).toBeDefined();
+
+    // Verify it's actually in the dispatch queue
+    const queueStatus = getQueueStatus(PROJECT, db);
+    expect(queueStatus.queued).toBeGreaterThanOrEqual(1);
   });
 
   it("returns error for non-REVIEW task", async () => {
@@ -95,6 +88,22 @@ describe("clawforce_verify tool", () => {
     const data = parseResult(result);
     expect(data.ok).toBe(false);
     expect(data.reason).toContain("OPEN");
+  });
+
+  it("dedup prevents double-enqueue for same task", async () => {
+    const task = createTask({ projectId: PROJECT, title: "Dedup verify", createdBy: "agent:a" }, db);
+    moveToReview(task.id);
+
+    // First request — enqueues
+    const r1 = await exec({ action: "request", project_id: PROJECT, task_id: task.id, project_dir: "/tmp" });
+    expect(parseResult(r1).queued).toBe(true);
+
+    // Second request — dedup
+    const r2 = await exec({ action: "request", project_id: PROJECT, task_id: task.id, project_dir: "/tmp" });
+    const d2 = parseResult(r2);
+    expect(d2.ok).toBe(true);
+    expect(d2.queued).toBe(false);
+    expect(d2.reason).toContain("dedup");
   });
 
   it("submits a PASS verdict", async () => {
@@ -132,7 +141,6 @@ describe("clawforce_verify tool", () => {
   });
 
   it("defaults project_id to 'default' when omitted", async () => {
-    // Should not throw — project_id is now optional
     const result = await exec({
       action: "verdict",
       task_id: "nonexistent",
@@ -140,7 +148,6 @@ describe("clawforce_verify tool", () => {
       reason: "ok",
     });
     const data = parseResult(result);
-    // Task won't exist in default project, but it should not error on missing project_id
     expect(data.ok).toBe(false);
     expect(data.reason).toBeDefined();
   });
@@ -177,29 +184,5 @@ describe("clawforce_verify tool", () => {
     const data = parseResult(result);
     expect(data.ok).toBe(true);
     expect(data.task.state).toBe("IN_PROGRESS");
-  });
-
-  it("handles dispatch failure", async () => {
-    const task = createTask({ projectId: PROJECT, title: "Fail dispatch", createdBy: "agent:a" }, db);
-    moveToReview(task.id);
-
-    mockDispatch.mockResolvedValue({
-      ok: false,
-      exitCode: 1,
-      stdout: "",
-      stderr: "connection timeout",
-    });
-
-    const result = await exec({
-      action: "request",
-      project_id: PROJECT,
-      task_id: task.id,
-      project_dir: "/tmp",
-    });
-
-    const data = parseResult(result);
-    expect(data.ok).toBe(false);
-    expect(data.passed).toBe(false);
-    expect(data.reason).toContain("exit code");
   });
 });

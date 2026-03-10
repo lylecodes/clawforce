@@ -13,7 +13,7 @@ export function buildResourcesContext(
   agentId?: string,
   dbOverride?: DatabaseSync,
 ): string | null {
-  const report = getCapacityReport(projectId, dbOverride);
+  const report = getCapacityReport(projectId, agentId, dbOverride);
 
   // Don't render if no budget data and no provider rate limit concerns
   const hasBudget = !!(report.budget.daily || report.budget.hourly || report.budget.monthly);

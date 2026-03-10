@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { getDb } from "./db.js";
 
-export type MetricType = "task_cycle" | "agent_performance" | "dispatch" | "sweep" | "system" | "cost";
+export type MetricType = "task_cycle" | "agent_performance" | "dispatch" | "sweep" | "system" | "cost" | "assignment";
 
 export type Metric = {
   id: string;

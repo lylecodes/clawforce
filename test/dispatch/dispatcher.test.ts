@@ -16,10 +16,15 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
-// Mock the spawn module to avoid actually spawning processes
-const mockDispatchAndTransition = vi.fn();
+// Mock the cron-dispatch module to avoid actually creating cron jobs
+const mockDispatchViaCron = vi.fn();
+vi.mock("../../src/dispatch/cron-dispatch.js", () => ({
+  dispatchViaCron: mockDispatchViaCron,
+}));
+
+// Mock spawn module — only buildTaskPrompt is used now
 vi.mock("../../src/dispatch/spawn.js", () => ({
-  dispatchAndTransition: mockDispatchAndTransition,
+  buildTaskPrompt: vi.fn((_task: unknown, prompt: string) => prompt),
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");
@@ -30,20 +35,6 @@ const { listEvents } = await import("../../src/events/store.js");
 const { queryMetrics } = await import("../../src/metrics.js");
 const { queryAuditLog } = await import("../../src/audit.js");
 
-/**
- * Helper: configure the mock to simulate a successful dispatch that
- * advances the task state. Directly updates the DB to avoid lease-conflict
- * checks (the dispatcher holds the lease under its own holder ID).
- */
-function mockSuccessWithTransition(testDb: DatabaseSync) {
-  mockDispatchAndTransition.mockImplementation(async (opts: { task: { projectId: string; id: string } }) => {
-    // Directly advance task state to REVIEW to simulate a real dispatch
-    testDb.prepare("UPDATE tasks SET state = 'REVIEW', updated_at = ? WHERE id = ?")
-      .run(Date.now(), opts.task.id);
-    return { ok: true, exitCode: 0, stdout: "done", stderr: "", durationMs: 100, evidenceId: "ev-123" };
-  });
-}
-
 describe("dispatch/dispatcher", () => {
   let db: DatabaseSync;
   const PROJECT = "test-project";
@@ -51,28 +42,33 @@ describe("dispatch/dispatcher", () => {
   beforeEach(() => {
     db = getMemoryDb();
     resetDispatcherForTest();
-    mockDispatchAndTransition.mockReset();
-    // Default: success with transition
-    mockSuccessWithTransition(db);
+    mockDispatchViaCron.mockReset();
+    // Default: successful cron job creation
+    mockDispatchViaCron.mockResolvedValue({ ok: true, cronJobName: "dispatch:test" });
   });
 
   afterEach(() => {
     try { db.close(); } catch { /* already closed */ }
   });
 
-  it("dispatches a queued item for an ASSIGNED task", async () => {
+  it("dispatches a queued item for an ASSIGNED task via cron", async () => {
     const task = createTask({
       projectId: PROJECT, title: "Test", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
 
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
 
     const dispatched = await dispatchLoop(PROJECT, db);
     expect(dispatched).toBe(1);
 
+    // Successful dispatch marks item as "dispatched" (not completed — that happens in agent_end)
     const status = getQueueStatus(PROJECT, db);
-    expect(status.completed).toBe(1);
     expect(status.queued).toBe(0);
+    // "dispatched" is not in the status summary keys, check via raw query
+    const dispatchedRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND status = 'dispatched'",
+    ).get(PROJECT) as Record<string, unknown>;
+    expect(dispatchedRow.cnt).toBe(1);
   });
 
   it("fails items for tasks in non-dispatchable states", async () => {
@@ -101,17 +97,18 @@ describe("dispatch/dispatcher", () => {
 
   // --- Dispatch events ---
 
-  it("emits dispatch_succeeded event on successful dispatch", async () => {
+  it("emits dispatch_succeeded event on successful cron creation", async () => {
     const task = createTask({
       projectId: PROJECT, title: "Success task", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
 
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
     const events = listEvents(PROJECT, { type: "dispatch_succeeded" }, db);
     expect(events).toHaveLength(1);
     expect(events[0]!.payload.taskId).toBe(task.id);
+    expect(events[0]!.payload.cronJobName).toBe("dispatch:test");
   });
 
   it("emits dispatch_failed event when task is in non-dispatchable state", async () => {
@@ -126,77 +123,42 @@ describe("dispatch/dispatcher", () => {
     expect(events[0]!.payload.error).toContain("non-dispatchable state");
   });
 
-  it("emits dispatch_failed event when spawn returns failure", async () => {
-    mockDispatchAndTransition.mockResolvedValue({
-      ok: false, exitCode: 1, stdout: "", stderr: "something broke", durationMs: 50,
+  it("emits dispatch_failed event when cron creation fails", async () => {
+    mockDispatchViaCron.mockResolvedValue({
+      ok: false, error: "Cron service not available",
     });
 
     const task = createTask({
       projectId: PROJECT, title: "Fail task", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
 
     await dispatchLoop(PROJECT, db);
 
     const events = listEvents(PROJECT, { type: "dispatch_failed" }, db);
     expect(events).toHaveLength(1);
-    expect(events[0]!.payload.error).toBe("something broke");
-  });
-
-  // --- State verification ---
-
-  it("fails queue item when subprocess exits 0 but task state did not advance", async () => {
-    // Mock returns ok:true but does NOT transition the task
-    mockDispatchAndTransition.mockResolvedValue({
-      ok: true, exitCode: 0, stdout: "done", stderr: "", durationMs: 100, evidenceId: "ev-123",
-    });
-
-    const task = createTask({
-      projectId: PROJECT, title: "Stuck task", createdBy: "agent:pm", assignedTo: "agent:worker",
-    }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
-
-    await dispatchLoop(PROJECT, db);
-
-    const status = getQueueStatus(PROJECT, db);
-    expect(status.failed).toBe(1);
-
-    const events = listEvents(PROJECT, { type: "dispatch_failed" }, db);
-    expect(events).toHaveLength(1);
-    expect(events[0]!.payload.stateStuck).toBe(true);
-    expect(events[0]!.payload.error).toContain("remained in ASSIGNED");
+    expect(events[0]!.payload.error).toBe("Cron service not available");
   });
 
   // --- Dead letter emission from dispatcher ---
 
   it("emits dispatch_dead_letter when item exhausts max attempts", async () => {
-    // Mock returns failure to trigger failItem
-    mockDispatchAndTransition.mockResolvedValue({
-      ok: false, exitCode: 1, stdout: "", stderr: "error", durationMs: 50,
-    });
+    mockDispatchViaCron.mockResolvedValue({ ok: false, error: "cron error" });
 
     const task = createTask({
       projectId: PROJECT, title: "Doomed task", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
 
     // Dispatch 3 times (max_dispatch_attempts = 3) — claim increments attempts
     for (let i = 0; i < 3; i++) {
       await dispatchLoop(PROJECT, db);
       // After failure, the item is marked failed. Re-enqueue for next attempt (except last).
       if (i < 2) {
-        // Complete the failed item and re-enqueue to simulate retry
-        enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+        enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
       }
     }
 
-    // The 3rd attempt should emit a dead letter (dispatchAttempts=3 >= maxDispatchAttempts=3)
-    // Note: each enqueue creates a fresh item with dispatchAttempts=0,
-    // so only the lease claim on the 3rd item gets attempts=1.
-    // Dead letter from dispatcher fires when item.dispatchAttempts >= item.maxDispatchAttempts.
-    // Since claimNext increments to 1 each time, the dispatcher dead letter won't fire
-    // for a single-attempt item. The dead letter from queue.ts covers the lease-expiry path.
-    // This test verifies the dispatch_failed events are emitted.
     const failedEvents = listEvents(PROJECT, { type: "dispatch_failed" }, db);
     expect(failedEvents.length).toBeGreaterThanOrEqual(1);
   });
@@ -232,14 +194,14 @@ describe("dispatch/dispatcher", () => {
 
   // --- Dispatch outcome metrics ---
 
-  it("records dispatch_success metric on successful dispatch", async () => {
+  it("records dispatch_cron_created metric on successful dispatch", async () => {
     const task = createTask({
       projectId: PROJECT, title: "Success metric", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
-    const metrics = queryMetrics({ projectId: PROJECT, key: "dispatch_success" }, db);
+    const metrics = queryMetrics({ projectId: PROJECT, key: "dispatch_cron_created" }, db);
     expect(metrics).toHaveLength(1);
     expect(metrics[0]!.subject).toBe(task.id);
   });
@@ -254,23 +216,9 @@ describe("dispatch/dispatcher", () => {
     expect(metrics[0]!.tags).toMatchObject({ reason: "non_dispatchable_state" });
   });
 
-  it("records dispatch_state_stuck metric when subprocess exits 0 but task stays", async () => {
-    mockDispatchAndTransition.mockResolvedValue({
-      ok: true, exitCode: 0, stdout: "done", stderr: "", durationMs: 100, evidenceId: "ev-123",
-    });
-
-    const task = createTask({
-      projectId: PROJECT, title: "Stuck metric", createdBy: "agent:pm", assignedTo: "agent:worker",
-    }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
-    await dispatchLoop(PROJECT, db);
-
-    const stuckMetrics = queryMetrics({ projectId: PROJECT, key: "dispatch_state_stuck" }, db);
-    expect(stuckMetrics).toHaveLength(1);
-    expect(stuckMetrics[0]!.tags).toMatchObject({ stuckState: "ASSIGNED" });
-  });
-
   it("records dispatch_dead_letter metric and audit on dead letter", async () => {
+    mockDispatchViaCron.mockResolvedValue({ ok: false, error: "fatal error" });
+
     // Use a single-attempt queue item to trigger dead letter on first failure
     const task = createTask({
       projectId: PROJECT, title: "Dead letter metric", createdBy: "agent:pm", assignedTo: "agent:worker",
@@ -281,10 +229,6 @@ describe("dispatch/dispatcher", () => {
       INSERT INTO dispatch_queue (id, project_id, task_id, priority, status, dispatch_attempts, max_dispatch_attempts, created_at)
       VALUES (?, ?, ?, 2, 'queued', 0, 1, ?)
     `).run(itemId, PROJECT, task.id, Date.now());
-
-    mockDispatchAndTransition.mockResolvedValue({
-      ok: false, exitCode: 1, stdout: "", stderr: "fatal error", durationMs: 50,
-    });
 
     await dispatchLoop(PROJECT, db);
 
@@ -300,7 +244,7 @@ describe("dispatch/dispatcher", () => {
     const task = createTask({
       projectId: PROJECT, title: "Loop metric", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
     const metrics = queryMetrics({ projectId: PROJECT, key: "dispatch_loop_pass" }, db);
@@ -313,7 +257,7 @@ describe("dispatch/dispatcher", () => {
     const task = createTask({
       projectId: PROJECT, title: "Enriched event", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
     const events = listEvents(PROJECT, { type: "dispatch_succeeded" }, db);
@@ -322,49 +266,29 @@ describe("dispatch/dispatcher", () => {
     expect(events[0]!.payload.maxAttempts).toBe(3);
   });
 
-  it("records queue.complete and queue.fail audit entries via dispatcher", async () => {
-    // Success path
+  it("records queue.dispatched audit entry on successful dispatch", async () => {
     const task = createTask({
       projectId: PROJECT, title: "Audit task", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
-    const completeAudits = queryAuditLog({ projectId: PROJECT, action: "queue.complete" }, db);
-    expect(completeAudits).toHaveLength(1);
+    const dispatchedAudits = queryAuditLog({ projectId: PROJECT, action: "queue.dispatched" }, db);
+    expect(dispatchedAudits).toHaveLength(1);
   });
 
-  // --- Lease renewal ---
-
-  it("renews task lease during long dispatch via setInterval", async () => {
-    vi.useFakeTimers();
-
+  it("does NOT release task lease on successful dispatch (lease lives until agent_end)", async () => {
     const task = createTask({
-      projectId: PROJECT, title: "Long task", createdBy: "agent:pm", assignedTo: "agent:worker",
+      projectId: PROJECT, title: "Lease task", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-
-    // Mock a slow dispatch that takes time (we'll advance timers)
-    mockDispatchAndTransition.mockImplementation(async (opts: { task: { id: string } }) => {
-      // Advance time past the renewal interval (5 min)
-      await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
-      db.prepare("UPDATE tasks SET state = 'REVIEW', updated_at = ? WHERE id = ?")
-        .run(Date.now(), opts.task.id);
-      return { ok: true, exitCode: 0, stdout: "done", stderr: "", durationMs: 360000 };
-    });
-
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
-    // Verify the lease was renewed: the lease_expires_at should be extended
-    // (If renewal didn't happen, the lease would have expired at original time)
-    const taskRow = db.prepare("SELECT lease_holder, lease_expires_at FROM tasks WHERE id = ?")
+    // Lease should still be held (released by agent_end hook, not dispatcher)
+    const taskRow = db.prepare("SELECT lease_holder FROM tasks WHERE id = ?")
       .get(task.id) as Record<string, unknown> | undefined;
-    // After dispatch, the lease is released, so lease_holder should be null
-    // But we can verify the dispatch succeeded (which it wouldn't if lease expired without renewal)
-    const status = getQueueStatus(PROJECT, db);
-    expect(status.completed).toBe(1);
-
-    vi.useRealTimers();
+    expect(taskRow!.lease_holder).toBeTruthy();
+    expect((taskRow!.lease_holder as string)).toContain("dispatch:");
   });
 
   // --- Dispatch event dedup keys ---
@@ -373,7 +297,7 @@ describe("dispatch/dispatcher", () => {
     const task = createTask({
       projectId: PROJECT, title: "Dedup event", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
-    enqueue(PROJECT, task.id, { prompt: "do it", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
     const events = listEvents(PROJECT, { type: "dispatch_succeeded" }, db);
@@ -395,19 +319,32 @@ describe("dispatch/dispatcher", () => {
     transitionTask({ projectId: PROJECT, taskId: task.id, toState: "OPEN", actor: "agent:pm" }, db);
     transitionTask({ projectId: PROJECT, taskId: task.id, toState: "ASSIGNED", actor: "agent:pm", assignedTo: "agent:worker" }, db);
 
-    // Set up mock to capture the prompt and advance task state
+    // Capture the prompt passed to dispatchViaCron
     let capturedPrompt = "";
-    mockDispatchAndTransition.mockImplementation(async (opts: { task: { projectId: string; id: string }; prompt: string }) => {
+    mockDispatchViaCron.mockImplementation(async (opts: { prompt: string }) => {
       capturedPrompt = opts.prompt;
-      db.prepare("UPDATE tasks SET state = 'REVIEW', updated_at = ? WHERE id = ?")
-        .run(Date.now(), opts.task.id);
-      return { ok: true, exitCode: 0, stdout: "done", stderr: "", durationMs: 100, evidenceId: "ev-456" };
+      return { ok: true, cronJobName: "dispatch:retry" };
     });
 
-    enqueue(PROJECT, task.id, { prompt: "fix the build", projectDir: "/tmp" }, undefined, db);
+    enqueue(PROJECT, task.id, { prompt: "fix the build" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
     expect(capturedPrompt).toContain("Previous Attempt Context");
     expect(capturedPrompt).toContain("Build error");
+  });
+
+  it("releases task lease when cron creation fails", async () => {
+    mockDispatchViaCron.mockResolvedValue({ ok: false, error: "service down" });
+
+    const task = createTask({
+      projectId: PROJECT, title: "Lease release", createdBy: "agent:pm", assignedTo: "agent:worker",
+    }, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
+    await dispatchLoop(PROJECT, db);
+
+    // Lease should be released on failure
+    const taskRow = db.prepare("SELECT lease_holder FROM tasks WHERE id = ?")
+      .get(task.id) as Record<string, unknown> | undefined;
+    expect(taskRow!.lease_holder).toBeNull();
   });
 });

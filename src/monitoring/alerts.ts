@@ -90,7 +90,14 @@ function evaluateSingleRule(
     return { name, fired: false };
   }
 
-  const value = agg[0]!.sum;
+  // H10: Select aggregation value based on rule's aggregation mode (default: sum)
+  const aggMode = rule.aggregation ?? "sum";
+  const aggResult = agg[0]!;
+  const value = aggMode === "avg" ? aggResult.avg
+    : aggMode === "count" ? aggResult.count
+    : aggMode === "min" ? aggResult.min
+    : aggMode === "max" ? aggResult.max
+    : aggResult.sum;
   let triggered = false;
 
   switch (rule.condition) {
@@ -105,20 +112,23 @@ function evaluateSingleRule(
     return { name, fired: false };
   }
 
-  // Fire action
+  // Fire action — H5: only update last_fired_at if action succeeds
+  let actionFired = false;
   try {
     fireAlertAction(projectId, name, rule, value, now, db);
+    actionFired = true;
   } catch (err) {
     safeLog("alerts.fireAction", err);
   }
 
-  // Update last_fired_at
-  try {
-    db.prepare(
-      "UPDATE alert_rules SET last_fired_at = ? WHERE project_id = ? AND name = ?",
-    ).run(now, projectId, name);
-  } catch (err) {
-    safeLog("alerts.updateLastFired", err);
+  if (actionFired) {
+    try {
+      db.prepare(
+        "UPDATE alert_rules SET last_fired_at = ? WHERE project_id = ? AND name = ?",
+      ).run(now, projectId, name);
+    } catch (err) {
+      safeLog("alerts.updateLastFired", err);
+    }
   }
 
   return { name, fired: true, reason: `${rule.metricKey}: ${value} ${rule.condition} ${rule.threshold}` };
@@ -160,7 +170,23 @@ function fireAlertAction(
         condition: rule.condition,
       }, `alert:${name}`, db);
       break;
-    case "escalate":
+    case "escalate": {
+      // Create a visible task for the escalation
+      const escalationTitle = (rule.actionParams?.taskTitle as string) ?? `Alert escalation: ${name}`;
+      const existingEsc = db.prepare(
+        "SELECT id FROM tasks WHERE project_id = ? AND title = ? AND state NOT IN ('DONE', 'FAILED', 'CANCELLED') LIMIT 1",
+      ).get(projectId, escalationTitle) as Record<string, unknown> | undefined;
+      if (!existingEsc) {
+        createTask({
+          projectId,
+          title: escalationTitle,
+          description: `Alert "${name}" escalated: ${rule.metricKey}=${value.toFixed(2)} (threshold: ${rule.condition} ${rule.threshold})`,
+          priority: "P0",
+          createdBy: "system:monitoring",
+          tags: ["alert-escalation", name],
+        }, db);
+      }
+      // Also emit event for routing
       ingestEvent(projectId, "sweep_finding", "internal", {
         finding: "alert_escalation",
         alert: name,
@@ -168,5 +194,6 @@ function fireAlertAction(
         value,
       }, `alert-escalation:${name}`, db);
       break;
+    }
   }
 }

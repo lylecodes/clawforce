@@ -5,6 +5,8 @@ import {
   CRITICAL_SOURCES,
   DEFAULT_ACTION_SCOPES,
   generateDefaultScopePolicies,
+  getToolNamesFromScope,
+  getAllowedActionsForTool,
 } from "../src/profiles.js";
 
 describe("BUILTIN_PROFILES", () => {
@@ -17,6 +19,8 @@ describe("BUILTIN_PROFILES", () => {
     expect(sourceNames).toContain("activity");
     expect(sourceNames).toContain("sweep_status");
     expect(sourceNames).toContain("proposals");
+    expect(sourceNames).toContain("skill");
+    expect(sourceNames).toContain("goal_hierarchy");
     // instructions handled separately, should NOT be in baseline
     expect(sourceNames).not.toContain("instructions");
   });
@@ -40,12 +44,12 @@ describe("BUILTIN_PROFILES", () => {
     expect(sourceNames).not.toContain("instructions");
   });
 
-  it("employee has transition/fail, log, and memory required", () => {
+  it("employee has transition/fail, log, and memory_search required", () => {
     const outputs = BUILTIN_PROFILES.employee.expectations;
     expect(outputs).toHaveLength(3);
     expect(outputs.some((o) => o.tool === "clawforce_task")).toBe(true);
     expect(outputs.some((o) => o.tool === "clawforce_log")).toBe(true);
-    expect(outputs.some((o) => o.tool === "clawforce_memory")).toBe(true);
+    expect(outputs.some((o) => o.tool === "memory_search")).toBe(true);
   });
 
   it("employee defaults to retry then alert", () => {
@@ -55,16 +59,21 @@ describe("BUILTIN_PROFILES", () => {
     expect(failure.then).toBe("alert");
   });
 
-  it("scheduled has memory in baseline context", () => {
-    expect(BUILTIN_PROFILES.scheduled.briefing).toHaveLength(1);
-    expect(BUILTIN_PROFILES.scheduled.briefing[0]!.source).toBe("memory");
+  it("scheduled has soul, tools_reference, memory, skill, and pending_messages in baseline context", () => {
+    expect(BUILTIN_PROFILES.scheduled.briefing).toHaveLength(5);
+    const sources = BUILTIN_PROFILES.scheduled.briefing.map((s) => s.source);
+    expect(sources).toContain("soul");
+    expect(sources).toContain("tools_reference");
+    expect(sources).toContain("memory");
+    expect(sources).toContain("skill");
+    expect(sources).toContain("pending_messages");
   });
 
-  it("scheduled has clawforce_log outcome and memory save required", () => {
+  it("scheduled has clawforce_log outcome and memory_search required", () => {
     const outputs = BUILTIN_PROFILES.scheduled.expectations;
     expect(outputs).toHaveLength(2);
     expect(outputs.some((o) => o.tool === "clawforce_log" && o.action === "outcome")).toBe(true);
-    expect(outputs.some((o) => o.tool === "clawforce_memory")).toBe(true);
+    expect(outputs.some((o) => o.tool === "memory_search")).toBe(true);
   });
 
   it("scheduled defaults to retry then terminate_and_alert", () => {
@@ -102,50 +111,112 @@ describe("CRITICAL_SOURCES", () => {
 });
 
 describe("DEFAULT_ACTION_SCOPES", () => {
-  it("manager has all clawforce tools", () => {
+  it("manager has all clawforce tools with wildcard access", () => {
     const scope = DEFAULT_ACTION_SCOPES.manager;
-    expect(scope).toContain("clawforce_task");
-    expect(scope).toContain("clawforce_log");
-    expect(scope).toContain("clawforce_verify");
-    expect(scope).toContain("clawforce_compact");
-    expect(scope).toContain("clawforce_workflow");
-    expect(scope).toContain("clawforce_ops");
-    expect(scope).toContain("clawforce_setup");
+    const toolNames = getToolNamesFromScope(scope);
+    expect(toolNames).toContain("clawforce_task");
+    expect(toolNames).toContain("clawforce_log");
+    expect(toolNames).toContain("clawforce_verify");
+    expect(toolNames).toContain("clawforce_compact");
+    expect(toolNames).toContain("clawforce_workflow");
+    expect(toolNames).toContain("clawforce_ops");
+    expect(toolNames).toContain("clawforce_setup");
+    expect(toolNames).toContain("clawforce_goal");
+    // All tools have wildcard access for manager
+    for (const tool of toolNames) {
+      expect(getAllowedActionsForTool(scope, tool)).toBe("*");
+    }
   });
 
-  it("employee has limited tools", () => {
+  it("employee has limited tools with action restrictions", () => {
     const scope = DEFAULT_ACTION_SCOPES.employee;
-    expect(scope).toContain("clawforce_task");
-    expect(scope).toContain("clawforce_log");
-    expect(scope).toContain("clawforce_verify");
-    expect(scope).toContain("clawforce_compact");
-    expect(scope).not.toContain("clawforce_setup");
-    expect(scope).not.toContain("clawforce_ops");
+    const toolNames = getToolNamesFromScope(scope);
+    expect(toolNames).toContain("clawforce_task");
+    expect(toolNames).toContain("clawforce_log");
+    expect(toolNames).toContain("clawforce_verify");
+    expect(toolNames).toContain("clawforce_compact");
+    expect(toolNames).toContain("clawforce_setup");
+    expect(toolNames).toContain("clawforce_goal");
+    expect(toolNames).not.toContain("clawforce_ops");
+    expect(toolNames).not.toContain("clawforce_workflow");
   });
 
-  it("scheduled has minimal tools", () => {
+  it("employee clawforce_goal has read-only actions", () => {
+    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee, "clawforce_goal");
+    expect(Array.isArray(actions)).toBe(true);
+    expect(actions).toContain("get");
+    expect(actions).toContain("list");
+    expect(actions).toContain("status");
+    expect(actions).not.toContain("create");
+    expect(actions).not.toContain("decompose");
+    expect(actions).not.toContain("achieve");
+    expect(actions).not.toContain("abandon");
+  });
+
+  it("employee clawforce_task excludes manager-only actions", () => {
+    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee, "clawforce_task");
+    expect(Array.isArray(actions)).toBe(true);
+    expect(actions).toContain("get");
+    expect(actions).toContain("transition");
+    expect(actions).not.toContain("create");
+    expect(actions).not.toContain("bulk_create");
+    expect(actions).not.toContain("bulk_transition");
+    expect(actions).not.toContain("metrics");
+  });
+
+  it("employee clawforce_log excludes verify_audit", () => {
+    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee, "clawforce_log");
+    expect(Array.isArray(actions)).toBe(true);
+    expect(actions).toContain("write");
+    expect(actions).not.toContain("verify_audit");
+  });
+
+  it("employee clawforce_setup only has explain and status", () => {
+    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee, "clawforce_setup");
+    expect(actions).toEqual(["explain", "status"]);
+  });
+
+  it("scheduled has minimal tools plus setup", () => {
     const scope = DEFAULT_ACTION_SCOPES.scheduled;
-    expect(scope).toContain("clawforce_log");
-    expect(scope).not.toContain("clawforce_task");
-    expect(scope).not.toContain("clawforce_setup");
+    const toolNames = getToolNamesFromScope(scope);
+    expect(toolNames).toContain("clawforce_log");
+    expect(toolNames).toContain("clawforce_setup");
+    expect(toolNames).not.toContain("clawforce_task");
+    expect(toolNames).not.toContain("clawforce_verify");
+    expect(toolNames).not.toContain("clawforce_compact");
+    expect(toolNames).not.toContain("clawforce_goal");
+  });
+
+  it("scheduled clawforce_log excludes write and verify_audit", () => {
+    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.scheduled, "clawforce_log");
+    expect(Array.isArray(actions)).toBe(true);
+    expect(actions).toContain("outcome");
+    expect(actions).toContain("search");
+    expect(actions).not.toContain("write");
+    expect(actions).not.toContain("verify_audit");
   });
 });
 
 describe("generateDefaultScopePolicies", () => {
-  it("generates policies per agent role", () => {
+  it("generates policies per agent role with ActionScope format", () => {
     const agents = {
       leon: { role: "manager" as const },
       coder: { role: "employee" as const },
       cron1: { role: "scheduled" as const },
+      helper: { role: "assistant" as const },
     };
 
     const policies = generateDefaultScopePolicies(agents);
-    expect(policies).toHaveLength(3);
+    expect(policies).toHaveLength(4);
 
     const coderPolicy = policies.find((p) => p.target === "coder")!;
     expect(coderPolicy).toBeDefined();
     expect(coderPolicy.type).toBe("action_scope");
-    expect(coderPolicy.config.allowed_tools).toEqual(DEFAULT_ACTION_SCOPES.employee);
+    // Should be object format, not array
+    const allowedTools = coderPolicy.config.allowed_tools as Record<string, unknown>;
+    expect(typeof allowedTools).toBe("object");
+    expect(Array.isArray(allowedTools)).toBe(false);
+    expect(allowedTools.clawforce_task).toEqual(DEFAULT_ACTION_SCOPES.employee.clawforce_task);
   });
 
   it("does not override explicit action_scope policies", () => {
@@ -295,7 +366,7 @@ describe("applyProfile", () => {
     expect(sourceNames).toContain("assigned_task");
   });
 
-  it("scheduled baseline has memory, user sources merge on top", () => {
+  it("scheduled baseline has soul + tools_reference + memory + skill, user sources merge on top", () => {
     const result = applyProfile("scheduled", {
       briefing: [{ source: "custom", content: "hi" }],
       exclude_briefing: [],
@@ -303,8 +374,38 @@ describe("applyProfile", () => {
       performance_policy: null,
     });
 
-    expect(result.briefing).toHaveLength(2);
+    expect(result.briefing).toHaveLength(6);
+    expect(result.briefing.some((s) => s.source === "soul")).toBe(true);
+    expect(result.briefing.some((s) => s.source === "tools_reference")).toBe(true);
     expect(result.briefing.some((s) => s.source === "memory")).toBe(true);
+    expect(result.briefing.some((s) => s.source === "skill")).toBe(true);
+    expect(result.briefing.some((s) => s.source === "pending_messages")).toBe(true);
     expect(result.briefing.some((s) => s.source === "custom")).toBe(true);
+  });
+});
+
+describe("getToolNamesFromScope", () => {
+  it("returns tool names from an ActionScope", () => {
+    const names = getToolNamesFromScope({ tool_a: "*", tool_b: ["x", "y"] });
+    expect(names).toEqual(["tool_a", "tool_b"]);
+  });
+
+  it("returns empty array for empty scope", () => {
+    expect(getToolNamesFromScope({})).toEqual([]);
+  });
+});
+
+describe("getAllowedActionsForTool", () => {
+  it("returns '*' for wildcard tools", () => {
+    expect(getAllowedActionsForTool({ clawforce_task: "*" }, "clawforce_task")).toBe("*");
+  });
+
+  it("returns string[] for restricted tools", () => {
+    const actions = getAllowedActionsForTool({ clawforce_task: ["get", "list"] }, "clawforce_task");
+    expect(actions).toEqual(["get", "list"]);
+  });
+
+  it("returns null for tools not in scope", () => {
+    expect(getAllowedActionsForTool({ clawforce_task: "*" }, "clawforce_ops")).toBeNull();
   });
 });

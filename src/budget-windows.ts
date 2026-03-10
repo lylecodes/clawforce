@@ -29,7 +29,7 @@ const ALERT_THRESHOLD = 75; // percent
 function getWindowStart(window: "hourly" | "daily" | "monthly", now: number): number {
   const d = new Date(now);
   if (window === "hourly") {
-    d.setMinutes(0, 0, 0);
+    d.setUTCMinutes(0, 0, 0);
   } else if (window === "daily") {
     d.setUTCHours(0, 0, 0, 0);
   } else {

@@ -54,6 +54,7 @@ describe("events/router", () => {
 
   it("handles task_completed events", () => {
     const task = createTask({ projectId: PROJECT, title: "Test", createdBy: "agent:pm" }, db);
+    processEvents(PROJECT, db); // drain task_created event
 
     // Manually ingest a task_completed event
     ingestEvent(PROJECT, "task_completed", "internal", { taskId: task.id }, undefined, db);
@@ -103,6 +104,7 @@ describe("events/router", () => {
 
   it("handles sweep_finding stale events", () => {
     const task = createTask({ projectId: PROJECT, title: "Stale task", createdBy: "agent:pm" }, db);
+    processEvents(PROJECT, db); // drain task_created event
 
     ingestEvent(PROJECT, "sweep_finding", "cron", {
       finding: "stale",
@@ -148,6 +150,7 @@ describe("events/router", () => {
 
   it("handles dispatch_failed by re-enqueuing the task", () => {
     const task = createTask({ projectId: PROJECT, title: "Failed dispatch", createdBy: "agent:pm" }, db);
+    processEvents(PROJECT, db); // drain task_created event
 
     ingestEvent(PROJECT, "dispatch_failed", "internal", {
       taskId: task.id,
@@ -164,6 +167,7 @@ describe("events/router", () => {
 
   it("handles dispatch_failed gracefully when dedup prevents re-enqueue", () => {
     const task = createTask({ projectId: PROJECT, title: "Already queued", createdBy: "agent:pm" }, db);
+    processEvents(PROJECT, db); // drain task_created event
 
     // Pre-enqueue the task so dedup blocks
     enqueue(PROJECT, task.id, undefined, undefined, db);
@@ -238,6 +242,7 @@ describe("events/router", () => {
 
   it("handles dispatch_dead_letter by marking task metadata", () => {
     const task = createTask({ projectId: PROJECT, title: "Dead letter task", createdBy: "agent:pm" }, db);
+    processEvents(PROJECT, db); // drain task_created event
 
     ingestEvent(PROJECT, "dispatch_dead_letter", "internal", {
       taskId: task.id,

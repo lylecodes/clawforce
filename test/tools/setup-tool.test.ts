@@ -42,12 +42,12 @@ describe("clawforce_setup tool", () => {
     vi.restoreAllMocks();
   });
 
-  function createTool(projectsDir?: string) {
-    return createClawforceSetupTool({ projectsDir: projectsDir ?? tmpDir });
+  function createTool(projectsDir?: string, agentId?: string) {
+    return createClawforceSetupTool({ projectsDir: projectsDir ?? tmpDir, agentId });
   }
 
-  async function execute(params: Record<string, unknown>, projectsDir?: string) {
-    const tool = createTool(projectsDir);
+  async function execute(params: Record<string, unknown>, projectsDir?: string, agentId?: string) {
+    const tool = createTool(projectsDir, agentId);
     const result = await tool.execute("call-1", params);
     return JSON.parse(result.content[0]!.text);
   }
@@ -73,6 +73,30 @@ describe("clawforce_setup tool", () => {
       const result = await execute({ action: "explain" });
 
       expect(result.reference).toContain("Agent IDs");
+    });
+
+    it("returns specific topic content when topic is provided", async () => {
+      const result = await execute({ action: "explain", topic: "memory" });
+
+      expect(result.ok).toBe(true);
+      expect(result.topic).toBe("memory");
+      expect(result.reference).toContain("memory");
+    });
+
+    it("returns error for unknown topic", async () => {
+      const result = await execute({ action: "explain", topic: "nonexistent_topic" });
+
+      expect(result.ok).toBe(true);
+      // resolveSkillSource returns an error string for unknown topics
+      expect(result.reference).toContain("Unknown skill topic");
+    });
+
+    it("returns full reference when topic is omitted", async () => {
+      const result = await execute({ action: "explain" });
+
+      expect(result.ok).toBe(true);
+      expect(result.topic).toBeUndefined();
+      expect(result.reference).toContain("project.yaml");
     });
   });
 
@@ -295,11 +319,55 @@ agents:
       expect(result.reason).toContain("yaml_content");
     });
 
-    it("returns error for non-existent config_path", async () => {
+    it("returns error for non-existent config_path outside projects dir", async () => {
       const result = await execute({ action: "validate", config_path: "/nonexistent/project.yaml" });
 
       expect(result.ok).toBe(false);
+      expect(result.reason).toContain("config_path must be within the projects directory");
+    });
+
+    it("returns error for non-existent config_path within projects dir", async () => {
+      const configPath = path.join(tmpDir, "nonexistent", "project.yaml");
+      const result = await execute({ action: "validate", config_path: configPath });
+
+      expect(result.ok).toBe(false);
       expect(result.reason).toContain("Cannot read file");
+    });
+
+    it("rejects config_path with path traversal outside projects dir", async () => {
+      const result = await execute({ action: "validate", config_path: "../../../etc/passwd" });
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("config_path must be within the projects directory");
+    });
+
+    it("rejects config_path with absolute path outside projects dir", async () => {
+      const result = await execute({ action: "validate", config_path: "/etc/passwd" });
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("config_path must be within the projects directory");
+    });
+
+    it("allows config_path within projects dir", async () => {
+      const yaml = `
+id: test-project
+name: Test
+dir: /tmp/test
+agents:
+  worker:
+    role: worker
+    required_outputs:
+      - tool: clawforce_task
+        action: transition
+        min_calls: 1
+    on_failure:
+      action: alert
+`;
+      const configPath = path.join(tmpDir, "project.yaml");
+      fs.writeFileSync(configPath, yaml, "utf-8");
+
+      const result = await execute({ action: "validate", config_path: configPath });
+      expect(result.valid).toBe(true);
     });
   });
 
@@ -453,6 +521,144 @@ policies:
 
       expect(result.ok).toBe(false);
       expect(result.reason).toContain("project_id");
+    });
+  });
+
+  describe("explain with agentId", () => {
+    it("returns scoped tools content for employee agent", async () => {
+      vi.spyOn(projectModule, "getAgentConfig").mockImplementation((agentId: string) => {
+        if (agentId === "worker1") return {
+          projectId: "proj1",
+          config: { role: "employee" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
+        };
+        return null;
+      });
+
+      const result = await execute({ action: "explain", topic: "tools" }, undefined, "worker1");
+
+      expect(result.ok).toBe(true);
+      expect(result.topic).toBe("tools");
+      // Employee scope — should have task and log but not ops/workflow
+      expect(result.reference).toContain("clawforce_task");
+      expect(result.reference).toContain("clawforce_log");
+      expect(result.reference).not.toContain("clawforce_ops");
+      expect(result.reference).not.toContain("clawforce_workflow");
+    });
+
+    it("returns full tools content when no agentId", async () => {
+      const result = await execute({ action: "explain", topic: "tools" });
+
+      expect(result.ok).toBe(true);
+      // Without agentId, should get full (manager-level) reference
+      expect(result.reference).toContain("clawforce_task");
+      expect(result.reference).toContain("clawforce_ops");
+    });
+
+    it("resolves non-tools topics using agent role", async () => {
+      vi.spyOn(projectModule, "getAgentConfig").mockImplementation((agentId: string) => {
+        if (agentId === "worker1") return {
+          projectId: "proj1",
+          config: { role: "employee" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
+        };
+        return null;
+      });
+
+      // employees can access "roles" topic (available to all roles)
+      const result = await execute({ action: "explain", topic: "roles" }, undefined, "worker1");
+      expect(result.ok).toBe(true);
+      expect(result.reference).toContain("manager");
+    });
+  });
+
+  describe("scaffold", () => {
+    it("creates SOUL.md template for single agent", async () => {
+      const projectDir = path.join(tmpDir, "my-project");
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue(["my-project"]);
+
+      const result = await execute({ action: "scaffold", project_id: "my-project", agent_id: "frontend-dev" });
+
+      expect(result.ok).toBe(true);
+      expect(result.scaffolded).toContain("frontend-dev");
+
+      const soulPath = path.join(projectDir, "agents", "frontend-dev", "SOUL.md");
+      expect(fs.existsSync(soulPath)).toBe(true);
+      const content = fs.readFileSync(soulPath, "utf-8");
+      expect(content).toContain("<!-- SOUL.md");
+      expect(content).toContain("frontend-dev");
+    });
+
+    it("creates for all agents when no agent_id specified", async () => {
+      const projectDir = path.join(tmpDir, "my-project");
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue(["my-project"]);
+      vi.spyOn(projectModule, "getRegisteredAgentIds").mockReturnValue(["worker1", "worker2"]);
+      vi.spyOn(projectModule, "getAgentConfig").mockImplementation((agentId: string) => {
+        if (agentId === "worker1" || agentId === "worker2") {
+          return {
+            projectId: "my-project",
+            config: { role: "employee" as const, briefing: [], expectations: [], performance_policy: { action: "alert" as const } },
+          };
+        }
+        return null;
+      });
+
+      const result = await execute({ action: "scaffold", project_id: "my-project" });
+
+      expect(result.ok).toBe(true);
+      expect(result.scaffolded).toContain("worker1");
+      expect(result.scaffolded).toContain("worker2");
+    });
+
+    it("skips customized SOUL.md", async () => {
+      const projectDir = path.join(tmpDir, "my-project");
+      const agentDir = path.join(projectDir, "agents", "worker1");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(path.join(agentDir, "SOUL.md"), "# My Custom Agent\n\nI specialize in frontend.", "utf-8");
+
+      vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue(["my-project"]);
+
+      const result = await execute({ action: "scaffold", project_id: "my-project", agent_id: "worker1" });
+
+      expect(result.ok).toBe(true);
+      expect(result.skipped).toContain("worker1");
+      expect(result.scaffolded).not.toContain("worker1");
+
+      // Content should be unchanged
+      const content = fs.readFileSync(path.join(agentDir, "SOUL.md"), "utf-8");
+      expect(content).toBe("# My Custom Agent\n\nI specialize in frontend.");
+    });
+
+    it("auto-resolves single active project", async () => {
+      const projectDir = path.join(tmpDir, "only-project");
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue(["only-project"]);
+
+      const result = await execute({ action: "scaffold", agent_id: "worker1" });
+
+      expect(result.ok).toBe(true);
+      expect(result.project_id).toBe("only-project");
+    });
+
+    it("errors when multiple projects and no project_id", async () => {
+      vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue(["proj1", "proj2"]);
+
+      const result = await execute({ action: "scaffold" });
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("project_id");
+    });
+
+    it("errors when no active projects", async () => {
+      vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue([]);
+
+      const result = await execute({ action: "scaffold" });
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("No active projects");
     });
   });
 

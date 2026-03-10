@@ -88,9 +88,10 @@ export function executeCrashAction(
   sessionKey: string,
   error: string | undefined,
   metrics: SessionMetrics | null,
+  jobName?: string,
 ): FailureActionResult {
   // Record crash in audit log
-  recordCrashAuditRun(projectId, agentId, sessionKey, error, metrics);
+  recordCrashAuditRun(projectId, agentId, sessionKey, error, metrics, jobName);
 
   if (policyConfig.action === "retry") {
     const maxRetries = resolveMaxRetries(policyConfig.max_retries);
@@ -158,8 +159,8 @@ function recordAuditRun(result: ComplianceResult, status: string): void {
     );
 
     db.prepare(`
-      INSERT INTO audit_runs (id, project_id, agent_id, session_key, status, summary, requirements_met, metrics, started_at, ended_at, duration_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO audit_runs (id, project_id, agent_id, session_key, status, summary, requirements_met, metrics, started_at, ended_at, duration_ms, job_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, result.projectId, result.agentId, result.sessionKey,
       status,
@@ -167,6 +168,7 @@ function recordAuditRun(result: ComplianceResult, status: string): void {
       requirementsMet,
       JSON.stringify(result.metrics),
       result.metrics.startedAt, now, duration,
+      result.jobName ?? null,
     );
   } catch (err) {
     safeLog("actions.recordAudit", err);
@@ -179,6 +181,7 @@ function recordCrashAuditRun(
   sessionKey: string,
   error: string | undefined,
   metrics: SessionMetrics | null,
+  jobName?: string,
 ): void {
   try {
     const db = getDb(projectId);
@@ -187,14 +190,15 @@ function recordCrashAuditRun(
     const startedAt = metrics?.startedAt ?? now;
 
     db.prepare(`
-      INSERT INTO audit_runs (id, project_id, agent_id, session_key, status, summary, metrics, started_at, ended_at, duration_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO audit_runs (id, project_id, agent_id, session_key, status, summary, metrics, started_at, ended_at, duration_ms, job_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, projectId, agentId, sessionKey,
       "crashed",
       error ?? "Employee is unresponsive",
       metrics ? JSON.stringify(metrics) : null,
       startedAt, now, now - startedAt,
+      jobName ?? null,
     );
   } catch (err) {
     safeLog("actions.recordCrashAudit", err);

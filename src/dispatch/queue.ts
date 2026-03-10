@@ -202,7 +202,59 @@ export function reclaimExpiredLeases(
     reclaimed++;
   }
 
+  // Also clean up stale dispatched items (sessions that never completed)
+  const STALE_DISPATCH_MS = 2 * 60 * 60 * 1000; // 2 hours
+  const staleDispatched = db.prepare(
+    `SELECT id, task_id FROM dispatch_queue
+     WHERE project_id = ? AND status = 'dispatched' AND created_at < ?`,
+  ).all(projectId, now - STALE_DISPATCH_MS) as Record<string, unknown>[];
+
+  for (const row of staleDispatched) {
+    const itemId = row.id as string;
+    const taskId = row.task_id as string;
+
+    db.prepare(
+      `UPDATE dispatch_queue SET status = 'failed', last_error = 'Dispatched session never completed', completed_at = ?
+       WHERE id = ?`,
+    ).run(now, itemId);
+
+    try {
+      ingestEvent(projectId, "dispatch_dead_letter", "internal", {
+        taskId, queueItemId: itemId, lastError: "Dispatched session never completed",
+      }, `dead-letter:${itemId}`, db);
+    } catch (err) { safeLog("queue.staleDispatch.deadLetter", err); }
+
+    try {
+      recordMetric({ projectId, type: "dispatch", subject: taskId, key: "queue_stale_dispatch", value: 1, tags: { queueItemId: itemId } }, db);
+    } catch (err) { safeLog("queue.staleDispatch.metric", err); }
+
+    reclaimed++;
+  }
+
   return reclaimed;
+}
+
+/**
+ * Mark a queue item as dispatched (cron job created, awaiting agent_end).
+ * Clears lease fields — the item is no longer leased, but not yet completed.
+ */
+export function markDispatched(
+  id: string,
+  dbOverride?: DatabaseSync,
+  projectId?: string,
+): void {
+  const db = dbOverride ?? getDb("");
+  db.prepare(
+    `UPDATE dispatch_queue
+     SET status = 'dispatched', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL
+     WHERE id = ?`,
+  ).run(id);
+
+  if (projectId) {
+    try {
+      writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.dispatched", targetType: "dispatch_queue", targetId: id }, db);
+    } catch (err) { safeLog("queue.dispatched.audit", err); }
+  }
 }
 
 /** Mark a queue item as completed. */

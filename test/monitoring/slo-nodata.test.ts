@@ -80,6 +80,66 @@ describe("evaluateSlos no-data behavior", () => {
     expect(results[0]!.actual).toBe(500);
   });
 
+  it("returns passed=false with noData=true when noDataPolicy is 'fail'", () => {
+    const results = evaluateSlos(PROJECT, {
+      strict_slo: {
+        name: "strict_slo",
+        metricType: "task_cycle",
+        metricKey: "nonexistent_metric",
+        aggregation: "avg",
+        condition: "lt",
+        threshold: 1000,
+        windowMs: 3600000,
+        severity: "critical",
+        noDataPolicy: "fail",
+      },
+    }, db);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.passed).toBe(false);
+    expect(results[0]!.noData).toBe(true);
+    expect(results[0]!.actual).toBeNull();
+  });
+
+  it("returns passed=true with noData=true when noDataPolicy is 'warn'", () => {
+    const results = evaluateSlos(PROJECT, {
+      warn_slo: {
+        name: "warn_slo",
+        metricType: "task_cycle",
+        metricKey: "nonexistent_metric",
+        aggregation: "avg",
+        condition: "lt",
+        threshold: 1000,
+        windowMs: 3600000,
+        severity: "warning",
+        noDataPolicy: "warn",
+      },
+    }, db);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.passed).toBe(true);
+    expect(results[0]!.noData).toBe(true);
+  });
+
+  it("defaults to pass when noDataPolicy is not set", () => {
+    const results = evaluateSlos(PROJECT, {
+      default_slo: {
+        name: "default_slo",
+        metricType: "task_cycle",
+        metricKey: "nonexistent_metric",
+        aggregation: "avg",
+        condition: "lt",
+        threshold: 1000,
+        windowMs: 3600000,
+        severity: "warning",
+      },
+    }, db);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.passed).toBe(true);
+    expect(results[0]!.noData).toBe(true);
+  });
+
   it("returns passed=false without noData when data breaches threshold", () => {
     recordMetric({ projectId: PROJECT, type: "task_cycle", key: "cycle_time", value: 5000 }, db);
     recordMetric({ projectId: PROJECT, type: "task_cycle", key: "cycle_time", value: 8000 }, db);
