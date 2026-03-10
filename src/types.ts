@@ -191,8 +191,11 @@ export type AssignmentConfig = {
 
 // --- Agent Enforcement Framework types ---
 
-/** Role determines default behavior and management patterns. */
-export type AgentRole = "manager" | "employee" | "scheduled" | "assistant";
+/** Coordination configuration for agents that manage other agents. */
+export type CoordinationConfig = {
+  enabled: boolean;
+  schedule?: string;
+};
 
 /** A context source to inject at session start. */
 export type ContextSource = {
@@ -248,7 +251,8 @@ export type AgentPermissions = {
 
 /** Per-agent configuration. */
 export type AgentConfig = {
-  role: AgentRole;
+  /** Preset to inherit defaults from (e.g. "manager", "employee"). */
+  extends?: string;
   /** Job title (e.g. "VP of Engineering"). */
   title?: string;
   /** AI model to use (e.g. "claude-opus-4-6"). */
@@ -288,12 +292,16 @@ export type AgentConfig = {
   compaction?: boolean | CompactionConfig;
   /** Name of the skill_pack to apply to this agent. */
   skill_pack?: string;
+  /** Coordination config for agents that manage other agents. */
+  coordination?: CoordinationConfig;
   /** Scoped sessions. Each key is a job name with its own briefing/expectations/cron. */
   jobs?: Record<string, JobDefinition>;
 };
 
 /** A scoped session definition for an agent. */
 export type JobDefinition = {
+  /** Preset to inherit job defaults from. */
+  extends?: string;
   /** Cron schedule. Accepts shorthand ("5m"), cron expr ("0 9 * * MON-FRI"), or ISO datetime ("at:2025-12-31T23:59:00Z"). */
   cron?: string;
   /** Timezone for cron expressions (e.g. "America/New_York"). Ignored for interval/at schedules. */
@@ -367,7 +375,7 @@ export type WorkforceConfig = {
     title: string;
     description: string;
     path: string;
-    roles?: AgentRole[];
+    roles?: string[];
   }>;
   /** Reusable config bundles that agents can reference. */
   skill_packs?: Record<string, SkillPack>;
@@ -461,7 +469,7 @@ export type ChannelConfig = {
   /** Auto-join agents by team. */
   teams?: string[];
   /** Auto-join agents by role. */
-  roles?: AgentRole[];
+  roles?: string[];
   /** Telegram group ID for mirroring channel messages. */
   telegramGroupId?: string;
   /** Telegram thread/topic ID within the group. */
