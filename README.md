@@ -7,11 +7,11 @@ Accountability layer for autonomous AI agents — treats them like employees wit
 - **Hire AI employees** with full profiles: title, model, persona, department, team, permissions
 - **Org hierarchy** with reporting chains via `reports_to`, forming manager-to-employee structures
 - **Accountability enforcement** -- agents must meet expectations (deliverables) or face performance policy (retry, escalate, terminate)
-- **Context briefing** -- each role gets default context sources injected automatically at session start
+- **Config inheritance** -- agents inherit from presets (`extends: manager`) with merge operators for composable config
 - **Task lifecycle** -- full state machine: OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE
 - **Workflows** -- multi-phase execution with automatic gating between phases
 - **Shared memory** -- agents search and retrieve learnings across sessions via OpenClaw's RAG engine (vector embeddings, hybrid BM25+vector search)
-- **Skill system** -- role-aware domain knowledge generated from source code, never drifts from reality
+- **Skill system** -- preset-aware domain knowledge generated from source code, never drifts from reality
 - **Cost tracking** -- token spending by agent and task, with budget enforcement
 - **Policy enforcement** -- approval flows, risk classification, SLO monitoring
 - **Sweep service** -- background process detects stale work, enforces deadlines, kills stuck agents
@@ -31,89 +31,131 @@ name: my-project
 
 agents:
   sarah:
-    role: manager
+    extends: manager
     title: VP of Sales
     model: claude-opus-4-6
     persona: "You manage the sales team. Focus on pipeline growth."
     department: sales
     channel: telegram
     reports_to: parent
-    briefing:
-      - source: task_board
-      - source: knowledge
-    expectations:
-      - tool: clawforce_log
-        action: write
-        min_calls: 1
-    performance_policy:
-      action: alert
 
   lead-gen:
-    role: scheduled
+    extends: employee
     title: Lead Generation Specialist
     model: claude-sonnet-4-6
     department: sales
     team: outreach
     reports_to: sarah
-    expectations:
-      - tool: clawforce_log
-        action: outcome
-        min_calls: 1
-    performance_policy:
-      action: retry
-      max_retries: 3
-      then: terminate_and_alert
+    jobs:
+      daily-outreach:
+        cron: "0 9 * * MON-FRI"
+        nudge: "Run today's lead generation campaign."
 ```
 
-## Agent Roles
+## Config Inheritance
 
-Every agent is assigned one of three roles, each with sensible defaults for briefing and behavior.
+Agents inherit from **presets** using `extends:`. Two builtin presets ship with the system:
 
-### Manager
+### `manager` preset
 
 Coordinates the team. Creates tasks, reviews work, handles escalations.
 
-Default briefing includes: `project_md`, `task_board`, `escalations`, `workflows`, `activity`, `sweep_status`, `proposals`, `agent_status`, `knowledge`, `memory`, `cost_summary`, `policy_status`, `health_status`, `team_status`.
+- Full operational briefing (task_board, escalations, team_status, cost_summary, etc.)
+- Coordination enabled (periodic wake-up cron)
+- Compaction enabled
+- Performance policy: alert on non-compliance
 
-### Employee
+### `employee` preset
 
-Completes assigned tasks. Focused and narrow -- sees only its assigned work.
+Completes assigned tasks. Focused and narrow.
 
-Default briefing includes: `assigned_task`, `memory`. Must transition tasks to a terminal state when done.
+- Task-focused briefing (assigned_task, memory, skill)
+- Must transition tasks to a terminal state
+- Performance policy: retry 3x then alert
 
-### Scheduled
+### User-defined presets
 
-Runs on a schedule (cron-style). Must report an outcome each run.
+Define reusable templates for similar agents:
 
-Default briefing includes: `memory`.
+```yaml
+presets:
+  sales-rep:
+    extends: employee
+    skills: [lead-gen, crm-integration]
+    performance_policy: { action: retry, max_retries: 2, then: alert }
 
-## Agent Profiles
+agents:
+  rep-west:
+    extends: sales-rep
+    title: West Coast Rep
+    reports_to: sarah
+
+  rep-east:
+    extends: sales-rep
+    title: East Coast Rep
+    reports_to: sarah
+    skills: ["+enterprise-contracts", "-crm-integration"]  # merge operators
+```
+
+### Merge operators
+
+Arrays support `+` (append) and `-` (remove) operators for composing config without full replacement:
+
+```yaml
+agents:
+  custom-manager:
+    extends: manager
+    briefing: ["+initiative_progress", "-sweep_status"]  # add one, remove one
+```
+
+Plain arrays (without operators) fully replace the parent's array.
+
+### Job presets
+
+Jobs also support `extends:` with two builtin presets:
+
+- **`reflect`** — weekly strategic review (budget, performance, team health)
+- **`triage`** — frequent coordination cycle (task board, escalations)
+
+```yaml
+agents:
+  eng-lead:
+    extends: manager
+    jobs:
+      weekly-review:
+        extends: reflect
+        cron: "0 9 * * FRI"
+```
+
+## Agent Config
 
 Each agent definition supports:
 
 | Field | Description |
 |-------|-------------|
-| `role` | `manager`, `employee`, or `scheduled` |
-| `title` | Job title (e.g., "VP of Sales", "Lead Generation Specialist") |
-| `model` | Which AI model to use (e.g., `claude-opus-4-6`, `claude-sonnet-4-6`) |
-| `persona` | Natural language persona injected into the agent's prompt |
+| `extends` | Preset to inherit from (`manager`, `employee`, or custom) |
+| `title` | Job title (e.g., "VP of Sales") |
+| `model` | AI model (e.g., `claude-opus-4-6`, `claude-sonnet-4-6`) |
+| `persona` | Natural language persona injected into the prompt |
 | `department` | Organizational department (e.g., `sales`, `engineering`) |
 | `team` | Sub-team within a department (e.g., `outreach`, `backend`) |
 | `channel` | Notification channel (e.g., `telegram`) |
-| `reports_to` | Agent ID this agent reports to, or `parent` for the top-level session |
-| `briefing` | Context sources injected at session start |
-| `expectations` | Required tool calls the agent must make before finishing |
-| `performance_policy` | What happens when expectations are not met |
+| `reports_to` | Agent ID this agent reports to, or `parent` for top-level |
+| `briefing` | Context sources (supports `+`/`-` merge operators) |
+| `expectations` | Required tool calls before session ends |
+| `performance_policy` | Consequences for non-compliance |
+| `coordination` | `{ enabled: true, schedule: "*/30 * * * *" }` for managers |
+| `jobs` | Recurring jobs with cron schedules |
 
 ## Org Hierarchy
 
-Agents form reporting chains through the `reports_to` field. This creates a real organizational structure:
+Agents form reporting chains through `reports_to`:
 
 ```
 parent (user session)
-  └── sarah (VP of Sales, manager)
-        └── lead-gen (Lead Generation Specialist, scheduled)
-        └── closer (Account Executive, employee)
+  └── sarah (VP of Sales, extends: manager)
+        └── lead-gen (Lead Generation Specialist, extends: employee)
+        └── closer (Account Executive, extends: employee)
 ```
 
 When an agent fails or needs escalation, the issue routes up the reporting chain. A manager receives escalation context in their briefing so they can act on team failures.
@@ -160,7 +202,7 @@ Retry counting is durable (SQLite-backed, 4-hour window, hard cap of 10).
 
 ## Context Sources
 
-Context briefing injects information into an agent's prompt at session start. Each role has defaults, and agents can add or exclude sources.
+Context briefing injects information into an agent's prompt at session start. Each preset has defaults, and agents can add or exclude sources using merge operators.
 
 | Source | Description |
 |--------|-------------|
@@ -183,13 +225,22 @@ Context briefing injects information into an agent's prompt at session start. Ea
 | `policy_status` | Active policies and recent violations |
 | `health_status` | SLO evaluations and alert status |
 
-Agents can customize their briefing:
+Agents can customize their briefing using merge operators:
 
 ```yaml
 agents:
   sarah:
-    role: manager
-    exclude_context:
+    extends: manager
+    briefing: ["-sweep_status", "-health_status", "+custom"]
+```
+
+Or with full source objects for advanced config:
+
+```yaml
+agents:
+  sarah:
+    extends: manager
+    exclude_briefing:
       - sweep_status
       - health_status
     briefing:

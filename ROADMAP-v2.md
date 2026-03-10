@@ -253,14 +253,14 @@ Improve manager's ability to predict session costs.
 
 ## Phase Summary
 
-### Phase 6: Role Simplification
-- [ ] 6.1: Collapse scheduled → employee + cron trigger
-- [ ] 6.2: Simplify role profiles (two roles only)
-- [ ] 6.3: Default manager reflection job (strategic thinking time)
+### Phase 6: Role Simplification ✅
+- [x] 6.1: Collapse scheduled → employee + cron trigger (scheduled is now a deprecated preset alias for employee)
+- [x] 6.2: Simplify role profiles → config inheritance with `extends:` presets, merge operators (+/-), user-defined presets
+- [x] 6.3: Default manager reflection job → builtin `reflect` job preset (weekly strategic thinking)
 
 ### Phase 7: Initiatives & Resource Allocation
 - [ ] 7.1: Initiative model (first-class concept with allocation)
-- [ ] 7.2: Resource config (rate limits, model costs as context)
+- [x] 7.2: Resource config (rate limits, model costs as context) — budget system complete
 - [ ] 7.3: Cascading budget allocation (org tree budget flow)
 - [ ] 7.4: Autonomous scheduling (manager plans own dispatch cadence)
 
