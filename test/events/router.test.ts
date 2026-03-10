@@ -202,7 +202,7 @@ describe("events/router", () => {
       name: "Test Project",
       agents: {
         "agent:verifier": {
-          role: "worker",
+          extends: "employee",
           context_in: [],
           required_outputs: [],
           on_failure: { action: "alert" },

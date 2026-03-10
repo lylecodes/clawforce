@@ -44,7 +44,7 @@ describe("approval flow", () => {
       },
       agents: {
         leon: {
-          role: "orchestrator",
+          extends: "manager",
           context_in: [{ source: "instructions" }],
           required_outputs: [{ tool: "clawforce_task", action: ["propose"], min_calls: 1 }],
           on_failure: { action: "alert" },

@@ -11,7 +11,7 @@ import type { AgentConfig } from "../../src/types.js";
 
 function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
-    role: "worker",
+    extends: "employee",
     context_in: [{ source: "instructions" }],
     required_outputs: [],
     on_failure: { action: "alert" },

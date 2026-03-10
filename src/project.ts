@@ -302,7 +302,8 @@ const VALID_SOURCES: ContextSource["source"][] = [
   "escalations", "workflows", "activity", "sweep_status",
   "proposals", "agent_status", "cost_summary", "policy_status", "health_status",
   "team_status", "team_performance", "soul", "tools_reference",
-  "channel_messages",
+  "channel_messages", "pending_messages", "goal_hierarchy", "planning_delta",
+  "velocity", "preferences", "trust_scores", "resources",
 ];
 
 function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {

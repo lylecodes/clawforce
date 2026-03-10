@@ -28,7 +28,7 @@ describe("approval/channel-router", () => {
       name: "Test",
       agents: {
         [agentId]: {
-          role: "worker",
+          extends: "employee",
           channel,
           context_in: [],
           required_outputs: [],
