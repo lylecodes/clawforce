@@ -38,7 +38,7 @@ describe("file glob support in assembler", () => {
 
   it("resolves glob patterns to concatenated content", () => {
     const result = assembleContext("test-agent", {
-      role: "employee",
+      extends: "employee",
       briefing: [
         { source: "file", path: "docs/*.md" },
       ],
@@ -56,7 +56,7 @@ describe("file glob support in assembler", () => {
 
   it("resolves single file without glob", () => {
     const result = assembleContext("test-agent", {
-      role: "employee",
+      extends: "employee",
       briefing: [
         { source: "file", path: "docs/guide-a.md" },
       ],

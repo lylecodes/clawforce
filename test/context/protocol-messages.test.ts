@@ -42,7 +42,7 @@ describe("protocol messages context rendering", () => {
     }, db);
 
     const context = assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -60,7 +60,7 @@ describe("protocol messages context rendering", () => {
     }, db);
 
     const context = assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -81,7 +81,7 @@ describe("protocol messages context rendering", () => {
     }, db);
 
     const context = assembleContext("reviewer", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -102,7 +102,7 @@ describe("protocol messages context rendering", () => {
     }, db);
 
     const context = assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },

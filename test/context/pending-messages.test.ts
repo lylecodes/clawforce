@@ -37,7 +37,7 @@ describe("pending_messages context source", () => {
 
   it("returns empty string when no pending messages", () => {
     const context = assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -58,7 +58,7 @@ describe("pending_messages context source", () => {
     }, db);
 
     const context = assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -83,7 +83,7 @@ describe("pending_messages context source", () => {
 
     // First assembly delivers the message
     assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -95,7 +95,7 @@ describe("pending_messages context source", () => {
 
     // Second assembly should not show the message again
     const context2 = assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -115,7 +115,7 @@ describe("pending_messages context source", () => {
     }, db);
 
     const context = assembleContext("manager", {
-      role: "manager",
+      extends: "manager",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -130,7 +130,7 @@ describe("pending_messages context source", () => {
     createMessage({ fromAgent: "cto", toAgent: "cfo", projectId: PROJECT, content: "msg2" }, db);
 
     const context = assembleContext("cfo", {
-      role: "employee",
+      extends: "employee",
       briefing: [{ source: "pending_messages" }],
       expectations: [],
       performance_policy: { action: "alert" },

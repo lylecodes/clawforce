@@ -40,7 +40,6 @@ import { buildDeltaReport, renderDeltaReport } from "../planning/ooda.js";
 import { buildVelocityReport, renderVelocityReport } from "../planning/velocity.js";
 import { renderPreferences } from "../trust/preferences.js";
 import { renderTrustSummary } from "../trust/tracker.js";
-import { ROLE_DEFAULTS } from "../profiles.js";
 import { getDirectReports } from "../org.js";
 import { getAgentConfig } from "../project.js";
 
@@ -159,7 +158,7 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
       // If tools_reference is also in the briefing, exclude "tools" from the skill TOC
       // to avoid duplicating the tools reference content.
       const hasToolsRef = ctx.config.briefing.some((s) => s.source === "tools_reference");
-      return resolveSkillSource(ctx.config.role, undefined, hasToolsRef ? ["tools"] : undefined, ctx.projectId);
+      return resolveSkillSource(ctx.config.extends ?? "employee", undefined, hasToolsRef ? ["tools"] : undefined, ctx.projectId);
     }
 
     case "memory":
@@ -233,7 +232,7 @@ function resolveTaskBoard(ctx: AssemblerContext): string | null {
   if (!countRow || (countRow.cnt as number) === 0) return null;
 
   // For managers, scope the board by department/team/direct reports
-  if (ctx.config.role === "manager") {
+  if (ctx.config.coordination?.enabled) {
     const directReports = getDirectReports(ctx.projectId, ctx.agentId);
     const hasScope = ctx.config.department || ctx.config.team || directReports.length > 0;
 
@@ -556,11 +555,10 @@ function resolveFileGlob(pattern: string, projectDir: string): string | null {
 
 /**
  * Build a profile header with title and persona for the agent.
- * Uses role defaults if the agent doesn't specify its own.
  * If SOUL.md exists, uses its content as persona instead of config.persona.
  */
 function buildProfileHeader(agentId: string, config: AgentConfig, projectDir?: string): string | null {
-  const title = config.title ?? ROLE_DEFAULTS[config.role]?.title;
+  const title = config.title;
 
   // SOUL.md overrides config.persona when present
   const soulContent = resolveSoulDoc(agentId, projectDir);
@@ -720,7 +718,7 @@ function resolveGoalHierarchySource(ctx: AssemblerContext): string | null {
   // For non-managers, filter to relevant goals (by department/team)
   const agentDept = ctx.config.department;
   const agentTeam = ctx.config.team;
-  const isManager = ctx.config.role === "manager";
+  const isManager = ctx.config.coordination?.enabled === true;
 
   type GoalRow = { id: string; title: string; status: string; parentGoalId: string | null; ownerAgentId: string | null; department: string | null; team: string | null };
   const goals: GoalRow[] = rows.map((r) => ({

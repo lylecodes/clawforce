@@ -9,7 +9,7 @@ import type { AgentConfig } from "../../src/types.js";
 
 function makeConfig(overrides: Partial<AgentConfig>): AgentConfig {
   return {
-    role: "orchestrator",
+    extends: "manager",
     briefing: [],
     expectations: [],
     performance_policy: { action: "alert" },

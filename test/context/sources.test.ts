@@ -49,7 +49,7 @@ describe("context sources", () => {
       fs.writeFileSync(path.join(tmpDir, "PROJECT.md"), "# My Project\n\nBuild a thing.");
 
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "project_md" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -62,7 +62,7 @@ describe("context sources", () => {
 
     it("returns empty when no PROJECT.md exists", () => {
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "project_md" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -74,7 +74,7 @@ describe("context sources", () => {
 
     it("returns empty when no projectDir", () => {
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "project_md" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -91,7 +91,7 @@ describe("context sources", () => {
       createTask({ projectId: PROJECT, title: "Task B", createdBy: "agent:a" }, db);
 
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "task_board" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -111,7 +111,7 @@ describe("context sources", () => {
       }
 
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "task_board" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -129,7 +129,7 @@ describe("context sources", () => {
 
     it("returns empty for project with no tasks", () => {
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "task_board" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -153,7 +153,7 @@ describe("context sources", () => {
       }, db);
 
       const config: AgentConfig = {
-        role: "worker",
+        extends: "employee",
         briefing: [{ source: "assigned_task" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -168,7 +168,7 @@ describe("context sources", () => {
 
     it("returns empty when not assigned", () => {
       const config: AgentConfig = {
-        role: "worker",
+        extends: "employee",
         briefing: [{ source: "assigned_task" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -186,7 +186,7 @@ describe("context sources", () => {
       ).run("k1", PROJECT, "architecture", "DB Schema", "We use SQLite for storage.", '["db","sqlite"]', Date.now());
 
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "knowledge" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -207,7 +207,7 @@ describe("context sources", () => {
       ).run("k2", PROJECT, "process", "Process note", "Process content", Date.now());
 
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "knowledge", filter: { category: ["architecture"] } }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -220,7 +220,7 @@ describe("context sources", () => {
 
     it("returns empty when no knowledge exists", () => {
       const config: AgentConfig = {
-        role: "orchestrator",
+        extends: "manager",
         briefing: [{ source: "knowledge" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -236,7 +236,7 @@ describe("context sources", () => {
       fs.writeFileSync(path.join(tmpDir, "config.yaml"), "key: value\ndb: sqlite");
 
       const config: AgentConfig = {
-        role: "worker",
+        extends: "employee",
         briefing: [{ source: "file", path: "config.yaml" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -249,7 +249,7 @@ describe("context sources", () => {
 
     it("blocks path traversal", () => {
       const config: AgentConfig = {
-        role: "worker",
+        extends: "employee",
         briefing: [{ source: "file", path: "../../../etc/passwd" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -261,7 +261,7 @@ describe("context sources", () => {
 
     it("returns empty for missing file", () => {
       const config: AgentConfig = {
-        role: "worker",
+        extends: "employee",
         briefing: [{ source: "file", path: "nonexistent.txt" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -273,7 +273,7 @@ describe("context sources", () => {
 
     it("returns empty without projectDir", () => {
       const config: AgentConfig = {
-        role: "worker",
+        extends: "employee",
         briefing: [{ source: "file", path: "config.yaml" }],
         expectations: [],
         performance_policy: { action: "alert" },
@@ -287,7 +287,7 @@ describe("context sources", () => {
   describe("skill context source", () => {
     it("returns role-filtered table of contents", () => {
       const config: AgentConfig = {
-        role: "worker",
+        extends: "employee",
         briefing: [{ source: "skill" as any }],
         expectations: [],
         performance_policy: { action: "alert" },

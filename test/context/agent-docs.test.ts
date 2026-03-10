@@ -7,9 +7,9 @@ import { ensureAgentDocs } from "../../src/context/sources/auto-generate.js";
 import { generateSoulTemplate, isSoulTemplateUnmodified } from "../../src/context/sources/auto-generate.js";
 import type { AgentConfig } from "../../src/types.js";
 
-function makeConfig(role: AgentConfig["role"]): AgentConfig {
+function makeConfig(preset: string): AgentConfig {
   return {
-    role,
+    extends: preset,
     briefing: [],
     expectations: [],
     performance_policy: { action: "alert" },

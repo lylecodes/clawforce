@@ -49,7 +49,7 @@ describe("buildInstructions", () => {
 describe("assembleContext", () => {
   it("assembles instructions + custom content", () => {
     const config: AgentConfig = {
-      role: "orchestrator",
+      extends: "manager",
       briefing: [
         { source: "instructions" },
         { source: "custom", content: "You are the project orchestrator for my-project." },
@@ -71,7 +71,7 @@ describe("assembleContext", () => {
 
   it("returns only instructions when no custom context", () => {
     const config: AgentConfig = {
-      role: "worker",
+      extends: "employee",
       briefing: [{ source: "instructions" }],
       expectations: [
         { tool: "clawforce_task", action: ["transition", "fail"], min_calls: 1 },
@@ -87,7 +87,7 @@ describe("assembleContext", () => {
 
   it("returns empty string when no sources produce content", () => {
     const config: AgentConfig = {
-      role: "worker",
+      extends: "employee",
       briefing: [{ source: "project_md" }],
       expectations: [],
       performance_policy: { action: "alert" },
@@ -100,7 +100,7 @@ describe("assembleContext", () => {
 
   it("skips sources that return null", () => {
     const config: AgentConfig = {
-      role: "worker",
+      extends: "employee",
       briefing: [
         { source: "project_md" },  // no projectDir, returns null
         { source: "custom", content: "Hello" },
@@ -131,7 +131,7 @@ describe("assembleContext — orchestrator sources", () => {
 
   function makeConfig(sources: AgentConfig["briefing"]): AgentConfig {
     return {
-      role: "orchestrator",
+      extends: "manager",
       briefing: sources,
       expectations: [],
       performance_policy: { action: "alert" },
