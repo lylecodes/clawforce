@@ -31,7 +31,7 @@ describe("custom skill topics", () => {
         title: "API Conventions",
         description: "Our REST patterns",
         path: "api-conventions.md",
-        roles: ["employee"],
+        presets: ["employee"],
       },
     }, tmpDir);
 
@@ -71,7 +71,7 @@ describe("custom skill topics", () => {
         title: "API Conventions",
         description: "Our REST patterns",
         path: "api-conventions.md",
-        roles: ["employee"],
+        presets: ["employee"],
       },
     }, tmpDir);
 
@@ -87,7 +87,7 @@ describe("custom skill topics", () => {
         title: "API Conventions",
         description: "Our REST patterns",
         path: "api-conventions.md",
-        roles: ["manager"],
+        presets: ["manager"],
       },
     }, tmpDir);
 

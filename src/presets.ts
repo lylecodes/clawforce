@@ -37,6 +37,8 @@ function deepMerge(parent: Record<string, unknown>, child: Record<string, unknow
     const cVal = child[key];
 
     if (Array.isArray(cVal)) {
+      // Arrays of non-string items (e.g., expectations objects) pass through
+      // hasMergeOperators as false and get returned as-is (full replacement).
       result[key] = mergeArrayWithOperators(
         Array.isArray(pVal) ? (pVal as string[]) : undefined,
         cVal as string[],

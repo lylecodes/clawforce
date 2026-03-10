@@ -4,27 +4,25 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   applyProfile,
-  BUILTIN_PROFILES,
-  CRITICAL_SOURCES,
   DEFAULT_ACTION_SCOPES,
-  ROLE_DEFAULTS,
   generateDefaultScopePolicies,
   getToolNamesFromScope,
   getAllowedActionsForTool,
 } from "../../src/profiles.js";
+import { BUILTIN_AGENT_PRESETS } from "../../src/presets.js";
 import { validateWorkforceConfig } from "../../src/config-validator.js";
 import {
   loadWorkforceConfig,
   resetEnforcementConfigForTest,
 } from "../../src/project.js";
 
-describe("assistant profile", () => {
-  it("exists in BUILTIN_PROFILES", () => {
-    expect(BUILTIN_PROFILES.assistant).toBeDefined();
+describe("assistant preset", () => {
+  it("exists in BUILTIN_AGENT_PRESETS", () => {
+    expect(BUILTIN_AGENT_PRESETS.assistant).toBeDefined();
   });
 
   it("has communication-focused briefing sources", () => {
-    const sources = BUILTIN_PROFILES.assistant.briefing.map((s) => s.source);
+    const sources = BUILTIN_AGENT_PRESETS.assistant.briefing as string[];
     expect(sources).toContain("soul");
     expect(sources).toContain("tools_reference");
     expect(sources).toContain("pending_messages");
@@ -40,26 +38,23 @@ describe("assistant profile", () => {
   });
 
   it("has empty expectations (no compliance enforcement)", () => {
-    expect(BUILTIN_PROFILES.assistant.expectations).toEqual([]);
+    expect(BUILTIN_AGENT_PRESETS.assistant.expectations).toEqual([]);
   });
 
   it("defaults to alert performance policy", () => {
-    expect(BUILTIN_PROFILES.assistant.performance_policy.action).toBe("alert");
+    const policy = BUILTIN_AGENT_PRESETS.assistant.performance_policy as { action: string };
+    expect(policy.action).toBe("alert");
   });
 
   it("has compaction enabled", () => {
-    expect(BUILTIN_PROFILES.assistant.compaction).toBe(true);
-  });
-
-  it("has no critical sources", () => {
-    expect(CRITICAL_SOURCES.assistant).toBeUndefined();
+    expect(BUILTIN_AGENT_PRESETS.assistant.compaction).toBe(true);
   });
 });
 
-describe("assistant role defaults", () => {
+describe("assistant preset defaults", () => {
   it("has title and persona", () => {
-    expect(ROLE_DEFAULTS.assistant.title).toBe("Personal Assistant");
-    expect(ROLE_DEFAULTS.assistant.persona).toContain("personal assistant");
+    expect(BUILTIN_AGENT_PRESETS.assistant.title).toBe("Personal Assistant");
+    expect(BUILTIN_AGENT_PRESETS.assistant.persona).toContain("personal assistant");
   });
 });
 

@@ -203,6 +203,6 @@ channels:
     expect(config).toBeDefined();
     expect(config!.channels![0]!.departments).toEqual(["engineering"]);
     expect(config!.channels![0]!.teams).toEqual(["backend"]);
-    expect(config!.channels![0]!.roles).toEqual(["employee"]);
+    expect(config!.channels![0]!.presets).toEqual(["employee"]);
   });
 });

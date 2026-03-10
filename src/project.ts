@@ -723,8 +723,8 @@ function normalizeSkillsConfig(raw: Record<string, unknown>): WorkforceConfig["s
       title: s.title,
       description: typeof s.description === "string" ? s.description : s.title,
       path: s.path,
-      roles: Array.isArray(s.roles)
-        ? s.roles.filter((r): r is string => typeof r === "string")
+      presets: Array.isArray(s.presets ?? s.roles)
+        ? ((s.presets ?? s.roles) as unknown[]).filter((r): r is string => typeof r === "string")
         : undefined,
     };
   }
@@ -911,8 +911,9 @@ function normalizeChannelsConfig(raw: unknown[]): ChannelConfig[] {
     if (Array.isArray(ch.teams)) {
       config.teams = ch.teams.filter((t: unknown) => typeof t === "string") as string[];
     }
-    if (Array.isArray(ch.roles)) {
-      config.roles = ch.roles.filter((r: unknown) => typeof r === "string") as string[];
+    const rawPresets = ch.presets ?? ch.roles;
+    if (Array.isArray(rawPresets)) {
+      config.presets = (rawPresets as unknown[]).filter((r: unknown) => typeof r === "string") as string[];
     }
     if (typeof ch.telegram_group_id === "string" && ch.telegram_group_id.trim()) {
       config.telegramGroupId = ch.telegram_group_id.trim();

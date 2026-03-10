@@ -2,7 +2,7 @@
  * Clawforce — Skill topic registry
  *
  * Central registry of generated-from-source domain knowledge topics.
- * Each topic has a role filter so agents only see relevant knowledge.
+ * Each topic has a preset filter so agents only see relevant knowledge.
  */
 
 import { generate as generateRoles } from "./topics/roles.js";
@@ -25,8 +25,8 @@ export type SkillTopic = {
   id: string;
   title: string;
   description: string;
-  /** Which presets/roles this topic is relevant for. Empty = all. */
-  roles: string[];
+  /** Which presets this topic is relevant for. Empty = all. */
+  presets: string[];
   generate: () => string;
 };
 
@@ -37,8 +37,8 @@ export type CustomSkillTopic = {
   description: string;
   /** Absolute path to the markdown file. */
   filePath: string;
-  /** Which presets/roles this topic is relevant for. Empty = all. */
-  roles: string[];
+  /** Which presets this topic is relevant for. Empty = all. */
+  presets: string[];
 };
 
 /** Per-project store of custom skill topics. */
@@ -50,7 +50,7 @@ const customTopicsStore = new Map<string, CustomSkillTopic[]>();
  */
 export function registerCustomSkills(
   projectId: string,
-  skills: Record<string, { title: string; description: string; path: string; roles?: string[] }>,
+  skills: Record<string, { title: string; description: string; path: string; presets?: string[] }>,
   projectDir: string,
 ): void {
   const topics: CustomSkillTopic[] = [];
@@ -68,7 +68,7 @@ export function registerCustomSkills(
       title: skill.title,
       description: skill.description,
       filePath: resolved,
-      roles: skill.roles ?? [],
+      presets: skill.presets ?? [],
     });
   }
 
@@ -96,123 +96,123 @@ export const SKILL_TOPICS: SkillTopic[] = [
     id: "roles",
     title: "Agent Roles",
     description: "Role definitions, default profiles, and inheritance",
-    roles: [],
+    presets: [],
     generate: generateRoles,
   },
   {
     id: "tasks",
     title: "Task Lifecycle",
     description: "Task states, transitions, evidence, and verification gates",
-    roles: ["manager", "employee", "assistant"],
+    presets: ["manager", "employee", "assistant"],
     generate: generateTasks,
   },
   {
     id: "accountability",
     title: "Accountability",
     description: "Expectations, performance policies, and compliance enforcement",
-    roles: [],
+    presets: [],
     generate: generateAccountability,
   },
   {
     id: "context_sources",
     title: "Context Sources",
     description: "All context sources available for agent briefing",
-    roles: [],
+    presets: [],
     generate: generateContextSources,
   },
   {
     id: "memory",
     title: "Shared Memory",
     description: "Save and recall learnings across sessions and agents",
-    roles: [],
+    presets: [],
     generate: generateMemory,
   },
   {
     id: "tools",
     title: "Tools Reference",
     description: "All tools and their actions",
-    roles: [],
+    presets: [],
     generate: generateTools,
   },
   {
     id: "workflows",
     title: "Workflows",
     description: "Multi-phase workflow execution and gating",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generateWorkflows,
   },
   {
     id: "org",
     title: "Org Hierarchy",
     description: "Reporting chains, departments, teams, and escalation",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generateOrg,
   },
   {
     id: "policies",
     title: "Policies",
     description: "Action scopes, transition gates, and spend limits",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generatePolicies,
   },
   {
     id: "budgets",
     title: "Budgets",
     description: "Cost tracking and budget enforcement",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generateBudgets,
   },
   {
     id: "risk",
     title: "Risk Tiers",
     description: "Risk classification and approval gates",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generateRisk,
   },
   {
     id: "approval",
     title: "Approval Flow",
     description: "Proposals, approvals, and rejection workflow",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generateApproval,
   },
   {
     id: "config",
     title: "Configuration Reference",
     description: "Full project.yaml format and all options",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generateConfig,
   },
   {
     id: "goals",
     title: "Goal Hierarchy",
     description: "Goal decomposition, cascade, and progress tracking",
-    roles: ["manager"],
+    presets: ["manager"],
     generate: generateGoals,
   },
   {
     id: "channels",
     title: "Channels & Meetings",
     description: "Topic-based channels, meeting mode, Telegram mirroring",
-    roles: ["manager", "employee", "assistant"],
+    presets: ["manager", "employee", "assistant"],
     generate: generateChannels,
   },
 ];
 
 /**
- * Get the list of topics available for a given role.
- * Empty roles array means the topic is available to all roles.
+ * Get the list of topics available for a given preset.
+ * Empty presets array means the topic is available to all presets.
  * When projectId is provided, includes custom topics from that project.
  */
-export function getTopicList(role: string, projectId?: string): Array<{ id: string; title: string; description: string }> {
+export function getTopicList(preset: string, projectId?: string): Array<{ id: string; title: string; description: string }> {
   const builtIn = SKILL_TOPICS
-    .filter((t) => t.roles.length === 0 || t.roles.includes(role))
+    .filter((t) => t.presets.length === 0 || t.presets.includes(preset))
     .map((t) => ({ id: t.id, title: t.title, description: t.description }));
 
   if (!projectId) return builtIn;
 
   const custom = getCustomTopics(projectId)
-    .filter((t) => t.roles.length === 0 || t.roles.includes(role))
+    .filter((t) => t.presets.length === 0 || t.presets.includes(preset))
     .map((t) => ({ id: t.id, title: t.title, description: t.description }));
 
   return [...builtIn, ...custom];
@@ -225,13 +225,13 @@ export function getTopicList(role: string, projectId?: string): Array<{ id: stri
  * - With a topic ID: returns the full generated content for that topic.
  * - projectId enables custom topics from project config.
  */
-export function resolveSkillSource(role: string, topic?: string, excludeTopics?: string[], projectId?: string): string | null {
+export function resolveSkillSource(preset: string, topic?: string, excludeTopics?: string[], projectId?: string): string | null {
   if (topic) {
     // Check built-in topics first
     const entry = SKILL_TOPICS.find((t) => t.id === topic);
     if (entry) {
-      if (entry.roles.length > 0 && !entry.roles.includes(role)) {
-        return `Topic "${topic}" is not available for role "${role}".`;
+      if (entry.presets.length > 0 && !entry.presets.includes(preset)) {
+        return `Topic "${topic}" is not available for preset "${preset}".`;
       }
       return entry.generate();
     }
@@ -241,8 +241,8 @@ export function resolveSkillSource(role: string, topic?: string, excludeTopics?:
       const customs = getCustomTopics(projectId);
       const custom = customs.find((t) => t.id === topic);
       if (custom) {
-        if (custom.roles.length > 0 && !custom.roles.includes(role)) {
-          return `Topic "${topic}" is not available for role "${role}".`;
+        if (custom.presets.length > 0 && !custom.presets.includes(preset)) {
+          return `Topic "${topic}" is not available for preset "${preset}".`;
         }
         try {
           const { readFileSync } = require("node:fs") as typeof import("node:fs");
@@ -265,7 +265,7 @@ export function resolveSkillSource(role: string, topic?: string, excludeTopics?:
   }
 
   // Table of contents
-  let available = getTopicList(role, projectId);
+  let available = getTopicList(preset, projectId);
   if (excludeTopics && excludeTopics.length > 0) {
     available = available.filter((t) => !excludeTopics.includes(t.id));
   }

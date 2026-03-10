@@ -375,7 +375,7 @@ export type WorkforceConfig = {
     title: string;
     description: string;
     path: string;
-    roles?: string[];
+    presets?: string[];
   }>;
   /** Reusable config bundles that agents can reference. */
   skill_packs?: Record<string, SkillPack>;
@@ -468,8 +468,8 @@ export type ChannelConfig = {
   departments?: string[];
   /** Auto-join agents by team. */
   teams?: string[];
-  /** Auto-join agents by role. */
-  roles?: string[];
+  /** Auto-join agents by preset. */
+  presets?: string[];
   /** Telegram group ID for mirroring channel messages. */
   telegramGroupId?: string;
   /** Telegram thread/topic ID within the group. */
