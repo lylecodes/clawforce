@@ -108,7 +108,7 @@ describe("db-migration", () => {
 
     const version = getCurrentVersion(db);
     expect(version).toBe(SCHEMA_VERSION);
-    expect(version).toBe(23);
+    expect(version).toBe(24);
 
     db.close();
   });
@@ -252,5 +252,26 @@ describe("db-migration", () => {
     expect(columnNames).toContain("value");
 
     db.close();
+  });
+
+  it("V24 — adds allocation column to goals table", () => {
+    const db = getMemoryDb();
+    runMigrations(db);
+
+    db.prepare(`
+      INSERT INTO goals (id, project_id, title, status, created_by, created_at, allocation)
+      VALUES ('g-alloc-1', 'proj', 'UI Work', 'active', 'agent', ${Date.now()}, 40)
+    `).run();
+
+    const row = db.prepare("SELECT allocation FROM goals WHERE id = 'g-alloc-1'").get() as Record<string, unknown>;
+    expect(row.allocation).toBe(40);
+
+    db.prepare(`
+      INSERT INTO goals (id, project_id, title, status, created_by, created_at)
+      VALUES ('g-alloc-2', 'proj', 'Ad hoc', 'active', 'agent', ${Date.now()})
+    `).run();
+
+    const row2 = db.prepare("SELECT allocation FROM goals WHERE id = 'g-alloc-2'").get() as Record<string, unknown>;
+    expect(row2.allocation).toBe(null);
   });
 });

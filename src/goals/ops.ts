@@ -34,6 +34,7 @@ function rowToGoal(row: Record<string, unknown>): Goal {
   if (row.metadata != null) {
     try { goal.metadata = JSON.parse(row.metadata as string); } catch { /* ignore */ }
   }
+  if (row.allocation != null) goal.allocation = row.allocation as number;
   return goal;
 }
 

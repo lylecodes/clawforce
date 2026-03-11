@@ -896,4 +896,5 @@ export type Goal = {
   createdAt: number;
   achievedAt?: number;
   metadata?: Record<string, unknown>;
+  allocation?: number;
 };

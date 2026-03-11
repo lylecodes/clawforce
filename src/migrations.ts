@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 23;
+export const SCHEMA_VERSION = 24;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -37,6 +37,7 @@ const migrations: Record<number, Migration> = {
   21: migrateV21,
   22: migrateV22,
   23: migrateV23,
+  24: migrateV24,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -821,6 +822,12 @@ function migrateV22(db: DatabaseSync): void {
 function migrateV23(db: DatabaseSync): void {
   safeAlterTable(db, `ALTER TABLE budgets ADD COLUMN hourly_limit_cents INTEGER`);
   safeAlterTable(db, `ALTER TABLE budgets ADD COLUMN monthly_limit_cents INTEGER`);
+}
+
+// --- Migration V24: Add allocation column to goals ---
+
+function migrateV24(db: DatabaseSync): void {
+  safeAlterTable(db, `ALTER TABLE goals ADD COLUMN allocation INTEGER`);
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */
