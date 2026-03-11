@@ -15,6 +15,7 @@ import {
   abandonGoal,
   getChildGoals,
   getGoalTasks,
+  getInitiativeSpend,
 } from "../goals/ops.js";
 import { computeGoalProgress } from "../goals/cascade.js";
 import { ingestEvent } from "../events/store.js";
@@ -38,6 +39,7 @@ const ClawforceGoalSchema = Type.Object({
   department: Type.Optional(Type.String({ description: "Department this goal belongs to." })),
   team: Type.Optional(Type.String({ description: "Team within the department." })),
   reason: Type.Optional(Type.String({ description: "Reason for abandoning a goal." })),
+  allocation: Type.Optional(Type.Number({ description: "Budget allocation as percentage of project daily budget (0-100). Makes this goal an initiative." })),
   status_filter: Type.Optional(Type.String({ description: "Filter by status: active, achieved, abandoned (for list)." })),
   limit: Type.Optional(Type.Number({ description: "Max results (for list, default 100)." })),
   sub_goals: Type.Optional(Type.Array(
@@ -90,11 +92,16 @@ export function createClawforceGoalTool(options?: {
             const ownerAgentId = readStringParam(params, "owner_agent_id") ?? undefined;
             const department = readStringParam(params, "department") ?? undefined;
             const team = readStringParam(params, "team") ?? undefined;
+            const allocation = readNumberParam(params, "allocation") ?? undefined;
+
+            if (allocation != null && (allocation < 0 || allocation > 100)) {
+              return jsonResult({ ok: false, error: "allocation must be 0-100" });
+            }
 
             const goal = createGoal({
               projectId, title, description, acceptanceCriteria,
               parentGoalId, ownerAgentId, department, team,
-              createdBy: actor,
+              createdBy: actor, allocation,
             });
 
             return jsonResult({ ok: true, goal });
@@ -132,13 +139,30 @@ export function createClawforceGoalTool(options?: {
 
           case "status": {
             const goalId = readStringParam(params, "goal_id", { required: true })!;
+            const db = getDb(projectId);
             const goal = getGoal(projectId, goalId);
             if (!goal) return jsonResult({ ok: false, reason: `Goal not found: ${goalId}` });
 
             const progress = computeGoalProgress(projectId, goalId);
             const childGoals = getChildGoals(projectId, goalId);
 
-            return jsonResult({ ok: true, goal, progress, childGoals });
+            let budget: Record<string, unknown> | undefined;
+            if (goal.allocation != null) {
+              const projectBudget = db.prepare(
+                "SELECT daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+              ).get(projectId) as { daily_limit_cents: number } | undefined;
+              const dailyBudget = projectBudget?.daily_limit_cents ?? 0;
+              const allocationCents = Math.floor((goal.allocation / 100) * dailyBudget);
+              const spentCents = getInitiativeSpend(projectId, goal.id);
+              budget = {
+                allocationPercent: goal.allocation,
+                allocationCents,
+                spentCents,
+                remainingCents: allocationCents - spentCents,
+              };
+            }
+
+            return jsonResult({ ok: true, goal, progress, childGoals, budget });
           }
 
           case "achieve": {

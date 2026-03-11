@@ -143,4 +143,54 @@ describe("tools/goal-tool", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("Unknown action");
   });
+
+  it("create — sets allocation on goal", async () => {
+    const result = await execute({
+      action: "create",
+      title: "UI Improvements",
+      description: "Dashboard UX",
+      allocation: 40,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.goal.allocation).toBe(40);
+  });
+
+  it("create — rejects allocation > 100", async () => {
+    const result = await execute({
+      action: "create",
+      title: "Too much",
+      allocation: 150,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("0-100");
+  });
+
+  it("create — rejects allocation < 0", async () => {
+    const result = await execute({
+      action: "create",
+      title: "Negative",
+      allocation: -5,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("0-100");
+  });
+
+  it("status — shows budget info when goal has allocation", async () => {
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO goals (id, project_id, title, status, created_by, created_at, allocation)
+      VALUES ('init-status', '${PROJECT}', 'UI Work', 'active', 'agent', ${now}, 40)
+    `).run();
+
+    db.prepare(`
+      INSERT INTO budgets (id, project_id, agent_id, daily_limit_cents, daily_spent_cents, daily_reset_at, created_at, updated_at)
+      VALUES ('b-status', '${PROJECT}', NULL, 1000, 0, ${now + 86400000}, ${now}, ${now})
+    `).run();
+
+    const result = await execute({ action: "status", goal_id: "init-status" });
+    expect(result.ok).toBe(true);
+    expect(result.budget).toBeDefined();
+    expect(result.budget.allocationPercent).toBe(40);
+    expect(result.budget.allocationCents).toBe(400);
+  });
 });

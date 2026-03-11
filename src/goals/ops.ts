@@ -51,6 +51,7 @@ export type CreateGoalParams = {
   team?: string;
   createdBy: string;
   metadata?: Record<string, unknown>;
+  allocation?: number;
 };
 
 export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync): Goal {
@@ -68,8 +69,8 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
   }
 
   db.prepare(`
-    INSERT INTO goals (id, project_id, title, description, acceptance_criteria, status, parent_goal_id, owner_agent_id, department, team, created_by, created_at, metadata)
-    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO goals (id, project_id, title, description, acceptance_criteria, status, parent_goal_id, owner_agent_id, department, team, created_by, created_at, metadata, allocation)
+    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     params.projectId,
@@ -83,6 +84,7 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
     params.createdBy,
     now,
     params.metadata ? JSON.stringify(params.metadata) : null,
+    params.allocation ?? null,
   );
 
   const goal: Goal = {
@@ -99,6 +101,7 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
     createdBy: params.createdBy,
     createdAt: now,
     metadata: params.metadata,
+    allocation: params.allocation,
   };
 
   safeLog("goals.create", { id, title: params.title, project: params.projectId });
@@ -204,6 +207,7 @@ export type UpdateGoalParams = {
   department?: string;
   team?: string;
   metadata?: Record<string, unknown>;
+  allocation?: number;
 };
 
 export function updateGoal(projectId: string, goalId: string, updates: UpdateGoalParams, dbOverride?: DatabaseSync): Goal {
@@ -221,6 +225,7 @@ export function updateGoal(projectId: string, goalId: string, updates: UpdateGoa
   if (updates.department !== undefined) { sets.push("department = ?"); params.push(updates.department); }
   if (updates.team !== undefined) { sets.push("team = ?"); params.push(updates.team); }
   if (updates.metadata !== undefined) { sets.push("metadata = ?"); params.push(JSON.stringify(updates.metadata)); }
+  if (updates.allocation !== undefined) { sets.push("allocation = ?"); params.push(updates.allocation); }
 
   if (sets.length === 0) return goal;
 
