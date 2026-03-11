@@ -291,7 +291,7 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
   });
 }
 
-function handleActivate(params: Record<string, unknown>, projectsDir: string): ToolResult {
+async function handleActivate(params: Record<string, unknown>, projectsDir: string): Promise<ToolResult> {
   const projectId = readStringParam(params, "project_id", { required: true })!;
   const resolvedDir = resolveProjectDir(projectsDir);
   const projectDir = path.join(resolvedDir, projectId);
@@ -364,6 +364,31 @@ function handleActivate(params: Record<string, unknown>, projectsDir: string): T
         reason: `Failed to initialize project: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
+  }
+
+  // Create goals from config
+  if (wfConfig?.goals) {
+    try {
+      const { createGoal, listGoals } = await import("../goals/ops.js");
+      for (const [goalTitle, goalDef] of Object.entries(wfConfig.goals)) {
+        // Idempotent: check if goal with this title already exists
+        const existing = listGoals(projectId, { status: "active" })
+          .find((g: { title: string }) => g.title === goalTitle);
+        if (!existing) {
+          createGoal({
+            projectId,
+            title: goalTitle,
+            description: goalDef.description,
+            acceptanceCriteria: goalDef.acceptance_criteria,
+            department: goalDef.department,
+            team: goalDef.team,
+            ownerAgentId: goalDef.owner_agent_id,
+            createdBy: "system:activate",
+            allocation: goalDef.allocation,
+          });
+        }
+      }
+    } catch (err) { safeLog("setup.activate.createGoals", err); }
   }
 
   // Recover orphaned sessions

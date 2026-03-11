@@ -35,6 +35,7 @@ import type {
   EventActionType,
   EventActionConfig,
   EventHandlerConfig,
+  GoalConfigEntry,
   ReviewConfig,
   JobDefinition,
   PerformancePolicy,
@@ -180,6 +181,33 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   // Parse channels config
   if (raw.channels && Array.isArray(raw.channels)) {
     result.channels = normalizeChannelsConfig(raw.channels);
+  }
+
+  // Parse goals config
+  if (raw.goals && typeof raw.goals === "object") {
+    const goals: Record<string, GoalConfigEntry> = {};
+    let totalAllocation = 0;
+
+    for (const [id, def] of Object.entries(raw.goals as Record<string, Record<string, unknown>>)) {
+      const entry: GoalConfigEntry = {
+        description: typeof def.description === "string" ? def.description : undefined,
+        allocation: typeof def.allocation === "number" ? def.allocation : undefined,
+        department: typeof def.department === "string" ? def.department : undefined,
+        team: typeof def.team === "string" ? def.team : undefined,
+        acceptance_criteria: typeof def.acceptance_criteria === "string" ? def.acceptance_criteria : undefined,
+        owner_agent_id: typeof def.owner_agent_id === "string" ? def.owner_agent_id : undefined,
+      };
+      if (entry.allocation != null) {
+        totalAllocation += entry.allocation;
+      }
+      goals[id] = entry;
+    }
+
+    if (totalAllocation > 100) {
+      throw new Error(`Goal allocations exceed 100%: total is ${totalAllocation}%`);
+    }
+
+    result.goals = goals;
   }
 
   return result;

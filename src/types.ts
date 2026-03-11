@@ -395,6 +395,19 @@ export type WorkforceConfig = {
   channels?: ChannelConfig[];
   /** Safety limits: configurable guardrails with conservative defaults. */
   safety?: SafetyConfig;
+  /** Goal definitions with optional allocation percentages. */
+  goals?: Record<string, GoalConfigEntry>;
+};
+
+// --- Goal config types ---
+
+export type GoalConfigEntry = {
+  description?: string;
+  allocation?: number;
+  department?: string;
+  team?: string;
+  acceptance_criteria?: string;
+  owner_agent_id?: string;
 };
 
 // --- Safety config types ---
