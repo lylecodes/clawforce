@@ -131,6 +131,10 @@ export type { ModelPricing } from "./pricing.js";
 export { updateProviderUsage, getProviderUsage, getAllProviderUsage, isProviderThrottled, getMaxUsagePercent } from "./rate-limits.js";
 export type { ProviderUsage, UsageWindow } from "./rate-limits.js";
 
+// --- Cascading Budget ---
+export { allocateBudget, getAgentBudgetStatus } from "./budget-cascade.js";
+export type { AllocateBudgetParams, AllocateBudgetResult, AgentBudgetStatus } from "./budget-cascade.js";
+
 // --- Multi-Window Budget ---
 export { getBudgetStatus, checkMultiWindowBudget } from "./budget-windows.js";
 export type { BudgetStatus, WindowStatus } from "./budget-windows.js";

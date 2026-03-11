@@ -53,7 +53,7 @@ const OPS_ACTIONS = [
   "refresh_context", "emit_event", "list_events", "enqueue_work",
   "queue_status", "process_events", "dispatch_metrics",
   "list_jobs", "create_job", "update_job", "delete_job", "toggle_job_cron",
-  "cron_status", "introspect",
+  "cron_status", "introspect", "allocate_budget",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -101,6 +101,10 @@ const ClawforceOpsSchema = Type.Object({
   job_enabled: Type.Optional(Type.Boolean({ description: "Enable (true) or disable (false) the job cron (for toggle_job_cron)." })),
   cron_job_name: Type.Optional(Type.String({ description: "Cron job name filter (for cron_status). If omitted, returns all project crons." })),
   filter_job_name: Type.Optional(Type.String({ description: "Filter audit_runs by job name (for query_audit with audit_table=audit_runs)." })),
+  // allocate_budget params
+  parent_agent_id: Type.Optional(Type.String({ description: "Parent agent for budget allocation." })),
+  child_agent_id: Type.Optional(Type.String({ description: "Child agent to receive budget allocation." })),
+  daily_limit_cents: Type.Optional(Type.Number({ description: "Daily budget limit in cents to allocate." })),
 });
 
 export function createClawforceOpsTool(options?: {
@@ -114,7 +118,7 @@ export function createClawforceOpsTool(options?: {
     description:
       "Team observability and control. " +
       "Read: agent_status, query_audit, refresh_context, list_events, queue_status, dispatch_metrics, list_jobs, cron_status, introspect. " +
-      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, toggle_job_cron. " +
+      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, toggle_job_cron, allocate_budget. " +
       "Job management: list_jobs (view agent jobs), create_job/update_job/delete_job (manage scoped sessions), toggle_job_cron (enable/disable job cron), cron_status (view cron run state). " +
       "introspect: view your own config, expectations, budget, and SLO status. " +
       "Use emit_event to ingest external events (CI failures, PR opens, etc). " +
@@ -1020,6 +1024,22 @@ export function createClawforceOpsTool(options?: {
               recentSloEvaluations: sloEvals,
               activePolicies: policies,
             });
+          }
+
+          case "allocate_budget": {
+            const parentAgentId = readStringParam(params, "parent_agent_id");
+            const childAgentId = readStringParam(params, "child_agent_id");
+            const dailyLimitCents = readNumberParam(params, "daily_limit_cents");
+            if (!parentAgentId || !childAgentId || dailyLimitCents == null) {
+              return jsonResult({ ok: false, error: "parent_agent_id, child_agent_id, and daily_limit_cents required" });
+            }
+            const { allocateBudget } = await import("../budget-cascade.js");
+            const db = getDb(projectId);
+            const result = allocateBudget({ projectId, parentAgentId, childAgentId, dailyLimitCents }, db);
+            if (result.ok) {
+              writeAuditEntry(db, projectId, caller, "allocate_budget", { parentAgentId, childAgentId, dailyLimitCents });
+            }
+            return jsonResult(result);
           }
 
           default:
