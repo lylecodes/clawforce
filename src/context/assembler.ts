@@ -35,6 +35,7 @@ import { buildPolicyStatus } from "./sources/policy-status.js";
 import { buildResourcesContext } from "./sources/resources.js";
 import { resolveToolsDocs, resolveSoulDoc } from "./sources/agent-docs.js";
 
+import { getInitiativeSpend } from "../goals/ops.js";
 import { resolveSkillSource } from "../skills/registry.js";
 import { buildDeltaReport, renderDeltaReport } from "../planning/ooda.js";
 import { buildVelocityReport, renderVelocityReport } from "../planning/velocity.js";
@@ -193,6 +194,9 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
 
     case "resources":
       return resolveResourcesSource(ctx);
+
+    case "initiative_status":
+      return resolveInitiativeStatusSource(ctx.projectId ?? "", undefined);
 
     default:
       return null;
@@ -938,4 +942,54 @@ function resolveResourcesSource(ctx: AssemblerContext): string | null {
   } catch {
     return null;
   }
+}
+
+export function resolveInitiativeStatusSource(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): string {
+  const db = dbOverride ?? getDb(projectId);
+
+  // Get initiatives (goals with allocation)
+  const initiatives = db.prepare(
+    "SELECT * FROM goals WHERE project_id = ? AND allocation IS NOT NULL AND status = 'active' ORDER BY allocation DESC",
+  ).all(projectId) as Record<string, unknown>[];
+
+  if (initiatives.length === 0) return "No initiatives configured.";
+
+  // Get project daily budget
+  const budgetRow = db.prepare(
+    "SELECT daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+  ).get(projectId) as { daily_limit_cents: number } | undefined;
+  const dailyBudget = budgetRow?.daily_limit_cents ?? 0;
+
+  const lines: string[] = ["## Initiative Budget Status", ""];
+  lines.push(`Daily budget: ${dailyBudget}c`, "");
+  lines.push("| Initiative | Allocation | Budget | Spent | Remaining |");
+  lines.push("|------------|-----------|--------|-------|-----------|");
+
+  let totalAllocation = 0;
+  let totalSpent = 0;
+
+  for (const row of initiatives) {
+    const title = row.title as string;
+    const id = row.id as string;
+    const allocationPct = row.allocation as number;
+    const allocationCents = Math.floor((allocationPct / 100) * dailyBudget);
+    const spent = getInitiativeSpend(projectId, id, db);
+    const remaining = allocationCents - spent;
+    totalAllocation += allocationPct;
+    totalSpent += spent;
+
+    const status = remaining <= 0 ? " ⛔" : remaining < allocationCents * 0.25 ? " ⚠️" : "";
+    lines.push(`| ${title} | ${allocationPct}% | ${allocationCents}c | ${spent}c | ${remaining}c${status} |`);
+  }
+
+  const reservePct = 100 - totalAllocation;
+  const reserveCents = dailyBudget - Math.floor((totalAllocation / 100) * dailyBudget);
+  lines.push("");
+  lines.push(`Reserve: ${reservePct}% (${reserveCents}c)`);
+  lines.push(`Total spent: ${totalSpent}c of ${dailyBudget}c`);
+
+  return lines.join("\n");
 }

@@ -199,7 +199,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
