@@ -276,6 +276,43 @@ With additional states: BLOCKED, FAILED, CANCELLED. Policy rules enforced by the
 - **Retry limit** -- FAILED to OPEN is blocked when retries are exhausted
 - **Workflow phase gate** -- tasks in future phases are blocked from starting
 
+## Initiatives & Budget Allocation
+
+Goals with an `allocation` field are **initiatives** — strategic priorities with hard budget enforcement.
+
+### Config
+
+```yaml
+budget:
+  daily_limit_cents: 2000
+
+goals:
+  ui-improvements:
+    allocation: 40
+    description: "Dashboard UX improvements"
+    department: engineering
+  customer-outreach:
+    allocation: 30
+    description: "Daily lead gen and follow-ups"
+    department: sales
+```
+
+Allocations are percentages of the project's daily budget. Unallocated remainder (here 30%) serves as reserve for ad-hoc work.
+
+### Hard Gate
+
+When an initiative's spend reaches its allocation, dispatch is **blocked** for all tasks under that goal tree. The gate traces tasks up the goal hierarchy to find their root initiative.
+
+### Cascading Budget
+
+Budget flows uniformly through the agent tree. Coordination agents allocate portions of their budget to reports. Each allocation is bounded by the parent's remaining allocatable budget.
+
+| Tool | Action | Purpose |
+|------|--------|---------|
+| `clawforce_goal` | `create` with `allocation` | Create an initiative |
+| `clawforce_goal` | `status` | See budget spend for initiative |
+| `clawforce_ops` | `allocate_budget` | Allocate budget to a report |
+
 ## Tools
 
 | Tool | Purpose |

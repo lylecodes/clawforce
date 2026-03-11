@@ -259,9 +259,9 @@ Improve manager's ability to predict session costs.
 - [x] 6.3: Default manager reflection job → builtin `reflect` job preset (weekly strategic thinking)
 
 ### Phase 7: Initiatives & Resource Allocation
-- [ ] 7.1: Initiative model (first-class concept with allocation)
+- [x] 7.1: Initiative model (goals with allocation, hard dispatch gate)
 - [x] 7.2: Resource config (rate limits, model costs as context) — budget system complete
-- [ ] 7.3: Cascading budget allocation (org tree budget flow)
+- [x] 7.3: Cascading budget allocation (uniform agent tree budget flow)
 - [ ] 7.4: Autonomous scheduling (manager plans own dispatch cadence)
 
 ### Phase 8: Memory & Knowledge Lifecycle
