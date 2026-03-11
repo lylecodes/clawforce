@@ -17,6 +17,7 @@ import { getExtendedProjectConfig } from "../project.js";
 import { classifyRisk } from "../risk/classifier.js";
 import { getRiskConfig } from "../risk/config.js";
 import { applyRiskGate } from "../risk/gate.js";
+import { findRootInitiative, getInitiativeSpend } from "../goals/ops.js";
 import { getTask, getTaskEvidence } from "../tasks/ops.js";
 import { acquireTaskLease, releaseTaskLease } from "../tasks/ops.js";
 import { ingestEvent } from "../events/store.js";
@@ -578,6 +579,7 @@ export function shouldDispatch(
   projectId: string,
   agentId: string,
   provider: string = "anthropic",
+  options?: { taskId?: string },
 ): { ok: true } | { ok: false; reason: string } {
   // Check multi-window budget (hourly / daily / monthly)
   const budgetResult = checkMultiWindowBudget({ projectId, agentId });
@@ -588,6 +590,55 @@ export function shouldDispatch(
   // Check provider rate limits
   if (isProviderThrottled(provider, 95)) {
     return { ok: false, reason: `Provider ${provider} rate limit exceeded (>95% used)` };
+  }
+
+  // Check initiative budget if task is specified
+  if (options?.taskId) {
+    try {
+      const initiativeResult = checkInitiativeBudget(projectId, options.taskId);
+      if (!initiativeResult.ok) {
+        return initiativeResult;
+      }
+    } catch (err) {
+      safeLog("dispatcher.initiativeBudgetCheck", err);
+    }
+  }
+
+  return { ok: true };
+}
+
+function checkInitiativeBudget(
+  projectId: string,
+  taskId: string,
+): { ok: true } | { ok: false; reason: string } {
+  const db = getDb(projectId);
+
+  // Look up task's goal_id
+  const task = db.prepare(
+    "SELECT goal_id FROM tasks WHERE id = ? AND project_id = ?",
+  ).get(taskId, projectId) as { goal_id: string | null } | undefined;
+
+  if (!task?.goal_id) return { ok: true }; // No goal = no initiative gate
+
+  // Walk up to root initiative
+  const initiative = findRootInitiative(projectId, task.goal_id);
+  if (!initiative?.allocation) return { ok: true }; // No allocation = no gate
+
+  // Get project daily budget
+  const budget = db.prepare(
+    "SELECT daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+  ).get(projectId) as { daily_limit_cents: number } | undefined;
+
+  if (!budget) return { ok: true }; // No project budget = no gate
+
+  const allocationCents = Math.floor((initiative.allocation / 100) * budget.daily_limit_cents);
+  const spentCents = getInitiativeSpend(projectId, initiative.id);
+
+  if (spentCents >= allocationCents) {
+    return {
+      ok: false,
+      reason: `Initiative "${initiative.title}" budget exceeded: spent ${spentCents}c of ${allocationCents}c allocation (${initiative.allocation}% of ${budget.daily_limit_cents}c daily budget)`,
+    };
   }
 
   return { ok: true };
