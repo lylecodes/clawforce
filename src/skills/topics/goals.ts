@@ -70,5 +70,39 @@ Managers automatically see the goal tree in their briefing. Shows:
 - All project goals with status
 - Sub-goal counts and progress
 - Department/team ownership
+
+## Initiatives (Budget-Gated Goals)
+
+A goal with an \`allocation\` field is an **initiative** — a strategic priority with budget enforcement.
+
+### Creating Initiatives
+
+\`\`\`json
+{ "action": "create", "title": "UI Improvements", "allocation": 40, "description": "Dashboard UX work", "department": "engineering" }
+\`\`\`
+
+The \`allocation\` is a percentage of the project's daily budget. If the project budget is $10/day and an initiative has allocation: 40, it gets $4/day.
+
+### Budget Enforcement
+
+When an initiative's allocation is spent, dispatch is **blocked** for tasks under that goal tree. This is a hard gate — agents cannot overspend.
+
+### Checking Initiative Status
+
+\`\`\`json
+{ "action": "status", "goal_id": "init-id" }
+\`\`\`
+
+Returns budget info: allocation percentage, allocated cents, spent today, remaining.
+
+### Budget Allocation to Reports
+
+Coordination agents can allocate budget to their reports:
+
+\`\`\`json
+{ "tool": "clawforce_ops", "action": "allocate_budget", "parent_agent_id": "manager", "child_agent_id": "frontend", "daily_limit_cents": 400 }
+\`\`\`
+
+Budget cascades down the agent tree. Each allocation is bounded by the parent's remaining allocatable budget.
 `;
 }
