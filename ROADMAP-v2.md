@@ -102,32 +102,25 @@ Every manager gets a built-in `reflect` job — dedicated strategic thinking tim
 
 ### 7.1 Initiative model
 
-New first-class concept: named strategic priorities with budget allocation.
+Initiatives are goals with an `allocation` field — percentage of project daily budget. No separate entity.
 
 ```yaml
-initiatives:
+goals:
   ui-improvements:
-    priority: high
-    allocation: 40%
+    allocation: 40
     description: "Improve dashboard UX based on user feedback"
     department: engineering
-    team: frontend
   customer-outreach:
-    priority: medium
-    allocation: 30%
+    allocation: 30
     description: "Daily lead generation and follow-ups"
     department: sales
-  maintenance:
-    priority: low
-    allocation: 30%
-    description: "Bug fixes, dependency updates, tech debt"
-    department: engineering
 ```
 
-- Initiatives link to goals (from Phase 2.3) — an initiative IS a top-level goal with budget metadata
-- Tasks created under an initiative inherit its department/team
+- A top-level goal with `allocation` is an initiative — hard budget enforcement at dispatch
+- Unallocated remainder = implicit reserve for ad-hoc work
+- Dispatch gate walks task's goal hierarchy (parent-walking) to find root initiative
 - Cost tracking per initiative (aggregate of all tasks under the goal tree)
-- Manager briefing includes initiative status: budget spent vs. allocated, progress, velocity
+- `initiative_status` briefing source shows allocation, spend, remaining per initiative
 
 ### 7.2 Resource config
 
@@ -168,15 +161,25 @@ Budget flows down the org tree. Each manager allocates to its reports.
 
 ### 7.4 Autonomous scheduling
 
-Manager plans its own dispatch cadence. Replaces human-configured cron frequency.
+Coordination agents plan their own dispatch cadence. No new scheduler infrastructure — context + enforcement.
 
-- Manager receives: initiative priorities, budget, rate limits, historical cost, current state
-- Manager decides: "run 3 improvement sessions, 2 outreach runs today"
-- Manager creates tasks for each planned session, assigns to appropriate employees
-- Dispatch queue handles execution with existing throttling/concurrency
-- Manager cron still fires on a schedule (e.g. every 30min) — but now it's planning, not just reacting
-- Feedback loop: manager reviews actual vs. projected cost, adjusts next cycle
-- Pacing: manager spaces dispatches to avoid rate limit contention
+- **Priority on goals** — P1-P4 field on goals (matching tasks), tells agents what to work on first
+- **Historical cost averages** — new briefing data: "improvement sessions average 150c" so agents can plan session counts
+- **Cost forecasting** — "at current burn rate, UI initiative exhausts budget by 3pm"
+- **Pre-dispatch cost estimation** — estimate cost before creating a task based on historical initiative × agent × model data
+- **Dispatch plans** — coordination agent creates a named plan for the cycle ("3 UI sessions, 2 outreach runs"), stored and tracked, reviewed at end of cycle (actual vs. planned)
+- **Adaptive wake frequency** — coordination agents adjust their own cron schedule within configurable bounds. Busy = more frequent, idle = less. Default bounds on manager preset.
+- **Rate-aware slot planning** — "you can run 2 Opus + 4 Sonnet sessions concurrently given current rate limits"
+- All features ship as defaults on manager preset, configurable via:
+  ```yaml
+  agents:
+    eng-lead:
+      extends: manager
+      scheduling:
+        adaptive_wake: true
+        planning: true
+        wake_bounds: ["*/15 * * * *", "*/120 * * * *"]
+  ```
 
 ---
 
@@ -353,7 +356,16 @@ User manually decides cron frequency with no guidance.
 - User can override but shouldn't have to
 - Adaptive: frequency increases during busy periods, decreases when idle
 
-### 9.8 Human onboarding
+### 9.8 Data streams
+
+Briefing sources are data streams — make them discoverable, parameterized, and composable.
+
+- **Stream catalog** — `clawforce streams` shows all available sources with descriptions and sample output
+- **Parameterized streams** — sources accept config: `{ source: "cost_forecast", horizon: "8h", granularity: "per_initiative" }`
+- **Custom computed streams** — users define sources backed by SQL queries or aggregations over existing data
+- **Stream routing** — same data streams power briefing, dashboard, webhooks, and alerts. One concept, multiple outputs.
+
+### 9.9 Human onboarding
 
 System onboards agents but not the user. No guided first experience.
 
@@ -373,7 +385,8 @@ System onboards agents but not the user. No guided first experience.
 - [ ] 9.5: Config hot-reload (watch, diff, apply without restart)
 - [ ] 9.6: Live actionable dashboard (real-time, approve/reassign/message from UI)
 - [ ] 9.7: Cron schedule automation (system determines frequency)
-- [ ] 9.8: Human onboarding (welcome flow, first-week digest, guided intervention)
+- [ ] 9.8: Data streams (catalog, parameterized sources, custom queries, multi-output routing)
+- [ ] 9.9: Human onboarding (welcome flow, first-week digest, guided intervention)
 
 ### Phase 10: Polish & Optimization
 - [ ] 10.1: Context assembly optimization (cache static, refresh dynamic)
