@@ -338,3 +338,79 @@ export function getGoalTasks(projectId: string, goalId: string, dbOverride?: Dat
     .all(goalId, projectId) as Record<string, unknown>[];
   return rows.map(rowToTask);
 }
+
+// --- Initiative budget helpers ---
+
+/**
+ * Walk up the goal hierarchy to find the root goal with an allocation > 0.
+ * Returns null if no ancestor (including the goal itself) has an allocation.
+ * Includes cycle protection via a visited set.
+ */
+export function findRootInitiative(projectId: string, goalId: string, dbOverride?: DatabaseSync): Goal | null {
+  const db = dbOverride ?? getDb(projectId);
+  const visited = new Set<string>();
+  let currentId: string | undefined = goalId;
+
+  while (currentId) {
+    if (visited.has(currentId)) return null; // cycle detected
+    visited.add(currentId);
+
+    const goal = getGoal(projectId, currentId, db);
+    if (!goal) return null;
+
+    if (goal.allocation != null && goal.allocation > 0) return goal;
+
+    currentId = goal.parentGoalId;
+  }
+
+  return null;
+}
+
+/**
+ * Get today's total spend (in cents) for all tasks under a goal tree.
+ * Collects all goal IDs recursively (BFS from rootGoalId down through children),
+ * then sums cost_records for tasks linked to those goals created today.
+ */
+export function getInitiativeSpend(projectId: string, rootGoalId: string, dbOverride?: DatabaseSync): number {
+  const db = dbOverride ?? getDb(projectId);
+
+  // BFS to collect all goal IDs in the tree
+  const goalIds: string[] = [];
+  const queue: string[] = [rootGoalId];
+  const visited = new Set<string>();
+
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    goalIds.push(id);
+
+    const children = db.prepare(
+      "SELECT id FROM goals WHERE parent_goal_id = ? AND project_id = ?",
+    ).all(id, projectId) as Record<string, unknown>[];
+
+    for (const child of children) {
+      queue.push(child.id as string);
+    }
+  }
+
+  if (goalIds.length === 0) return 0;
+
+  // Today's start timestamp (midnight local time)
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+  // Build parameterized IN clause
+  const placeholders = goalIds.map(() => "?").join(", ");
+
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(cr.cost_cents), 0) as total
+    FROM cost_records cr
+    INNER JOIN tasks t ON cr.task_id = t.id AND t.project_id = cr.project_id
+    WHERE t.goal_id IN (${placeholders})
+      AND cr.project_id = ?
+      AND cr.created_at >= ?
+  `).get(...goalIds, projectId, todayStart) as Record<string, unknown> | undefined;
+
+  return (row?.total as number) ?? 0;
+}

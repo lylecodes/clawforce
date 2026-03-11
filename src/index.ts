@@ -85,7 +85,7 @@ export {
 } from "./messaging/protocols.js";
 
 // --- Goals ---
-export { createGoal, getGoal, listGoals, updateGoal, achieveGoal, abandonGoal, getChildGoals, getGoalTree, linkTaskToGoal, unlinkTaskFromGoal, getGoalTasks } from "./goals/ops.js";
+export { createGoal, getGoal, listGoals, updateGoal, achieveGoal, abandonGoal, getChildGoals, getGoalTree, linkTaskToGoal, unlinkTaskFromGoal, getGoalTasks, findRootInitiative, getInitiativeSpend } from "./goals/ops.js";
 export type { CreateGoalParams, ListGoalsFilters, GoalTreeNode } from "./goals/ops.js";
 export { checkGoalCascade, computeGoalProgress } from "./goals/cascade.js";
 export type { GoalProgress, CascadeResult } from "./goals/cascade.js";
