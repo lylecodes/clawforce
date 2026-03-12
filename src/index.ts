@@ -226,4 +226,8 @@ export type {
   ChannelStatus,
   ChannelConfig as CommChannelConfig,
   MeetingConfig,
+  PromotionTarget,
+  PromotionCandidate,
+  KnowledgeFlag,
+  KnowledgeConfig,
 } from "./types.js";
