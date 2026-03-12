@@ -54,6 +54,7 @@ const OPS_ACTIONS = [
   "queue_status", "process_events", "dispatch_metrics",
   "list_jobs", "create_job", "update_job", "delete_job", "toggle_job_cron",
   "cron_status", "introspect", "allocate_budget",
+  "plan_create", "plan_start", "plan_complete", "plan_abandon", "plan_list",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -105,6 +106,10 @@ const ClawforceOpsSchema = Type.Object({
   parent_agent_id: Type.Optional(Type.String({ description: "Parent agent for budget allocation." })),
   child_agent_id: Type.Optional(Type.String({ description: "Child agent to receive budget allocation." })),
   daily_limit_cents: Type.Optional(Type.Number({ description: "Daily budget limit in cents to allocate." })),
+  // plan management params
+  planned_items: Type.Optional(Type.String({ description: "JSON array of planned dispatch items for plan_create." })),
+  plan_id: Type.Optional(Type.String({ description: "Dispatch plan ID for plan_start/plan_complete/plan_abandon." })),
+  actual_results: Type.Optional(Type.String({ description: "JSON array of actual results for plan_complete." })),
 });
 
 export function createClawforceOpsTool(options?: {
@@ -1040,6 +1045,48 @@ export function createClawforceOpsTool(options?: {
               writeAuditEntry(db, projectId, caller, "allocate_budget", { parentAgentId, childAgentId, dailyLimitCents });
             }
             return jsonResult(result);
+          }
+
+          case "plan_create": {
+            const plannedItemsStr = readStringParam(params, "planned_items");
+            if (!plannedItemsStr) return jsonResult({ ok: false, error: "planned_items required (JSON array)" });
+            let plannedItems;
+            try { plannedItems = JSON.parse(plannedItemsStr); } catch { return jsonResult({ ok: false, error: "planned_items must be valid JSON" }); }
+            const { createPlan } = await import("../scheduling/plans.js");
+            const plan = createPlan({ projectId, agentId: caller, plannedItems }, getDb(projectId));
+            writeAuditEntry(getDb(projectId), projectId, caller, "plan_create", { planId: plan.id, itemCount: plannedItems.length, estimatedCostCents: plan.estimatedCostCents });
+            return jsonResult({ ok: true, plan });
+          }
+          case "plan_start": {
+            const planId = readStringParam(params, "plan_id");
+            if (!planId) return jsonResult({ ok: false, error: "plan_id required" });
+            const { startPlan } = await import("../scheduling/plans.js");
+            startPlan(projectId, planId, getDb(projectId));
+            return jsonResult({ ok: true, planId, status: "executing" });
+          }
+          case "plan_complete": {
+            const planId = readStringParam(params, "plan_id");
+            const actualResultsStr = readStringParam(params, "actual_results");
+            if (!planId || !actualResultsStr) return jsonResult({ ok: false, error: "plan_id and actual_results required" });
+            let actualResults;
+            try { actualResults = JSON.parse(actualResultsStr); } catch { return jsonResult({ ok: false, error: "actual_results must be valid JSON" }); }
+            const { completePlan } = await import("../scheduling/plans.js");
+            completePlan(projectId, planId, { actualResults }, getDb(projectId));
+            writeAuditEntry(getDb(projectId), projectId, caller, "plan_complete", { planId });
+            return jsonResult({ ok: true, planId, status: "completed" });
+          }
+          case "plan_abandon": {
+            const planId = readStringParam(params, "plan_id");
+            if (!planId) return jsonResult({ ok: false, error: "plan_id required" });
+            const { abandonPlan } = await import("../scheduling/plans.js");
+            abandonPlan(projectId, planId, getDb(projectId));
+            return jsonResult({ ok: true, planId, status: "abandoned" });
+          }
+          case "plan_list": {
+            const { listPlans } = await import("../scheduling/plans.js");
+            const limit = readNumberParam(params, "limit") ?? 10;
+            const plans = listPlans(projectId, caller, getDb(projectId), limit);
+            return jsonResult({ ok: true, plans });
           }
 
           default:
