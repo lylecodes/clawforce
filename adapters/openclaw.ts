@@ -105,6 +105,7 @@ type GhostRecallConfig = {
   maxInjectedChars?: number;
   maxSearches?: number;
   debug?: boolean;
+  injectExpectations?: boolean;
 };
 
 type MemoryFlushConfig = {
@@ -134,6 +135,7 @@ const DEFAULT_GHOST_RECALL: Required<GhostRecallConfig> = {
   maxInjectedChars: 4000,
   maxSearches: 3,
   debug: false,
+  injectExpectations: true,
 };
 
 const DEFAULT_MEMORY_FLUSH: Required<MemoryFlushConfig> = {
@@ -163,6 +165,7 @@ function resolveGhostRecall(raw?: Record<string, unknown>): Required<GhostRecall
     maxInjectedChars: typeof raw.maxInjectedChars === "number" ? raw.maxInjectedChars : DEFAULT_GHOST_RECALL.maxInjectedChars,
     maxSearches: typeof raw.maxSearches === "number" ? raw.maxSearches : DEFAULT_GHOST_RECALL.maxSearches,
     debug: typeof raw.debug === "boolean" ? raw.debug : DEFAULT_GHOST_RECALL.debug,
+    injectExpectations: typeof raw.injectExpectations === "boolean" ? raw.injectExpectations : DEFAULT_GHOST_RECALL.injectExpectations,
   };
 }
 
@@ -494,7 +497,15 @@ const clawforcePlugin = {
           }
         }
 
-        const parts = [content, ghostContext].filter(Boolean);
+        // Expectations re-injection (after ghost context)
+        let expectationsContext: string | null = null;
+        const injectExpectations = cfg.ghostRecall.injectExpectations ?? true;
+        if (injectExpectations && config.expectations?.length) {
+          const { formatExpectationsReminder } = await import("../src/memory/ghost-turn.js");
+          expectationsContext = formatExpectationsReminder(config.expectations);
+        }
+
+        const parts = [content, ghostContext, expectationsContext].filter(Boolean);
         if (parts.length > 0) {
           return { prependContext: parts.join("\n\n") };
         }

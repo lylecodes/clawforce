@@ -9,6 +9,7 @@
 import { emitDiagnosticEvent } from "../diagnostics.js";
 import { callTriage, resolveProvider } from "./llm-client.js";
 import type { ProviderInfo, TriageResult } from "./llm-client.js";
+import type { Expectation } from "../types.js";
 
 // ── Types ──
 
@@ -310,4 +311,21 @@ export async function runCronRecall(
   });
 
   return formatted;
+}
+
+// ── Expectations re-injection ──
+
+/**
+ * Format agent expectations as a compressed reminder for re-injection.
+ * Returns null if no expectations are provided.
+ */
+export function formatExpectationsReminder(expectations: Expectation[]): string | null {
+  if (!expectations || expectations.length === 0) return null;
+
+  const lines: string[] = ["## Expectations Reminder", ""];
+  for (const exp of expectations) {
+    const actions = Array.isArray(exp.action) ? exp.action.join("/") : exp.action;
+    lines.push(`- Use \`${exp.tool}\` → \`${actions}\` (min ${exp.min_calls}x per session)`);
+  }
+  return lines.join("\n");
 }
