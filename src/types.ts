@@ -912,3 +912,36 @@ export type Goal = {
   allocation?: number;
   priority?: TaskPriority;
 };
+
+export type PlannedItem = {
+  initiativeId?: string;
+  agentId: string;
+  model?: string;
+  taskTitle: string;
+  estimatedCostCents: number;
+  confidence: "high" | "medium" | "low";
+  priority?: TaskPriority;
+};
+
+export type ActualResult = {
+  plannedIndex: number;
+  taskId?: string;
+  actualCostCents?: number;
+  status: "dispatched" | "skipped" | "failed";
+  skipReason?: string;
+};
+
+export type DispatchPlanStatus = "planned" | "executing" | "completed" | "abandoned";
+
+export type DispatchPlan = {
+  id: string;
+  projectId: string;
+  agentId: string;
+  status: DispatchPlanStatus;
+  plannedItems: PlannedItem[];
+  actualResults?: ActualResult[];
+  estimatedCostCents: number;
+  actualCostCents?: number;
+  createdAt: number;
+  completedAt?: number;
+};
