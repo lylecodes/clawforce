@@ -198,6 +198,9 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
     case "initiative_status":
       return resolveInitiativeStatusSource(ctx.projectId ?? "", undefined);
 
+    case "cost_forecast":
+      return resolveCostForecastSource(ctx.projectId ?? "", undefined);
+
     default:
       return null;
   }
@@ -990,6 +993,68 @@ export function resolveInitiativeStatusSource(
   lines.push("");
   lines.push(`Reserve: ${reservePct}% (${reserveCents}c)`);
   lines.push(`Total spent: ${totalSpent}c of ${dailyBudget}c`);
+
+  return lines.join("\n");
+}
+
+export function resolveCostForecastSource(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): string {
+  const db = dbOverride ?? getDb(projectId);
+
+  const initiatives = db.prepare(
+    "SELECT * FROM goals WHERE project_id = ? AND allocation IS NOT NULL AND status = 'active' ORDER BY allocation DESC",
+  ).all(projectId) as Record<string, unknown>[];
+
+  if (initiatives.length === 0) return "No initiatives configured.";
+
+  const budgetRow = db.prepare(
+    "SELECT daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+  ).get(projectId) as { daily_limit_cents: number } | undefined;
+  const dailyBudget = budgetRow?.daily_limit_cents ?? 0;
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const hoursElapsed = Math.max(0.5, (now.getTime() - todayStart) / (1000 * 60 * 60));
+
+  const lines: string[] = ["## Cost Forecast", ""];
+  lines.push(`Daily budget: ${dailyBudget}c | Hours elapsed: ${hoursElapsed.toFixed(1)}h`, "");
+  lines.push("| Initiative | Allocation | Budget | Spent | Remaining | Burn Rate | Exhausts At |");
+  lines.push("|------------|-----------|--------|-------|-----------|-----------|-------------|");
+
+  let totalAllocation = 0;
+  let totalSpent = 0;
+
+  for (const row of initiatives) {
+    const title = row.title as string;
+    const id = row.id as string;
+    const allocationPct = row.allocation as number;
+    const allocationCents = Math.floor((allocationPct / 100) * dailyBudget);
+    const spent = getInitiativeSpend(projectId, id, db);
+    const remaining = allocationCents - spent;
+    totalAllocation += allocationPct;
+    totalSpent += spent;
+
+    const burnRate = spent > 0 ? spent / hoursElapsed : 0;
+    let exhaustsAt = "—";
+    if (burnRate > 0 && remaining > 0) {
+      const hoursUntilExhausted = remaining / burnRate;
+      const exhaustTime = new Date(now.getTime() + hoursUntilExhausted * 60 * 60 * 1000);
+      const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+      if (exhaustTime.getTime() < midnight) {
+        exhaustsAt = `~${exhaustTime.getHours()}:${String(exhaustTime.getMinutes()).padStart(2, "0")}`;
+      }
+    }
+
+    const status = remaining <= 0 ? " ⛔" : remaining < allocationCents * 0.25 ? " ⚠️" : "";
+    lines.push(`| ${title} | ${allocationPct}% | ${allocationCents}c | ${spent}c | ${remaining}c${status} | ${burnRate.toFixed(1)}c/hr | ${exhaustsAt} |`);
+  }
+
+  const reservePct = 100 - totalAllocation;
+  const reserveCents = dailyBudget - Math.floor((totalAllocation / 100) * dailyBudget);
+  lines.push("");
+  lines.push(`Reserve: ${reservePct}% (${reserveCents}c) | Total spent: ${totalSpent}c of ${dailyBudget}c`);
 
   return lines.join("\n");
 }
