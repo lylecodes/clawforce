@@ -35,6 +35,7 @@ import { buildPolicyStatus } from "./sources/policy-status.js";
 import { buildResourcesContext } from "./sources/resources.js";
 import { resolveToolsDocs, resolveSoulDoc } from "./sources/agent-docs.js";
 
+import { computeAvailableSlots } from "../scheduling/slots.js";
 import { getInitiativeSpend } from "../goals/ops.js";
 import { resolveSkillSource } from "../skills/registry.js";
 import { buildDeltaReport, renderDeltaReport } from "../planning/ooda.js";
@@ -200,6 +201,9 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
 
     case "cost_forecast":
       return resolveCostForecastSource(ctx.projectId ?? "", undefined);
+
+    case "available_capacity":
+      return resolveAvailableCapacitySource(ctx.projectId ?? "", undefined);
 
     default:
       return null;
@@ -1055,6 +1059,81 @@ export function resolveCostForecastSource(
   const reserveCents = dailyBudget - Math.floor((totalAllocation / 100) * dailyBudget);
   lines.push("");
   lines.push(`Reserve: ${reservePct}% (${reserveCents}c) | Total spent: ${totalSpent}c of ${dailyBudget}c`);
+
+  return lines.join("\n");
+}
+
+export function resolveAvailableCapacitySource(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): string {
+  const db = dbOverride ?? getDb(projectId);
+
+  // Try to load resource config from project_metadata
+  let modelConfigs: Record<string, { rpm: number; tpm: number; cost_per_1k_input: number; cost_per_1k_output: number }> | undefined;
+  try {
+    const metaRow = db.prepare(
+      "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'resources_models'",
+    ).get(projectId) as { value: string } | undefined;
+    if (metaRow?.value) {
+      modelConfigs = JSON.parse(metaRow.value);
+    }
+  } catch { /* ignore */ }
+
+  if (!modelConfigs || Object.keys(modelConfigs).length === 0) {
+    return "## Available Capacity\n\nNo resource/model configuration found. Configure `resources.models` in project.yaml to enable capacity planning.";
+  }
+
+  // Count active sessions per model from dispatch queue
+  const activeRows = db.prepare(`
+    SELECT payload, COUNT(*) as count
+    FROM dispatch_queue
+    WHERE project_id = ? AND status = 'leased'
+    GROUP BY payload
+  `).all(projectId) as Record<string, unknown>[];
+
+  const activeSessions: Record<string, number> = {};
+  for (const row of activeRows) {
+    try {
+      const payload = JSON.parse(row.payload as string);
+      const model = payload.model ?? "unknown";
+      activeSessions[model] = (activeSessions[model] ?? 0) + (row.count as number);
+    } catch { /* ignore */ }
+  }
+
+  // Get average tokens per session from cost_records
+  const tokenRows = db.prepare(`
+    SELECT model, AVG(input_tokens + output_tokens) as avg_tokens
+    FROM cost_records
+    WHERE project_id = ?
+    GROUP BY model
+  `).all(projectId) as Record<string, unknown>[];
+
+  const avgTokens: Record<string, number> = {};
+  for (const row of tokenRows) {
+    if (row.model) avgTokens[row.model as string] = Math.round(row.avg_tokens as number);
+  }
+
+  // Build slot calc input
+  const models: Record<string, { rpm: number; tpm: number; costPer1kInput: number; costPer1kOutput: number }> = {};
+  for (const [name, config] of Object.entries(modelConfigs)) {
+    models[name] = {
+      rpm: config.rpm ?? 60,
+      tpm: config.tpm ?? 200000,
+      costPer1kInput: config.cost_per_1k_input ?? 0,
+      costPer1kOutput: config.cost_per_1k_output ?? 0,
+    };
+  }
+
+  const slots = computeAvailableSlots({ models, activeSessions, avgTokensPerSession: avgTokens });
+
+  const lines: string[] = ["## Available Capacity", ""];
+  lines.push("| Model | Available Slots | Active | RPM (used/limit) | Avg Tokens/Session |");
+  lines.push("|-------|----------------|--------|-------------------|-------------------|");
+
+  for (const slot of slots) {
+    lines.push(`| ${slot.model} | ${slot.availableSlots} | ${slot.currentActive} | ${slot.rpmUsed}/${slot.rpmLimit} | ${slot.avgTokensPerSession.toLocaleString()} |`);
+  }
 
   return lines.join("\n");
 }
