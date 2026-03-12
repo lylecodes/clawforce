@@ -37,6 +37,7 @@ import type {
   EventHandlerConfig,
   GoalConfigEntry,
   ReviewConfig,
+  SchedulingConfig,
   JobDefinition,
   PerformancePolicy,
   PolicyDefinition,
@@ -439,6 +440,16 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
 
   const jobs = normalizeJobs(raw.jobs);
 
+  let scheduling: SchedulingConfig | undefined;
+  if (raw.scheduling && typeof raw.scheduling === "object") {
+    const s = raw.scheduling as Record<string, unknown>;
+    scheduling = {
+      adaptiveWake: typeof s.adaptive_wake === "boolean" ? s.adaptive_wake : undefined,
+      planning: typeof s.planning === "boolean" ? s.planning : undefined,
+      wakeBounds: Array.isArray(s.wake_bounds) ? s.wake_bounds as [string, string] : undefined,
+    };
+  }
+
   return {
     extends: extendsFrom,
     title,
@@ -458,6 +469,7 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
     skill_pack: skillPackName,
     compaction: compaction === false ? undefined : compaction,
     jobs,
+    scheduling,
   };
 }
 

@@ -786,6 +786,17 @@ export function createClawforceOpsTool(options?: {
             // Merge updates with existing job
             const existingJob = currentJobs[jobName]!;
             const merged = { ...existingJob, ...parseJobConfig(updates) };
+
+            // Enforce wake bounds if agent has scheduling config
+            if (merged.cron) {
+              const agentEntry = getAgentConfig(targetAgentId);
+              const wakeBounds = agentEntry?.config.scheduling?.wakeBounds;
+              if (wakeBounds) {
+                const { clampCronToWakeBounds } = await import("../scheduling/wake-bounds.js");
+                merged.cron = clampCronToWakeBounds(merged.cron, wakeBounds);
+              }
+            }
+
             upsertJob(targetAgentId, jobName, merged);
 
             // Re-register cron if schedule changed

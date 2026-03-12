@@ -249,6 +249,12 @@ export type AgentPermissions = {
   budget_limit_cents?: number;
 };
 
+export type SchedulingConfig = {
+  adaptiveWake?: boolean;
+  planning?: boolean;
+  wakeBounds?: [string, string];
+};
+
 /** Per-agent configuration. */
 export type AgentConfig = {
   /** Preset to inherit defaults from (e.g. "manager", "employee"). */
@@ -296,6 +302,8 @@ export type AgentConfig = {
   coordination?: CoordinationConfig;
   /** Scoped sessions. Each key is a job name with its own briefing/expectations/cron. */
   jobs?: Record<string, JobDefinition>;
+  /** Scheduling configuration (adaptive wake, planning, wake bounds). */
+  scheduling?: SchedulingConfig;
 };
 
 /** A scoped session definition for an agent. */
