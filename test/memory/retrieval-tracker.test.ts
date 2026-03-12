@@ -17,6 +17,7 @@ vi.mock("../../src/identity.js", () => ({
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");
+const { clearSessionTracker } = await import("../../src/memory/retrieval-tracker.js");
 
 describe("retrieval tracker", () => {
   let db: DatabaseSync;
@@ -28,6 +29,7 @@ describe("retrieval tracker", () => {
   });
 
   afterEach(() => {
+    clearSessionTracker();
     try { db.close(); } catch { /* already closed */ }
   });
 
