@@ -81,14 +81,14 @@ export function completePlan(projectId: string, planId: string, params: Complete
   db.prepare(`
     UPDATE dispatch_plans
     SET status = 'completed', actual_results = ?, actual_cost_cents = ?, completed_at = ?
-    WHERE id = ? AND project_id = ?
+    WHERE id = ? AND project_id = ? AND status IN ('planned', 'executing')
   `).run(JSON.stringify(params.actualResults), actualCostCents, now, planId, projectId);
 }
 
 export function abandonPlan(projectId: string, planId: string, dbOverride?: DatabaseSync): void {
   const db = dbOverride ?? getDb(projectId);
   const now = Date.now();
-  db.prepare("UPDATE dispatch_plans SET status = 'abandoned', completed_at = ? WHERE id = ? AND project_id = ?")
+  db.prepare("UPDATE dispatch_plans SET status = 'abandoned', completed_at = ? WHERE id = ? AND project_id = ? AND status IN ('planned', 'executing')")
     .run(now, planId, projectId);
 }
 
