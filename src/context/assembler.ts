@@ -205,6 +205,9 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
     case "available_capacity":
       return resolveAvailableCapacitySource(ctx.projectId ?? "", undefined);
 
+    case "knowledge_candidates":
+      return resolveKnowledgeCandidatesSource(ctx.projectId ?? "", undefined);
+
     default:
       return null;
   }
@@ -1133,6 +1136,51 @@ export function resolveAvailableCapacitySource(
 
   for (const slot of slots) {
     lines.push(`| ${slot.model} | ${slot.availableSlots} | ${slot.currentActive} | ${slot.rpmUsed}/${slot.rpmLimit} | ${slot.avgTokensPerSession.toLocaleString()} |`);
+  }
+
+  return lines.join("\n");
+}
+
+export function resolveKnowledgeCandidatesSource(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): string {
+  const db = dbOverride ?? getDb(projectId);
+
+  const candidates = db.prepare(
+    "SELECT * FROM promotion_candidates WHERE project_id = ? AND status = 'pending' ORDER BY retrieval_count DESC",
+  ).all(projectId) as Record<string, unknown>[];
+
+  const flags = db.prepare(
+    "SELECT * FROM knowledge_flags WHERE project_id = ? AND status = 'pending' ORDER BY severity DESC, created_at DESC",
+  ).all(projectId) as Record<string, unknown>[];
+
+  if (candidates.length === 0 && flags.length === 0) {
+    return "No pending knowledge promotions or corrections.";
+  }
+
+  const lines: string[] = ["## Knowledge Review", ""];
+
+  if (candidates.length > 0) {
+    lines.push("### Promotion Candidates", "");
+    lines.push("| Content | Retrieved | Sessions | Suggested Target | Action |");
+    lines.push("|---------|-----------|----------|-----------------|--------|");
+    for (const row of candidates) {
+      const snippet = (row.content_snippet as string).slice(0, 80);
+      lines.push(`| ${snippet} | ${row.retrieval_count}x | ${row.session_count} | ${row.suggested_target} | \`approve_promotion\` / \`dismiss_promotion\` candidate_id="${row.id}" |`);
+    }
+    lines.push("");
+  }
+
+  if (flags.length > 0) {
+    lines.push("### Knowledge Corrections", "");
+    lines.push("| Source | Wrong | Correct | Severity | Action |");
+    lines.push("|--------|-------|---------|----------|--------|");
+    for (const row of flags) {
+      const flagged = (row.flagged_content as string).slice(0, 50);
+      const correction = (row.correction as string).slice(0, 50);
+      lines.push(`| ${row.source_type}:${row.source_ref} | ${flagged} | ${correction} | ${row.severity} | \`resolve_flag\` / \`dismiss_flag\` flag_id="${row.id}" |`);
+    }
   }
 
   return lines.join("\n");
