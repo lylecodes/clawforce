@@ -55,6 +55,7 @@ const OPS_ACTIONS = [
   "list_jobs", "create_job", "update_job", "delete_job", "toggle_job_cron",
   "cron_status", "introspect", "allocate_budget",
   "plan_create", "plan_start", "plan_complete", "plan_abandon", "plan_list",
+  "flag_knowledge", "approve_promotion", "dismiss_promotion", "resolve_flag", "dismiss_flag", "list_candidates", "list_flags",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -110,6 +111,14 @@ const ClawforceOpsSchema = Type.Object({
   planned_items: Type.Optional(Type.String({ description: "JSON array of planned dispatch items for plan_create." })),
   plan_id: Type.Optional(Type.String({ description: "Dispatch plan ID for plan_start/plan_complete/plan_abandon." })),
   actual_results: Type.Optional(Type.String({ description: "JSON array of actual results for plan_complete." })),
+  // knowledge lifecycle params
+  source_type: Type.Optional(Type.String({ description: "Knowledge source type: soul, skill, or project_doc." })),
+  source_ref: Type.Optional(Type.String({ description: "Source reference (file path or topic name)." })),
+  flagged_content: Type.Optional(Type.String({ description: "The content that is wrong." })),
+  correction: Type.Optional(Type.String({ description: "The correct information." })),
+  severity: Type.Optional(Type.String({ description: "Flag severity: low, medium, high." })),
+  candidate_id: Type.Optional(Type.String({ description: "Promotion candidate ID." })),
+  flag_id: Type.Optional(Type.String({ description: "Knowledge flag ID." })),
 });
 
 export function createClawforceOpsTool(options?: {
@@ -128,7 +137,8 @@ export function createClawforceOpsTool(options?: {
       "introspect: view your own config, expectations, budget, and SLO status. " +
       "Use emit_event to ingest external events (CI failures, PR opens, etc). " +
       "Use enqueue_work to add tasks to the dispatch queue with priority. " +
-      "Use process_events to trigger event processing + dispatch.",
+      "Use process_events to trigger event processing + dispatch. " +
+      "Knowledge lifecycle: flag_knowledge (report wrong knowledge), approve_promotion/dismiss_promotion (manage promotion candidates), resolve_flag/dismiss_flag (manage knowledge corrections), list_candidates/list_flags (view pending items). ",
     parameters: ClawforceOpsSchema,
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
@@ -1098,6 +1108,63 @@ export function createClawforceOpsTool(options?: {
             const limit = readNumberParam(params, "limit") ?? 10;
             const plans = listPlans(projectId, caller, getDb(projectId), limit);
             return jsonResult({ ok: true, plans });
+          }
+
+          // --- Knowledge Lifecycle ---
+
+          case "flag_knowledge": {
+            const sourceType = readStringParam(params, "source_type");
+            const sourceRef = readStringParam(params, "source_ref");
+            const flaggedContent = readStringParam(params, "flagged_content");
+            const correction = readStringParam(params, "correction");
+            const severity = readStringParam(params, "severity") ?? "medium";
+            if (!sourceType || !sourceRef || !flaggedContent || !correction) {
+              return jsonResult({ ok: false, error: "source_type, source_ref, flagged_content, and correction required" });
+            }
+            const { createFlag } = await import("../memory/demotion.js");
+            const flag = createFlag({ projectId, agentId: caller, sourceType: sourceType as any, sourceRef, flaggedContent, correction, severity: severity as any }, getDb(projectId));
+            writeAuditEntry(getDb(projectId), projectId, caller, "flag_knowledge", { flagId: flag.id, sourceType, sourceRef, severity });
+            return jsonResult({ ok: true, flag });
+          }
+          case "approve_promotion": {
+            const candidateId = readStringParam(params, "candidate_id");
+            if (!candidateId) return jsonResult({ ok: false, error: "candidate_id required" });
+            const { approveCandidate } = await import("../memory/promotion.js");
+            approveCandidate(projectId, candidateId, getDb(projectId));
+            writeAuditEntry(getDb(projectId), projectId, caller, "approve_promotion", { candidateId });
+            return jsonResult({ ok: true, candidateId, status: "approved" });
+          }
+          case "dismiss_promotion": {
+            const candidateId = readStringParam(params, "candidate_id");
+            if (!candidateId) return jsonResult({ ok: false, error: "candidate_id required" });
+            const { dismissCandidate } = await import("../memory/promotion.js");
+            dismissCandidate(projectId, candidateId, getDb(projectId));
+            return jsonResult({ ok: true, candidateId, status: "dismissed" });
+          }
+          case "resolve_flag": {
+            const flagId = readStringParam(params, "flag_id");
+            if (!flagId) return jsonResult({ ok: false, error: "flag_id required" });
+            const { resolveFlag } = await import("../memory/demotion.js");
+            resolveFlag(projectId, flagId, getDb(projectId));
+            writeAuditEntry(getDb(projectId), projectId, caller, "resolve_flag", { flagId });
+            return jsonResult({ ok: true, flagId, status: "resolved" });
+          }
+          case "dismiss_flag": {
+            const flagId = readStringParam(params, "flag_id");
+            if (!flagId) return jsonResult({ ok: false, error: "flag_id required" });
+            const { dismissFlag } = await import("../memory/demotion.js");
+            dismissFlag(projectId, flagId, getDb(projectId));
+            return jsonResult({ ok: true, flagId, status: "dismissed" });
+          }
+          case "list_candidates": {
+            const { listCandidates } = await import("../memory/promotion.js");
+            const candidates = listCandidates(projectId, getDb(projectId), "pending");
+            return jsonResult({ ok: true, candidates });
+          }
+          case "list_flags": {
+            const { listFlags } = await import("../memory/demotion.js");
+            const flags = listFlags(projectId, "pending", getDb(projectId));
+            return jsonResult({ ok: true, flags });
           }
 
           default:
