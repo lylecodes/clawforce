@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 25;
+export const SCHEMA_VERSION = 26;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -39,6 +39,7 @@ const migrations: Record<number, Migration> = {
   23: migrateV23,
   24: migrateV24,
   25: migrateV25,
+  26: migrateV26,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -854,6 +855,74 @@ function migrateV25(db: DatabaseSync): void {
   db.prepare(`
     CREATE INDEX IF NOT EXISTS idx_dispatch_plans_project_agent
     ON dispatch_plans (project_id, agent_id, created_at DESC)
+  `).run();
+}
+
+// --- Migration V26: Memory knowledge lifecycle tables ---
+
+function migrateV26(db: DatabaseSync): void {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS memory_retrieval_stats (
+      content_hash TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      content_snippet TEXT NOT NULL,
+      retrieval_count INTEGER NOT NULL DEFAULT 1,
+      session_count INTEGER NOT NULL DEFAULT 1,
+      first_retrieved_at INTEGER NOT NULL,
+      last_retrieved_at INTEGER NOT NULL,
+      PRIMARY KEY (content_hash, project_id, agent_id)
+    )
+  `).run();
+
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS memory_search_log (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      session_key TEXT NOT NULL,
+      query_hash TEXT NOT NULL,
+      query_text TEXT NOT NULL,
+      result_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    )
+  `).run();
+
+  db.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_search_log_session
+    ON memory_search_log (session_key, query_hash)
+  `).run();
+
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS promotion_candidates (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      content_snippet TEXT NOT NULL,
+      retrieval_count INTEGER NOT NULL,
+      session_count INTEGER NOT NULL,
+      suggested_target TEXT NOT NULL,
+      target_agent_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      reviewed_at INTEGER
+    )
+  `).run();
+
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS knowledge_flags (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      flagged_content TEXT NOT NULL,
+      correction TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'medium',
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    )
   `).run();
 }
 

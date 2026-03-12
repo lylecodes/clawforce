@@ -199,7 +199,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
@@ -304,6 +304,8 @@ export type AgentConfig = {
   jobs?: Record<string, JobDefinition>;
   /** Scheduling configuration (adaptive wake, planning, wake bounds). */
   scheduling?: SchedulingConfig;
+  /** Maximum number of skills an agent can hold. */
+  skillCap?: number;
 };
 
 /** A scoped session definition for an agent. */
@@ -405,6 +407,8 @@ export type WorkforceConfig = {
   safety?: SafetyConfig;
   /** Goal definitions with optional allocation percentages. */
   goals?: Record<string, GoalConfigEntry>;
+  /** Knowledge lifecycle configuration (promotion thresholds, etc.). */
+  knowledge?: KnowledgeConfig;
 };
 
 // --- Goal config types ---
@@ -952,4 +956,43 @@ export type DispatchPlan = {
   actualCostCents?: number;
   createdAt: number;
   completedAt?: number;
+};
+
+// --- Knowledge lifecycle types ---
+
+export type PromotionTarget = "soul" | "skill" | "project_doc";
+
+export type PromotionCandidate = {
+  id: string;
+  projectId: string;
+  contentHash: string;
+  contentSnippet: string;
+  retrievalCount: number;
+  sessionCount: number;
+  suggestedTarget: PromotionTarget;
+  targetAgentId?: string;
+  status: "pending" | "approved" | "dismissed";
+  createdAt: number;
+  reviewedAt?: number;
+};
+
+export type KnowledgeFlag = {
+  id: string;
+  projectId: string;
+  agentId: string;
+  sourceType: PromotionTarget;
+  sourceRef: string;
+  flaggedContent: string;
+  correction: string;
+  severity: "low" | "medium" | "high";
+  status: "pending" | "resolved" | "dismissed";
+  createdAt: number;
+  resolvedAt?: number;
+};
+
+export type KnowledgeConfig = {
+  promotionThreshold?: {
+    minRetrievals?: number;
+    minSessions?: number;
+  };
 };
