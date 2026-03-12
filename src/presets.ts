@@ -129,7 +129,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
       "soul", "tools_reference", "project_md", "task_board", "goal_hierarchy",
       "escalations", "team_status", "trust_scores", "cost_summary", "resources",
       "pending_messages", "channel_messages", "memory", "skill",
-      "policy_status", "preferences",
+      "policy_status", "preferences", "cost_forecast", "available_capacity",
     ],
     expectations: [
       { tool: "clawforce_log", action: "write", min_calls: 1 },
@@ -138,6 +138,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     performance_policy: { action: "alert" },
     compaction: true,
     coordination: { enabled: true, schedule: "*/30 * * * *" },
+    scheduling: { adaptiveWake: true, planning: true, wakeBounds: ["*/15 * * * *", "*/120 * * * *"] },
   },
   employee: {
     title: "Employee",

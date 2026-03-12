@@ -104,5 +104,51 @@ Coordination agents can allocate budget to their reports:
 \`\`\`
 
 Budget cascades down the agent tree. Each allocation is bounded by the parent's remaining allocatable budget.
+
+## Goal Priority
+
+Goals support priority levels (P0-P3) matching task priorities:
+- **P0** — Critical, must be addressed immediately
+- **P1** — High priority
+- **P2** — Normal priority (default)
+- **P3** — Low priority
+
+Tasks linked to a goal inherit its priority when they don't have one set explicitly.
+
+Set priority when creating a goal:
+\`\`\`
+clawforce_goal create title="Fix production bug" priority="P0"
+\`\`\`
+
+## Dispatch Plans
+
+Coordination agents create dispatch plans to structure their wake cycles:
+
+1. **Create plan**: \`clawforce_ops plan_create planned_items='[{"agentId":"frontend","taskTitle":"Fix nav","estimatedCostCents":200,"confidence":"high"}]'\`
+2. **Start execution**: \`clawforce_ops plan_start plan_id="..."\`
+3. **Complete with results**: \`clawforce_ops plan_complete plan_id="..." actual_results='[{"plannedIndex":0,"taskId":"task-123","actualCostCents":180,"status":"dispatched"}]'\`
+4. **List recent plans**: \`clawforce_ops plan_list\`
+5. **Abandon plan**: \`clawforce_ops plan_abandon plan_id="..."\`
+
+Plans track estimated vs. actual cost for forecasting accuracy.
+
+## Adaptive Wake Frequency
+
+Coordination agents can adjust their own wake frequency within configured bounds:
+
+\`\`\`
+clawforce_ops update_job job_name="coordination" job_config='{"cron":"*/30 * * * *"}'
+\`\`\`
+
+Frequency is clamped to configured bounds (default: 15min fastest, 120min slowest).
+- Wake more frequently when there are many pending tasks or P0/P1 items
+- Wake less frequently when idle or budget is low
+
+## Scheduling Briefing Sources
+
+- **cost_forecast** — Per-initiative spend, burn rate, projected exhaustion time
+- **available_capacity** — Per-model slot availability based on rate limits and active sessions
+
+Both are included in the manager preset by default.
 `;
 }

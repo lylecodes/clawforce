@@ -152,6 +152,15 @@ export { parseBudgetShorthand } from "./budget-parser.js";
 // --- Cost Auto-Capture ---
 export { recordCostFromLlmOutput } from "./cost.js";
 
+// --- Scheduling ---
+export { getCostEstimate } from "./scheduling/cost-engine.js";
+export type { CostEstimate } from "./scheduling/cost-engine.js";
+export { createPlan, getPlan, startPlan, completePlan, abandonPlan, listPlans } from "./scheduling/plans.js";
+export type { CreatePlanParams, CompletePlanParams } from "./scheduling/plans.js";
+export { computeAvailableSlots } from "./scheduling/slots.js";
+export type { SlotAvailability, SlotCalcInput, ModelConfig } from "./scheduling/slots.js";
+export { clampCronToWakeBounds } from "./scheduling/wake-bounds.js";
+
 // --- Dispatch Gate ---
 export { shouldDispatch } from "./dispatch/dispatcher.js";
 
