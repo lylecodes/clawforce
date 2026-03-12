@@ -161,6 +161,15 @@ export { computeAvailableSlots } from "./scheduling/slots.js";
 export type { SlotAvailability, SlotCalcInput, ModelConfig } from "./scheduling/slots.js";
 export { clampCronToWakeBounds } from "./scheduling/wake-bounds.js";
 
+// --- Knowledge Lifecycle ---
+export { trackRetrieval, getRetrievalStats, getStatsAboveThreshold } from "./memory/retrieval-tracker.js";
+export type { RetrievalStat } from "./memory/retrieval-tracker.js";
+export { isDuplicateQuery, logSearchQuery } from "./memory/search-dedup.js";
+export { checkPromotionCandidates, listCandidates, getCandidate, approveCandidate, dismissCandidate } from "./memory/promotion.js";
+export { createFlag, getFlag, listFlags, resolveFlag, dismissFlag } from "./memory/demotion.js";
+export type { CreateFlagParams } from "./memory/demotion.js";
+export { formatExpectationsReminder } from "./memory/ghost-turn.js";
+
 // --- Dispatch Gate ---
 export { shouldDispatch } from "./dispatch/dispatcher.js";
 
