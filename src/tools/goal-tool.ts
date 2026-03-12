@@ -40,6 +40,7 @@ const ClawforceGoalSchema = Type.Object({
   team: Type.Optional(Type.String({ description: "Team within the department." })),
   reason: Type.Optional(Type.String({ description: "Reason for abandoning a goal." })),
   allocation: Type.Optional(Type.Number({ description: "Budget allocation as percentage of project daily budget (0-100). Makes this goal an initiative." })),
+  priority: Type.Optional(stringEnum(["P0", "P1", "P2", "P3"], { description: "Goal priority (P0=critical, P3=low). Tasks under this goal inherit its priority." })),
   status_filter: Type.Optional(Type.String({ description: "Filter by status: active, achieved, abandoned (for list)." })),
   limit: Type.Optional(Type.Number({ description: "Max results (for list, default 100)." })),
   sub_goals: Type.Optional(Type.Array(
@@ -93,6 +94,7 @@ export function createClawforceGoalTool(options?: {
             const department = readStringParam(params, "department") ?? undefined;
             const team = readStringParam(params, "team") ?? undefined;
             const allocation = readNumberParam(params, "allocation") ?? undefined;
+            const priority = readStringParam(params, "priority") as "P0" | "P1" | "P2" | "P3" | undefined;
 
             if (allocation != null && (allocation < 0 || allocation > 100)) {
               return jsonResult({ ok: false, error: "allocation must be 0-100" });
@@ -101,7 +103,7 @@ export function createClawforceGoalTool(options?: {
             const goal = createGoal({
               projectId, title, description, acceptanceCriteria,
               parentGoalId, ownerAgentId, department, team,
-              createdBy: actor, allocation,
+              createdBy: actor, allocation, priority,
             });
 
             return jsonResult({ ok: true, goal });

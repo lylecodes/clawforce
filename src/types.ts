@@ -910,4 +910,5 @@ export type Goal = {
   achievedAt?: number;
   metadata?: Record<string, unknown>;
   allocation?: number;
+  priority?: TaskPriority;
 };

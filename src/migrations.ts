@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 24;
+export const SCHEMA_VERSION = 25;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -38,6 +38,7 @@ const migrations: Record<number, Migration> = {
   22: migrateV22,
   23: migrateV23,
   24: migrateV24,
+  25: migrateV25,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -828,6 +829,32 @@ function migrateV23(db: DatabaseSync): void {
 
 function migrateV24(db: DatabaseSync): void {
   safeAlterTable(db, `ALTER TABLE goals ADD COLUMN allocation INTEGER`);
+}
+
+// --- Migration V25: Goal priority + dispatch_plans table ---
+
+function migrateV25(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE goals ADD COLUMN priority TEXT");
+
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS dispatch_plans (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'planned',
+      planned_items TEXT NOT NULL DEFAULT '[]',
+      actual_results TEXT,
+      estimated_cost_cents INTEGER NOT NULL DEFAULT 0,
+      actual_cost_cents INTEGER,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER
+    )
+  `).run();
+
+  db.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_dispatch_plans_project_agent
+    ON dispatch_plans (project_id, agent_id, created_at DESC)
+  `).run();
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */

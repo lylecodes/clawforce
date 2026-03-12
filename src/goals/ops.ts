@@ -35,6 +35,7 @@ function rowToGoal(row: Record<string, unknown>): Goal {
     try { goal.metadata = JSON.parse(row.metadata as string); } catch { /* ignore */ }
   }
   if (row.allocation != null) goal.allocation = row.allocation as number;
+  if (row.priority != null) goal.priority = row.priority as Goal["priority"];
   return goal;
 }
 
@@ -52,6 +53,7 @@ export type CreateGoalParams = {
   createdBy: string;
   metadata?: Record<string, unknown>;
   allocation?: number;
+  priority?: Goal["priority"];
 };
 
 export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync): Goal {
@@ -69,8 +71,8 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
   }
 
   db.prepare(`
-    INSERT INTO goals (id, project_id, title, description, acceptance_criteria, status, parent_goal_id, owner_agent_id, department, team, created_by, created_at, metadata, allocation)
-    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO goals (id, project_id, title, description, acceptance_criteria, status, parent_goal_id, owner_agent_id, department, team, created_by, created_at, metadata, allocation, priority)
+    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     params.projectId,
@@ -85,6 +87,7 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
     now,
     params.metadata ? JSON.stringify(params.metadata) : null,
     params.allocation ?? null,
+    params.priority ?? null,
   );
 
   const goal: Goal = {
@@ -102,6 +105,7 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
     createdAt: now,
     metadata: params.metadata,
     allocation: params.allocation,
+    priority: params.priority,
   };
 
   safeLog("goals.create", { id, title: params.title, project: params.projectId });
@@ -208,6 +212,7 @@ export type UpdateGoalParams = {
   team?: string;
   metadata?: Record<string, unknown>;
   allocation?: number;
+  priority?: Goal["priority"];
 };
 
 export function updateGoal(projectId: string, goalId: string, updates: UpdateGoalParams, dbOverride?: DatabaseSync): Goal {
@@ -226,6 +231,7 @@ export function updateGoal(projectId: string, goalId: string, updates: UpdateGoa
   if (updates.team !== undefined) { sets.push("team = ?"); params.push(updates.team); }
   if (updates.metadata !== undefined) { sets.push("metadata = ?"); params.push(JSON.stringify(updates.metadata)); }
   if (updates.allocation !== undefined) { sets.push("allocation = ?"); params.push(updates.allocation); }
+  if (updates.priority !== undefined) { sets.push("priority = ?"); params.push(updates.priority); }
 
   if (sets.length === 0) return goal;
 
