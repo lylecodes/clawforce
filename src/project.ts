@@ -211,6 +211,20 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
     result.goals = goals;
   }
 
+  // Parse knowledge config
+  if (raw.knowledge && typeof raw.knowledge === "object") {
+    const k = raw.knowledge as Record<string, unknown>;
+    const pt = k.promotion_threshold && typeof k.promotion_threshold === "object"
+      ? k.promotion_threshold as Record<string, unknown>
+      : undefined;
+    result.knowledge = {
+      promotionThreshold: pt ? {
+        minRetrievals: typeof pt.min_retrievals === "number" ? pt.min_retrievals : undefined,
+        minSessions: typeof pt.min_sessions === "number" ? pt.min_sessions : undefined,
+      } : undefined,
+    };
+  }
+
   return result;
 }
 
@@ -441,6 +455,8 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
 
   const jobs = normalizeJobs(raw.jobs);
 
+  const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;
+
   let scheduling: SchedulingConfig | undefined;
   if (raw.scheduling && typeof raw.scheduling === "object") {
     const s = raw.scheduling as Record<string, unknown>;
@@ -471,6 +487,7 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
     compaction: compaction === false ? undefined : compaction,
     jobs,
     scheduling,
+    skillCap,
   };
 }
 

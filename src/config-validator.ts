@@ -345,6 +345,14 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
     });
   }
 
+  if (config.skillCap !== undefined && config.skillCap < 1) {
+    warnings.push({
+      level: "warn",
+      agentId,
+      message: `Skill cap must be a positive number (got ${config.skillCap}).`,
+    });
+  }
+
   if (config.permissions?.budget_limit_cents !== undefined && config.permissions.budget_limit_cents <= 0) {
     warnings.push({
       level: "warn",

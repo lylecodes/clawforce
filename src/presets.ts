@@ -139,6 +139,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     compaction: true,
     coordination: { enabled: true, schedule: "*/30 * * * *" },
     scheduling: { adaptiveWake: true, planning: true, wakeBounds: ["*/15 * * * *", "*/120 * * * *"] },
+    skillCap: 12,
   },
   employee: {
     title: "Employee",
@@ -154,6 +155,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     performance_policy: { action: "retry", max_retries: 3, then: "alert" },
     compaction: false,
     coordination: { enabled: false },
+    skillCap: 8,
   },
   assistant: {
     title: "Personal Assistant",
