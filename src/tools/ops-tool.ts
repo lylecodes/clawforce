@@ -1063,7 +1063,7 @@ export function createClawforceOpsTool(options?: {
             const db = getDb(projectId);
             const result = allocateBudget({ projectId, parentAgentId, childAgentId, dailyLimitCents }, db);
             if (result.ok) {
-              writeAuditEntry(db, projectId, caller, "allocate_budget", { parentAgentId, childAgentId, dailyLimitCents });
+              writeAuditEntry({ projectId, actor: caller, action: "allocate_budget", targetType: "budget", targetId: childAgentId, detail: JSON.stringify({ parentAgentId, childAgentId, dailyLimitCents }) }, db);
             }
             return jsonResult(result);
           }
@@ -1075,7 +1075,7 @@ export function createClawforceOpsTool(options?: {
             try { plannedItems = JSON.parse(plannedItemsStr); } catch { return jsonResult({ ok: false, error: "planned_items must be valid JSON" }); }
             const { createPlan } = await import("../scheduling/plans.js");
             const plan = createPlan({ projectId, agentId: caller, plannedItems }, getDb(projectId));
-            writeAuditEntry(getDb(projectId), projectId, caller, "plan_create", { planId: plan.id, itemCount: plannedItems.length, estimatedCostCents: plan.estimatedCostCents });
+            writeAuditEntry({ projectId, actor: caller, action: "plan_create", targetType: "plan", targetId: plan.id, detail: JSON.stringify({ itemCount: plannedItems.length, estimatedCostCents: plan.estimatedCostCents }) }, getDb(projectId));
             return jsonResult({ ok: true, plan });
           }
           case "plan_start": {
@@ -1093,7 +1093,7 @@ export function createClawforceOpsTool(options?: {
             try { actualResults = JSON.parse(actualResultsStr); } catch { return jsonResult({ ok: false, error: "actual_results must be valid JSON" }); }
             const { completePlan } = await import("../scheduling/plans.js");
             completePlan(projectId, planId, { actualResults }, getDb(projectId));
-            writeAuditEntry(getDb(projectId), projectId, caller, "plan_complete", { planId });
+            writeAuditEntry({ projectId, actor: caller, action: "plan_complete", targetType: "plan", targetId: planId }, getDb(projectId));
             return jsonResult({ ok: true, planId, status: "completed" });
           }
           case "plan_abandon": {
@@ -1123,7 +1123,7 @@ export function createClawforceOpsTool(options?: {
             }
             const { createFlag } = await import("../memory/demotion.js");
             const flag = createFlag({ projectId, agentId: caller, sourceType: sourceType as any, sourceRef, flaggedContent, correction, severity: severity as any }, getDb(projectId));
-            writeAuditEntry(getDb(projectId), projectId, caller, "flag_knowledge", { flagId: flag.id, sourceType, sourceRef, severity });
+            writeAuditEntry({ projectId, actor: caller, action: "flag_knowledge", targetType: "knowledge", targetId: flag.id, detail: JSON.stringify({ sourceType, sourceRef, severity }) }, getDb(projectId));
             return jsonResult({ ok: true, flag });
           }
           case "approve_promotion": {
@@ -1131,7 +1131,7 @@ export function createClawforceOpsTool(options?: {
             if (!candidateId) return jsonResult({ ok: false, error: "candidate_id required" });
             const { approveCandidate } = await import("../memory/promotion.js");
             approveCandidate(projectId, candidateId, getDb(projectId));
-            writeAuditEntry(getDb(projectId), projectId, caller, "approve_promotion", { candidateId });
+            writeAuditEntry({ projectId, actor: caller, action: "approve_promotion", targetType: "knowledge", targetId: candidateId }, getDb(projectId));
             return jsonResult({ ok: true, candidateId, status: "approved" });
           }
           case "dismiss_promotion": {
@@ -1146,7 +1146,7 @@ export function createClawforceOpsTool(options?: {
             if (!flagId) return jsonResult({ ok: false, error: "flag_id required" });
             const { resolveFlag } = await import("../memory/demotion.js");
             resolveFlag(projectId, flagId, getDb(projectId));
-            writeAuditEntry(getDb(projectId), projectId, caller, "resolve_flag", { flagId });
+            writeAuditEntry({ projectId, actor: caller, action: "resolve_flag", targetType: "knowledge", targetId: flagId }, getDb(projectId));
             return jsonResult({ ok: true, flagId, status: "resolved" });
           }
           case "dismiss_flag": {
