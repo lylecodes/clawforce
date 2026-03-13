@@ -11,7 +11,7 @@ export function generate(): string {
   const sections: string[] = [
     "# Agent Presets",
     "",
-    "Clawforce defines built-in presets that provide sensible defaults for agents. Each agent uses `extends: <preset>` to inherit a preset's defaults for briefing, expectations, performance policy, compaction, and coordination. Agents only need to specify what's different from their preset.",
+    "Clawforce defines built-in presets that provide sensible defaults for agents. Each agent uses `extends: <preset>` to inherit a preset's defaults for briefing, expectations, performance policy, compaction, and coordination. Agents only need to specify what's different from their preset. Agents are defined globally and assigned to one or more domains — the preset controls the agent's defaults regardless of which domain it operates in.",
     "",
 
     "## How Inheritance Works",
@@ -31,7 +31,7 @@ export function generate(): string {
     "- `+item` — add to the inherited list",
     "- `-item` — remove from the inherited list",
     "",
-    "If no `extends` is specified, the agent gets no preset defaults and must define all fields explicitly.",
+    "If no `extends` is specified, the agent gets no preset defaults and must define all fields explicitly. Domain configs can further customize agent behavior per-domain through rules and budget overrides.",
     "",
   ];
 
@@ -133,7 +133,7 @@ export function generate(): string {
   // Job presets
   sections.push("## Job Presets");
   sections.push("");
-  sections.push("Job presets define defaults for scoped sessions (cron jobs). An agent's `jobs:` entries can use `extends:` to inherit from a job preset.");
+  sections.push("Job presets define defaults for scoped sessions (cron jobs). An agent's `jobs:` entries can use `extends:` to inherit from a job preset. Jobs run within the context of a specific domain.");
   sections.push("");
 
   for (const [name, preset] of Object.entries(BUILTIN_JOB_PRESETS)) {

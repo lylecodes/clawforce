@@ -81,7 +81,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "clawforce_setup",
-    description: "System setup and diagnostics — explain the system, check status, validate config.",
+    description: "System setup and diagnostics — explain the system, check status, validate config, and scaffold domains via `clawforce init`.",
     actions: SETUP_ACTIONS,
     roleAccess: "manager",
   },
@@ -238,7 +238,7 @@ function getActionDescription(tool: string, action: string): string {
     clawforce_workflow: {
       create: "Create a new multi-phase workflow",
       get: "Get workflow details and current phase",
-      list: "List all workflows for the project",
+      list: "List all workflows for the domain",
       add_task: "Add a task to a workflow phase",
       advance: "Advance to the next phase if gate condition is met",
       force_advance: "Force-advance to next phase (bypasses gate check, audited)",
@@ -246,9 +246,9 @@ function getActionDescription(tool: string, action: string): string {
     },
     clawforce_setup: {
       explain: "Explain how Clawforce works (system overview)",
-      status: "Show current system status and configuration",
-      validate: "Validate project config for errors and warnings",
-      activate: "Activate Clawforce for the current project",
+      status: "Show current system status and domain configuration",
+      validate: "Validate domain config for errors and warnings",
+      activate: "Activate Clawforce for the current domain (initDomain — scaffolds DB, registers agents)",
     },
     clawforce_compact: {
       update_doc: "Update a context document with new content (persists learnings)",
