@@ -960,7 +960,7 @@ export type DispatchPlan = {
 
 // --- Knowledge lifecycle types ---
 
-export type PromotionTarget = "soul" | "skill" | "project_doc";
+export type PromotionTarget = "soul" | "skill" | "project_doc" | "rule";
 
 export type PromotionCandidate = {
   id: string;

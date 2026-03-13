@@ -30,8 +30,20 @@ function rowToCandidate(row: Record<string, unknown>): PromotionCandidate {
 /**
  * Suggest a promotion target based on content heuristics.
  */
-function suggestTarget(snippet: string): PromotionTarget {
+export function suggestTarget(snippet: string): PromotionTarget {
   const lower = snippet.toLowerCase();
+
+  // Rule patterns: decision-like content that could be automated
+  if (
+    lower.includes("when") && (lower.includes("then") || lower.includes("always") || lower.includes("should")) ||
+    lower.includes("every time") ||
+    lower.includes("always assign") ||
+    lower.includes("if") && lower.includes("should") ||
+    lower.includes("whenever") && (lower.includes("do") || lower.includes("assign") || lower.includes("trigger"))
+  ) {
+    return "rule";
+  }
+
   if (lower.includes("i prefer") || lower.includes("i always") || lower.includes("my approach") || lower.includes("my style")) {
     return "soul";
   }
