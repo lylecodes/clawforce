@@ -96,6 +96,7 @@ type MemoryToolFactory = (opts: { agentSessionKey?: string }) => Record<string, 
 import { recordCostFromLlmOutput } from "../src/cost.js";
 import { registerBulkPricing } from "../src/pricing.js";
 import { updateProviderUsage } from "../src/rate-limits.js";
+import { initializeAllDomains } from "../src/config/init.js";
 import type { CronRegistrar, CronRegistrarInput } from "../src/types.js";
 
 type GhostRecallConfig = {
@@ -126,6 +127,8 @@ type ClawforcePluginConfig = {
   memoryFlush?: MemoryFlushConfig;
   /** Sync clawforce agents to OpenClaw config (agents.list[]). Default: true. */
   syncAgents?: boolean;
+  /** Override for domain config directory (defaults to projectsDir). */
+  configDir?: string;
 };
 
 const DEFAULT_GHOST_RECALL: Required<GhostRecallConfig> = {
@@ -1603,6 +1606,22 @@ const clawforcePlugin = {
         });
         // Scan for project configs and register agents
         scanAndRegisterProjects(cfg.projectsDir, api.logger);
+
+        // Also initialize domain-based configs (Phase 9)
+        try {
+          const domainResult = initializeAllDomains(cfg.configDir ?? cfg.projectsDir);
+          if (domainResult.domains.length > 0) {
+            api.logger.info(`Clawforce: initialized ${domainResult.domains.length} domain(s): ${domainResult.domains.join(", ")}`);
+          }
+          for (const warning of domainResult.warnings) {
+            api.logger.info(`Clawforce domain warning: ${warning}`);
+          }
+          for (const error of domainResult.errors) {
+            api.logger.warn(`Clawforce domain error: ${error}`);
+          }
+        } catch (err) {
+          api.logger.warn(`Clawforce: domain initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
 
         // Sync clawforce agents to OpenClaw config (agents.list[])
         if (cfg.syncAgents) {
