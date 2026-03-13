@@ -31,7 +31,7 @@ export function generateSoulTemplate(agentId: string): string {
 
 /**
  * Ensure the agent's docs directory exists and SOUL.md template is present.
- * Called during project registration (scanAndRegisterProjects) and activate.
+ * Called during project registration (initializeAllDomains) and activate.
  *
  * - Creates `{projectDir}/agents/{agentId}/` if missing.
  * - Scaffolds `SOUL.md` template if missing.

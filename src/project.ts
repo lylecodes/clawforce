@@ -79,6 +79,8 @@ export type WorkerConfig = {
 
 /**
  * Load a project config from a YAML file.
+ * @deprecated Use domain-based config via initializeAllDomains instead.
+ * Retained for backward compatibility with setup-tool activate and tests.
  */
 export function loadProject(configPath: string): ProjectConfig {
   const content = fs.readFileSync(configPath, "utf-8");
@@ -88,6 +90,8 @@ export function loadProject(configPath: string): ProjectConfig {
 /**
  * Load the workforce config (agent configs + approval policy) from a project.yaml.
  * Returns null if the file has no `agents` section with workforce configs.
+ * @deprecated Use domain-based config via initializeAllDomains instead.
+ * Retained for backward compatibility with setup-tool activate and tests.
  */
 export function loadWorkforceConfig(configPath: string): WorkforceConfig | null {
   const content = fs.readFileSync(configPath, "utf-8");
@@ -228,7 +232,7 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   return result;
 }
 
-/** @deprecated Use loadWorkforceConfig instead. */
+/** @deprecated Use domain-based config via initializeAllDomains. Alias for loadWorkforceConfig. */
 export const loadEnforcementConfig = loadWorkforceConfig;
 
 /**

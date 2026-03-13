@@ -18,8 +18,7 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
-// We test scanAndRegisterProjects by importing from index.ts indirectly.
-// Instead, test the underlying functions directly.
+// Test the project config parsing functions directly.
 const { loadWorkforceConfig, loadProject, registerWorkforceConfig, getAgentConfig, resetEnforcementConfigForTest } =
   await import("../../src/project.js");
 const { validateWorkforceConfig } = await import("../../src/config-validator.js");

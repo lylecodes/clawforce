@@ -22,7 +22,6 @@ type OpenClawPluginApi = _OpenClawPluginApi & {
 
 import { assembleContext } from "../src/context/assembler.js";
 import { resolveJobName, resolveDispatchContext, resolveEffectiveConfig } from "../src/jobs.js";
-import { validateWorkforceConfig } from "../src/config-validator.js";
 import { checkCompliance } from "../src/enforcement/check.js";
 import { executeFailureAction, executeCrashAction, recordCompliantRun } from "../src/enforcement/actions.js";
 import { resolveEscalationTarget, routeEscalation } from "../src/enforcement/escalation-router.js";
@@ -33,10 +32,6 @@ import {
   getAgentConfig,
   getExtendedProjectConfig,
   getRegisteredAgentIds,
-  initProject,
-  loadWorkforceConfig,
-  loadProject,
-  registerWorkforceConfig,
   resolveProjectDir,
 } from "../src/project.js";
 import { syncAgentsToOpenClaw } from "../src/agent-sync.js";
@@ -57,15 +52,13 @@ import { getRiskConfig } from "../src/risk/config.js";
 import { getDb } from "../src/db.js";
 import { completeItem, failItem } from "../src/dispatch/queue.js";
 import { getTask, releaseTaskLease } from "../src/tasks/ops.js";
-import { registerJobCrons, setCronService } from "../src/manager-cron.js";
+import { setCronService } from "../src/manager-cron.js";
 import { registerKillFunction } from "../src/audit/auto-kill.js";
 import { disableAgent, isAgentDisabled } from "../src/enforcement/disabled-store.js";
 import { handleWorkerSessionEnd } from "../src/tasks/session-end.js";
 import { buildOnboardingContext } from "../src/context/onboarding.js";
-import { registerPolicies } from "../src/policy/registry.js";
-import { generateDefaultScopePolicies, getAllowedActionsForTool } from "../src/profiles.js";
+import { getAllowedActionsForTool } from "../src/profiles.js";
 import { resolveEffectiveScope } from "../src/scope.js";
-import { ensureAgentDocs } from "../src/context/sources/auto-generate.js";
 import { withPolicyCheck, enforceToolPolicy } from "../src/policy/middleware.js";
 import { adaptTool, type ToolResult } from "../src/tools/common.js";
 import { createClawforceLogTool } from "../src/tools/log-tool.js";
@@ -208,118 +201,6 @@ function resolveConfig(raw?: Record<string, unknown>): ResolvedConfig {
     memoryFlush: resolveMemoryFlush(raw.memoryFlush as Record<string, unknown> | undefined),
     syncAgents: typeof raw.syncAgents === "boolean" ? raw.syncAgents : true,
   };
-}
-
-type MinimalLogger = { info(msg: string): void; warn(msg: string): void };
-
-/**
- * Scan projectsDir for project subdirectories containing project.yaml.
- * For each valid project: load + validate enforcement config, register agents,
- * init DB, and register for sweep service.
- */
-function scanAndRegisterProjects(projectsDir: string, logger: MinimalLogger): void {
-  const resolved = resolveProjectDir(projectsDir);
-  if (!fs.existsSync(resolved)) {
-    logger.info(`Clawforce: projects dir does not exist yet: ${resolved}`);
-    return;
-  }
-
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(resolved, { withFileTypes: true });
-  } catch (err) {
-    logger.warn(`Clawforce: failed to read projects dir: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-
-  let registered = 0;
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-
-    const projectDir = path.join(resolved, entry.name);
-    const configPath = path.join(projectDir, "project.yaml");
-    if (!fs.existsSync(configPath)) continue;
-
-    try {
-      // Load and register workforce config (agent configs)
-      const wfConfig = loadWorkforceConfig(configPath);
-      if (wfConfig) {
-        const warnings = validateWorkforceConfig(wfConfig);
-        for (const w of warnings) {
-          const prefix = w.agentId ? `[${entry.name}/${w.agentId}]` : `[${entry.name}]`;
-          if (w.level === "error") {
-            logger.warn(`Clawforce config error ${prefix}: ${w.message}`);
-          } else {
-            logger.info(`Clawforce config warning ${prefix}: ${w.message}`);
-          }
-        }
-
-        // Only skip if there are hard errors with no agents
-        const hasErrors = warnings.some((w) => w.level === "error");
-        if (!hasErrors || Object.keys(wfConfig.agents).length > 0) {
-          registerWorkforceConfig(entry.name, wfConfig, projectDir);
-
-          // Bootstrap per-agent docs (TOOLS.md auto-generation)
-          for (const [agentId, agentConfig] of Object.entries(wfConfig.agents)) {
-            try {
-              ensureAgentDocs(projectDir, agentId, agentConfig);
-            } catch (err) {
-              logger.warn(`Clawforce: failed to bootstrap agent docs for "${agentId}": ${err instanceof Error ? err.message : String(err)}`);
-            }
-          }
-
-          // Register per-job crons for agents with jobs
-          for (const [agentId, agentConfig] of Object.entries(wfConfig.agents)) {
-            if (agentConfig.jobs) {
-              void registerJobCrons(entry.name, agentId, agentConfig.jobs);
-            }
-          }
-
-          // Build combined policy list: explicit + auto-generated scope defaults
-          const allPolicies: Array<{ name: string; type: string; target?: string; config: Record<string, unknown> }> = [];
-          if (wfConfig.policies && wfConfig.policies.length > 0) {
-            allPolicies.push(...wfConfig.policies);
-          }
-          try {
-            const agentEntries = Object.fromEntries(
-              Object.entries(wfConfig.agents).map(([id, cfg]) => [id, { extends: cfg.extends }]),
-            );
-            const scopePolicies = generateDefaultScopePolicies(agentEntries, wfConfig.policies);
-            allPolicies.push(...scopePolicies);
-          } catch (scopeErr) {
-            logger.warn(`Clawforce: failed to generate scope policies for "${entry.name}": ${scopeErr instanceof Error ? scopeErr.message : String(scopeErr)}`);
-          }
-          if (allPolicies.length > 0) {
-            try {
-              registerPolicies(entry.name, allPolicies);
-            } catch (policyErr) {
-              logger.warn(`Clawforce: failed to register policies for "${entry.name}": ${policyErr instanceof Error ? policyErr.message : String(policyErr)}`);
-            }
-          }
-        }
-      }
-
-      // Load project config and initialize (DB, sweep registration, orchestrator)
-      const projectConfig = loadProject(configPath);
-      initProject(projectConfig);
-
-      // Recover orphaned sessions from previous crashes
-      const orphans = recoverOrphanedSessions(entry.name);
-      for (const orphan of orphans) {
-        logger.warn(`Clawforce: orphaned session detected — agent ${orphan.agentId} (${orphan.toolCallCount} tool calls, started ${new Date(orphan.startedAt).toISOString()})`);
-      }
-
-      registered++;
-    } catch (err) {
-      logger.warn(
-        `Clawforce: failed to load project "${entry.name}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  if (registered > 0) {
-    logger.info(`Clawforce: registered ${registered} project(s) from ${resolved}`);
-  }
 }
 
 const clawforcePlugin = {
@@ -1604,10 +1485,7 @@ const clawforcePlugin = {
           verificationRequired: true,
           cronRegistrar,
         });
-        // Scan for project configs and register agents
-        scanAndRegisterProjects(cfg.projectsDir, api.logger);
-
-        // Also initialize domain-based configs (Phase 9)
+        // Initialize domain-based configs (Phase 9)
         try {
           const domainResult = initializeAllDomains(cfg.configDir ?? cfg.projectsDir);
           if (domainResult.domains.length > 0) {

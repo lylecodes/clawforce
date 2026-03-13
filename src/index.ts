@@ -12,11 +12,7 @@ export { syncAgentsToOpenClaw, buildOpenClawAgentEntry } from "./agent-sync.js";
 export {
   getAgentConfig,
   initProject,
-  loadWorkforceConfig,
-  loadEnforcementConfig,
-  loadProject,
   registerWorkforceConfig,
-  registerEnforcementConfig,
   resolveProjectDir,
   getApprovalPolicy,
   getRegisteredAgentIds,
