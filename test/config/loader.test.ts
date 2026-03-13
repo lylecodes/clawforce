@@ -113,6 +113,45 @@ describe("global config loader", () => {
     expect(match).toBeNull();
   });
 
+  it("throws on invalid global config", async () => {
+    const { loadGlobalConfig } = await import("../../src/config/loader.js");
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), "agents: not-an-object\n");
+    expect(() => loadGlobalConfig(tmpDir)).toThrow();
+  });
+
+  it("skips invalid domain files gracefully", async () => {
+    const { loadAllDomains } = await import("../../src/config/loader.js");
+    // Valid domain
+    fs.writeFileSync(path.join(tmpDir, "domains", "good.yaml"), [
+      "domain: good",
+      "agents:",
+      "  - a",
+    ].join("\n"));
+    // Invalid domain (missing domain name)
+    fs.writeFileSync(path.join(tmpDir, "domains", "bad.yaml"), [
+      "agents:",
+      "  - b",
+    ].join("\n"));
+
+    const domains = loadAllDomains(tmpDir);
+    expect(domains).toHaveLength(1);
+    expect(domains[0].domain).toBe("good");
+  });
+
+  it("resolves tilde in domain paths", async () => {
+    const { resolveDomainFromPath } = await import("../../src/config/loader.js");
+    const homeDir = os.homedir();
+
+    const domains = [{
+      domain: "tildetest",
+      agents: ["a"],
+      paths: ["~/code/myapp"],
+    }];
+
+    const match = resolveDomainFromPath(path.join(homeDir, "code", "myapp", "src", "file.ts"), domains as any);
+    expect(match).toBe("tildetest");
+  });
+
   it("validates agents in domain are defined globally", async () => {
     const { loadGlobalConfig, loadAllDomains, validateDomainAgents } =
       await import("../../src/config/loader.js");

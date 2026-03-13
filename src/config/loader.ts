@@ -103,7 +103,7 @@ export function resolveDomainFromPath(
   for (const domain of domains) {
     if (!domain.paths) continue;
     for (const p of domain.paths) {
-      const resolved = p.startsWith("~")
+      const resolved = p.startsWith("~/") || p === "~"
         ? path.join(homeDir, p.slice(1))
         : p;
       entries.push({ resolved, domain: domain.domain });
