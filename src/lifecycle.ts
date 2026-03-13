@@ -75,6 +75,20 @@ export function getActiveProjectIds(): string[] {
   return [...activeProjectIds];
 }
 
+// Domain aliases — pass through to existing project tracking.
+// During the migration to domain-based config, both vocabularies work.
+export function registerDomain(domainId: string): void {
+  activeProjectIds.add(domainId);
+}
+
+export function unregisterDomain(domainId: string): void {
+  activeProjectIds.delete(domainId);
+}
+
+export function getActiveDomainIds(): string[] {
+  return [...activeProjectIds];
+}
+
 export function isClawforceInitialized(): boolean {
   return initialized;
 }

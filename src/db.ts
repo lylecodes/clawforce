@@ -38,6 +38,7 @@ function resolveHomeDir(): string {
 }
 
 let projectsDir = path.join(resolveHomeDir(), ".clawforce");
+let dataDir = path.join(resolveHomeDir(), ".clawforce", "data");
 
 export function setProjectsDir(dir: string): void {
   projectsDir = dir.startsWith("~")
@@ -47,6 +48,35 @@ export function setProjectsDir(dir: string): void {
 
 export function getProjectsDir(): string {
   return projectsDir;
+}
+
+export function setDataDir(dir: string): void {
+  dataDir = dir.startsWith("~")
+    ? path.join(resolveHomeDir(), dir.slice(1))
+    : dir;
+}
+
+export function getDataDir(): string {
+  return dataDir;
+}
+
+export function getDbByDomain(domainId: string): DatabaseSync {
+  const key = `domain:${domainId}`;
+  const existing = databases.get(key);
+  if (existing) return existing;
+
+  validateProjectId(domainId);
+  fs.mkdirSync(dataDir, { recursive: true });
+
+  const dbPath = path.join(dataDir, `${domainId}.db`);
+  const db = new DatabaseSync(dbPath);
+
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+
+  runMigrations(db);
+  databases.set(key, db);
+  return db;
 }
 
 export function getDb(projectId: string): DatabaseSync {
