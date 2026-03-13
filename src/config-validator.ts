@@ -5,6 +5,7 @@
  * Returns warnings (non-fatal) so the plugin can still load with partial configs.
  */
 
+import type { DomainConfig } from "./config/schema.js";
 import { validatePolicyConfigs } from "./policy/normalizer.js";
 import { isKnownCategory } from "./risk/categories.js";
 import type { AgentConfig, CompactionConfig, ContextSource, RiskGateAction, RiskTier, WorkforceConfig } from "./types.js";
@@ -14,7 +15,7 @@ const VALID_RISK_TIERS: RiskTier[] = ["low", "medium", "high", "critical"];
 const VALID_GATE_ACTIONS: RiskGateAction[] = ["none", "delay", "confirm", "approval", "human_approval"];
 
 export type ConfigWarning = {
-  level: "warn" | "error";
+  level: "warn" | "error" | "suggest";
   agentId?: string;
   message: string;
 };
@@ -319,11 +320,63 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
     }
   }
 
+  // Suggestions (non-blocking guidance)
+  const agentCount = Object.keys(config.agents).length;
+  if (agentCount >= 3 && !config.budgets) {
+    warnings.push({
+      level: "suggest",
+      message: `You have ${agentCount} agents but no budget config — consider setting budget limits.`,
+    });
+  }
+
+  for (const [agentId, agentConfig] of Object.entries(config.agents)) {
+    if (
+      (!agentConfig.expectations || agentConfig.expectations.length === 0) &&
+      agentConfig.extends !== "assistant"
+    ) {
+      warnings.push({
+        level: "suggest",
+        agentId,
+        message: `Agent "${agentId}" has no expectations — compliance tracking won't be useful without them.`,
+      });
+    }
+  }
+
   return warnings;
 }
 
 /** @deprecated Use validateWorkforceConfig instead. */
 export const validateEnforcementConfig = validateWorkforceConfig;
+
+/**
+ * Validate domain config quality — returns non-blocking suggestions.
+ */
+export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
+  const results: ConfigWarning[] = [];
+
+  if (!domain.orchestrator) {
+    results.push({
+      level: "suggest",
+      message: `Domain "${domain.domain}" has no orchestrator — consider assigning one for coordination.`,
+    });
+  }
+
+  if (!domain.paths || domain.paths.length === 0) {
+    results.push({
+      level: "suggest",
+      message: `Domain "${domain.domain}" has no paths configured — add code paths if this domain works with repositories.`,
+    });
+  }
+
+  if (!domain.rules || domain.rules.length === 0) {
+    results.push({
+      level: "suggest",
+      message: `Domain "${domain.domain}" has no rules — rules automate recurring decisions and reduce LLM costs.`,
+    });
+  }
+
+  return results;
+}
 
 function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarning[] {
   const warnings: ConfigWarning[] = [];
