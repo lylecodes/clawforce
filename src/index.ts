@@ -7,7 +7,7 @@
  */
 
 // --- Lifecycle & Configuration ---
-export { initClawforce, shutdownClawforce, getActiveProjectIds, registerProject, unregisterProject, isClawforceInitialized } from "./lifecycle.js";
+export { initClawforce, shutdownClawforce, getActiveProjectIds, registerProject, unregisterProject, isClawforceInitialized, registerDomain, unregisterDomain, getActiveDomainIds } from "./lifecycle.js";
 export { syncAgentsToOpenClaw, buildOpenClawAgentEntry } from "./agent-sync.js";
 export {
   getAgentConfig,
@@ -22,7 +22,25 @@ export {
   getRegisteredAgentIds,
   getExtendedProjectConfig,
 } from "./project.js";
-export { validateWorkforceConfig, validateEnforcementConfig } from "./config-validator.js";
+export { validateWorkforceConfig, validateEnforcementConfig, validateDomainQuality } from "./config-validator.js";
+
+// --- Config System ---
+export { loadGlobalConfig, loadAllDomains, resolveDomainFromPath, validateDomainAgents } from "./config/loader.js";
+export { validateGlobalConfig, validateDomainConfig, validateRuleDefinition } from "./config/schema.js";
+export type { GlobalConfig, DomainConfig, GlobalAgentDef, GlobalDefaults, ValidationResult } from "./config/schema.js";
+export { registerGlobalAgents, assignAgentsToDomain, getGlobalAgent, getAgentDomain, getAgentDomains, getDomainAgents, getGlobalAgentIds, clearRegistry } from "./config/registry.js";
+export { initializeAllDomains } from "./config/init.js";
+export type { InitResult } from "./config/init.js";
+export { scaffoldConfigDir, initDomain } from "./config/wizard.js";
+export type { InitDomainOpts } from "./config/wizard.js";
+export { startConfigWatcher, stopConfigWatcher, diffConfigs, diffDomainConfigs } from "./config/watcher.js";
+export type { GlobalConfigDiff, DomainConfigDiff, ReloadCallback } from "./config/watcher.js";
+
+// --- Rules ---
+export { matchRules, buildPromptFromRule, evaluateRules } from "./rules/engine.js";
+export type { RuleEvent, MatchedRule } from "./rules/engine.js";
+export { formatEvolutionPrompt } from "./rules/evolution.js";
+
 export { generateDefaultScopePolicies } from "./profiles.js";
 export { resolveConfig, mergeArrayWithOperators, detectCycle, BUILTIN_AGENT_PRESETS, BUILTIN_JOB_PRESETS } from "./presets.js";
 
@@ -165,7 +183,7 @@ export { clampCronToWakeBounds } from "./scheduling/wake-bounds.js";
 export { trackRetrieval, getRetrievalStats, getStatsAboveThreshold } from "./memory/retrieval-tracker.js";
 export type { RetrievalStat } from "./memory/retrieval-tracker.js";
 export { isDuplicateQuery, logSearchQuery } from "./memory/search-dedup.js";
-export { checkPromotionCandidates, listCandidates, getCandidate, approveCandidate, dismissCandidate } from "./memory/promotion.js";
+export { checkPromotionCandidates, listCandidates, getCandidate, approveCandidate, dismissCandidate, suggestTarget } from "./memory/promotion.js";
 export { createFlag, getFlag, listFlags, resolveFlag, dismissFlag } from "./memory/demotion.js";
 export type { CreateFlagParams } from "./memory/demotion.js";
 export { formatExpectationsReminder } from "./memory/ghost-turn.js";
@@ -178,7 +196,7 @@ export { createDashboardServer, handleRequest } from "./dashboard/index.js";
 export type { DashboardOptions } from "./dashboard/index.js";
 
 // --- Database ---
-export { getDb, getMemoryDb, closeDb, closeAllDbs, setProjectsDir, getProjectsDir, validateProjectId } from "./db.js";
+export { getDb, getMemoryDb, closeDb, closeAllDbs, setProjectsDir, getProjectsDir, validateProjectId, getDbByDomain, setDataDir, getDataDir } from "./db.js";
 
 // --- Types ---
 export type {
@@ -230,4 +248,7 @@ export type {
   PromotionCandidate,
   KnowledgeFlag,
   KnowledgeConfig,
+  RuleDefinition,
+  RuleTrigger,
+  RuleAction,
 } from "./types.js";
