@@ -123,6 +123,76 @@ describe("domain-based initialization", () => {
     expect(result.domains).toHaveLength(0);
   });
 
+  it("resolves agent preset inheritance", async () => {
+    const { initializeAllDomains } = await import("../../src/config/init.js");
+    const { getAgentConfig } = await import("../../src/project.js");
+
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), [
+      "agents:",
+      "  worker:",
+      "    extends: employee",
+    ].join("\n"));
+    fs.writeFileSync(path.join(tmpDir, "domains", "test.yaml"), [
+      "domain: test",
+      "agents:",
+      "  - worker",
+    ].join("\n"));
+
+    initializeAllDomains(tmpDir);
+
+    const entry = getAgentConfig("worker");
+    expect(entry).not.toBeNull();
+    // Employee preset should provide default values (e.g. title)
+    expect(entry!.config.title).toBe("Employee");
+  });
+
+  it("applies global defaults when agent does not set them", async () => {
+    const { initializeAllDomains } = await import("../../src/config/init.js");
+    const { getAgentConfig } = await import("../../src/project.js");
+
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), [
+      "defaults:",
+      "  model: anthropic/claude-opus-4-6",
+      "agents:",
+      "  worker:",
+      "    extends: employee",
+    ].join("\n"));
+    fs.writeFileSync(path.join(tmpDir, "domains", "test.yaml"), [
+      "domain: test",
+      "agents:",
+      "  - worker",
+    ].join("\n"));
+
+    initializeAllDomains(tmpDir);
+
+    const entry = getAgentConfig("worker");
+    expect(entry!.config.model).toBe("anthropic/claude-opus-4-6");
+  });
+
+  it("does not override agent-level values with global defaults", async () => {
+    const { initializeAllDomains } = await import("../../src/config/init.js");
+    const { getAgentConfig } = await import("../../src/project.js");
+
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), [
+      "defaults:",
+      "  model: anthropic/claude-opus-4-6",
+      "agents:",
+      "  worker:",
+      "    extends: employee",
+      "    model: openai/gpt-4",
+    ].join("\n"));
+    fs.writeFileSync(path.join(tmpDir, "domains", "test.yaml"), [
+      "domain: test",
+      "agents:",
+      "  - worker",
+    ].join("\n"));
+
+    initializeAllDomains(tmpDir);
+
+    const entry = getAgentConfig("worker");
+    expect(entry!.config.model).toBe("openai/gpt-4");
+  });
+
   it("warns when no domain configs found", async () => {
     const { initializeAllDomains } = await import(
       "../../src/config/init.js"

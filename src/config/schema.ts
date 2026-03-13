@@ -37,7 +37,7 @@ export type DomainConfig = {
   orchestrator?: string;
   paths?: string[];
   agents: string[];
-  policies?: Record<string, unknown>;
+  policies?: unknown[];
   budget?: Record<string, unknown>;
   workflows?: string[];
   rules?: RuleDefinition[];
@@ -48,7 +48,7 @@ export type DomainConfig = {
   knowledge?: Record<string, unknown>;
   safety?: Record<string, unknown>;
   channels?: unknown[];
-  event_handlers?: unknown[];
+  event_handlers?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
