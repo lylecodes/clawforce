@@ -996,3 +996,22 @@ export type KnowledgeConfig = {
     minSessions?: number;
   };
 };
+
+// --- Domain Config & Rules ---
+
+export type RuleTrigger = {
+  event: string;
+  match?: Record<string, unknown>;
+};
+
+export type RuleAction = {
+  agent: string;
+  prompt_template: string;
+};
+
+export type RuleDefinition = {
+  name: string;
+  trigger: RuleTrigger;
+  action: RuleAction;
+  enabled?: boolean;
+};
