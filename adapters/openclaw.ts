@@ -78,7 +78,8 @@ import { advanceMeetingTurn, concludeMeeting, getMeetingStatus } from "../src/ch
 import { buildChannelTranscript } from "../src/channels/messages.js";
 import { getChannel } from "../src/channels/store.js";
 // Memory system
-import { runGhostRecall, runCronRecall, clearCooldown, type GhostTurnIntensity, type MemoryToolInstance, INTENSITY_PRESETS } from "../src/memory/ghost-turn.js";
+import { runGhostRecall, runCronRecall, clearCooldown, type GhostTurnIntensity, type MemoryToolInstance, type GhostRecallResult, INTENSITY_PRESETS } from "../src/memory/ghost-turn.js";
+import { trackRetrieval } from "../src/memory/retrieval-tracker.js";
 import {
   isMemoryWriteCall,
   getFlushPrompt,
@@ -339,13 +340,14 @@ const clawforcePlugin = {
           try {
             const isMemMode = memoryModeStore.get(sessionKey) ?? false;
             const isCron = !!jobName;
+            let recallResult: GhostRecallResult | null = null;
 
             if (isCron) {
               // Cron path: use job prompt directly, no LLM triage
               const cronPrompt = (event as { prompt?: string }).prompt ?? "";
               const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
               const toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
-              ghostContext = await runCronRecall(cronPrompt, toolInstance, {
+              recallResult = await runCronRecall(cronPrompt, toolInstance, {
                 maxSearches: cfg.ghostRecall.maxSearches,
                 maxInjectedChars: cfg.ghostRecall.maxInjectedChars,
                 debug: cfg.ghostRecall.debug,
@@ -355,7 +357,7 @@ const clawforcePlugin = {
               // User-facing path: LLM triage on recent messages
               const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
               const toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
-              ghostContext = await runGhostRecall(
+              recallResult = await runGhostRecall(
                 (event as { messages?: unknown[] }).messages ?? [],
                 toolInstance,
                 {
@@ -368,6 +370,18 @@ const clawforcePlugin = {
                   debug: cfg.ghostRecall.debug,
                 },
               );
+            }
+
+            if (recallResult) {
+              ghostContext = recallResult.formatted;
+              // Track each retrieved memory for the promotion pipeline
+              for (const result of recallResult.rawResults) {
+                try {
+                  trackRetrieval(entry.projectId, agentId, sessionKey, result);
+                } catch {
+                  // Non-critical — don't let tracking failure break the recall
+                }
+              }
             }
           } catch (err) {
             emitDiagnosticEvent({ type: "ghost_turn_error", sessionKey, error: err instanceof Error ? err.message : String(err) });

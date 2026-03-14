@@ -152,7 +152,7 @@ export { handleWorkerSessionEnd } from "./tasks/session-end.js";
 
 // --- Memory (Ghost Turn + Flush) ---
 export { runGhostRecall, runCronRecall, clearCooldown, clearAllCooldowns, INTENSITY_PRESETS } from "./memory/ghost-turn.js";
-export type { GhostTurnIntensity, GhostTurnOpts, MemoryToolInstance } from "./memory/ghost-turn.js";
+export type { GhostTurnIntensity, GhostTurnOpts, GhostRecallResult, MemoryToolInstance } from "./memory/ghost-turn.js";
 export { resolveProvider, callTriage, parseTriageResponse } from "./memory/llm-client.js";
 export type { ProviderInfo, TriageResult } from "./memory/llm-client.js";
 export { isMemoryWriteCall, getFlushPrompt } from "./memory/flush-tracker.js";

@@ -363,8 +363,10 @@ describe("ghost-turn", () => {
         tool,
         { maxSearches: 3, maxInjectedChars: 4000, debug: false, sessionKey: "s1" },
       );
-      expect(result).toContain("Recalled Memory");
-      expect(result).toContain("Relevant memory data");
+      expect(result).not.toBeNull();
+      expect(result!.formatted).toContain("Recalled Memory");
+      expect(result!.formatted).toContain("Relevant memory data");
+      expect(result!.rawResults).toContain("Relevant memory data");
       expect(tool.execute).toHaveBeenCalled();
     });
   });
@@ -431,8 +433,10 @@ describe("ghost-turn", () => {
       ];
 
       const result = await runGhostRecall(messages, tool, defaultOpts);
-      expect(result).toContain("Recalled Memory");
-      expect(result).toContain("Alpha is a web app");
+      expect(result).not.toBeNull();
+      expect(result!.formatted).toContain("Recalled Memory");
+      expect(result!.formatted).toContain("Alpha is a web app");
+      expect(result!.rawResults).toContain("Alpha is a web app project started in Jan.");
       expect(tool.execute).toHaveBeenCalled();
     });
 

@@ -211,6 +211,15 @@ export function formatMemoryResults(
   return section;
 }
 
+// ── Result type ──
+
+export type GhostRecallResult = {
+  /** Formatted markdown for prependContext, or null when nothing was found. */
+  formatted: string | null;
+  /** Raw individual memory result texts (for retrieval tracking). */
+  rawResults: string[];
+};
+
 // ── Main orchestrator ──
 
 /**
@@ -221,7 +230,7 @@ export async function runGhostRecall(
   messages: unknown[],
   tool: MemoryToolInstance | null,
   opts: GhostTurnOpts,
-): Promise<string | null> {
+): Promise<GhostRecallResult | null> {
   if (!tool) return null;
 
   const startTime = Date.now();
@@ -281,7 +290,7 @@ export async function runGhostRecall(
     injected: formatted !== null,
   });
 
-  return formatted;
+  return { formatted, rawResults: results };
 }
 
 /**
@@ -292,7 +301,7 @@ export async function runCronRecall(
   prompt: string,
   tool: MemoryToolInstance | null,
   opts: { maxSearches: number; maxInjectedChars: number; debug: boolean; sessionKey: string },
-): Promise<string | null> {
+): Promise<GhostRecallResult | null> {
   if (!tool) return null;
 
   const startTime = Date.now();
@@ -310,7 +319,7 @@ export async function runCronRecall(
     latencyMs: Date.now() - startTime,
   });
 
-  return formatted;
+  return { formatted, rawResults: results };
 }
 
 // ── Expectations re-injection ──
