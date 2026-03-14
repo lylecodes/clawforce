@@ -13,7 +13,8 @@ import { registerWorkforceConfig } from "../project.js";
 import { resolveConfig, BUILTIN_AGENT_PRESETS } from "../presets.js";
 import { safeLog } from "../diagnostics.js";
 import type { AgentConfig, WorkforceConfig } from "../types.js";
-import type { GlobalConfig, DomainConfig } from "./schema.js";
+import type { GlobalConfig, DomainConfig, GlobalAgentDef } from "./schema.js";
+import { inferPreset, markInferred } from "./inference.js";
 
 export type InitResult = {
   domains: string[];
@@ -96,12 +97,34 @@ function buildWorkforceConfig(
 ): WorkforceConfig {
   const agents: Record<string, AgentConfig> = {};
 
+  // Build domain-scoped agent map for inference
+  const domainAgentDefs: Record<string, GlobalAgentDef> = {};
+  for (const agentId of domain.agents) {
+    const def = global.agents[agentId];
+    if (def) domainAgentDefs[agentId] = def;
+  }
+
+  // Infer preset for agents without explicit extends (domain-scoped)
+  for (const agentId of domain.agents) {
+    const globalDef = global.agents[agentId];
+    if (globalDef && !globalDef.extends) {
+      // Clone to avoid mutating shared global config across domains
+      global.agents[agentId] = { ...globalDef, extends: inferPreset(agentId, domainAgentDefs) };
+      markInferred(agentId);
+    }
+  }
+
   for (const agentId of domain.agents) {
     const globalDef = global.agents[agentId];
     if (!globalDef) continue; // warned about in validateDomainAgents
 
     // Resolve preset inheritance using BUILTIN_AGENT_PRESETS
     const resolved = resolveConfig({ ...globalDef }, BUILTIN_AGENT_PRESETS);
+
+    // Preserve the extends field in the resolved config (resolveConfig strips it)
+    if (globalDef.extends) {
+      resolved.extends = globalDef.extends;
+    }
 
     // Apply global defaults
     if (global.defaults?.model && !resolved.model) {

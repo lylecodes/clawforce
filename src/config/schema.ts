@@ -10,7 +10,7 @@ import type { RuleDefinition } from "../types.js";
 // --- Types ---
 
 export type GlobalAgentDef = {
-  extends: string;
+  extends?: string;
   model?: string;
   persona?: string;
   title?: string;

@@ -193,6 +193,37 @@ describe("domain-based initialization", () => {
     expect(entry!.config.model).toBe("openai/gpt-4");
   });
 
+  it("infers roles when extends is omitted", async () => {
+    const { initializeAllDomains } = await import("../../src/config/init.js");
+    const { getAgentConfig } = await import("../../src/project.js");
+
+    fs.writeFileSync(
+      path.join(tmpDir, "config.yaml"),
+      [
+        "agents:",
+        "  lead:",
+        "    title: Engineering Lead",
+        "  worker:",
+        "    reports_to: lead",
+        "    title: Developer",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "domains", "testdomain.yaml"),
+      ["domain: testdomain", "agents:", "  - lead", "  - worker"].join("\n"),
+    );
+
+    const result = initializeAllDomains(tmpDir);
+    expect(result.errors).toHaveLength(0);
+    expect(result.domains).toContain("testdomain");
+
+    // getAgentConfig takes 1 arg (agentId), returns { projectId, config } | null
+    const leadEntry = getAgentConfig("lead");
+    const workerEntry = getAgentConfig("worker");
+    expect(leadEntry?.config.extends).toBe("manager");
+    expect(workerEntry?.config.extends).toBe("employee");
+  });
+
   it("warns when no domain configs found", async () => {
     const { initializeAllDomains } = await import(
       "../../src/config/init.js"
