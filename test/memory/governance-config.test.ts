@@ -258,3 +258,65 @@ describe("memory expectations stripping", () => {
     }
   });
 });
+
+describe("memory config validation", () => {
+  it("warns when memory.review.cron format is unrecognized", async () => {
+    const { validateWorkforceConfig } = await import("../../src/config-validator.js");
+
+    const config = {
+      name: "test",
+      agents: {
+        lead: {
+          extends: "manager",
+          briefing: [{ source: "soul" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          memory: {
+            review: {
+              enabled: true,
+              cron: "badcron",
+              aggressiveness: "invalid_level",
+            },
+          },
+        } as any,
+      },
+    };
+
+    const warnings = validateWorkforceConfig(config);
+    const memoryWarnings = warnings.filter((w) => w.message.includes("memory"));
+    expect(memoryWarnings.length).toBeGreaterThan(0);
+  });
+
+  it("accepts valid memory governance config without warnings", async () => {
+    const { validateWorkforceConfig } = await import("../../src/config-validator.js");
+
+    const config = {
+      name: "test",
+      agents: {
+        lead: {
+          extends: "manager",
+          briefing: [{ source: "soul" }],
+          expectations: [
+            { tool: "clawforce_log", action: "write", min_calls: 1 },
+            { tool: "memory_search", action: "search", min_calls: 1 },
+          ],
+          performance_policy: { action: "alert" },
+          memory: {
+            instructions: true,
+            expectations: true,
+            review: {
+              enabled: true,
+              cron: "0 18 * * *",
+              aggressiveness: "medium",
+              scope: "reports",
+            },
+          },
+        } as any,
+      },
+    };
+
+    const warnings = validateWorkforceConfig(config);
+    const memoryErrors = warnings.filter((w) => w.level === "error" && w.message.includes("memory"));
+    expect(memoryErrors).toHaveLength(0);
+  });
+});

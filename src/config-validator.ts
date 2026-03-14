@@ -679,5 +679,66 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
     }
   }
 
+  // Validate memory governance config
+  if (raw.memory !== undefined) {
+    const mem = raw.memory as Record<string, unknown> | undefined;
+    if (typeof mem === "object" && mem !== null) {
+      if (mem.instructions !== undefined) {
+        if (typeof mem.instructions !== "boolean" && typeof mem.instructions !== "string") {
+          warnings.push({
+            level: "error",
+            agentId,
+            message: "memory.instructions must be a boolean or string.",
+          });
+        }
+      }
+
+      if (mem.expectations !== undefined && typeof mem.expectations !== "boolean") {
+        warnings.push({
+          level: "error",
+          agentId,
+          message: "memory.expectations must be a boolean.",
+        });
+      }
+
+      if (mem.review !== undefined && typeof mem.review === "object" && mem.review !== null) {
+        const rv = mem.review as Record<string, unknown>;
+
+        if (rv.aggressiveness !== undefined) {
+          if (typeof rv.aggressiveness !== "string" || !["low", "medium", "high"].includes(rv.aggressiveness)) {
+            warnings.push({
+              level: "warn",
+              agentId,
+              message: `memory.review.aggressiveness must be "low", "medium", or "high" — got "${rv.aggressiveness}".`,
+            });
+          }
+        }
+
+        if (rv.scope !== undefined) {
+          if (typeof rv.scope !== "string" || !["self", "reports", "all"].includes(rv.scope)) {
+            warnings.push({
+              level: "warn",
+              agentId,
+              message: `memory.review.scope must be "self", "reports", or "all" — got "${rv.scope}".`,
+            });
+          }
+        }
+
+        if (rv.cron !== undefined && typeof rv.cron === "string") {
+          const isInterval = /^(\d+[smhd]|\d+|every:\d+)$/.test(rv.cron);
+          const isCronExpr = rv.cron.trim().split(/\s+/).length >= 5 || rv.cron.startsWith("cron:");
+          const isOneShot = rv.cron.startsWith("at:") || /^\d{4}-\d{2}-\d{2}T/.test(rv.cron);
+          if (!isInterval && !isCronExpr && !isOneShot) {
+            warnings.push({
+              level: "warn",
+              agentId,
+              message: `memory.review.cron has unrecognized format "${rv.cron}" — will default to daily 6pm.`,
+            });
+          }
+        }
+      }
+    }
+  }
+
   return warnings;
 }
