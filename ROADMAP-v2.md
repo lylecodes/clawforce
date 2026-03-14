@@ -378,15 +378,15 @@ System onboards agents but not the user. No guided first experience.
 
 ### Phase 10: Polish & Optimization
 ### Phase 9: UX Overhaul
-- [ ] 9.1: Minimal viable config (role inference, smart defaults)
-- [ ] 9.2: Interactive setup (`clawforce init` flow)
+- [x] 9.1: Minimal viable config (role inference, smart defaults)
+- [x] 9.2: Interactive setup (`clawforce init` flow)
 - [ ] 9.3: Config quality feedback (lint-style best practice warnings)
-- [ ] 9.4: Budget guidance (cost estimation, recommendations)
+- [x] 9.4: Budget guidance (cost estimation, recommendations)
 - [ ] 9.5: Config hot-reload (watch, diff, apply without restart)
 - [ ] 9.6: Live actionable dashboard (real-time, approve/reassign/message from UI)
 - [ ] 9.7: Cron schedule automation (system determines frequency)
-- [ ] 9.8: Data streams (catalog, parameterized sources, custom queries, multi-output routing)
-- [ ] 9.9: Human onboarding (welcome flow, first-week digest, guided intervention)
+- [x] 9.8: Data streams (catalog, parameterized sources, custom queries, multi-output routing)
+- [x] 9.9: Human onboarding (welcome flow, first-week digest, guided intervention)
 
 ### Phase 10: Polish & Optimization
 - [ ] 10.1: Context assembly optimization (cache static, refresh dynamic)
