@@ -32,6 +32,9 @@ export type { InitDomainOpts } from "./config/wizard.js";
 export { startConfigWatcher, stopConfigWatcher, diffConfigs, diffDomainConfigs } from "./config/watcher.js";
 export type { GlobalConfigDiff, DomainConfigDiff, ReloadCallback } from "./config/watcher.js";
 
+// --- Config: OpenClaw Reader ---
+export { setOpenClawConfig, getAgentModel, getAgentTools, getModelPricing, getProviderRateLimits, clearOpenClawConfigCache } from "./config/openclaw-reader.js";
+
 // --- Config: Inference ---
 export { inferPreset, markInferred, wasInferred, clearInferenceState } from "./config/inference.js";
 
