@@ -11,7 +11,6 @@ import type { RuleDefinition } from "../types.js";
 
 export type GlobalAgentDef = {
   extends?: string;
-  model?: string;
   persona?: string;
   title?: string;
   skillCap?: number;
@@ -19,7 +18,6 @@ export type GlobalAgentDef = {
 };
 
 export type GlobalDefaults = {
-  model?: string;
   performance_policy?: {
     action: "retry" | "alert" | "terminate_and_alert";
     max_retries?: number;

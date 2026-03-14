@@ -10,7 +10,7 @@ describe("agent global roster registry", () => {
     const { registerGlobalAgents, assignAgentsToDomain, getAgentDomain, getGlobalAgent } = await import("../../src/config/registry.js");
 
     registerGlobalAgents({
-      "compliance-bot": { extends: "employee", model: "anthropic/claude-opus-4-6" },
+      "compliance-bot": { extends: "employee" },
       "research-bot": { extends: "employee" },
     });
 
@@ -18,7 +18,6 @@ describe("agent global roster registry", () => {
 
     expect(getAgentDomain("compliance-bot")).toBe("rentright");
     expect(getGlobalAgent("compliance-bot")?.extends).toBe("employee");
-    expect(getGlobalAgent("compliance-bot")?.model).toBe("anthropic/claude-opus-4-6");
   });
 
   it("allows an agent to be assigned to multiple domains", async () => {

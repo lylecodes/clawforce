@@ -382,14 +382,6 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
   const warnings: ConfigWarning[] = [];
 
   // Validate new profile fields
-  if (config.model !== undefined && config.model.length === 0) {
-    warnings.push({
-      level: "warn",
-      agentId,
-      message: "Agent has empty model field — will use platform default.",
-    });
-  }
-
   if (config.persona !== undefined && config.persona.length > 4000) {
     warnings.push({
       level: "warn",

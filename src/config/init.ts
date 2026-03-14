@@ -127,9 +127,6 @@ function buildWorkforceConfig(
     }
 
     // Apply global defaults
-    if (global.defaults?.model && !resolved.model) {
-      resolved.model = global.defaults.model;
-    }
     if (global.defaults?.performance_policy && !resolved.performance_policy) {
       resolved.performance_policy =
         global.defaults.performance_policy as AgentConfig["performance_policy"];

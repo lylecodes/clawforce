@@ -18,6 +18,7 @@ import { enqueue } from "../dispatch/queue.js";
 import { getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
 import { cascadeUnblock } from "../tasks/deps.js";
 import { gatherFailureAnalysis, recordReplanAttempt } from "../planning/replan.js";
+import { getAgentModel } from "../config/openclaw-reader.js";
 import { handleWorkflowCompletion, handleGoalAchieved } from "../planning/completion.js";
 import { advanceWorkflow, getWorkflow } from "../workflow.js";
 import { getRegisteredAgentIds, getAgentConfig, getExtendedProjectConfig } from "../project.js";
@@ -573,9 +574,9 @@ function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandl
   if (!task || task.state !== "ASSIGNED") return { action: "handled", taskId };
 
   // Build dispatch payload from agent config
-  const agentEntry = task.assignedTo ? getAgentConfig(task.assignedTo) : null;
   const payload: Record<string, unknown> = {};
-  if (agentEntry?.config.model) payload.model = agentEntry.config.model;
+  const agentModel = task.assignedTo ? getAgentModel(task.assignedTo) : null;
+  if (agentModel) payload.model = agentModel;
 
   try {
     const result = enqueue(event.projectId, taskId, payload, undefined, db);

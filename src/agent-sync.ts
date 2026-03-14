@@ -68,10 +68,6 @@ export function buildOpenClawAgentEntry(
     entry.identity = { name: config.title };
   }
 
-  if (config.model) {
-    entry.model = { primary: config.model };
-  }
-
   if (projectDir) {
     entry.workspace = projectDir;
   }

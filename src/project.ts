@@ -450,8 +450,6 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
 
   // Parse new employee profile fields
   const title = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : undefined;
-  const model = typeof raw.model === "string" && raw.model.trim() ? raw.model.trim() : undefined;
-  const provider = typeof raw.provider === "string" && raw.provider.trim() ? raw.provider.trim() : undefined;
   const persona = typeof raw.persona === "string" && raw.persona.trim() ? raw.persona.trim() : undefined;
   const tools = Array.isArray(raw.tools) ? raw.tools.filter((t): t is string => typeof t === "string") : undefined;
   const channel = typeof raw.channel === "string" && raw.channel.trim() ? raw.channel.trim() : undefined;
@@ -476,8 +474,6 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
   return {
     extends: extendsFrom,
     title,
-    model,
-    provider,
     persona,
     tools: tools?.length ? tools : undefined,
     permissions,

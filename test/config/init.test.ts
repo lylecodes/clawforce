@@ -146,13 +146,14 @@ describe("domain-based initialization", () => {
     expect(entry!.config.title).toBe("Employee");
   });
 
-  it("applies global defaults when agent does not set them", async () => {
+  it("does not apply model from global defaults (model is runtime-only, owned by OpenClaw)", async () => {
     const { initializeAllDomains } = await import("../../src/config/init.js");
     const { getAgentConfig } = await import("../../src/project.js");
 
     fs.writeFileSync(path.join(tmpDir, "config.yaml"), [
       "defaults:",
-      "  model: anthropic/claude-opus-4-6",
+      "  performance_policy:",
+      "    action: retry",
       "agents:",
       "  worker:",
       "    extends: employee",
@@ -166,31 +167,8 @@ describe("domain-based initialization", () => {
     initializeAllDomains(tmpDir);
 
     const entry = getAgentConfig("worker");
-    expect(entry!.config.model).toBe("anthropic/claude-opus-4-6");
-  });
-
-  it("does not override agent-level values with global defaults", async () => {
-    const { initializeAllDomains } = await import("../../src/config/init.js");
-    const { getAgentConfig } = await import("../../src/project.js");
-
-    fs.writeFileSync(path.join(tmpDir, "config.yaml"), [
-      "defaults:",
-      "  model: anthropic/claude-opus-4-6",
-      "agents:",
-      "  worker:",
-      "    extends: employee",
-      "    model: openai/gpt-4",
-    ].join("\n"));
-    fs.writeFileSync(path.join(tmpDir, "domains", "test.yaml"), [
-      "domain: test",
-      "agents:",
-      "  - worker",
-    ].join("\n"));
-
-    initializeAllDomains(tmpDir);
-
-    const entry = getAgentConfig("worker");
-    expect(entry!.config.model).toBe("openai/gpt-4");
+    // model field no longer exists on AgentConfig — runtime model comes from OpenClaw
+    expect((entry!.config as Record<string, unknown>).model).toBeUndefined();
   });
 
   it("infers roles when extends is omitted", async () => {

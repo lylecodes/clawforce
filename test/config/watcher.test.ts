@@ -6,12 +6,12 @@ describe("config hot-reload", () => {
 
     const oldConfig = {
       agents: {
-        bot: { extends: "employee", model: "old-model" },
+        bot: { extends: "employee", persona: "old-persona" },
       },
     };
     const newConfig = {
       agents: {
-        bot: { extends: "employee", model: "new-model" },
+        bot: { extends: "employee", persona: "new-persona" },
       },
     };
 
@@ -44,8 +44,8 @@ describe("config hot-reload", () => {
   it("detects defaults changes", async () => {
     const { diffConfigs } = await import("../../src/config/watcher.js");
 
-    const oldConfig = { agents: {}, defaults: { model: "old" } };
-    const newConfig = { agents: {}, defaults: { model: "new" } };
+    const oldConfig = { agents: {}, defaults: { performance_policy: { action: "retry" } } };
+    const newConfig = { agents: {}, defaults: { performance_policy: { action: "alert" } } };
 
     const diff = diffConfigs(oldConfig as any, newConfig as any);
     expect(diff.changed).toBe(true);

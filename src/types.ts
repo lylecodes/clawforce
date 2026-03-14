@@ -265,10 +265,6 @@ export type AgentConfig = {
   extends?: string;
   /** Job title (e.g. "VP of Engineering"). */
   title?: string;
-  /** AI model to use (e.g. "claude-opus-4-6"). */
-  model?: string;
-  /** Model provider (e.g. "anthropic"). */
-  provider?: string;
   /** System prompt personality for this agent. */
   persona?: string;
   /** Tools this agent is allowed to use. */

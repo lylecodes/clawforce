@@ -31,12 +31,12 @@ describe("buildOpenClawAgentEntry", () => {
     expect(entry.identity).toEqual({ name: "VP of Engineering" });
   });
 
-  it("maps model to model.primary", () => {
+  it("does not set model (model lives in OpenClaw config, not Clawforce)", () => {
     const entry = buildOpenClawAgentEntry(
       "coder",
-      makeAgentConfig({ model: "claude-opus-4-6" }),
+      makeAgentConfig(),
     );
-    expect(entry.model).toEqual({ primary: "claude-opus-4-6" });
+    expect(entry.model).toBeUndefined();
   });
 
   it("maps projectDir to workspace", () => {
@@ -150,7 +150,7 @@ describe("syncAgentsToOpenClaw", () => {
 
     const result = await syncAgentsToOpenClaw({
       agents: [
-        { agentId: "bot1", config: makeAgentConfig({ title: "Bot One", model: "claude-opus-4-6" }) },
+        { agentId: "bot1", config: makeAgentConfig({ title: "Bot One" }) },
         { agentId: "bot2", config: makeAgentConfig({ extends: "manager", coordination: { enabled: true }, title: "Manager" }), projectDir: "/proj" },
       ],
       loadConfig,
@@ -176,7 +176,7 @@ describe("syncAgentsToOpenClaw", () => {
     const existingConfig: OpenClawConfigSubset = {
       agents: {
         list: [
-          { id: "bot1", name: "Bot One", model: { primary: "claude-opus-4-6" }, identity: { name: "Bot One" } },
+          { id: "bot1", name: "Bot One", identity: { name: "Bot One" } },
         ],
       },
     };
@@ -184,7 +184,7 @@ describe("syncAgentsToOpenClaw", () => {
 
     const result = await syncAgentsToOpenClaw({
       agents: [
-        { agentId: "bot1", config: makeAgentConfig({ title: "Bot One", model: "claude-opus-4-6" }) },
+        { agentId: "bot1", config: makeAgentConfig({ title: "Bot One" }) },
       ],
       loadConfig,
       writeConfigFile,
@@ -208,7 +208,7 @@ describe("syncAgentsToOpenClaw", () => {
 
     const result = await syncAgentsToOpenClaw({
       agents: [
-        { agentId: "bot1", config: makeAgentConfig({ title: "Auto Name", model: "claude-opus-4-6" }), projectDir: "/ws" },
+        { agentId: "bot1", config: makeAgentConfig({ title: "Auto Name" }), projectDir: "/ws" },
       ],
       loadConfig,
       writeConfigFile,
