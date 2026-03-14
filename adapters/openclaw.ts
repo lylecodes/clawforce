@@ -79,9 +79,7 @@ import { getChannel } from "../src/channels/store.js";
 // Memory system
 import { runGhostRecall, runCronRecall, clearCooldown, type GhostTurnIntensity, type MemoryToolInstance, INTENSITY_PRESETS } from "../src/memory/ghost-turn.js";
 import {
-  incrementTurnCount, incrementToolCallCount, markMemoryWrite, hasMemoryWrite,
-  shouldFlush, resetCycle, markFlushAttempted, hasFlushBeenAttempted,
-  isSessionSubstantive, clearSession as clearFlushSession, isMemoryWriteCall,
+  isMemoryWriteCall,
   getFlushPrompt,
 } from "../src/memory/flush-tracker.js";
 // OpenClaw RAG memory tool factories — lazy-imported at registration time
@@ -335,11 +333,6 @@ const clawforcePlugin = {
           }
         }
 
-        // Track turns for periodic memory flush
-        if (cfg.memoryFlush.enabled) {
-          incrementTurnCount(sessionKey);
-        }
-
         // Ghost turn memory recall
         let ghostContext: string | null = null;
         if (cfg.ghostRecall.enabled && _createMemorySearchTool) {
@@ -488,12 +481,9 @@ const clawforcePlugin = {
         !event.error,
       );
 
-      // Memory flush tracking: detect memory writes + count tool calls
-      if (cfg.memoryFlush.enabled) {
-        incrementToolCallCount(ctx.sessionKey);
-        if (isMemoryWriteCall(toolName, event.params)) {
-          markMemoryWrite(ctx.sessionKey);
-        }
+      // Memory write detection (informational — flush timing delegated to OpenClaw)
+      if (cfg.memoryFlush.enabled && isMemoryWriteCall(toolName, event.params)) {
+        emitDiagnosticEvent({ type: "memory_write_detected", sessionKey: ctx.sessionKey, toolName });
       }
     });
 
@@ -637,48 +627,10 @@ const clawforcePlugin = {
     api.on("agent_end", async (event, ctx) => {
       if (!ctx.sessionKey) return;
 
-      // --- Periodic memory flush ---
-      if (cfg.memoryFlush.enabled) {
-        // Mid-cycle flush: if turns have accumulated without memory writes
-        if (shouldFlush(ctx.sessionKey, cfg.memoryFlush.flushInterval)) {
-          try {
-            await api.injectAgentMessage({
-              sessionKey: ctx.sessionKey,
-              message: getFlushPrompt(),
-            });
-            resetCycle(ctx.sessionKey);
-            emitDiagnosticEvent({ type: "memory_flush_periodic", sessionKey: ctx.sessionKey });
-          } catch (err) {
-            api.logger.warn(`Clawforce: periodic flush failed for ${ctx.sessionKey}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          return; // Let the flush run; compliance happens on next agent_end
-        }
-
-        // Session-end safety net: if the session was substantive but had no memory writes
-        if (
-          !hasFlushBeenAttempted(ctx.sessionKey) &&
-          !hasMemoryWrite(ctx.sessionKey) &&
-          isSessionSubstantive(ctx.sessionKey, cfg.memoryFlush.minToolCalls)
-        ) {
-          markFlushAttempted(ctx.sessionKey);
-          try {
-            await api.injectAgentMessage({
-              sessionKey: ctx.sessionKey,
-              message: getFlushPrompt(),
-            });
-            emitDiagnosticEvent({ type: "memory_flush_session_end", sessionKey: ctx.sessionKey });
-          } catch (err) {
-            api.logger.warn(`Clawforce: session-end flush failed for ${ctx.sessionKey}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          return; // Let the flush run; compliance happens on next agent_end
-        }
-      }
-
       // --- Compliance check ---
       const session = endSession(ctx.sessionKey);
 
-      // Clean up memory tracking state
-      clearFlushSession(ctx.sessionKey);
+      // Clean up session state
       clearCooldown(ctx.sessionKey);
       memoryModeStore.delete(ctx.sessionKey);
 

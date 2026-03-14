@@ -1,109 +1,10 @@
 /**
- * Per-session memory write tracking and periodic flush management.
+ * Clawforce — Flush Prompt Generation
  *
- * Tracks whether agents are writing to memory during their sessions
- * and triggers forced memory flushes when they aren't.
+ * Per-agent flush prompts for memory checkpoint turns.
+ * Timing delegated to OpenClaw's native memoryFlush (softThresholdTokens).
+ * This module only generates the prompt content and detects memory writes.
  */
-
-type SessionState = {
-  turnCount: number;
-  memoryWritten: boolean;
-  flushAttempted: boolean;
-  toolCallCount: number;
-};
-
-const sessions = new Map<string, SessionState>();
-
-function getOrCreate(sessionKey: string): SessionState {
-  let state = sessions.get(sessionKey);
-  if (!state) {
-    state = { turnCount: 0, memoryWritten: false, flushAttempted: false, toolCallCount: 0 };
-    sessions.set(sessionKey, state);
-  }
-  return state;
-}
-
-// ── Turn counting ──
-
-export function incrementTurnCount(sessionKey: string): number {
-  const state = getOrCreate(sessionKey);
-  state.turnCount++;
-  return state.turnCount;
-}
-
-export function getTurnCount(sessionKey: string): number {
-  return sessions.get(sessionKey)?.turnCount ?? 0;
-}
-
-export function incrementToolCallCount(sessionKey: string): void {
-  getOrCreate(sessionKey).toolCallCount++;
-}
-
-// ── Memory write tracking ──
-
-export function markMemoryWrite(sessionKey: string): void {
-  getOrCreate(sessionKey).memoryWritten = true;
-}
-
-export function hasMemoryWrite(sessionKey: string): boolean {
-  return sessions.get(sessionKey)?.memoryWritten ?? false;
-}
-
-// ── Periodic flush ──
-
-/**
- * Check if a periodic flush should be triggered.
- * Returns true when turn count has reached the flush interval
- * AND no memory writes have been detected in the current cycle.
- */
-export function shouldFlush(sessionKey: string, flushInterval: number): boolean {
-  const state = sessions.get(sessionKey);
-  if (!state) return false;
-  return state.turnCount > 0
-    && state.turnCount % flushInterval === 0
-    && !state.memoryWritten;
-}
-
-/**
- * Reset the cycle after a flush or memory write.
- * Keeps the session alive but resets write tracking.
- */
-export function resetCycle(sessionKey: string): void {
-  const state = sessions.get(sessionKey);
-  if (state) {
-    state.memoryWritten = false;
-  }
-}
-
-// ── Session-end safety net ──
-
-export function markFlushAttempted(sessionKey: string): void {
-  getOrCreate(sessionKey).flushAttempted = true;
-}
-
-export function hasFlushBeenAttempted(sessionKey: string): boolean {
-  return sessions.get(sessionKey)?.flushAttempted ?? false;
-}
-
-/**
- * Check if a session had enough activity to warrant a memory flush.
- */
-export function isSessionSubstantive(sessionKey: string, minToolCalls: number): boolean {
-  const state = sessions.get(sessionKey);
-  if (!state) return false;
-  return state.toolCallCount >= minToolCalls;
-}
-
-// ── Cleanup ──
-
-export function clearSession(sessionKey: string): void {
-  sessions.delete(sessionKey);
-}
-
-/** For testing only. */
-export function clearAllSessions(): void {
-  sessions.clear();
-}
 
 // ── Memory write detection ──
 
@@ -153,6 +54,12 @@ Review the recent conversation and save:
 
 Use memory_search first to check for existing memories, then save new or updated learnings. Be selective — only save what would genuinely help in future conversations.`;
 
-export function getFlushPrompt(): string {
-  return FLUSH_PROMPT;
+export function getFlushPrompt(fileTargets?: string[]): string {
+  if (!fileTargets || fileTargets.length === 0) return FLUSH_PROMPT;
+
+  const fileSection = fileTargets
+    .map((f) => `- ${f}`)
+    .join("\n");
+
+  return `${FLUSH_PROMPT}\n\nAlso update these files with relevant learnings:\n${fileSection}`;
 }

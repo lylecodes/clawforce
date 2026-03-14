@@ -148,12 +148,7 @@ export { runGhostRecall, runCronRecall, clearCooldown, clearAllCooldowns, INTENS
 export type { GhostTurnIntensity, GhostTurnOpts, MemoryToolInstance } from "./memory/ghost-turn.js";
 export { resolveProvider, callTriage, parseTriageResponse } from "./memory/llm-client.js";
 export type { ProviderInfo, TriageResult } from "./memory/llm-client.js";
-export {
-  incrementTurnCount, incrementToolCallCount, markMemoryWrite, hasMemoryWrite,
-  shouldFlush, resetCycle, markFlushAttempted, hasFlushBeenAttempted,
-  isSessionSubstantive, clearSession as clearFlushSession, isMemoryWriteCall,
-  getFlushPrompt,
-} from "./memory/flush-tracker.js";
+export { isMemoryWriteCall, getFlushPrompt } from "./memory/flush-tracker.js";
 
 // --- Event Actions & Templates ---
 export { interpolate, interpolateRecord } from "./events/template.js";

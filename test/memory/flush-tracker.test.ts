@@ -1,150 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  incrementTurnCount,
-  getTurnCount,
-  incrementToolCallCount,
-  markMemoryWrite,
-  hasMemoryWrite,
-  shouldFlush,
-  resetCycle,
-  markFlushAttempted,
-  hasFlushBeenAttempted,
-  isSessionSubstantive,
-  clearSession,
-  clearAllSessions,
   isMemoryWriteCall,
   getFlushPrompt,
 } from "../../src/memory/flush-tracker.js";
 
 describe("flush-tracker", () => {
-  beforeEach(() => {
-    clearAllSessions();
-  });
-
-  describe("turn counting", () => {
-    it("starts at 0 for unknown sessions", () => {
-      expect(getTurnCount("unknown")).toBe(0);
-    });
-
-    it("increments and returns new count", () => {
-      expect(incrementTurnCount("s1")).toBe(1);
-      expect(incrementTurnCount("s1")).toBe(2);
-      expect(incrementTurnCount("s1")).toBe(3);
-    });
-
-    it("tracks sessions independently", () => {
-      incrementTurnCount("s1");
-      incrementTurnCount("s1");
-      incrementTurnCount("s2");
-      expect(getTurnCount("s1")).toBe(2);
-      expect(getTurnCount("s2")).toBe(1);
-    });
-  });
-
-  describe("memory write tracking", () => {
-    it("defaults to no writes", () => {
-      expect(hasMemoryWrite("s1")).toBe(false);
-    });
-
-    it("marks memory write", () => {
-      markMemoryWrite("s1");
-      expect(hasMemoryWrite("s1")).toBe(true);
-    });
-
-    it("resetCycle clears the write flag", () => {
-      markMemoryWrite("s1");
-      resetCycle("s1");
-      expect(hasMemoryWrite("s1")).toBe(false);
-    });
-  });
-
-  describe("shouldFlush", () => {
-    it("returns false for unknown sessions", () => {
-      expect(shouldFlush("unknown", 5)).toBe(false);
-    });
-
-    it("returns false when turn count is not at interval", () => {
-      incrementTurnCount("s1"); // 1
-      incrementTurnCount("s1"); // 2
-      incrementTurnCount("s1"); // 3
-      expect(shouldFlush("s1", 5)).toBe(false);
-    });
-
-    it("returns true at exact interval with no memory writes", () => {
-      for (let i = 0; i < 15; i++) incrementTurnCount("s1");
-      expect(shouldFlush("s1", 15)).toBe(true);
-    });
-
-    it("returns true at multiples of the interval", () => {
-      for (let i = 0; i < 30; i++) incrementTurnCount("s1");
-      expect(shouldFlush("s1", 15)).toBe(true);
-    });
-
-    it("returns false when memory has been written", () => {
-      for (let i = 0; i < 15; i++) incrementTurnCount("s1");
-      markMemoryWrite("s1");
-      expect(shouldFlush("s1", 15)).toBe(false);
-    });
-
-    it("returns true again after resetCycle clears write flag", () => {
-      for (let i = 0; i < 15; i++) incrementTurnCount("s1");
-      markMemoryWrite("s1");
-      resetCycle("s1");
-      expect(shouldFlush("s1", 15)).toBe(true);
-    });
-  });
-
-  describe("flush attempted tracking", () => {
-    it("defaults to not attempted", () => {
-      expect(hasFlushBeenAttempted("s1")).toBe(false);
-    });
-
-    it("marks flush as attempted", () => {
-      markFlushAttempted("s1");
-      expect(hasFlushBeenAttempted("s1")).toBe(true);
-    });
-  });
-
-  describe("isSessionSubstantive", () => {
-    it("returns false for unknown sessions", () => {
-      expect(isSessionSubstantive("unknown", 3)).toBe(false);
-    });
-
-    it("returns false when tool calls below threshold", () => {
-      incrementToolCallCount("s1");
-      incrementToolCallCount("s1");
-      expect(isSessionSubstantive("s1", 3)).toBe(false);
-    });
-
-    it("returns true when tool calls meet threshold", () => {
-      incrementToolCallCount("s1");
-      incrementToolCallCount("s1");
-      incrementToolCallCount("s1");
-      expect(isSessionSubstantive("s1", 3)).toBe(true);
-    });
-
-    it("returns true when tool calls exceed threshold", () => {
-      for (let i = 0; i < 10; i++) incrementToolCallCount("s1");
-      expect(isSessionSubstantive("s1", 3)).toBe(true);
-    });
-  });
-
-  describe("clearSession", () => {
-    it("removes all state for a session", () => {
-      incrementTurnCount("s1");
-      markMemoryWrite("s1");
-      markFlushAttempted("s1");
-      incrementToolCallCount("s1");
-
-      clearSession("s1");
-
-      expect(getTurnCount("s1")).toBe(0);
-      expect(hasMemoryWrite("s1")).toBe(false);
-      expect(hasFlushBeenAttempted("s1")).toBe(false);
-      expect(isSessionSubstantive("s1", 1)).toBe(false);
-    });
-  });
-
   describe("isMemoryWriteCall", () => {
     it("detects file-write tools targeting memory/ paths", () => {
       expect(isMemoryWriteCall("edit_file", { path: "/project/memory/notes.md" })).toBe(true);
@@ -189,6 +49,20 @@ describe("flush-tracker", () => {
       expect(prompt.length).toBeGreaterThan(50);
       expect(prompt).toContain("Memory Checkpoint");
       expect(prompt).toContain("memory_search");
+    });
+
+    it("appends file targets when provided", () => {
+      const prompt = getFlushPrompt(["docs/notes.md", "memory/context.md"]);
+      expect(prompt).toContain("Memory Checkpoint");
+      expect(prompt).toContain("docs/notes.md");
+      expect(prompt).toContain("memory/context.md");
+      expect(prompt).toContain("Also update these files");
+    });
+
+    it("returns base prompt when fileTargets is empty array", () => {
+      const base = getFlushPrompt();
+      const withEmpty = getFlushPrompt([]);
+      expect(withEmpty).toBe(base);
     });
   });
 });
