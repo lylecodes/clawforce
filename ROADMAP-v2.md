@@ -392,3 +392,12 @@ System onboards agents but not the user. No guided first experience.
 - [ ] 10.1: Context assembly optimization (cache static, refresh dynamic)
 - [ ] 10.2: Session length optimization (max turns per cycle)
 - [ ] 10.3: Cost forecasting accuracy (moving average with confidence)
+
+### OpenClaw Thinning (Architectural)
+- [x] Strip runtime config (model/provider) from Clawforce types
+- [x] OpenClaw config reader for runtime data lookups
+- [x] Config validation rejects runtime fields with migration message
+- [x] Delegate memory flush timing to OpenClaw native memoryFlush
+- [x] Import cron types from OpenClaw (delete redefinitions)
+- [x] Unified channel delivery adapter (replace 3 setter patterns)
+- [ ] Cost data: OpenClaw API primary, llm_output fallback (skipped — loadSessionCostSummary not exported from plugin-sdk)
