@@ -5,9 +5,13 @@
  * Provides agent status, kill/disable/enable, reassign, audit queries, and sweep trigger.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { SQLInputValue } from "node:sqlite";
 import { Type } from "@sinclair/typebox";
+import { getInitQuestions, buildConfigFromAnswers, getBudgetGuidance } from "../config/init-flow.js";
+import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
 import { getActiveSessions, getSession } from "../enforcement/tracker.js";
 import { listDisabledAgents, disableAgent, enableAgent, isAgentDisabled } from "../enforcement/disabled-store.js";
 import { countRecentRetries } from "../enforcement/retry-store.js";
@@ -56,6 +60,7 @@ const OPS_ACTIONS = [
   "cron_status", "introspect", "allocate_budget",
   "plan_create", "plan_start", "plan_complete", "plan_abandon", "plan_list",
   "flag_knowledge", "approve_promotion", "dismiss_promotion", "resolve_flag", "dismiss_flag", "list_candidates", "list_flags",
+  "init_questions", "init_apply",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -119,6 +124,9 @@ const ClawforceOpsSchema = Type.Object({
   severity: Type.Optional(Type.String({ description: "Flag severity: low, medium, high." })),
   candidate_id: Type.Optional(Type.String({ description: "Promotion candidate ID." })),
   flag_id: Type.Optional(Type.String({ description: "Knowledge flag ID." })),
+  // init flow params
+  init_answers: Type.Optional(Type.String({ description: "JSON object with init answers: domain_name, mission, agents, reporting, budget_cents (for init_apply)." })),
+  config_dir: Type.Optional(Type.String({ description: "Config directory path (for init_apply, defaults to ~/.clawforce)." })),
 });
 
 export function createClawforceOpsTool(options?: {
@@ -138,7 +146,8 @@ export function createClawforceOpsTool(options?: {
       "Use emit_event to ingest external events (CI failures, PR opens, etc). " +
       "Use enqueue_work to add tasks to the dispatch queue with priority. " +
       "Use process_events to trigger event processing + dispatch. " +
-      "Knowledge lifecycle: flag_knowledge (report wrong knowledge), approve_promotion/dismiss_promotion (manage promotion candidates), resolve_flag/dismiss_flag (manage knowledge corrections), list_candidates/list_flags (view pending items). ",
+      "Knowledge lifecycle: flag_knowledge (report wrong knowledge), approve_promotion/dismiss_promotion (manage promotion candidates), resolve_flag/dismiss_flag (manage knowledge corrections), list_candidates/list_flags (view pending items). " +
+      "Init flow: init_questions (get setup wizard questions), init_apply (apply answers to scaffold config). ",
     parameters: ClawforceOpsSchema,
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
@@ -1165,6 +1174,55 @@ export function createClawforceOpsTool(options?: {
             const { listFlags } = await import("../memory/demotion.js");
             const flags = listFlags(projectId, "pending", getDb(projectId));
             return jsonResult({ ok: true, flags });
+          }
+
+          case "init_questions": {
+            const questions = getInitQuestions();
+            return jsonResult({ questions });
+          }
+
+          case "init_apply": {
+            const answersJson = readStringParam(params, "init_answers");
+            if (!answersJson) return jsonResult({ error: "init_answers is required" });
+
+            let answers;
+            try {
+              answers = JSON.parse(answersJson);
+            } catch {
+              return jsonResult({ error: "init_answers must be valid JSON" });
+            }
+
+            const configDir = readStringParam(params, "config_dir") ??
+              path.join(process.env.HOME ?? "/tmp", ".clawforce");
+
+            const { global, domain } = buildConfigFromAnswers(answers);
+
+            // Scaffold directory and write configs
+            scaffoldConfigDir(configDir);
+
+            // Write agents to global config
+            if (global.agents) {
+              const { loadGlobalConfig } = await import("../config/loader.js");
+              const existing = loadGlobalConfig(configDir);
+              Object.assign(existing.agents, global.agents);
+              const YAML = await import("yaml");
+              const configPath = path.join(configDir, "config.yaml");
+              fs.writeFileSync(configPath, YAML.stringify(existing), "utf-8");
+            }
+
+            // Create domain
+            initDomain(configDir, domain);
+
+            // Get budget guidance
+            const guidance = getBudgetGuidance(answers);
+
+            return jsonResult({
+              success: true,
+              domain: domain.name,
+              agents: domain.agents,
+              config_dir: configDir,
+              budget_guidance: guidance,
+            });
           }
 
           default:
