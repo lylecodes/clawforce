@@ -354,6 +354,15 @@ export const validateEnforcementConfig = validateWorkforceConfig;
 export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
   const results: ConfigWarning[] = [];
 
+  // Reject runtime fields on domain-level agent defs
+  const rawDomain = domain as Record<string, unknown>;
+  if (rawDomain.model !== undefined) {
+    results.push({
+      level: "error",
+      message: `Domain "${domain.domain}": "model" is a runtime setting — configure it in OpenClaw's agent config, not Clawforce.`,
+    });
+  }
+
   if (!domain.orchestrator) {
     results.push({
       level: "suggest",
@@ -380,6 +389,23 @@ export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
 
 function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarning[] {
   const warnings: ConfigWarning[] = [];
+
+  // Reject runtime fields that belong in OpenClaw's agent config
+  const raw = config as Record<string, unknown>;
+  if (raw.model !== undefined) {
+    warnings.push({
+      level: "error",
+      agentId,
+      message: `"model" is a runtime setting — configure it in OpenClaw's agent config (~/.openclaw/ agents section), not Clawforce.`,
+    });
+  }
+  if (raw.provider !== undefined) {
+    warnings.push({
+      level: "error",
+      agentId,
+      message: `"provider" is a runtime setting — configure it in OpenClaw's agent config, not Clawforce.`,
+    });
+  }
 
   // Validate new profile fields
   if (config.persona !== undefined && config.persona.length > 4000) {

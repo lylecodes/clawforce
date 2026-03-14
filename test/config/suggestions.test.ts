@@ -80,4 +80,46 @@ describe("config quality suggestions", () => {
     expect(result.some(r => r.message.toLowerCase().includes("paths"))).toBe(true);
     expect(result.some(r => r.message.toLowerCase().includes("rules"))).toBe(true);
   });
+
+  it("rejects model field with migration message", async () => {
+    const { validateWorkforceConfig } = await import("../../src/config-validator.js");
+
+    const config = {
+      name: "test",
+      agents: {
+        worker: {
+          extends: "employee",
+          model: "claude-opus-4-6",
+          expectations: [],
+          briefing: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    };
+
+    const results = validateWorkforceConfig(config as any);
+    const errors = results.filter(r => r.level === "error" && r.agentId === "worker");
+    expect(errors.some(e => e.message.includes("model") && e.message.includes("OpenClaw"))).toBe(true);
+  });
+
+  it("rejects provider field with migration message", async () => {
+    const { validateWorkforceConfig } = await import("../../src/config-validator.js");
+
+    const config = {
+      name: "test",
+      agents: {
+        worker: {
+          extends: "employee",
+          provider: "anthropic",
+          expectations: [],
+          briefing: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    };
+
+    const results = validateWorkforceConfig(config as any);
+    const errors = results.filter(r => r.level === "error" && r.agentId === "worker");
+    expect(errors.some(e => e.message.includes("provider") && e.message.includes("OpenClaw"))).toBe(true);
+  });
 });
