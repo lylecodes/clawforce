@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
+    "filtrex": "3.1.0",
     "yaml": "^2.8.2"
   },
   "devDependencies": {

@@ -60,7 +60,7 @@ const OPS_ACTIONS = [
   "cron_status", "introspect", "allocate_budget",
   "plan_create", "plan_start", "plan_complete", "plan_abandon", "plan_list",
   "flag_knowledge", "approve_promotion", "dismiss_promotion", "resolve_flag", "dismiss_flag", "list_candidates", "list_flags",
-  "init_questions", "init_apply",
+  "init_questions", "init_apply", "route",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -127,6 +127,10 @@ const ClawforceOpsSchema = Type.Object({
   // init flow params
   init_answers: Type.Optional(Type.String({ description: "JSON object with init answers: domain_name, mission, agents, reporting, budget_cents (for init_apply)." })),
   config_dir: Type.Optional(Type.String({ description: "Config directory path (for init_apply, defaults to ~/.clawforce)." })),
+  // route params
+  route_name: Type.Optional(Type.String({ description: "Route name to execute (for route action)." })),
+  route_config: Type.Optional(Type.String({ description: "JSON route config: { name, source, condition, outputs } (for route action)." })),
+  stream_data: Type.Optional(Type.String({ description: "JSON stream data context for condition evaluation (for route action)." })),
 });
 
 export function createClawforceOpsTool(options?: {
@@ -1179,6 +1183,24 @@ export function createClawforceOpsTool(options?: {
           case "init_questions": {
             const questions = getInitQuestions();
             return jsonResult({ questions });
+          }
+
+          case "route": {
+            const routeConfigJson = readStringParam(params, "route_config");
+            const streamDataJson = readStringParam(params, "stream_data");
+            if (!routeConfigJson) return jsonResult({ error: "route_config is required" });
+
+            let routeConfig, streamData;
+            try {
+              routeConfig = JSON.parse(routeConfigJson);
+              streamData = streamDataJson ? JSON.parse(streamDataJson) : {};
+            } catch {
+              return jsonResult({ error: "Invalid JSON in route_config or stream_data" });
+            }
+
+            const { executeRoute } = await import("../streams/router.js");
+            const results = await executeRoute(routeConfig, streamData, JSON.stringify(streamData), projectId);
+            return jsonResult(results);
           }
 
           case "init_apply": {
