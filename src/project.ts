@@ -36,6 +36,7 @@ import type {
   EventActionConfig,
   EventHandlerConfig,
   GoalConfigEntry,
+  MemoryGovernanceConfig,
   ReviewConfig,
   SchedulingConfig,
   JobDefinition,
@@ -461,6 +462,8 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
 
   const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;
 
+  const memory = normalizeMemoryConfig(raw.memory);
+
   let scheduling: SchedulingConfig | undefined;
   if (raw.scheduling && typeof raw.scheduling === "object") {
     const s = raw.scheduling as Record<string, unknown>;
@@ -490,6 +493,7 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
     jobs,
     scheduling,
     skillCap,
+    memory,
   };
 }
 
@@ -598,6 +602,41 @@ function normalizeCompactionConfig(raw: unknown): boolean | CompactionConfig | u
     return { enabled, files: files?.length ? files : undefined };
   }
   return undefined;
+}
+
+function normalizeMemoryConfig(raw: unknown): MemoryGovernanceConfig | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const result: MemoryGovernanceConfig = {};
+
+  if (r.instructions !== undefined) {
+    if (typeof r.instructions === "boolean") {
+      result.instructions = r.instructions;
+    } else if (typeof r.instructions === "string" && r.instructions.trim()) {
+      result.instructions = r.instructions.trim();
+    }
+  }
+
+  if (typeof r.expectations === "boolean") {
+    result.expectations = r.expectations;
+  }
+
+  if (typeof r.review === "object" && r.review !== null) {
+    const rv = r.review as Record<string, unknown>;
+    const review: NonNullable<MemoryGovernanceConfig["review"]> = {};
+    if (typeof rv.enabled === "boolean") review.enabled = rv.enabled;
+    if (typeof rv.cron === "string" && rv.cron.trim()) review.cron = rv.cron.trim();
+    if (typeof rv.model === "string" && rv.model.trim()) review.model = rv.model.trim();
+    if (typeof rv.aggressiveness === "string" && ["low", "medium", "high"].includes(rv.aggressiveness)) {
+      review.aggressiveness = rv.aggressiveness as "low" | "medium" | "high";
+    }
+    if (typeof rv.scope === "string" && ["self", "reports", "all"].includes(rv.scope)) {
+      review.scope = rv.scope as "self" | "reports" | "all";
+    }
+    if (Object.keys(review).length > 0) result.review = review;
+  }
+
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function normalizeJobs(raw: unknown): Record<string, JobDefinition> | undefined {

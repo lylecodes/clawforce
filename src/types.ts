@@ -306,6 +306,8 @@ export type AgentConfig = {
   scheduling?: SchedulingConfig;
   /** Maximum number of skills an agent can hold. */
   skillCap?: number;
+  /** Memory governance configuration. */
+  memory?: MemoryGovernanceConfig;
 };
 
 /** A scoped session definition for an agent. */
@@ -1011,6 +1013,20 @@ export type KnowledgeConfig = {
   promotionThreshold?: {
     minRetrievals?: number;
     minSessions?: number;
+  };
+};
+
+// --- Memory Governance types ---
+
+export type MemoryGovernanceConfig = {
+  instructions?: boolean | string;  // true = role default, string = custom, false = disable
+  expectations?: boolean;           // true = role default expectations, false = none
+  review?: {
+    enabled?: boolean;
+    cron?: string;
+    model?: string;
+    aggressiveness?: "low" | "medium" | "high";
+    scope?: "self" | "reports" | "all";
   };
 };
 
