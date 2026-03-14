@@ -416,3 +416,18 @@ System onboards agents but not the user. No guided first experience.
 - [x] Import cron types from OpenClaw (delete redefinitions)
 - [x] Unified channel delivery adapter (replace 3 setter patterns)
 - [ ] Cost data: OpenClaw API primary, llm_output fallback (skipped — loadSessionCostSummary not exported from plugin-sdk)
+
+### Memory Governance
+- [ ] Memory instructions (role-based prompt injection — where to write, when to search)
+- [ ] Memory expectations (manager must search memory, compliance-enforced)
+- [ ] Memory review job preset (daily Sonnet-class extraction from session transcripts)
+- [ ] Memory review context source (transcript assembly for review agent)
+
+### Launch Readiness (Target: May/June 2026)
+- [ ] README that sells in 30 seconds (pitch, minimal config example, before/after)
+- [ ] Config reference documentation (all configurable surfaces — Phase 5.4)
+- [ ] Example configs (3-agent team, 10-agent org with departments)
+- [ ] Dashboard MVP (9.6 — real-time budget, task board, approval queue, drag-and-drop config)
+- [ ] Public GitHub repo
+- [ ] npm package / OpenClaw plugin registry listing
+- [ ] EU AI Act compliance positioning (audit trails, budget enforcement, accountability)
