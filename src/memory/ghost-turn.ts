@@ -10,6 +10,7 @@ import { emitDiagnosticEvent } from "../diagnostics.js";
 import { callTriage, resolveProvider } from "./llm-client.js";
 import type { ProviderInfo, TriageResult } from "./llm-client.js";
 import type { Expectation } from "../types.js";
+import { isDuplicateQuery, logSearchQuery } from "./search-dedup.js";
 
 // ── Types ──
 
@@ -25,6 +26,9 @@ export type GhostTurnOpts = {
   debug: boolean;
   provider?: ProviderInfo;
   model?: string;
+  /** Project and agent IDs for search dedup. Optional for backwards compat. */
+  projectId?: string;
+  agentId?: string;
 };
 
 export type MemoryToolInstance = {
@@ -149,19 +153,39 @@ export function buildCronQuery(prompt: string): string[] {
 
 // ── Memory search execution ──
 
+export type SearchDedupContext = {
+  projectId: string;
+  agentId: string;
+  sessionKey: string;
+};
+
 /**
  * Execute memory searches using the OpenClaw memory_search tool directly.
  * Deduplicates results across queries.
+ * When dedupCtx is provided, skips queries already searched in this session
+ * and logs completed searches for future dedup.
  */
 export async function executeMemorySearch(
   queries: string[],
   tool: MemoryToolInstance,
   maxSearches: number,
+  dedupCtx?: SearchDedupContext,
 ): Promise<string[]> {
   const seen = new Set<string>();
   const results: string[] = [];
 
   for (const query of queries.slice(0, maxSearches)) {
+    // Skip duplicate queries within the same session
+    if (dedupCtx) {
+      try {
+        if (isDuplicateQuery(dedupCtx.projectId, dedupCtx.sessionKey, query)) {
+          continue;
+        }
+      } catch {
+        // Non-critical — proceed with search if dedup check fails
+      }
+    }
+
     try {
       const result = await tool.execute(`ghost-recall-${Date.now()}`, {
         action: "search",
@@ -169,10 +193,21 @@ export async function executeMemorySearch(
         maxResults: 3,
       });
 
+      let queryResultCount = 0;
       for (const block of result.content) {
         if (block.type === "text" && block.text && !seen.has(block.text)) {
           seen.add(block.text);
           results.push(block.text);
+          queryResultCount++;
+        }
+      }
+
+      // Log the completed search for future dedup
+      if (dedupCtx) {
+        try {
+          logSearchQuery(dedupCtx.projectId, dedupCtx.agentId, dedupCtx.sessionKey, query, queryResultCount);
+        } catch {
+          // Non-critical — don't let logging failure break the search
         }
       }
     } catch {
@@ -273,8 +308,11 @@ export async function runGhostRecall(
     return null;
   }
 
-  // Search
-  const results = await executeMemorySearch(triage.queries, tool, maxSearches);
+  // Search (with session-level dedup when project/agent context is available)
+  const dedupCtx = opts.projectId && opts.agentId
+    ? { projectId: opts.projectId, agentId: opts.agentId, sessionKey: opts.sessionKey }
+    : undefined;
+  const results = await executeMemorySearch(triage.queries, tool, maxSearches, dedupCtx);
 
   // Format
   const formatted = formatMemoryResults(results, opts.maxInjectedChars, opts.debug, triage.queries);
@@ -300,7 +338,7 @@ export async function runGhostRecall(
 export async function runCronRecall(
   prompt: string,
   tool: MemoryToolInstance | null,
-  opts: { maxSearches: number; maxInjectedChars: number; debug: boolean; sessionKey: string },
+  opts: { maxSearches: number; maxInjectedChars: number; debug: boolean; sessionKey: string; projectId?: string; agentId?: string },
 ): Promise<GhostRecallResult | null> {
   if (!tool) return null;
 
@@ -308,7 +346,10 @@ export async function runCronRecall(
   const queries = buildCronQuery(prompt);
   if (queries.length === 0) return null;
 
-  const results = await executeMemorySearch(queries, tool, opts.maxSearches);
+  const dedupCtx = opts.projectId && opts.agentId
+    ? { projectId: opts.projectId, agentId: opts.agentId, sessionKey: opts.sessionKey }
+    : undefined;
+  const results = await executeMemorySearch(queries, tool, opts.maxSearches, dedupCtx);
   const formatted = formatMemoryResults(results, opts.maxInjectedChars, opts.debug, queries);
 
   emitDiagnosticEvent({

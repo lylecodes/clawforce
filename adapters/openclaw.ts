@@ -352,6 +352,8 @@ const clawforcePlugin = {
                 maxInjectedChars: cfg.ghostRecall.maxInjectedChars,
                 debug: cfg.ghostRecall.debug,
                 sessionKey,
+                projectId: entry.projectId,
+                agentId,
               });
             } else {
               // User-facing path: LLM triage on recent messages
@@ -368,6 +370,8 @@ const clawforcePlugin = {
                   maxInjectedChars: cfg.ghostRecall.maxInjectedChars,
                   maxSearches: cfg.ghostRecall.maxSearches,
                   debug: cfg.ghostRecall.debug,
+                  projectId: entry.projectId,
+                  agentId,
                 },
               );
             }
