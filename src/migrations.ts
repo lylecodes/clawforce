@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 27;
+export const SCHEMA_VERSION = 28;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -41,6 +41,7 @@ const migrations: Record<number, Migration> = {
   25: migrateV25,
   26: migrateV26,
   27: migrateV27,
+  28: migrateV28,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -944,6 +945,49 @@ function migrateV27(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_audit_runs_agent_ended
     ON audit_runs(agent_id, ended_at)
   `).run();
+}
+
+// --- Migration V28: Budget v2 — token/request counters, reservations, window boundaries ---
+
+function migrateV28(db: DatabaseSync): void {
+  // Cost spent counters (hourly/monthly — daily already exists)
+  // Note: hourly_limit_cents and monthly_limit_cents already exist from V23
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN hourly_spent_cents INTEGER NOT NULL DEFAULT 0");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN monthly_spent_cents INTEGER NOT NULL DEFAULT 0");
+
+  // Token limits and counters
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN hourly_limit_tokens INTEGER");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN hourly_spent_tokens INTEGER NOT NULL DEFAULT 0");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN daily_limit_tokens INTEGER");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN daily_spent_tokens INTEGER NOT NULL DEFAULT 0");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN monthly_limit_tokens INTEGER");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN monthly_spent_tokens INTEGER NOT NULL DEFAULT 0");
+
+  // Request limits and counters
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN hourly_limit_requests INTEGER");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN hourly_spent_requests INTEGER NOT NULL DEFAULT 0");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN daily_limit_requests INTEGER");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN daily_spent_requests INTEGER NOT NULL DEFAULT 0");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN monthly_limit_requests INTEGER");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN monthly_spent_requests INTEGER NOT NULL DEFAULT 0");
+
+  // Window boundaries (daily_reset_at exists)
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN hourly_reset_at INTEGER");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN monthly_reset_at INTEGER");
+
+  // Reservation hold for active plans
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN reserved_cents INTEGER NOT NULL DEFAULT 0");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN reserved_tokens INTEGER NOT NULL DEFAULT 0");
+  safeAlterTable(db, "ALTER TABLE budgets ADD COLUMN reserved_requests INTEGER NOT NULL DEFAULT 0");
+
+  // Index for efficient initiative-level cost forecasting
+  db.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_goal_id
+    ON tasks(goal_id) WHERE goal_id IS NOT NULL
+  `).run();
+
+  // Add started_at to dispatch_plans for reservation crash recovery TTL
+  safeAlterTable(db, "ALTER TABLE dispatch_plans ADD COLUMN started_at INTEGER");
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */
