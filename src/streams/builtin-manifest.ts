@@ -56,4 +56,5 @@ export function registerBuiltinStreams(): void {
   });
   registerStream({ name: "available_capacity", description: "Current rate limit headroom and concurrent slot availability", builtIn: true, outputTargets: ["briefing"] });
   registerStream({ name: "knowledge_candidates", description: "Memory entries flagged for promotion to structured knowledge", builtIn: true, outputTargets: ["briefing"] });
+  registerStream({ name: "budget_guidance", description: "Budget utilization, remaining sessions, and exhaustion forecast", builtIn: true, outputTargets: ["briefing", "telegram"] });
 }

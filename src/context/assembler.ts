@@ -43,8 +43,9 @@ import { buildVelocityReport, renderVelocityReport } from "../planning/velocity.
 import { renderPreferences } from "../trust/preferences.js";
 import { renderTrustSummary } from "../trust/tracker.js";
 import { getDirectReports } from "../org.js";
-import { getAgentConfig } from "../project.js";
+import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 import { getStream } from "../streams/catalog.js";
+import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -208,6 +209,9 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
 
     case "knowledge_candidates":
       return resolveKnowledgeCandidatesSource(ctx.projectId ?? "", undefined);
+
+    case "budget_guidance":
+      return resolveBudgetGuidanceSource(ctx.projectId ?? "", source.params);
 
     case "custom_stream": {
       if (!source.streamName || !ctx.projectId) return null;
