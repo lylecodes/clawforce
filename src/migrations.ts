@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 26;
+export const SCHEMA_VERSION = 27;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -40,6 +40,7 @@ const migrations: Record<number, Migration> = {
   24: migrateV24,
   25: migrateV25,
   26: migrateV26,
+  27: migrateV27,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -923,6 +924,25 @@ function migrateV26(db: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       resolved_at INTEGER
     )
+  `).run();
+}
+
+// --- Migration V27: Onboarding state + audit index ---
+
+function migrateV27(db: DatabaseSync): void {
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS onboarding_state (
+      project_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (project_id, key)
+    )
+  `).run();
+
+  db.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_audit_runs_agent_ended
+    ON audit_runs(agent_id, ended_at)
   `).run();
 }
 

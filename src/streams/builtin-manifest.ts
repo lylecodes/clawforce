@@ -57,4 +57,7 @@ export function registerBuiltinStreams(): void {
   registerStream({ name: "available_capacity", description: "Current rate limit headroom and concurrent slot availability", builtIn: true, outputTargets: ["briefing"] });
   registerStream({ name: "knowledge_candidates", description: "Memory entries flagged for promotion to structured knowledge", builtIn: true, outputTargets: ["briefing"] });
   registerStream({ name: "budget_guidance", description: "Budget utilization, remaining sessions, and exhaustion forecast", builtIn: true, outputTargets: ["briefing", "telegram"] });
+  registerStream({ name: "onboarding_welcome", description: "First-day orientation checklist for fresh domains", builtIn: true, outputTargets: ["briefing"] });
+  registerStream({ name: "weekly_digest", description: "Weekly performance summary with task, cost, and agent metrics", builtIn: true, outputTargets: ["briefing", "telegram"] });
+  registerStream({ name: "intervention_suggestions", description: "Pattern-detected recommendations for struggling agents or initiatives", builtIn: true, outputTargets: ["briefing"] });
 }

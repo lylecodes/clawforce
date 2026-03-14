@@ -131,6 +131,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
       "pending_messages", "channel_messages", "memory", "skill",
       "policy_status", "preferences", "cost_forecast", "available_capacity",
       "knowledge_candidates", "budget_guidance",
+      "onboarding_welcome", "weekly_digest", "intervention_suggestions",
     ],
     expectations: [
       { tool: "clawforce_log", action: "write", min_calls: 1 },

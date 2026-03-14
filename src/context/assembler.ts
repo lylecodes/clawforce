@@ -46,6 +46,7 @@ import { getDirectReports } from "../org.js";
 import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 import { getStream } from "../streams/catalog.js";
 import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
+import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -212,6 +213,35 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
 
     case "budget_guidance":
       return resolveBudgetGuidanceSource(ctx.projectId ?? "", source.params);
+
+    case "onboarding_welcome": {
+      if (!ctx.projectId) return null;
+      try {
+        const db = getDb(ctx.projectId);
+        const agents = getRegisteredAgentIds();
+        return resolveWelcomeSource(ctx.projectId, db, {
+          agentCount: agents.length,
+          domainName: ctx.projectId,
+        });
+      } catch { return null; }
+    }
+
+    case "weekly_digest": {
+      if (!ctx.projectId) return null;
+      try {
+        const db = getDb(ctx.projectId);
+        return resolveWeeklyDigestSource(ctx.projectId, db);
+      } catch { return null; }
+    }
+
+    case "intervention_suggestions": {
+      if (!ctx.projectId) return null;
+      try {
+        const db = getDb(ctx.projectId);
+        const agents = getRegisteredAgentIds();
+        return resolveInterventionSource(ctx.projectId, db, agents);
+      } catch { return null; }
+    }
 
     case "custom_stream": {
       if (!source.streamName || !ctx.projectId) return null;
