@@ -150,6 +150,11 @@ export { registerKillFunction } from "./audit/auto-kill.js";
 // --- Tasks ---
 export { handleWorkerSessionEnd } from "./tasks/session-end.js";
 
+// --- Memory Governance ---
+export { resolveMemoryInstructions, MANAGER_MEMORY_INSTRUCTIONS, EMPLOYEE_MEMORY_INSTRUCTIONS } from "./context/sources/memory-instructions.js";
+export { buildReviewContext } from "./memory/review-context.js";
+export type { ReviewContextOpts } from "./memory/review-context.js";
+
 // --- Memory (Ghost Turn + Flush) ---
 export { runGhostRecall, runCronRecall, clearCooldown, clearAllCooldowns, INTENSITY_PRESETS } from "./memory/ghost-turn.js";
 export type { GhostTurnIntensity, GhostTurnOpts, GhostRecallResult, MemoryToolInstance } from "./memory/ghost-turn.js";
@@ -282,6 +287,7 @@ export type {
   PromotionCandidate,
   KnowledgeFlag,
   KnowledgeConfig,
+  MemoryGovernanceConfig,
   RuleDefinition,
   RuleTrigger,
   RuleAction,
