@@ -9,6 +9,7 @@ import crypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "./db.js";
 import { safeLog } from "./diagnostics.js";
+import { checkBudgetV2 } from "./budget/check-v2.js";
 import type { BudgetCheckResult, BudgetConfig } from "./types.js";
 
 /**
@@ -68,6 +69,8 @@ export function setBudget(
 
 /**
  * Check if an agent/project is within budget.
+ * Delegates time-window checks (hourly/daily/monthly) to checkBudgetV2 (O(1)).
+ * Keeps session/task per-record checks (bounded O(n) scope).
  * Returns { ok: true } if within budget or no budget set.
  */
 export function checkBudget(
@@ -81,84 +84,72 @@ export function checkBudget(
 ): BudgetCheckResult {
   const db = dbOverride ?? getDb(params.projectId);
 
-  // Check agent-level budget first (more specific)
+  // Time-window checks via v2 (O(1) counter-based)
+  const v2Result = checkBudgetV2({ projectId: params.projectId, agentId: params.agentId }, db);
+  if (!v2Result.ok) return v2Result;
+
+  // Session/task per-record checks (bounded scope)
+  const perRecordResult = evaluatePerRecordBudget(params, db);
+  if (!perRecordResult.ok) return perRecordResult;
+
+  return { ok: true, remaining: v2Result.remaining };
+}
+
+function evaluatePerRecordBudget(
+  params: { projectId: string; agentId?: string; taskId?: string; sessionKey?: string },
+  db: DatabaseSync,
+): BudgetCheckResult {
+  // Get budget rows to check task/session limits
+  const budgets: Array<Record<string, unknown>> = [];
+
   if (params.agentId) {
     const agentBudget = db.prepare(
       "SELECT * FROM budgets WHERE project_id = ? AND agent_id = ?",
     ).get(params.projectId, params.agentId) as Record<string, unknown> | undefined;
-
-    if (agentBudget) {
-      const result = evaluateBudget(agentBudget, params, db);
-      if (!result.ok) return result;
-    }
+    if (agentBudget) budgets.push(agentBudget);
   }
 
-  // Check project-level budget
   const projectBudget = db.prepare(
     "SELECT * FROM budgets WHERE project_id = ? AND agent_id IS NULL",
   ).get(params.projectId) as Record<string, unknown> | undefined;
+  if (projectBudget) budgets.push(projectBudget);
 
-  if (projectBudget) {
-    const result = evaluateBudget(projectBudget, params, db);
-    if (!result.ok) return result;
+  for (const budget of budgets) {
+    const taskLimit = budget.task_limit_cents as number | null;
+    const sessionLimit = budget.session_limit_cents as number | null;
+
+    // Task limit check
+    if (taskLimit !== null && params.taskId) {
+      const taskRow = db.prepare(
+        "SELECT COALESCE(SUM(cost_cents), 0) as spent FROM cost_records WHERE project_id = ? AND task_id = ?",
+      ).get(params.projectId, params.taskId) as Record<string, unknown>;
+      const taskSpent = taskRow.spent as number;
+      if (taskSpent >= taskLimit) {
+        return {
+          ok: false,
+          remaining: 0,
+          reason: `Task budget exceeded: spent ${taskSpent} cents of ${taskLimit} cents limit`,
+        };
+      }
+    }
+
+    // Session limit check
+    if (sessionLimit !== null && params.sessionKey) {
+      const sessionRow = db.prepare(
+        "SELECT COALESCE(SUM(cost_cents), 0) as spent FROM cost_records WHERE project_id = ? AND session_key = ?",
+      ).get(params.projectId, params.sessionKey) as Record<string, unknown>;
+      const sessionSpent = sessionRow.spent as number;
+      if (sessionSpent >= sessionLimit) {
+        return {
+          ok: false,
+          remaining: 0,
+          reason: `Session budget exceeded: spent ${sessionSpent} cents of ${sessionLimit} cents limit`,
+        };
+      }
+    }
   }
 
   return { ok: true };
-}
-
-function evaluateBudget(
-  budget: Record<string, unknown>,
-  params: { projectId: string; agentId?: string; taskId?: string; sessionKey?: string },
-  db: DatabaseSync,
-): BudgetCheckResult {
-  const dailyLimit = budget.daily_limit_cents as number | null;
-  const taskLimit = budget.task_limit_cents as number | null;
-  const sessionLimit = budget.session_limit_cents as number | null;
-  const dailySpent = budget.daily_spent_cents as number;
-
-  // Daily limit check
-  if (dailyLimit !== null && dailySpent >= dailyLimit) {
-    const remaining = Math.max(0, dailyLimit - dailySpent);
-    const scope = budget.agent_id ? `agent "${budget.agent_id}"` : "project";
-    return {
-      ok: false,
-      remaining,
-      reason: `Daily budget exceeded for ${scope}: spent ${dailySpent} cents of ${dailyLimit} cents limit`,
-    };
-  }
-
-  // Task limit check
-  if (taskLimit !== null && params.taskId) {
-    const taskRow = db.prepare(
-      "SELECT COALESCE(SUM(cost_cents), 0) as spent FROM cost_records WHERE project_id = ? AND task_id = ?",
-    ).get(params.projectId, params.taskId) as Record<string, unknown>;
-    const taskSpent = taskRow.spent as number;
-    if (taskSpent >= taskLimit) {
-      return {
-        ok: false,
-        remaining: 0,
-        reason: `Task budget exceeded: spent ${taskSpent} cents of ${taskLimit} cents limit`,
-      };
-    }
-  }
-
-  // Session limit check
-  if (sessionLimit !== null && params.sessionKey) {
-    const sessionRow = db.prepare(
-      "SELECT COALESCE(SUM(cost_cents), 0) as spent FROM cost_records WHERE project_id = ? AND session_key = ?",
-    ).get(params.projectId, params.sessionKey) as Record<string, unknown>;
-    const sessionSpent = sessionRow.spent as number;
-    if (sessionSpent >= sessionLimit) {
-      return {
-        ok: false,
-        remaining: 0,
-        reason: `Session budget exceeded: spent ${sessionSpent} cents of ${sessionLimit} cents limit`,
-      };
-    }
-  }
-
-  const remaining = dailyLimit !== null ? Math.max(0, dailyLimit - dailySpent) : undefined;
-  return { ok: true, remaining };
 }
 
 /**

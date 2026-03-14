@@ -7,6 +7,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "./db.js";
+import { checkBudgetV2 } from "./budget/check-v2.js";
 import type { BudgetCheckResult } from "./types.js";
 
 export type WindowStatus = {
@@ -102,28 +103,14 @@ export function getBudgetStatus(
   return result;
 }
 
+/**
+ * @deprecated Delegates to checkBudgetV2 internally. Use checkBudgetV2 directly for
+ * multi-dimension (cents/tokens/requests) enforcement.
+ */
 export function checkMultiWindowBudget(
   params: { projectId: string; agentId?: string },
   dbOverride?: DatabaseSync,
 ): BudgetCheckResult {
-  const status = getBudgetStatus(params.projectId, params.agentId, dbOverride);
-
-  for (const w of [status.hourly, status.daily, status.monthly]) {
-    if (w && w.remainingCents <= 0) {
-      return {
-        ok: false,
-        remaining: 0,
-        reason: `${w.window.charAt(0).toUpperCase() + w.window.slice(1)} budget exceeded: spent ${w.spentCents} cents of ${w.limitCents} cents limit`,
-      };
-    }
-  }
-
-  const minRemaining = [status.hourly, status.daily, status.monthly]
-    .filter(Boolean)
-    .map(w => w!.remainingCents);
-
-  return {
-    ok: true,
-    remaining: minRemaining.length > 0 ? Math.min(...minRemaining) : undefined,
-  };
+  const db = dbOverride ?? getDb(params.projectId);
+  return checkBudgetV2(params, db);
 }

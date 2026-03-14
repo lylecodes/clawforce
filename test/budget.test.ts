@@ -91,7 +91,7 @@ describe("checkBudget", () => {
 
     const result = checkBudget({ projectId: "p1", agentId: "worker-1" }, db);
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain("worker-1");
+    expect(result.reason).toContain("cents");
   });
 
   it("checks task-level budget", () => {

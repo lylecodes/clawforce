@@ -111,27 +111,43 @@ export function checkCostCircuitBreaker(
   const db = dbOverride ?? getDb(projectId);
 
   try {
-    // Check project-level budget
+    // Check budget across all dimensions (cents, tokens, requests)
     const query = agentId
-      ? "SELECT daily_limit_cents, daily_spent_cents FROM budgets WHERE project_id = ? AND agent_id = ?"
-      : "SELECT daily_limit_cents, daily_spent_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL";
+      ? `SELECT daily_limit_cents, daily_spent_cents,
+                daily_limit_tokens, daily_spent_tokens,
+                daily_limit_requests, daily_spent_requests
+         FROM budgets WHERE project_id = ? AND agent_id = ?`
+      : `SELECT daily_limit_cents, daily_spent_cents,
+                daily_limit_tokens, daily_spent_tokens,
+                daily_limit_requests, daily_spent_requests
+         FROM budgets WHERE project_id = ? AND agent_id IS NULL`;
     const args = agentId ? [projectId, agentId] : [projectId];
     const budget = db.prepare(query).get(...args) as Record<string, unknown> | undefined;
 
     if (!budget) return { ok: true };
 
-    const limit = budget.daily_limit_cents as number | null;
-    const spent = budget.daily_spent_cents as number;
+    const scope = agentId ? `agent "${agentId}"` : "project";
 
-    if (limit === null || limit <= 0) return { ok: true };
+    // Check all three dimensions with the same multiplier
+    const dimensions: Array<{ name: string; limitCol: string; spentCol: string; unit: string }> = [
+      { name: "cents", limitCol: "daily_limit_cents", spentCol: "daily_spent_cents", unit: "cents" },
+      { name: "tokens", limitCol: "daily_limit_tokens", spentCol: "daily_spent_tokens", unit: "tokens" },
+      { name: "requests", limitCol: "daily_limit_requests", spentCol: "daily_spent_requests", unit: "requests" },
+    ];
 
-    const threshold = Math.floor(limit * config.costCircuitBreaker);
-    if (spent >= threshold) {
-      const scope = agentId ? `agent "${agentId}"` : "project";
-      return {
-        ok: false,
-        reason: `Cost circuit breaker: ${scope} spent ${spent} cents, exceeds ${config.costCircuitBreaker}x budget threshold of ${threshold} cents (limit: ${limit})`,
-      };
+    for (const dim of dimensions) {
+      const limit = budget[dim.limitCol] as number | null;
+      const spent = budget[dim.spentCol] as number;
+
+      if (limit === null || limit === undefined || limit <= 0) continue;
+
+      const threshold = Math.floor(limit * config.costCircuitBreaker);
+      if (spent >= threshold) {
+        return {
+          ok: false,
+          reason: `Cost circuit breaker: ${scope} spent ${spent} ${dim.unit}, exceeds ${config.costCircuitBreaker}x budget threshold of ${threshold} ${dim.unit} (limit: ${limit})`,
+        };
+      }
     }
   } catch {
     // Non-fatal

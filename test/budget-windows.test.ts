@@ -61,7 +61,7 @@ describe("multi-window budget", () => {
 
     const result = checkMultiWindowBudget({ projectId: "test-proj" }, db);
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain("Hourly");
+    expect(result.reason).toContain("hourly");
   });
 
   it("returns alert thresholds when approaching limit", () => {

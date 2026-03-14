@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 import { checkBudget } from "../budget.js";
-import { checkMultiWindowBudget } from "../budget-windows.js";
+import { checkBudgetV2 } from "../budget/check-v2.js";
 import { isProviderThrottled } from "../rate-limits.js";
 import { checkSpawnDepth, checkCostCircuitBreaker, checkLoopDetection } from "../safety.js";
 import { getDb } from "../db.js";
@@ -247,12 +247,9 @@ async function dispatchItem(
   db: DatabaseSync,
   resolvedAgentId: string,
 ): Promise<void> {
-  // Pre-dispatch budget check (includes agent-level and session-level budgets)
+  // Pre-dispatch budget check: single v2 call covers all windows + dimensions + reservations
   try {
-    const profileVal = item.payload?.profile as string | undefined;
-    const agentId = profileVal ? `claude-code:${profileVal}` : undefined;
-    const sessionKey = item.payload?.sessionKey as string | undefined;
-    const budgetResult = checkBudget({ projectId, agentId, taskId: item.taskId, sessionKey }, db);
+    const budgetResult = checkBudgetV2({ projectId, agentId: resolvedAgentId }, db);
     if (!budgetResult.ok) {
       failItem(item.id, `Budget exceeded: ${budgetResult.reason}`, db, projectId);
       emitDispatchEvent(projectId, "dispatch_failed", item, { error: budgetResult.reason, budgetExceeded: true }, db);
@@ -264,16 +261,26 @@ async function dispatchItem(
     // Budget check failure is non-fatal — proceed with dispatch
   }
 
-  // Multi-window budget + rate limit gate
+  // Session/task per-record budget checks (bounded O(n) scope)
   try {
-    const multiWindowResult = checkMultiWindowBudget({ projectId, agentId: resolvedAgentId });
-    if (!multiWindowResult.ok) {
-      failItem(item.id, `Budget exceeded: ${multiWindowResult.reason}`, db, projectId);
-      emitDispatchEvent(projectId, "dispatch_failed", item, { error: multiWindowResult.reason, budgetExceeded: true }, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "multi_window_budget" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
-      return;
+    const profileVal = item.payload?.profile as string | undefined;
+    const agentId = profileVal ? `claude-code:${profileVal}` : undefined;
+    const sessionKey = item.payload?.sessionKey as string | undefined;
+    if (sessionKey || item.taskId) {
+      const perRecordResult = checkBudget({ projectId, agentId, taskId: item.taskId, sessionKey }, db);
+      if (!perRecordResult.ok) {
+        failItem(item.id, `Budget exceeded: ${perRecordResult.reason}`, db, projectId);
+        emitDispatchEvent(projectId, "dispatch_failed", item, { error: perRecordResult.reason, budgetExceeded: true }, db);
+        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_exceeded" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+        return;
+      }
     }
+  } catch (err) {
+    safeLog("dispatcher.perRecordBudgetCheck", err);
+  }
 
+  // Provider rate limit gate
+  try {
     const provider = (item.payload?.provider as string) ?? "anthropic";
     if (isProviderThrottled(provider, 95)) {
       failItem(item.id, `Provider ${provider} rate limit exceeded (>95% used)`, db, projectId);
@@ -282,7 +289,7 @@ async function dispatchItem(
       return;
     }
   } catch (err) {
-    safeLog("dispatcher.multiWindowCheck", err);
+    safeLog("dispatcher.rateLimitCheck", err);
   }
 
   // Safety checks: spawn depth, cost circuit breaker, loop detection
@@ -581,8 +588,9 @@ export function shouldDispatch(
   provider: string = "anthropic",
   options?: { taskId?: string },
 ): { ok: true } | { ok: false; reason: string } {
-  // Check multi-window budget (hourly / daily / monthly)
-  const budgetResult = checkMultiWindowBudget({ projectId, agentId });
+  // Check multi-window budget via v2 (hourly / daily / monthly + all dimensions)
+  const budgetDb = getDb(projectId);
+  const budgetResult = checkBudgetV2({ projectId, agentId }, budgetDb);
   if (!budgetResult.ok) {
     return { ok: false, reason: budgetResult.reason! };
   }
