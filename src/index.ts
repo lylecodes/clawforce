@@ -32,10 +32,37 @@ export type { InitDomainOpts } from "./config/wizard.js";
 export { startConfigWatcher, stopConfigWatcher, diffConfigs, diffDomainConfigs } from "./config/watcher.js";
 export type { GlobalConfigDiff, DomainConfigDiff, ReloadCallback } from "./config/watcher.js";
 
+// --- Config: Inference ---
+export { inferPreset, markInferred, wasInferred, clearInferenceState } from "./config/inference.js";
+
+// --- Config: Budget Guide ---
+export { estimateBudget, formatBudgetSummary, MODEL_COSTS } from "./config/budget-guide.js";
+export type { AgentBudgetInput, AgentCostEstimate, BudgetEstimate } from "./config/budget-guide.js";
+
+// --- Config: Init Flow ---
+export { getInitQuestions, buildConfigFromAnswers, getBudgetGuidance } from "./config/init-flow.js";
+export type { QuestionType, InitQuestion, AgentAnswer, InitAnswers } from "./config/init-flow.js";
+
 // --- Rules ---
 export { matchRules, buildPromptFromRule, evaluateRules } from "./rules/engine.js";
 export type { RuleEvent, MatchedRule } from "./rules/engine.js";
 export { formatEvolutionPrompt } from "./rules/evolution.js";
+
+// --- Streams ---
+export { registerStream, getStream, listStreams, clearCatalog, formatStreamCatalog } from "./streams/catalog.js";
+export type { OutputTarget, ParamSchema, StreamDefinition } from "./streams/catalog.js";
+export { registerBuiltinStreams } from "./streams/builtin-manifest.js";
+export { validateStreamParams } from "./streams/params.js";
+export type { ParamValidationResult } from "./streams/params.js";
+export { executeCustomStream } from "./streams/custom.js";
+export type { CustomStreamDef, StreamResult } from "./streams/custom.js";
+export { evaluateCondition } from "./streams/conditions.js";
+export { evaluateRoute, executeRoute, deliverToOutput } from "./streams/router.js";
+export type { RouteOutput, RouteDefinition, RouteEvalResult, DeliveryResult } from "./streams/router.js";
+
+// --- Onboarding Sources ---
+export { resolveBudgetGuidanceSource } from "./context/sources/budget-guidance.js";
+export { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./context/sources/onboarding-sources.js";
 
 export { generateDefaultScopePolicies } from "./profiles.js";
 export { resolveConfig, mergeArrayWithOperators, detectCycle, BUILTIN_AGENT_PRESETS, BUILTIN_JOB_PRESETS } from "./presets.js";
