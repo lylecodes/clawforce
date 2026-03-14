@@ -4,9 +4,13 @@
  * Module-level setter pattern (matches setCronService/registerKillFunction).
  * The adapter captures OpenClaw channel APIs and calls setApprovalNotifier()
  * during registration.
+ *
+ * When no explicit notifier is set, falls back to the unified delivery adapter
+ * from src/channels/deliver.ts.
  */
 
 import type { ApprovalChannel } from "./channel-router.js";
+import { deliverMessage } from "../channels/deliver.js";
 
 export type NotificationPayload = {
   proposalId: string;
@@ -51,10 +55,34 @@ export function setApprovalNotifier(n: ApprovalNotifier | null): void {
 }
 
 /**
- * Get the registered approval notifier, or null if none configured.
+ * Get the registered approval notifier.
+ * Falls back to the unified delivery adapter if no explicit notifier is set.
  */
 export function getApprovalNotifier(): ApprovalNotifier | null {
-  return notifier;
+  if (notifier) return notifier;
+
+  // Fallback: use unified delivery adapter
+  return {
+    async sendProposalNotification(payload: NotificationPayload) {
+      const message = formatTelegramMessage(payload);
+      const buttons = buildApprovalButtons(payload.projectId, payload.proposalId);
+      const result = await deliverMessage({
+        channel: "telegram",
+        content: message,
+        target: { chatId: payload.projectId },
+        options: { buttons, format: "markdown" },
+      });
+      return {
+        sent: result.delivered,
+        channel: "telegram" as ApprovalChannel,
+        messageId: result.messageId,
+        error: result.error,
+      };
+    },
+    async editProposalMessage() {
+      // Edit not supported via unified delivery fallback
+    },
+  };
 }
 
 /**

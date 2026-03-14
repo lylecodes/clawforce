@@ -3,9 +3,11 @@
  *
  * Module-level setter for message delivery to external channels (Telegram, etc.).
  * Follows the same pattern as setApprovalNotifier() in src/approval/notify.ts.
+ * Falls back to the unified delivery adapter when no explicit notifier is set.
  */
 
 import { safeLog } from "../diagnostics.js";
+import { deliverMessage } from "../channels/deliver.js";
 import type { Message } from "../types.js";
 
 export type MessageNotifier = {
@@ -49,13 +51,28 @@ export function formatMessageNotification(message: Message): string {
 /**
  * Attempt to notify the recipient via their configured channel.
  * Fire-and-forget with error boundary.
+ * Falls back to unified delivery adapter when no explicit notifier is set.
  */
 export async function notifyMessage(message: Message): Promise<void> {
   const n = notifier;
-  if (!n) return;
+  if (n) {
+    try {
+      await n.sendMessageNotification(message);
+    } catch (err) {
+      safeLog("messaging.notify", err);
+    }
+    return;
+  }
 
+  // Fallback: use unified delivery adapter
   try {
-    await n.sendMessageNotification(message);
+    const content = formatMessageNotification(message);
+    await deliverMessage({
+      channel: "telegram",
+      content,
+      target: { chatId: message.toAgent },
+      options: { format: "markdown" },
+    });
   } catch (err) {
     safeLog("messaging.notify", err);
   }

@@ -73,6 +73,7 @@ import { createClawforceMessageTool } from "../src/tools/message-tool.js";
 import { createClawforceChannelTool } from "../src/tools/channel-tool.js";
 import { setMessageNotifier, formatMessageNotification } from "../src/messaging/notify.js";
 import { setChannelNotifier, formatChannelMessage } from "../src/channels/notify.js";
+import { setDeliveryAdapter } from "../src/channels/deliver.js";
 import { advanceMeetingTurn, concludeMeeting, getMeetingStatus } from "../src/channels/meeting.js";
 import { buildChannelTranscript } from "../src/channels/messages.js";
 import { getChannel } from "../src/channels/store.js";
@@ -1128,10 +1129,39 @@ const clawforcePlugin = {
         });
       }
 
-      // Capture channel APIs for approval notifications
+      // Capture channel APIs for delivery and notifications
       const channelApis = api.runtime?.channel;
       if (channelApis?.telegram?.sendMessageTelegram) {
         const sendTelegram = channelApis.telegram.sendMessageTelegram;
+
+        // Wire unified delivery adapter
+        setDeliveryAdapter({
+          send: async (channel, content, target, options) => {
+            switch (channel) {
+              case "telegram": {
+                if (!sendTelegram) return { sent: false, error: "Telegram not configured" };
+                try {
+                  const sendOpts: Record<string, unknown> = {
+                    textMode: options?.format ?? "markdown",
+                  };
+                  if (options?.buttons) sendOpts.buttons = options.buttons;
+                  if (target.threadId) sendOpts.messageThreadId = Number(target.threadId);
+                  const result = await sendTelegram(
+                    String(target.chatId ?? ""),
+                    content,
+                    sendOpts as never,
+                  );
+                  return { sent: !!result, messageId: result?.messageId };
+                } catch (err) {
+                  return { sent: false, error: err instanceof Error ? err.message : String(err) };
+                }
+              }
+              default:
+                return { sent: false, error: `Unsupported channel: ${channel}` };
+            }
+          },
+        });
+        api.logger.info("Clawforce: unified delivery adapter configured (Telegram)");
 
         const notifier: ApprovalNotifier = {
           async sendProposalNotification(payload: NotificationPayload) {

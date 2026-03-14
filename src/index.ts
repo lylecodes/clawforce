@@ -137,6 +137,10 @@ export { sendChannelMessage, buildChannelTranscript } from "./channels/messages.
 export { startMeeting, advanceMeetingTurn, concludeMeeting, getMeetingStatus } from "./channels/meeting.js";
 export { setChannelNotifier, getChannelNotifier, notifyChannelMessage } from "./channels/notify.js";
 
+// --- Channel Delivery ---
+export { setDeliveryAdapter, getDeliveryAdapter, deliverMessage, clearDeliveryAdapter } from "./channels/deliver.js";
+export type { DeliveryAdapter, DeliveryRequest, DeliveryResult as ChannelDeliveryResult } from "./channels/deliver.js";
+
 // --- Audit ---
 export { registerKillFunction } from "./audit/auto-kill.js";
 

@@ -15,9 +15,12 @@ const {
 
 describe("approval/notify", () => {
   describe("module-level setter", () => {
-    it("starts as null", () => {
+    it("returns fallback notifier when none set", () => {
       setApprovalNotifier(null);
-      expect(getApprovalNotifier()).toBeNull();
+      // Falls back to unified delivery adapter instead of null
+      const n = getApprovalNotifier();
+      expect(n).not.toBeNull();
+      expect(n!.sendProposalNotification).toBeDefined();
     });
 
     it("stores and retrieves notifier", () => {
