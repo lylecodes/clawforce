@@ -10,22 +10,31 @@ import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import { checkBudgetV2 } from "./budget/check-v2.js";
-import type { BudgetCheckResult, BudgetConfig } from "./types.js";
+import { normalizeBudgetConfig } from "./budget/normalize.js";
+import { getNextHourBoundary, getNextMidnightUTC, getNextMonthBoundaryUTC } from "./budget/reset.js";
+import type { BudgetCheckResult, BudgetConfig, BudgetConfigV2 } from "./types.js";
 
 /**
  * Set or update a budget for a project or agent.
+ * Accepts both legacy BudgetConfig and BudgetConfigV2.
+ * Normalizes legacy config to v2 format, then writes all dimension/window columns.
  */
 export function setBudget(
   params: {
     projectId: string;
     agentId?: string;
-    config: BudgetConfig;
+    config: BudgetConfig | BudgetConfigV2;
   },
   dbOverride?: DatabaseSync,
 ): void {
   const db = dbOverride ?? getDb(params.projectId);
   const now = Date.now();
-  const nextMidnight = getNextMidnight(now);
+  const v2 = normalizeBudgetConfig(params.config);
+
+  // Extract legacy session/task limits if present on the original config
+  const legacy = params.config as BudgetConfig;
+  const sessionLimitCents = legacy.sessionLimitCents ?? (v2.session?.cents ?? null);
+  const taskLimitCents = legacy.taskLimitCents ?? (v2.task?.cents ?? null);
 
   // Upsert: check if budget exists
   const existing = db.prepare(
@@ -37,30 +46,54 @@ export function setBudget(
   if (existing) {
     db.prepare(`
       UPDATE budgets SET
-        daily_limit_cents = ?, session_limit_cents = ?, task_limit_cents = ?,
+        hourly_limit_cents = ?, hourly_limit_tokens = ?, hourly_limit_requests = ?,
+        daily_limit_cents = ?, daily_limit_tokens = ?, daily_limit_requests = ?,
+        monthly_limit_cents = ?, monthly_limit_tokens = ?, monthly_limit_requests = ?,
+        session_limit_cents = ?, task_limit_cents = ?,
+        hourly_reset_at = COALESCE(hourly_reset_at, ?),
+        monthly_reset_at = COALESCE(monthly_reset_at, ?),
         updated_at = ?
       WHERE id = ?
     `).run(
-      params.config.dailyLimitCents ?? null,
-      params.config.sessionLimitCents ?? null,
-      params.config.taskLimitCents ?? null,
+      v2.hourly?.cents ?? null, v2.hourly?.tokens ?? null, v2.hourly?.requests ?? null,
+      v2.daily?.cents ?? null, v2.daily?.tokens ?? null, v2.daily?.requests ?? null,
+      v2.monthly?.cents ?? null, v2.monthly?.tokens ?? null, v2.monthly?.requests ?? null,
+      sessionLimitCents,
+      taskLimitCents,
+      v2.hourly ? getNextHourBoundary(now) : null,
+      v2.monthly ? getNextMonthBoundaryUTC(now) : null,
       now,
       existing.id as string,
     );
   } else {
     const id = crypto.randomUUID();
     db.prepare(`
-      INSERT INTO budgets (id, project_id, agent_id, daily_limit_cents, session_limit_cents, task_limit_cents,
-        daily_spent_cents, daily_reset_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      INSERT INTO budgets (id, project_id, agent_id,
+        hourly_limit_cents, hourly_limit_tokens, hourly_limit_requests,
+        daily_limit_cents, daily_limit_tokens, daily_limit_requests,
+        monthly_limit_cents, monthly_limit_tokens, monthly_limit_requests,
+        session_limit_cents, task_limit_cents,
+        daily_spent_cents, daily_reset_at, hourly_reset_at, monthly_reset_at,
+        created_at, updated_at)
+      VALUES (?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?,
+        ?, ?,
+        0, ?, ?, ?,
+        ?, ?)
     `).run(
       id,
       params.projectId,
       params.agentId ?? null,
-      params.config.dailyLimitCents ?? null,
-      params.config.sessionLimitCents ?? null,
-      params.config.taskLimitCents ?? null,
-      nextMidnight,
+      v2.hourly?.cents ?? null, v2.hourly?.tokens ?? null, v2.hourly?.requests ?? null,
+      v2.daily?.cents ?? null, v2.daily?.tokens ?? null, v2.daily?.requests ?? null,
+      v2.monthly?.cents ?? null, v2.monthly?.tokens ?? null, v2.monthly?.requests ?? null,
+      sessionLimitCents,
+      taskLimitCents,
+      getNextMidnightUTC(now),
+      v2.hourly ? getNextHourBoundary(now) : null,
+      v2.monthly ? getNextMonthBoundaryUTC(now) : null,
       now,
       now,
     );
@@ -161,7 +194,7 @@ export function resetDailyBudgets(
 ): number {
   const db = dbOverride ?? getDb(projectId);
   const now = Date.now();
-  const nextMidnight = getNextMidnight(now);
+  const nextMidnight = getNextMidnightUTC(now);
 
   const result = db.prepare(`
     UPDATE budgets SET daily_spent_cents = 0, daily_reset_at = ?, updated_at = ?
@@ -169,10 +202,4 @@ export function resetDailyBudgets(
   `).run(nextMidnight, now, projectId, now);
 
   return Number(result.changes);
-}
-
-function getNextMidnight(now: number): number {
-  const d = new Date(now);
-  d.setUTCHours(24, 0, 0, 0);
-  return d.getTime();
 }

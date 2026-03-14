@@ -182,6 +182,15 @@ export type { AllocateBudgetParams, AllocateBudgetResult, AgentBudgetStatus } fr
 export { getBudgetStatus, checkMultiWindowBudget } from "./budget-windows.js";
 export type { BudgetStatus, WindowStatus } from "./budget-windows.js";
 
+// --- Budget v2 ---
+export { normalizeBudgetConfig } from "./budget/normalize.js";
+export { ensureWindowsCurrent, getNextHourBoundary, getNextMidnightUTC, getNextMonthBoundaryUTC } from "./budget/reset.js";
+export { checkBudgetV2 } from "./budget/check-v2.js";
+export { reserveBudget, settlePlanItem, releasePlanReservation, cleanupStaleReservations } from "./budget/reservation.js";
+export { computeDailySnapshot, computeWeeklyTrend, computeMonthlyProjection } from "./budget/forecast.js";
+export type { BudgetConfigV2, BudgetWindowConfig, DailyBudgetSnapshot, WeeklyTrend, MonthlyProjection } from "./types.js";
+export type { BudgetAllocation } from "./budget-cascade.js";
+
 // --- Capacity ---
 export { getCapacityReport } from "./capacity.js";
 export type { CapacityReport, ThrottleRisk } from "./capacity.js";

@@ -376,6 +376,21 @@ System onboards agents but not the user. No guided first experience.
 
 ---
 
+### Budget System v2
+- [x] BudgetConfigV2 types and normalization adapter (legacy -> v2)
+- [x] V28 migration: token/request counters, window boundaries, reservations
+- [x] Lazy self-healing window resets (hourly/daily/monthly)
+- [x] O(1) counter-based budget check across all dimensions and windows
+- [x] recordCost increments all 9 counters (3 windows x 3 dimensions)
+- [x] Soft budget reservations for dispatch plans
+- [x] Pre-flight plan validation with reservation lifecycle
+- [x] Multi-day forecasting (daily snapshot, weekly trend, monthly projection)
+- [x] Cascading budgets extended to all dimensions and windows
+- [x] Dispatcher unified to single checkBudgetV2 call
+- [x] Circuit breaker extended to tokens and requests
+- [x] setBudget supports BudgetConfigV2 with all limit columns
+- [x] Full budget v2 exports from index.ts
+
 ### Phase 10: Polish & Optimization
 ### Phase 9: UX Overhaul
 - [x] 9.1: Minimal viable config (role inference, smart defaults)
