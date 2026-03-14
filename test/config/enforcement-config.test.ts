@@ -575,7 +575,7 @@ agents:
     expect(sourceNames).toContain("project_md");
     expect(sourceNames).toContain("escalations");
     expect(sourceNames).toContain("soul");
-    expect(sourceNames).toContain("memory");
+    expect(sourceNames).toContain("memory_instructions");
     expect(sourceNames).toContain("skill");
   });
 
@@ -615,7 +615,7 @@ agents:
     expect(sourceNames).toContain("soul");
     expect(sourceNames).toContain("tools_reference");
     expect(sourceNames).toContain("assigned_task");
-    expect(sourceNames).toContain("memory");
+    expect(sourceNames).toContain("memory_instructions");
     expect(sourceNames).toContain("skill");
     // Inherits employee profile expectations
     expect(worker.expectations.some((r) => r.tool === "clawforce_task")).toBe(true);

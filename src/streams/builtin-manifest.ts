@@ -22,6 +22,8 @@ export function registerBuiltinStreams(): void {
   registerStream({ name: "file", description: "Raw file content from a path", builtIn: true, outputTargets: ["briefing"] });
   registerStream({ name: "skill", description: "Agent skill pack documentation", builtIn: true, outputTargets: ["briefing"] });
   registerStream({ name: "memory", description: "Memory search instructions for the agent", builtIn: true, outputTargets: ["briefing"] });
+  registerStream({ name: "memory_instructions", description: "Role-based memory protocol instructions (replaces memory)", builtIn: true, outputTargets: ["briefing"] });
+  registerStream({ name: "memory_review_context", description: "Session transcripts and context for memory review job", builtIn: true, outputTargets: ["briefing"] });
   registerStream({ name: "escalations", description: "Pending and recent escalation events", builtIn: true, outputTargets: ["briefing", "telegram"] });
   registerStream({ name: "workflows", description: "Active workflow phases and progress", builtIn: true, outputTargets: ["briefing"] });
   registerStream({ name: "activity", description: "Recent agent activity log", builtIn: true, outputTargets: ["briefing"] });

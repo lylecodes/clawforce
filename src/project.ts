@@ -347,6 +347,7 @@ function normalizeProjectConfig(raw: Record<string, unknown>): ProjectConfig {
 const VALID_SOURCES: ContextSource["source"][] = [
   "instructions", "custom", "project_md", "task_board",
   "assigned_task", "knowledge", "file", "skill", "memory",
+  "memory_instructions", "memory_review_context",
   "escalations", "workflows", "activity", "sweep_status",
   "proposals", "agent_status", "cost_summary", "policy_status", "health_status",
   "team_status", "team_performance", "soul", "tools_reference",

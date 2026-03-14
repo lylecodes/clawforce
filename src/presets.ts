@@ -128,7 +128,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     briefing: [
       "soul", "tools_reference", "project_md", "task_board", "goal_hierarchy",
       "escalations", "team_status", "trust_scores", "cost_summary", "resources",
-      "pending_messages", "channel_messages", "memory", "skill",
+      "pending_messages", "channel_messages", "memory_instructions", "skill",
       "policy_status", "preferences", "cost_forecast", "available_capacity",
       "knowledge_candidates", "budget_guidance",
       "onboarding_welcome", "weekly_digest", "intervention_suggestions",
@@ -148,7 +148,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     persona: "You are an employee agent responsible for executing assigned tasks and reporting results.",
     briefing: [
       "soul", "tools_reference", "assigned_task", "pending_messages",
-      "channel_messages", "memory", "skill",
+      "channel_messages", "memory_instructions", "skill",
     ],
     expectations: [
       { tool: "clawforce_task", action: "transition", min_calls: 1 },
@@ -164,7 +164,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     persona: "You are a personal assistant agent focused on communication, memory management, and helping users.",
     briefing: [
       "soul", "tools_reference", "pending_messages", "channel_messages",
-      "memory", "skill", "preferences",
+      "memory_instructions", "skill", "preferences",
     ],
     expectations: [],
     performance_policy: { action: "alert" },

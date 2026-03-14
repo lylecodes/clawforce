@@ -47,6 +47,7 @@ import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 import { getStream } from "../streams/catalog.js";
 import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
 import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
+import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -168,6 +169,9 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
 
     case "memory":
       return "## Shared Memory\n\nUse `memory_search` to find relevant learnings from previous sessions. Use `memory_get` to retrieve specific memories by ID.";
+
+    case "memory_instructions":
+      return resolveMemoryInstructions(ctx.config.memory, ctx.config.extends ?? "employee");
 
     case "soul":
       return resolveSoulDoc(ctx.agentId, ctx.projectDir);

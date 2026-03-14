@@ -27,7 +27,7 @@ describe("assistant preset", () => {
     expect(sources).toContain("tools_reference");
     expect(sources).toContain("pending_messages");
     expect(sources).toContain("channel_messages");
-    expect(sources).toContain("memory");
+    expect(sources).toContain("memory_instructions");
     expect(sources).toContain("skill");
     // Should NOT include org/management sources
     expect(sources).not.toContain("task_board");
@@ -116,7 +116,7 @@ describe("assistant applyProfile", () => {
     expect(sources).toContain("soul");
     expect(sources).toContain("pending_messages");
     expect(sources).toContain("channel_messages");
-    expect(sources).toContain("memory");
+    expect(sources).toContain("memory_instructions");
   });
 
   it("inherits empty expectations when agent provides null", () => {
