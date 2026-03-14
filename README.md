@@ -1,50 +1,78 @@
 # clawforce
 
-Accountability layer for autonomous AI agents — treats them like employees with titles, departments, reporting chains, performance expectations, and consequences. Built for the [OpenClaw](https://github.com/openclaw/openclaw) ecosystem.
+**Your AI agents are employees. Clawforce is their HR department.**
 
-## Key Features
+Budget enforcement, compliance tracking, org hierarchy, performance management, and trust evolution — in one [OpenClaw](https://github.com/openclaw/openclaw) plugin. The only agent framework where "you can't dispatch that task because the engineering initiative already burned through its daily allocation" is a real sentence.
 
-- **Hire AI employees** with full profiles: title, model, persona, department, team, permissions
-- **Org hierarchy** with reporting chains via `reports_to`, forming manager-to-employee structures
-- **Accountability enforcement** -- agents must meet expectations (deliverables) or face performance policy (retry, escalate, terminate)
-- **Config inheritance** -- agents inherit from presets (`extends: manager`) with merge operators for composable config
-- **Task lifecycle** -- full state machine: OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE
-- **Workflows** -- multi-phase execution with automatic gating between phases
-- **Shared memory** -- agents search and retrieve learnings across sessions via OpenClaw's RAG engine (vector embeddings, hybrid BM25+vector search)
-- **Skill system** -- preset-aware domain knowledge generated from source code, never drifts from reality
-- **Cost tracking** -- token spending by agent and task, with budget enforcement
-- **Policy enforcement** -- approval flows, risk classification, SLO monitoring
-- **Sweep service** -- background process detects stale work, enforces deadlines, kills stuck agents
+## Before / After
+
+**Without Clawforce:** You manually wire OpenClaw agents with custom cron jobs, hand-rolled compliance, spreadsheet budgets, and hope nobody overspends. When an agent fails, you find out tomorrow.
+
+**With Clawforce:**
+
+```yaml
+agents:
+  lead:
+    title: Engineering Lead
+  frontend:
+    title: Frontend Dev
+    reports_to: lead
+  backend:
+    title: Backend Dev
+    reports_to: lead
+
+budget:
+  daily: { cents: 5000, tokens: 3000000 }
+```
+
+That's it. Roles inferred from structure. Budgets enforced automatically. Compliance tracked. Failures escalated. Manager wakes up on a cron, plans its day around remaining budget, dispatches work, reviews results.
+
+## Why Clawforce
+
+No other framework does this:
+
+| Capability | Clawforce | CrewAI | LangGraph | AutoGen |
+|-----------|-----------|--------|-----------|---------|
+| Per-agent budget enforcement | Hard gates, 3 dimensions | No | No | No |
+| Compliance & audit trails | Built-in, every session | No | No | No |
+| Org hierarchy with reporting chains | First-class | Roles only | Patterns only | Chat groups |
+| Progressive trust / earned autonomy | Track record based | No | No | No |
+| Initiative-level budget allocation | % of daily budget | No | No | No |
+| Pre-flight plan validation | Validates before dispatch | No | No | No |
+| EU AI Act ready | Audit trails + accountability | No | No | No |
 
 ## Quick Start
 
-Install:
+### 1. Install
 
 ```bash
-pnpm install
+npm install clawforce
 ```
 
-Create a `project.yaml` to define your AI workforce:
+Requires Node 22+ and an [OpenClaw](https://github.com/openclaw/openclaw) installation.
+
+### 2. Initialize
+
+```bash
+# Interactive setup — answers 5 questions, generates config
+clawforce init
+```
+
+Or create `~/.clawforce/config.yaml` manually:
 
 ```yaml
-name: my-project
-
 agents:
   sarah:
     extends: manager
     title: VP of Sales
-    model: claude-opus-4-6
     persona: "You manage the sales team. Focus on pipeline growth."
     department: sales
     channel: telegram
-    reports_to: parent
 
   lead-gen:
     extends: employee
     title: Lead Generation Specialist
-    model: claude-sonnet-4-6
     department: sales
-    team: outreach
     reports_to: sarah
     jobs:
       daily-outreach:
@@ -52,144 +80,81 @@ agents:
         nudge: "Run today's lead generation campaign."
 ```
 
-## Config Inheritance
-
-Agents inherit from **presets** using `extends:`. Two builtin presets ship with the system:
-
-### `manager` preset
-
-Coordinates the team. Creates tasks, reviews work, handles escalations.
-
-- Full operational briefing (task_board, escalations, team_status, cost_summary, etc.)
-- Coordination enabled (periodic wake-up cron)
-- Compaction enabled
-- Performance policy: alert on non-compliance
-
-### `employee` preset
-
-Completes assigned tasks. Focused and narrow.
-
-- Task-focused briefing (assigned_task, memory, skill)
-- Must transition tasks to a terminal state
-- Performance policy: retry 3x then alert
-
-### User-defined presets
-
-Define reusable templates for similar agents:
+And a domain config at `~/.clawforce/domains/sales.yaml`:
 
 ```yaml
-presets:
-  sales-rep:
-    extends: employee
-    skills: [lead-gen, crm-integration]
-    performance_policy: { action: retry, max_retries: 2, then: alert }
-
-agents:
-  rep-west:
-    extends: sales-rep
-    title: West Coast Rep
-    reports_to: sarah
-
-  rep-east:
-    extends: sales-rep
-    title: East Coast Rep
-    reports_to: sarah
-    skills: ["+enterprise-contracts", "-crm-integration"]  # merge operators
+domain: sales
+agents: [sarah, lead-gen]
+paths: ["~/projects/sales-pipeline"]
 ```
 
-### Merge operators
+### 3. Activate
 
-Arrays support `+` (append) and `-` (remove) operators for composing config without full replacement:
+Clawforce runs as an OpenClaw plugin. Once config is set, agents are managed automatically — budget gates, compliance checks, escalation routing, and context injection happen on every session.
+
+## Core Concepts
+
+### Agents Are Employees
+
+Every agent has a title, department, reporting chain, and performance expectations. Not metaphorically — the system enforces accountability the way a real organization would.
+
+```
+CEO (extends: manager)
+├── VP Engineering (extends: manager, reports_to: ceo)
+│   ├── Frontend Dev (extends: employee, reports_to: vp-eng)
+│   └── Backend Dev (extends: employee, reports_to: vp-eng)
+└── VP Sales (extends: manager, reports_to: ceo)
+    └── Lead Gen (extends: employee, reports_to: vp-sales)
+```
+
+Two built-in presets:
+
+- **`manager`** — Coordinates the team. Creates tasks, reviews work, allocates budget. Wakes on a cron, plans its day, dispatches work.
+- **`employee`** — Executes assigned tasks. Must transition tasks to completion, attach evidence, meet expectations.
+
+Roles can be inferred automatically — if other agents report to you, you're a manager.
+
+### Budget Enforcement
+
+Three budget dimensions (cents, tokens, requests) across three time windows (hourly, daily, monthly). Any dimension can block dispatch.
 
 ```yaml
-agents:
-  custom-manager:
-    extends: manager
-    briefing: ["+initiative_progress", "-sweep_status"]  # add one, remove one
+budget:
+  daily: { cents: 10000, tokens: 5000000 }
+  hourly: { cents: 2000 }
+  monthly: { cents: 200000 }
 ```
 
-Plain arrays (without operators) fully replace the parent's array.
+Features:
+- **Hard dispatch gates** — agents cannot exceed budget, period
+- **Initiative allocation** — "UI improvements gets 40% of daily budget"
+- **Cascading budgets** — managers allocate to reports
+- **Pre-flight plan validation** — "this plan costs $45, you have $30 remaining" blocks before starting
+- **Soft reservations** — active plans hold budget so other dispatches can't steal it
+- **Cost forecasting** — weekly trends, monthly projections, exhaustion ETA
+- **Circuit breaker** — pause at 1.5x daily budget (configurable)
 
-### Job presets
+### Accountability
 
-Jobs also support `extends:` with two builtin presets:
-
-- **`reflect`** — weekly strategic review (budget, performance, team health)
-- **`triage`** — frequent coordination cycle (task board, escalations)
-
-```yaml
-agents:
-  eng-lead:
-    extends: manager
-    jobs:
-      weekly-review:
-        extends: reflect
-        cron: "0 9 * * FRI"
-```
-
-## Agent Config
-
-Each agent definition supports:
-
-| Field | Description |
-|-------|-------------|
-| `extends` | Preset to inherit from (`manager`, `employee`, or custom) |
-| `title` | Job title (e.g., "VP of Sales") |
-| `model` | AI model (e.g., `claude-opus-4-6`, `claude-sonnet-4-6`) |
-| `persona` | Natural language persona injected into the prompt |
-| `department` | Organizational department (e.g., `sales`, `engineering`) |
-| `team` | Sub-team within a department (e.g., `outreach`, `backend`) |
-| `channel` | Notification channel (e.g., `telegram`) |
-| `reports_to` | Agent ID this agent reports to, or `parent` for top-level |
-| `briefing` | Context sources (supports `+`/`-` merge operators) |
-| `expectations` | Required tool calls before session ends |
-| `performance_policy` | Consequences for non-compliance |
-| `coordination` | `{ enabled: true, schedule: "*/30 * * * *" }` for managers |
-| `jobs` | Recurring jobs with cron schedules |
-
-## Org Hierarchy
-
-Agents form reporting chains through `reports_to`:
-
-```
-parent (user session)
-  └── sarah (VP of Sales, extends: manager)
-        └── lead-gen (Lead Generation Specialist, extends: employee)
-        └── closer (Account Executive, extends: employee)
-```
-
-When an agent fails or needs escalation, the issue routes up the reporting chain. A manager receives escalation context in their briefing so they can act on team failures.
-
-Departments and teams provide logical grouping for cost tracking, policy enforcement, and monitoring.
-
-## Accountability
-
-### Expectations
-
-Every agent has expectations -- required tool calls that must happen before the session ends:
+Agents have expectations — required tool calls that must happen before a session ends:
 
 ```yaml
 expectations:
+  - tool: clawforce_task
+    action: transition
+    min_calls: 1
   - tool: clawforce_log
     action: write
     min_calls: 1
-  - tool: clawforce_task
-    action: [transition, fail]
-    min_calls: 1
 ```
 
-If an agent finishes without meeting its expectations, it is flagged non-compliant.
-
-### Performance Policy
-
-The `performance_policy` defines consequences for non-compliance:
+If expectations aren't met, the performance policy kicks in:
 
 | Action | Behavior |
 |--------|----------|
-| `retry` | Re-run the agent with "you didn't do X" context. Set `max_retries`. |
-| `alert` | Notify via messaging channel. |
-| `escalate` | Route the failure up to the `reports_to` agent. |
-| `terminate_and_alert` | Kill the agent and notify. Used as the `then` action after retries exhaust. |
+| `retry` | Re-run with "you didn't do X" context |
+| `alert` | Notify via Telegram/Slack/Discord |
+| `terminate_and_alert` | Kill and notify |
 
 ```yaml
 performance_policy:
@@ -198,139 +163,170 @@ performance_policy:
   then: terminate_and_alert
 ```
 
-Retry counting is durable (SQLite-backed, 4-hour window, hard cap of 10).
+Every session is audited. Compliance is tracked. Failures route up the reporting chain.
 
-## Context Sources
+### Task Lifecycle
 
-Context briefing injects information into an agent's prompt at session start. Each preset has defaults, and agents can add or exclude sources using merge operators.
+```
+OPEN → ASSIGNED → IN_PROGRESS → REVIEW → DONE
+                                   ↓
+                              FAILED / BLOCKED
+```
 
-| Source | Description |
-|--------|-------------|
-| `instructions` | Auto-generated from `expectations` (always injected) |
-| `custom` | Raw markdown string via `content` field |
-| `project_md` | Contents of `PROJECT.md` from the project directory |
-| `task_board` | Active tasks grouped by state |
-| `assigned_task` | Full task details for this agent's assigned work |
-| `knowledge` | Knowledge base entries (filterable by category, tags) |
-| `memory` | Directs agents to use `memory_search` and `memory_get` RAG tools |
-| `skill` | Role-filtered domain knowledge (table of contents at session start) |
-| `file` | File contents from the project directory |
-| `escalations` | Failed tasks that exhausted retries |
-| `workflows` | Active workflows with per-phase progress |
-| `activity` | Recent state transitions |
-| `sweep_status` | Stale tasks and approaching deadlines |
-| `proposals` | Pending approval proposals |
-| `agent_status` | Active sessions, stuck agents, disabled agents |
-| `cost_summary` | Token spending by agent and task |
-| `policy_status` | Active policies and recent violations |
-| `health_status` | SLO evaluations and alert status |
+- **Evidence required** — moving to REVIEW needs at least one evidence attachment
+- **Verifier gate** — a different agent must approve REVIEW → DONE
+- **Retry limit** — FAILED → OPEN blocked when retries exhausted
+- **Goal linking** — tasks inherit priority from their goal
 
-Agents can customize their briefing using merge operators:
+### Trust Evolution
+
+Agents earn autonomy based on track record. 47 approved emails with 0 rejections? Suggest auto-approving routine replies. Trust scores tracked per action category, with configurable decay.
+
+### Goals & Initiatives
+
+Full goal hierarchy with completion cascade. Goals with `allocation` are initiatives — strategic priorities with hard budget enforcement:
 
 ```yaml
-agents:
-  sarah:
-    extends: manager
-    briefing: ["-sweep_status", "-health_status", "+custom"]
-```
-
-Or with full source objects for advanced config:
-
-```yaml
-agents:
-  sarah:
-    extends: manager
-    exclude_briefing:
-      - sweep_status
-      - health_status
-    briefing:
-      - source: custom
-        content: "Always prioritize pipeline deals closing this week."
-      - source: file
-        path: "SALES_PLAYBOOK.md"
-```
-
-## Shared Memory (RAG)
-
-Agents search and retrieve persistent learnings via OpenClaw's native RAG memory engine. Two tools are available:
-
-| Tool | Purpose |
-|------|---------|
-| `memory_search` | Semantic search using hybrid BM25 + vector similarity with MMR re-ranking |
-| `memory_get` | Retrieve a specific memory entry by ID |
-
-The `memory` context source injects guidance directing agents to use these tools on-demand rather than pre-loading memories. OpenClaw handles persistence, embedding, and lifecycle management automatically.
-
-## Task Lifecycle
-
-Tasks follow a strict state machine:
-
-```
-OPEN --> ASSIGNED --> IN_PROGRESS --> REVIEW --> DONE
-```
-
-With additional states: BLOCKED, FAILED, CANCELLED. Policy rules enforced by the state machine:
-
-- **Evidence required** -- moving to REVIEW requires at least one evidence attachment
-- **Verifier gate** -- REVIEW to DONE requires a different agent than the assignee
-- **Retry limit** -- FAILED to OPEN is blocked when retries are exhausted
-- **Workflow phase gate** -- tasks in future phases are blocked from starting
-
-## Initiatives & Budget Allocation
-
-Goals with an `allocation` field are **initiatives** — strategic priorities with hard budget enforcement.
-
-### Config
-
-```yaml
-budget:
-  daily_limit_cents: 2000
-
 goals:
   ui-improvements:
     allocation: 40
     description: "Dashboard UX improvements"
-    department: engineering
   customer-outreach:
     allocation: 30
     description: "Daily lead gen and follow-ups"
-    department: sales
 ```
 
-Allocations are percentages of the project's daily budget. Unallocated remainder (here 30%) serves as reserve for ad-hoc work.
+When an initiative's spend reaches its allocation percentage of the daily budget, dispatch is blocked for all tasks under that goal tree.
 
-### Hard Gate
+### Communication
 
-When an initiative's spend reaches its allocation, dispatch is **blocked** for all tasks under that goal tree. The gate traces tasks up the goal hierarchy to find their root initiative.
+Structured agent-to-agent protocols:
+- **Direct messages** — agents DM each other
+- **Request/response** — formal ask with timeout
+- **Delegation** — assign sub-work with report-back
+- **Channels & meetings** — topic-based channels with meeting mode, mirrored to Telegram
 
-### Cascading Budget
+### Memory
 
-Budget flows uniformly through the agent tree. Coordination agents allocate portions of their budget to reports. Each allocation is bounded by the parent's remaining allocatable budget.
+OpenClaw provides the memory infrastructure (RAG vector store). Clawforce provides memory governance:
+- **Ghost recall** — per-turn LLM triage enriches context with relevant memories
+- **Retrieval tracking** — frequently-accessed memories surface as promotion candidates
+- **Promotion pipeline** — memories promoted to SOUL.md, skills, or project docs
+- **Knowledge flagging** — wrong knowledge flagged, corrected at source
 
-| Tool | Action | Purpose |
-|------|--------|---------|
-| `clawforce_goal` | `create` with `allocation` | Create an initiative |
-| `clawforce_goal` | `status` | See budget spend for initiative |
-| `clawforce_ops` | `allocate_budget` | Allocate budget to a report |
+### Data Streams
+
+29+ built-in context sources, parameterizable, with multi-output routing:
+
+```yaml
+routing:
+  cost_alert:
+    source: cost_forecast
+    params: { horizon: "4h" }
+    condition: "exhausts_within_hours < 4"
+    outputs:
+      - target: telegram
+        channel: eng-alerts
+      - target: webhook
+        url: https://hooks.example.com/budget
+```
+
+Custom SQL streams over Clawforce's SQLite database:
+
+```yaml
+streams:
+  stale_tasks:
+    description: "Tasks open > 48 hours"
+    query: >
+      SELECT id, title FROM tasks
+      WHERE state = 'OPEN' AND created_at < unixepoch() - 172800
+```
+
+## Config Inheritance
+
+Agents inherit from presets using `extends:`. Merge operators compose config:
+
+```yaml
+agents:
+  custom-manager:
+    extends: manager
+    briefing: ["+initiative_status", "-sweep_status"]
+```
+
+User-defined presets for reusable templates:
+
+```yaml
+presets:
+  sales-rep:
+    extends: employee
+    skills: [lead-gen, crm-integration]
+
+agents:
+  rep-west:
+    extends: sales-rep
+    title: West Coast Rep
+    reports_to: sarah
+```
+
+Job presets for recurring work:
+
+```yaml
+jobs:
+  weekly-review:
+    extends: reflect      # built-in: strategic review
+    cron: "0 9 * * FRI"
+  coordination:
+    extends: triage       # built-in: frequent task board check
+    cron: "*/30 * * * *"
+```
+
+## Architecture
+
+Clawforce is a **governance layer** that composes with OpenClaw. It doesn't own agent runtime (model, tools, compaction mechanics) — OpenClaw handles those. Clawforce owns the organizational layer: who does what, how much they can spend, what they're accountable for, and how they earn trust.
+
+```
+Clawforce (Governance)
+├── Org Model — titles, reporting chains, departments
+├── Budget — enforcement, allocation, forecasting
+├── Compliance — expectations, performance policies, audit
+├── Tasks — state machine, assignment, verification
+├── Goals — hierarchy, initiatives, completion cascade
+├── Trust — earned autonomy, progressive trust
+├── Communication — protocols, meetings, channels
+├── Memory — ghost recall, promotion/demotion lifecycle
+└── Data Streams — catalog, routing, custom queries
+
+OpenClaw (Runtime)
+├── Model execution, tools, compaction
+├── Memory RAG (vector store, embeddings)
+├── Cron scheduling
+├── Channel delivery (Telegram, Slack, Discord, etc.)
+└── Session management
+```
 
 ## Tools
 
 | Tool | Purpose |
 |------|---------|
-| `clawforce_task` | Create tasks, transition states, attach evidence, manage proposals |
-| `clawforce_log` | Write knowledge entries, log outcomes, search history |
-| `clawforce_verify` | Request verification, submit pass/fail verdicts |
-| `clawforce_workflow` | Create and manage multi-phase workflows |
-| `clawforce_setup` | Onboard projects, validate configs, activate |
-| `clawforce_compact` | Session compaction for long-running agents |
-| `clawforce_ops` | Operational actions (enqueue work, process events, kill agents) |
-| `memory_search` | Semantic search for relevant memories from previous sessions (OpenClaw RAG) |
-| `memory_get` | Retrieve a specific memory entry by ID (OpenClaw RAG) |
+| `clawforce_task` | Create tasks, transition states, attach evidence |
+| `clawforce_log` | Write knowledge entries, log outcomes |
+| `clawforce_verify` | Request verification, submit verdicts |
+| `clawforce_workflow` | Multi-phase workflow management |
+| `clawforce_ops` | Agent status, dispatch, budget allocation, plans |
+| `clawforce_goal` | Goal hierarchy, initiatives, decomposition |
+| `clawforce_message` | Agent-to-agent messaging and protocols |
+| `clawforce_channel` | Channel management, meetings |
+| `clawforce_compact` | Session compaction and knowledge preservation |
+| `clawforce_setup` | Project onboarding, config validation |
+| `clawforce_context` | Context assembly and refresh |
+| `memory_search` | RAG semantic search (OpenClaw) |
+| `memory_get` | Retrieve memory by ID (OpenClaw) |
 
-## Installation
+## Requirements
 
-```bash
-pnpm install
-```
+- Node 22+ (for `node:sqlite`)
+- [OpenClaw](https://github.com/openclaw/openclaw) runtime
 
-Requires Node 22+ (for `node:sqlite`).
+## License
+
+MIT
