@@ -342,6 +342,28 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
     }
   }
 
+  // Skill cap warnings — check custom skill count against agent skillCap
+  const customSkillCount = config.skills ? Object.keys(config.skills).length : 0;
+  if (customSkillCount > 0) {
+    for (const [agentId, agentConfig] of Object.entries(config.agents)) {
+      if (agentConfig.skillCap !== undefined && agentConfig.skillCap > 0) {
+        if (customSkillCount >= agentConfig.skillCap) {
+          warnings.push({
+            level: "suggest",
+            agentId,
+            message: `Agent has ${customSkillCount} custom skill(s) which meets or exceeds skillCap of ${agentConfig.skillCap} — consider splitting this agent into specialists.`,
+          });
+        } else if (customSkillCount >= agentConfig.skillCap - 2) {
+          warnings.push({
+            level: "suggest",
+            agentId,
+            message: `Agent has ${customSkillCount} custom skill(s), approaching skillCap of ${agentConfig.skillCap} — plan for growth.`,
+          });
+        }
+      }
+    }
+  }
+
   return warnings;
 }
 
