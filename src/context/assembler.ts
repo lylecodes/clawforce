@@ -44,6 +44,7 @@ import { renderPreferences } from "../trust/preferences.js";
 import { renderTrustSummary } from "../trust/tracker.js";
 import { getDirectReports } from "../org.js";
 import { getAgentConfig } from "../project.js";
+import { getStream } from "../streams/catalog.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -207,6 +208,15 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
 
     case "knowledge_candidates":
       return resolveKnowledgeCandidatesSource(ctx.projectId ?? "", undefined);
+
+    case "custom_stream": {
+      if (!source.streamName || !ctx.projectId) return null;
+      const streamDef = getStream(source.streamName);
+      if (!streamDef) return null;
+      // Custom streams with queries are resolved through the router.
+      // In briefing context, show the stream description as a reference.
+      return `## ${source.streamName}\n\n${streamDef.description}`;
+    }
 
     default:
       return null;
