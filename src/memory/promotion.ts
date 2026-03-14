@@ -3,11 +3,15 @@
  *
  * Detects frequently-retrieved memories and creates promotion candidates.
  * Candidates are reviewed by the manager during reflection.
+ * On approval, writes promoted content to the appropriate target file.
  */
 
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { getDb } from "../db.js";
+import { getDb, getProjectsDir } from "../db.js";
+import { safeLog } from "../diagnostics.js";
 import type { PromotionCandidate, PromotionTarget } from "../types.js";
 
 function rowToCandidate(row: Record<string, unknown>): PromotionCandidate {
@@ -122,10 +126,76 @@ export function getCandidate(projectId: string, candidateId: string, dbOverride?
   return row ? rowToCandidate(row) : null;
 }
 
+/**
+ * Resolve the project directory on disk for a given projectId.
+ */
+function resolveProjectPath(projectId: string): string {
+  return path.join(getProjectsDir(), projectId);
+}
+
+/**
+ * Write promoted content to the appropriate target file.
+ * Handles "soul", "skill", "project_doc", and "rule" targets.
+ */
+function writePromotedContent(candidate: PromotionCandidate): void {
+  const projectDir = resolveProjectPath(candidate.projectId);
+  const agentId = candidate.targetAgentId;
+  const content = candidate.contentSnippet;
+  const timestamp = new Date().toISOString().slice(0, 10);
+  const entry = `\n\n<!-- Promoted from memory on ${timestamp} -->\n${content}\n`;
+
+  try {
+    switch (candidate.suggestedTarget) {
+      case "soul": {
+        if (!agentId) {
+          safeLog("promotion:write", "Cannot promote to soul — no target agent ID");
+          return;
+        }
+        const agentDir = path.join(projectDir, "agents", agentId);
+        fs.mkdirSync(agentDir, { recursive: true });
+        const soulPath = path.join(agentDir, "SOUL.md");
+        fs.appendFileSync(soulPath, entry, "utf-8");
+        break;
+      }
+      case "skill": {
+        const skillsDir = path.join(projectDir, "skills");
+        fs.mkdirSync(skillsDir, { recursive: true });
+        // Derive a filename from content hash
+        const skillFile = path.join(skillsDir, `promoted-${candidate.contentHash.slice(0, 8)}.md`);
+        fs.writeFileSync(skillFile, `# Promoted Skill\n\n${content}\n`, "utf-8");
+        break;
+      }
+      case "project_doc": {
+        const knowledgeDir = path.join(projectDir, "knowledge");
+        fs.mkdirSync(knowledgeDir, { recursive: true });
+        const learningsPath = path.join(knowledgeDir, "learnings.md");
+        fs.appendFileSync(learningsPath, entry, "utf-8");
+        break;
+      }
+      case "rule": {
+        // Rules are handled by the rule engine — write to a rules file for review
+        const rulesDir = path.join(projectDir, "rules");
+        fs.mkdirSync(rulesDir, { recursive: true });
+        const ruleFile = path.join(rulesDir, `promoted-${candidate.contentHash.slice(0, 8)}.md`);
+        fs.writeFileSync(ruleFile, `# Promoted Rule\n\n${content}\n`, "utf-8");
+        break;
+      }
+    }
+  } catch (err) {
+    safeLog("promotion:write", err);
+  }
+}
+
 export function approveCandidate(projectId: string, candidateId: string, dbOverride?: DatabaseSync): void {
   const db = dbOverride ?? getDb(projectId);
   db.prepare("UPDATE promotion_candidates SET status = 'approved', reviewed_at = ? WHERE id = ? AND project_id = ? AND status = 'pending'")
     .run(Date.now(), candidateId, projectId);
+
+  // Write promoted content to the target file
+  const candidate = getCandidate(projectId, candidateId, dbOverride);
+  if (candidate && candidate.status === "approved") {
+    writePromotedContent(candidate);
+  }
 }
 
 export function dismissCandidate(projectId: string, candidateId: string, dbOverride?: DatabaseSync): void {
