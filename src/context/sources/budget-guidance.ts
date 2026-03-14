@@ -2,11 +2,17 @@
  * Clawforce — Budget Guidance Briefing Source
  *
  * Runtime budget guidance injected into manager reflection.
- * Uses historical cost data when available, model estimates when fresh.
+ * Delegates to the forecast module for daily snapshot, weekly trend,
+ * and monthly projection data.
  */
 
 import { getDb } from "../../db.js";
 import { safeLog } from "../../diagnostics.js";
+import {
+  computeDailySnapshot,
+  computeWeeklyTrend,
+  computeMonthlyProjection,
+} from "../../budget/forecast.js";
 
 export function resolveBudgetGuidanceSource(
   projectId: string,
@@ -17,63 +23,91 @@ export function resolveBudgetGuidanceSource(
   try {
     const db = getDb(projectId);
 
-    // Get today's spend
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayMs = todayStart.getTime();
+    const snapshot = computeDailySnapshot(projectId, db);
 
-    const spendRow = db.prepare(`
-      SELECT COALESCE(SUM(cost_cents), 0) as spent
-      FROM cost_records
-      WHERE project_id = ? AND created_at >= ?
-    `).get(projectId, todayMs) as { spent: number } | undefined;
+    // No budget configured — nothing to report
+    if (snapshot.cents.limit <= 0 && snapshot.tokens.limit <= 0) return null;
 
-    const spent = spendRow?.spent ?? 0;
+    const lines: string[] = ["## Budget Guidance", ""];
 
-    // Get daily budget from budgets table (project-level = agent_id IS NULL)
-    const budgetRow = db.prepare(
-      `SELECT daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL`,
-    ).get(projectId) as { daily_limit_cents: number } | undefined;
-
-    if (!budgetRow) return null;
-    const dailyBudget = budgetRow.daily_limit_cents;
-    if (!dailyBudget || dailyBudget <= 0) return null;
-
-    const utilization = Math.round((spent / dailyBudget) * 100);
-    const remaining = dailyBudget - spent;
-
-    // Estimate sessions remaining based on average session cost
-    const avgRow = db.prepare(`
-      SELECT COALESCE(AVG(cost_cents), 0) as avg_cost, COUNT(*) as count
-      FROM cost_records
-      WHERE project_id = ? AND created_at >= ? AND cost_cents > 0
-    `).get(projectId, todayMs) as { avg_cost: number; count: number } | undefined;
-
-    const avgCost = avgRow?.avg_cost ?? 0;
-    const sessionsRemaining = avgCost > 0 ? Math.floor(remaining / avgCost) : 0;
-
-    // Estimate exhaustion time
-    let exhaustionNote = "";
-    if (avgRow && avgRow.count >= 2 && avgCost > 0) {
-      const hoursElapsed = (Date.now() - todayMs) / 3600000;
-      if (hoursElapsed > 0) {
-        const burnRate = spent / hoursElapsed;
-        if (burnRate > 0) {
-          const hoursRemaining = remaining / burnRate;
-          const exhaustionHour = new Date(Date.now() + hoursRemaining * 3600000);
-          exhaustionNote = ` At current velocity, exhausts by ${exhaustionHour.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}.`;
-        }
-      }
+    // --- Daily Snapshot ---
+    if (snapshot.cents.limit > 0) {
+      const exhaustionNote = snapshot.exhaustionEta
+        ? ` At current velocity, exhausts by ${snapshot.exhaustionEta.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}.`
+        : "";
+      lines.push(
+        `Daily cost: ${snapshot.cents.utilization}% ($${(snapshot.cents.spent / 100).toFixed(2)} of $${(snapshot.cents.limit / 100).toFixed(2)}, $${(snapshot.cents.reserved / 100).toFixed(2)} reserved).${exhaustionNote}`,
+      );
     }
 
-    const lines = [
-      "## Budget Guidance",
-      "",
-      `Budget utilization: ${utilization}% ($${(spent / 100).toFixed(2)} of $${(dailyBudget / 100).toFixed(2)}).${exhaustionNote}`,
-    ];
+    if (snapshot.tokens.limit > 0) {
+      lines.push(
+        `Daily tokens: ${snapshot.tokens.utilization}% (${fmtTokens(snapshot.tokens.spent)} of ${fmtTokens(snapshot.tokens.limit)}).`,
+      );
+    }
 
-    if (sessionsRemaining > 0) {
-      lines.push(`Estimated sessions remaining: ~${sessionsRemaining}.`);
+    if (snapshot.requests.limit > 0) {
+      lines.push(
+        `Daily requests: ${snapshot.requests.utilization}% (${snapshot.requests.spent} of ${snapshot.requests.limit}).`,
+      );
+    }
+
+    if (snapshot.sessionsRemaining > 0) {
+      lines.push(`Estimated sessions remaining: ~${snapshot.sessionsRemaining}.`);
+    }
+
+    // --- Weekly Trend ---
+    try {
+      const trend = computeWeeklyTrend(projectId, db);
+      if (trend.dailyAverage.cents > 0) {
+        const arrow =
+          trend.direction.cents === "up"
+            ? "^"
+            : trend.direction.cents === "down"
+              ? "v"
+              : "=";
+        lines.push("");
+        lines.push(
+          `Weekly trend: $${(trend.dailyAverage.cents / 100).toFixed(2)}/day avg (${arrow} ${Math.abs(trend.changePercent.cents)}% ${trend.direction.cents}).`,
+        );
+      }
+    } catch {
+      // non-fatal — weekly trend is optional context
+    }
+
+    // --- Monthly Projection ---
+    try {
+      const projection = computeMonthlyProjection(projectId, db);
+      if (
+        projection.monthlyLimit.cents !== null &&
+        projection.projectedTotal.cents > 0
+      ) {
+        const pct = Math.round(
+          (projection.projectedTotal.cents / projection.monthlyLimit.cents) *
+            100,
+        );
+        lines.push(
+          `Monthly projection: $${(projection.projectedTotal.cents / 100).toFixed(2)} projected of $${(projection.monthlyLimit.cents / 100).toFixed(2)} limit (${pct}%).`,
+        );
+        if (projection.exhaustionDay !== null) {
+          lines.push(
+            `Warning: projected to exhaust monthly budget by day ${projection.exhaustionDay}.`,
+          );
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+
+    // --- Initiative breakdown ---
+    if (snapshot.initiatives.length > 0) {
+      lines.push("");
+      lines.push("### Initiative Breakdown");
+      for (const init of snapshot.initiatives) {
+        lines.push(
+          `- ${init.name}: ${init.utilization}% of ${init.allocation}% allocation ($${(init.spent.cents / 100).toFixed(2)})`,
+        );
+      }
     }
 
     return lines.join("\n");
@@ -81,4 +115,10 @@ export function resolveBudgetGuidanceSource(
     safeLog("budget-guidance", `Failed to generate budget guidance: ${err}`);
     return null;
   }
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return String(n);
 }
