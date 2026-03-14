@@ -683,12 +683,27 @@ export type CostRecord = {
   createdAt: number;
 };
 
+/** @deprecated Use BudgetConfigV2 instead. */
 export type BudgetConfig = {
   hourlyLimitCents?: number;
   dailyLimitCents?: number;
   monthlyLimitCents?: number;
   sessionLimitCents?: number;
   taskLimitCents?: number;
+};
+
+export type BudgetWindowConfig = {
+  cents?: number;
+  tokens?: number;
+  requests?: number;
+};
+
+export type BudgetConfigV2 = {
+  hourly?: BudgetWindowConfig;
+  daily?: BudgetWindowConfig;
+  monthly?: BudgetWindowConfig;
+  session?: BudgetWindowConfig;
+  task?: BudgetWindowConfig;
 };
 
 export type BudgetCheckResult = {
@@ -931,6 +946,7 @@ export type PlannedItem = {
   model?: string;
   taskTitle: string;
   estimatedCostCents: number;
+  estimatedTokens?: number;
   confidence: "high" | "medium" | "low";
   priority?: TaskPriority;
 };
@@ -953,6 +969,7 @@ export type DispatchPlan = {
   plannedItems: PlannedItem[];
   actualResults?: ActualResult[];
   estimatedCostCents: number;
+  estimatedTokens?: number;
   actualCostCents?: number;
   createdAt: number;
   completedAt?: number;
@@ -995,6 +1012,48 @@ export type KnowledgeConfig = {
     minRetrievals?: number;
     minSessions?: number;
   };
+};
+
+// --- Budget forecast types ---
+
+export type DailyBudgetSnapshot = {
+  cents: { limit: number; spent: number; reserved: number; remaining: number; utilization: number };
+  tokens: { limit: number; spent: number; reserved: number; remaining: number; utilization: number };
+  requests: { limit: number; spent: number; reserved: number; remaining: number; utilization: number };
+  sessionsRemaining: number;
+  exhaustionEta: Date | null;
+  initiatives: Array<{
+    id: string;
+    name: string;
+    allocation: number;
+    spent: { cents: number; tokens: number };
+    utilization: number;
+  }>;
+};
+
+export type WeeklyTrend = {
+  dailyAverage: { cents: number; tokens: number; requests: number };
+  direction: { cents: "up" | "down" | "stable"; tokens: "up" | "down" | "stable" };
+  changePercent: { cents: number; tokens: number };
+  perInitiative: Array<{
+    id: string;
+    name: string;
+    dailyAverage: { cents: number; tokens: number };
+    allocation: number;
+    overUnder: number;
+  }>;
+};
+
+export type MonthlyProjection = {
+  projectedTotal: { cents: number; tokens: number };
+  monthlyLimit: { cents: number | null; tokens: number | null };
+  exhaustionDay: number | null;
+  perInitiative: Array<{
+    id: string;
+    projectedTotal: number;
+    allocation: number;
+    onTrack: boolean;
+  }>;
 };
 
 // --- Domain Config & Rules ---
