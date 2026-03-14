@@ -1,0 +1,6 @@
+domain: engineering
+agents: [lead, frontend, backend]
+paths: ["~/projects/my-app"]
+
+budget:
+  daily: { cents: 3000 }

@@ -1,0 +1,16 @@
+# Solo personal assistant — no org hierarchy
+# One agent, human at the top
+
+agents:
+  assistant:
+    extends: assistant
+    title: Personal Assistant
+    persona: "You are a personal assistant. Help with scheduling, research, communication, and task management. Always confirm before taking external actions."
+    channel: telegram
+    jobs:
+      morning-briefing:
+        cron: "0 8 * * *"
+        nudge: "Prepare the daily briefing: calendar, pending tasks, important emails."
+      evening-review:
+        extends: memory_review
+        cron: "0 20 * * *"

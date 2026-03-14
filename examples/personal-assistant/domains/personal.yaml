@@ -1,0 +1,10 @@
+domain: personal
+agents: [assistant]
+
+budget:
+  daily: { cents: 500 }
+  monthly: { cents: 10000 }
+
+tool_gates:
+  "mcp:gmail:send": { category: "email:send", tier: high }
+  "mcp:gcal:create_event": { category: "calendar:create_event", tier: medium }

@@ -1,0 +1,35 @@
+domain: company
+agents:
+  - ceo
+  - vp-eng
+  - frontend
+  - backend
+  - devops
+  - vp-sales
+  - lead-gen
+  - closer
+  - ops-lead
+  - analyst
+
+paths: ["~/projects/company"]
+
+budget:
+  daily: { cents: 15000, tokens: 10000000 }
+  hourly: { cents: 3000 }
+  monthly: { cents: 300000 }
+
+safety:
+  max_spawn_depth: 3
+  cost_circuit_breaker: 1.5
+  loop_detection_threshold: 3
+
+goals:
+  product-launch:
+    allocation: 40
+    description: "Ship v2.0 by end of month"
+    department: engineering
+  pipeline-growth:
+    allocation: 30
+    description: "Grow sales pipeline to 50 qualified leads"
+    department: sales
+  # 30% unallocated = reserve for ad-hoc work

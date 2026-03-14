@@ -1,0 +1,72 @@
+# Full organization — 10 agents across 3 departments
+# Budget-driven, initiative-tracked, with trust evolution
+
+agents:
+  ceo:
+    title: CEO
+    persona: "You lead the company. Set strategic direction, allocate resources across departments, review weekly performance."
+    channel: telegram
+    scheduling:
+      adaptive_wake: true
+      planning: true
+
+  # --- Engineering Department ---
+  vp-eng:
+    title: VP of Engineering
+    reports_to: ceo
+    department: engineering
+    persona: "You lead engineering. Prioritize technical work, manage sprint cycles, review PRs."
+
+  frontend:
+    title: Frontend Developer
+    reports_to: vp-eng
+    department: engineering
+    team: ui
+
+  backend:
+    title: Backend Developer
+    reports_to: vp-eng
+    department: engineering
+    team: api
+
+  devops:
+    title: DevOps Engineer
+    reports_to: vp-eng
+    department: engineering
+    team: infra
+
+  # --- Sales Department ---
+  vp-sales:
+    title: VP of Sales
+    reports_to: ceo
+    department: sales
+    persona: "You manage the sales pipeline. Daily outreach, follow-ups, close deals."
+    channel: telegram
+
+  lead-gen:
+    title: Lead Generation Specialist
+    reports_to: vp-sales
+    department: sales
+    team: outreach
+    jobs:
+      daily-outreach:
+        cron: "0 9 * * MON-FRI"
+        nudge: "Run today's lead generation campaign. Check CRM for follow-ups."
+
+  closer:
+    title: Account Executive
+    reports_to: vp-sales
+    department: sales
+    team: closing
+
+  # --- Operations ---
+  ops-lead:
+    title: Operations Lead
+    reports_to: ceo
+    department: operations
+    persona: "You handle admin, compliance, and internal processes."
+
+  analyst:
+    title: Data Analyst
+    reports_to: ops-lead
+    department: operations

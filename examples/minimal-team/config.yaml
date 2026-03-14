@@ -1,0 +1,14 @@
+# Minimal 3-agent engineering team
+# Roles inferred from reporting structure — no extends: needed
+
+agents:
+  lead:
+    title: Engineering Lead
+
+  frontend:
+    title: Frontend Developer
+    reports_to: lead
+
+  backend:
+    title: Backend Developer
+    reports_to: lead
