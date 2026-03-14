@@ -193,4 +193,15 @@ export const BUILTIN_JOB_PRESETS: Record<string, Record<string, unknown>> = {
     nudge: "Check on your team. Reassign stuck tasks, handle escalations.",
     performance_policy: { action: "alert" },
   },
+  memory_review: {
+    cron: "0 18 * * *",
+    model: "anthropic/claude-sonnet-4-6",
+    sessionTarget: "isolated",
+    briefing: ["memory_review_context"],
+    expectations: [
+      { tool: "memory_search", action: "search", min_calls: 1 },
+    ],
+    nudge: "Review today's session transcripts. Extract key learnings, decisions, patterns, and reusable knowledge. Search existing memory to avoid duplicates. Write valuable findings to memory using memory tools.",
+    performance_policy: { action: "alert" },
+  },
 };

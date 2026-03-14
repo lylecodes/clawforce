@@ -48,6 +48,7 @@ import { getStream } from "../streams/catalog.js";
 import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
 import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
 import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
+import { buildReviewContext } from "../memory/review-context.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -172,6 +173,17 @@ function resolveSource(source: ContextSource, ctx: AssemblerContext): string | n
 
     case "memory_instructions":
       return resolveMemoryInstructions(ctx.config.memory, ctx.config.extends ?? "employee");
+
+    case "memory_review_context": {
+      if (!ctx.projectDir) return null;
+      const memoryConfig = ctx.config.memory;
+      return buildReviewContext({
+        agentId: ctx.agentId,
+        scope: memoryConfig?.review?.scope ?? "self",
+        aggressiveness: memoryConfig?.review?.aggressiveness ?? "medium",
+        projectDir: ctx.projectDir,
+      });
+    }
 
     case "soul":
       return resolveSoulDoc(ctx.agentId, ctx.projectDir);
