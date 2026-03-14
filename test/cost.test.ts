@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 
 vi.mock("../src/diagnostics.js", () => ({
@@ -143,6 +144,91 @@ describe("getCostSummary", () => {
     const summary = getCostSummary({ projectId: "unknown" }, db);
     expect(summary.recordCount).toBe(0);
     expect(summary.totalCostCents).toBe(0);
+  });
+});
+
+describe("recordCost v2 counters", () => {
+  function insertBudget(projectId: string) {
+    const now = Date.now();
+    const future = now + 86400000;
+    db.prepare(`
+      INSERT INTO budgets (id, project_id, agent_id, daily_limit_cents, daily_spent_cents, daily_reset_at, created_at, updated_at)
+      VALUES (?, ?, NULL, 10000, 0, ?, ?, ?)
+    `).run(crypto.randomUUID(), projectId, future, now, now);
+  }
+
+  it("increments all window counters on cost recording", () => {
+    insertBudget("p1");
+
+    // Record a cost with known tokens
+    recordCost({
+      projectId: "p1",
+      agentId: "worker-1",
+      inputTokens: 500,
+      outputTokens: 200,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 50,
+      model: "sonnet",
+    }, db);
+
+    const row = db.prepare(
+      "SELECT * FROM budgets WHERE project_id = 'p1' AND agent_id IS NULL",
+    ).get() as Record<string, number>;
+
+    const expectedCost = calculateCostCents({
+      inputTokens: 500,
+      outputTokens: 200,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 50,
+      model: "sonnet",
+    });
+    const expectedTokens = 500 + 200 + 100 + 50; // 850
+
+    // All three windows should have the same cents increment
+    expect(row.hourly_spent_cents).toBe(expectedCost);
+    expect(row.daily_spent_cents).toBe(expectedCost);
+    expect(row.monthly_spent_cents).toBe(expectedCost);
+
+    // All three windows should have the same token increment
+    expect(row.hourly_spent_tokens).toBe(expectedTokens);
+    expect(row.daily_spent_tokens).toBe(expectedTokens);
+    expect(row.monthly_spent_tokens).toBe(expectedTokens);
+
+    // All three windows should have request count = 1
+    expect(row.hourly_spent_requests).toBe(1);
+    expect(row.daily_spent_requests).toBe(1);
+    expect(row.monthly_spent_requests).toBe(1);
+  });
+
+  it("accumulates counters across multiple recordings", () => {
+    insertBudget("p1");
+
+    recordCost({
+      projectId: "p1",
+      agentId: "worker-1",
+      inputTokens: 100,
+      outputTokens: 50,
+    }, db);
+    recordCost({
+      projectId: "p1",
+      agentId: "worker-1",
+      inputTokens: 200,
+      outputTokens: 100,
+    }, db);
+
+    const row = db.prepare(
+      "SELECT * FROM budgets WHERE project_id = 'p1' AND agent_id IS NULL",
+    ).get() as Record<string, number>;
+
+    // Requests should be 2
+    expect(row.hourly_spent_requests).toBe(2);
+    expect(row.daily_spent_requests).toBe(2);
+    expect(row.monthly_spent_requests).toBe(2);
+
+    // Tokens should be sum of both: (100+50) + (200+100) = 450
+    expect(row.hourly_spent_tokens).toBe(450);
+    expect(row.daily_spent_tokens).toBe(450);
+    expect(row.monthly_spent_tokens).toBe(450);
   });
 });
 

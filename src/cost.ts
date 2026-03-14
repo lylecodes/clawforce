@@ -82,12 +82,29 @@ export function recordCost(
     now,
   );
 
-  // Also update budget daily_spent if a budget exists
+  // Update all budget window counters (hourly/daily/monthly × cents/tokens/requests)
+  const totalTokens = params.inputTokens + params.outputTokens +
+    (params.cacheReadTokens ?? 0) + (params.cacheWriteTokens ?? 0);
   try {
     db.prepare(`
-      UPDATE budgets SET daily_spent_cents = daily_spent_cents + ?, updated_at = ?
-      WHERE project_id = ? AND (agent_id = ? OR agent_id IS NULL) AND daily_reset_at > ?
-    `).run(costCents, now, params.projectId, params.agentId, now);
+      UPDATE budgets SET
+        hourly_spent_cents = hourly_spent_cents + ?,
+        daily_spent_cents = daily_spent_cents + ?,
+        monthly_spent_cents = monthly_spent_cents + ?,
+        hourly_spent_tokens = hourly_spent_tokens + ?,
+        daily_spent_tokens = daily_spent_tokens + ?,
+        monthly_spent_tokens = monthly_spent_tokens + ?,
+        hourly_spent_requests = hourly_spent_requests + 1,
+        daily_spent_requests = daily_spent_requests + 1,
+        monthly_spent_requests = monthly_spent_requests + 1,
+        updated_at = ?
+      WHERE project_id = ? AND (agent_id = ? OR agent_id IS NULL)
+    `).run(
+      costCents, costCents, costCents,
+      totalTokens, totalTokens, totalTokens,
+      now,
+      params.projectId, params.agentId,
+    );
   } catch (err) {
     safeLog("cost.updateBudget", err);
   }
