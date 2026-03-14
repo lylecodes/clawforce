@@ -216,8 +216,7 @@ const clawforcePlugin = {
     }
 
     // --- Disabled agent tracking (persistent) ---
-    type CronServiceLike = { list(opts?: { includeDisabled?: boolean }): Promise<Array<{ id: string; agentId?: string; enabled: boolean; name: string }>>; update(id: string, patch: { enabled: boolean }): Promise<unknown> };
-    let capturedCronService: CronServiceLike | null = null;
+    let capturedCronService: import("../src/manager-cron.js").CronServiceLike | null = null;
 
     async function handleDisable(agentId: string): Promise<void> {
       // Persist to SQLite via the agent's project

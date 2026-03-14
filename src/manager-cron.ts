@@ -41,7 +41,11 @@ export function setManagerCronRegistrar(registrar: CronRegistrar | undefined): v
 
 // --- Runtime cron service (for job management tooling) ---
 
-/** Cron job state as reported by OpenClaw. */
+/**
+ * Cron job state as reported by OpenClaw.
+ * Mirrors openclaw/dist/plugin-sdk/cron/types.d.ts CronJobState —
+ * kept as a local subset to avoid deep import path coupling.
+ */
 export type CronJobState = {
   nextRunAtMs?: number;
   runningAtMs?: number;
@@ -54,7 +58,10 @@ export type CronJobState = {
   lastDeliveryError?: string;
 };
 
-/** Full cron job record returned by list/getJob. */
+/**
+ * Full cron job record returned by list/getJob.
+ * Mirrors a subset of OpenClaw's CronJob type (openclaw/dist/plugin-sdk/cron/types.d.ts).
+ */
 export type CronJobRecord = {
   id: string;
   name: string;
@@ -65,7 +72,10 @@ export type CronJobRecord = {
   state: CronJobState;
 };
 
-/** Cron service interface for runtime job management. */
+/**
+ * Cron service interface for runtime job management.
+ * Mirrors OpenClaw's CronService (openclaw/dist/plugin-sdk/cron/service.d.ts).
+ */
 export type CronServiceLike = {
   list(opts?: { includeDisabled?: boolean }): Promise<CronJobRecord[]>;
   add(input: CronRegistrarInput): Promise<unknown>;
