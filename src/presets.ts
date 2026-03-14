@@ -136,6 +136,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     expectations: [
       { tool: "clawforce_log", action: "write", min_calls: 1 },
       { tool: "clawforce_compact", action: "update_doc", min_calls: 1 },
+      { tool: "memory_search", action: "search", min_calls: 1 },
     ],
     performance_policy: { action: "alert" },
     compaction: true,

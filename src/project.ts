@@ -427,6 +427,8 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
     merged.briefing.unshift({ source: "instructions" });
   }
 
+  const memory = normalizeMemoryConfig(raw.memory);
+
   // Normalize compaction config
   const hasExplicitCompaction = raw.compaction !== undefined;
   const compaction = hasExplicitCompaction
@@ -446,6 +448,15 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
     merged.expectations = filtered;
   }
 
+  // When memory.expectations is explicitly false, strip the memory_search
+  // expectation that may have been inherited from the manager profile
+  // (unless user explicitly set expectations)
+  if (memory?.expectations === false && !hasExplicitExpectations) {
+    merged.expectations = merged.expectations.filter(
+      (r) => r.tool !== "memory_search",
+    );
+  }
+
   const reportsTo = typeof raw.reports_to === "string" && raw.reports_to.trim()
     ? raw.reports_to.trim()
     : undefined;
@@ -462,8 +473,6 @@ function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<
   const jobs = normalizeJobs(raw.jobs);
 
   const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;
-
-  const memory = normalizeMemoryConfig(raw.memory);
 
   let scheduling: SchedulingConfig | undefined;
   if (raw.scheduling && typeof raw.scheduling === "object") {

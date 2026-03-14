@@ -141,3 +141,120 @@ describe("MemoryGovernanceConfig parsing", () => {
     }
   });
 });
+
+describe("memory expectations stripping", () => {
+  it("manager preset includes memory_search expectation by default", async () => {
+    const { BUILTIN_AGENT_PRESETS } = await import("../../src/presets.js");
+    const managerExpectations = BUILTIN_AGENT_PRESETS.manager.expectations as Array<{ tool: string }>;
+    expect(managerExpectations.some((e) => e.tool === "memory_search")).toBe(true);
+  });
+
+  it("memory_search expectation is stripped when memory.expectations=false", async () => {
+    const YAML = (await import("yaml")).default;
+    const { loadWorkforceConfig } = await import("../../src/project.js");
+
+    const yaml = YAML.stringify({
+      name: "test-project",
+      agents: {
+        lead: {
+          extends: "manager",
+          memory: {
+            expectations: false,
+          },
+        },
+      },
+    });
+
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const os = await import("node:os");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-test-"));
+    const tmpFile = path.join(tmpDir, "project.yaml");
+    fs.writeFileSync(tmpFile, yaml);
+
+    try {
+      const config = loadWorkforceConfig(tmpFile);
+      expect(config).not.toBeNull();
+      const agent = config!.agents.lead;
+      const hasMemoryExpectation = agent.expectations.some((e) => e.tool === "memory_search");
+      expect(hasMemoryExpectation).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("memory_search expectation is preserved when memory.expectations=true", async () => {
+    const YAML = (await import("yaml")).default;
+    const { loadWorkforceConfig } = await import("../../src/project.js");
+
+    const yaml = YAML.stringify({
+      name: "test-project",
+      agents: {
+        lead: {
+          extends: "manager",
+          memory: {
+            expectations: true,
+          },
+        },
+      },
+    });
+
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const os = await import("node:os");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-test-"));
+    const tmpFile = path.join(tmpDir, "project.yaml");
+    fs.writeFileSync(tmpFile, yaml);
+
+    try {
+      const config = loadWorkforceConfig(tmpFile);
+      expect(config).not.toBeNull();
+      const agent = config!.agents.lead;
+      const hasMemoryExpectation = agent.expectations.some((e) => e.tool === "memory_search");
+      expect(hasMemoryExpectation).toBe(true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("employee preset does NOT include memory_search expectation", async () => {
+    const { BUILTIN_AGENT_PRESETS } = await import("../../src/presets.js");
+    const employeeExpectations = BUILTIN_AGENT_PRESETS.employee.expectations as Array<{ tool: string }>;
+    expect(employeeExpectations.some((e) => e.tool === "memory_search")).toBe(false);
+  });
+
+  it("employee does not gain memory_search expectation when memory.expectations=true", async () => {
+    const YAML = (await import("yaml")).default;
+    const { loadWorkforceConfig } = await import("../../src/project.js");
+
+    const yaml = YAML.stringify({
+      name: "test-project",
+      agents: {
+        worker: {
+          extends: "employee",
+          memory: {
+            expectations: true,
+          },
+        },
+      },
+    });
+
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const os = await import("node:os");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-test-"));
+    const tmpFile = path.join(tmpDir, "project.yaml");
+    fs.writeFileSync(tmpFile, yaml);
+
+    try {
+      const config = loadWorkforceConfig(tmpFile);
+      expect(config).not.toBeNull();
+      const agent = config!.agents.worker;
+      // Employee preset doesn't have memory_search, so expectations=true has no effect
+      const hasMemoryExpectation = agent.expectations.some((e) => e.tool === "memory_search");
+      expect(hasMemoryExpectation).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+});
