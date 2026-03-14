@@ -1069,14 +1069,43 @@ export function createClawforceOpsTool(options?: {
             const parentAgentId = readStringParam(params, "parent_agent_id");
             const childAgentId = readStringParam(params, "child_agent_id");
             const dailyLimitCents = readNumberParam(params, "daily_limit_cents");
-            if (!parentAgentId || !childAgentId || dailyLimitCents == null) {
-              return jsonResult({ ok: false, error: "parent_agent_id, child_agent_id, and daily_limit_cents required" });
+            const allocationConfigStr = readStringParam(params, "allocation_config");
+
+            if (!parentAgentId || !childAgentId) {
+              return jsonResult({ ok: false, error: "parent_agent_id and child_agent_id required" });
             }
+
+            // Support v2 allocation_config JSON param alongside legacy daily_limit_cents
+            let allocationConfig: import("../budget-cascade.js").BudgetAllocation | undefined;
+            if (allocationConfigStr) {
+              try {
+                const parsed = JSON.parse(allocationConfigStr);
+                // Accept BudgetConfigV2 format and use as BudgetAllocation (daily/hourly/monthly)
+                const { normalizeBudgetConfig } = await import("../budget/normalize.js");
+                const normalized = normalizeBudgetConfig(parsed);
+                allocationConfig = {
+                  hourly: normalized.hourly,
+                  daily: normalized.daily,
+                  monthly: normalized.monthly,
+                };
+              } catch {
+                return jsonResult({ ok: false, error: "allocation_config must be valid JSON" });
+              }
+            } else if (dailyLimitCents == null) {
+              return jsonResult({ ok: false, error: "Either allocation_config or daily_limit_cents required" });
+            }
+
             const { allocateBudget } = await import("../budget-cascade.js");
             const db = getDb(projectId);
-            const result = allocateBudget({ projectId, parentAgentId, childAgentId, dailyLimitCents }, db);
+            const result = allocateBudget({
+              projectId,
+              parentAgentId,
+              childAgentId,
+              dailyLimitCents: dailyLimitCents ?? undefined,
+              allocationConfig,
+            }, db);
             if (result.ok) {
-              writeAuditEntry({ projectId, actor: caller, action: "allocate_budget", targetType: "budget", targetId: childAgentId, detail: JSON.stringify({ parentAgentId, childAgentId, dailyLimitCents }) }, db);
+              writeAuditEntry({ projectId, actor: caller, action: "allocate_budget", targetType: "budget", targetId: childAgentId, detail: JSON.stringify({ parentAgentId, childAgentId, dailyLimitCents, allocationConfig }) }, db);
             }
             return jsonResult(result);
           }
