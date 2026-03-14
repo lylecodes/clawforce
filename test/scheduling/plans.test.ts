@@ -106,3 +106,209 @@ describe("dispatch plan CRUD", () => {
     expect(plans[0].plannedItems[0].taskTitle).toBe("T2"); // most recent first
   });
 });
+
+describe("pre-flight plan validation and reservations", () => {
+  let db: DatabaseSync;
+  const PROJECT = "budget-plan-test";
+  const AGENT = "eng-lead";
+
+  function insertBudget(dailyLimitCents: number, dailySpentCents = 0, reservedCents = 0) {
+    const now = Date.now();
+    const future = now + 86400000;
+    db.prepare(`
+      INSERT INTO budgets (id, project_id, agent_id, daily_limit_cents, daily_spent_cents,
+        daily_reset_at, reserved_cents, reserved_tokens, reserved_requests, created_at, updated_at)
+      VALUES ('budget1', ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?)
+    `).run(PROJECT, dailyLimitCents, dailySpentCents, future, reservedCents, now, now);
+  }
+
+  beforeEach(() => {
+    db = getMemoryDb();
+  });
+
+  afterEach(() => {
+    try { db.close(); } catch { /* already closed */ }
+  });
+
+  it("validatePlanBudget passes when plan fits within budget", async () => {
+    const { validatePlanBudget } = await import("../../src/scheduling/plans.js");
+    insertBudget(10000, 2000);
+
+    const result = validatePlanBudget(
+      { estimatedCostCents: 3000 },
+      PROJECT,
+      db,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.remaining).toBe(8000);
+  });
+
+  it("validatePlanBudget blocks when plan exceeds remaining budget", async () => {
+    const { validatePlanBudget } = await import("../../src/scheduling/plans.js");
+    insertBudget(10000, 8000);
+
+    const result = validatePlanBudget(
+      { estimatedCostCents: 5000 },
+      PROJECT,
+      db,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("exceeds remaining daily budget");
+  });
+
+  it("validatePlanBudget accounts for existing reservations", async () => {
+    const { validatePlanBudget } = await import("../../src/scheduling/plans.js");
+    insertBudget(10000, 2000, 5000);
+
+    // remaining = 10000 - 2000 - 5000 = 3000
+    const result = validatePlanBudget(
+      { estimatedCostCents: 4000 },
+      PROJECT,
+      db,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.remaining).toBe(3000);
+  });
+
+  it("validatePlanBudget passes when no budget configured", async () => {
+    const { validatePlanBudget } = await import("../../src/scheduling/plans.js");
+    // No budget inserted
+    const result = validatePlanBudget(
+      { estimatedCostCents: 99999 },
+      PROJECT,
+      db,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("startPlan validates budget and reserves on success", async () => {
+    const { createPlan, startPlan, getPlan } = await import("../../src/scheduling/plans.js");
+    insertBudget(10000);
+
+    const plan = createPlan({
+      projectId: PROJECT,
+      agentId: AGENT,
+      plannedItems: [
+        { agentId: "worker", taskTitle: "Build feature", estimatedCostCents: 500, estimatedTokens: 50000, confidence: "high" as const },
+        { agentId: "worker", taskTitle: "Write tests", estimatedCostCents: 300, estimatedTokens: 30000, confidence: "medium" as const },
+      ],
+    }, db);
+
+    const result = startPlan(PROJECT, plan.id, db);
+    expect(result.ok).toBe(true);
+
+    // Plan should be executing
+    const executing = getPlan(PROJECT, plan.id, db);
+    expect(executing!.status).toBe("executing");
+
+    // started_at should be set
+    const row = db.prepare("SELECT started_at FROM dispatch_plans WHERE id = ?").get(plan.id) as Record<string, number | null>;
+    expect(row.started_at).toBeGreaterThan(0);
+
+    // Budget should have reservation
+    const budget = db.prepare("SELECT reserved_cents, reserved_tokens, reserved_requests FROM budgets WHERE id = 'budget1'").get() as Record<string, number>;
+    expect(budget.reserved_cents).toBe(800); // 500 + 300
+    expect(budget.reserved_tokens).toBe(80000); // 50000 + 30000
+    expect(budget.reserved_requests).toBe(2);
+  });
+
+  it("startPlan blocks when budget insufficient", async () => {
+    const { createPlan, startPlan, getPlan } = await import("../../src/scheduling/plans.js");
+    insertBudget(500, 200);
+
+    const plan = createPlan({
+      projectId: PROJECT,
+      agentId: AGENT,
+      plannedItems: [
+        { agentId: "worker", taskTitle: "Big job", estimatedCostCents: 400, confidence: "high" as const },
+      ],
+    }, db);
+
+    const result = startPlan(PROJECT, plan.id, db);
+    expect(result.ok).toBe(false);
+
+    // Plan should remain in planned state
+    const stillPlanned = getPlan(PROJECT, plan.id, db);
+    expect(stillPlanned!.status).toBe("planned");
+
+    // No reservation should be created
+    const budget = db.prepare("SELECT reserved_cents FROM budgets WHERE id = 'budget1'").get() as Record<string, number>;
+    expect(budget.reserved_cents).toBe(0);
+  });
+
+  it("completePlan releases reservation", async () => {
+    const { createPlan, startPlan, completePlan } = await import("../../src/scheduling/plans.js");
+    insertBudget(10000);
+
+    const plan = createPlan({
+      projectId: PROJECT,
+      agentId: AGENT,
+      plannedItems: [
+        { agentId: "worker", taskTitle: "Task", estimatedCostCents: 500, estimatedTokens: 40000, confidence: "high" as const },
+      ],
+    }, db);
+
+    startPlan(PROJECT, plan.id, db);
+
+    // Verify reservation exists
+    let budget = db.prepare("SELECT reserved_cents, reserved_tokens, reserved_requests FROM budgets WHERE id = 'budget1'").get() as Record<string, number>;
+    expect(budget.reserved_cents).toBe(500);
+
+    completePlan(PROJECT, plan.id, {
+      actualResults: [
+        { plannedIndex: 0, taskId: "task-1", actualCostCents: 450, status: "dispatched" as const },
+      ],
+    }, db);
+
+    // Reservation should be released
+    budget = db.prepare("SELECT reserved_cents, reserved_tokens, reserved_requests FROM budgets WHERE id = 'budget1'").get() as Record<string, number>;
+    expect(budget.reserved_cents).toBe(0);
+    expect(budget.reserved_tokens).toBe(0);
+    expect(budget.reserved_requests).toBe(0);
+  });
+
+  it("abandonPlan releases reservation", async () => {
+    const { createPlan, startPlan, abandonPlan } = await import("../../src/scheduling/plans.js");
+    insertBudget(10000);
+
+    const plan = createPlan({
+      projectId: PROJECT,
+      agentId: AGENT,
+      plannedItems: [
+        { agentId: "worker", taskTitle: "Cancelled", estimatedCostCents: 300, confidence: "low" as const },
+      ],
+    }, db);
+
+    startPlan(PROJECT, plan.id, db);
+
+    // Verify reservation exists
+    let budget = db.prepare("SELECT reserved_cents FROM budgets WHERE id = 'budget1'").get() as Record<string, number>;
+    expect(budget.reserved_cents).toBe(300);
+
+    abandonPlan(PROJECT, plan.id, db);
+
+    // Reservation should be released
+    budget = db.prepare("SELECT reserved_cents, reserved_tokens, reserved_requests FROM budgets WHERE id = 'budget1'").get() as Record<string, number>;
+    expect(budget.reserved_cents).toBe(0);
+    expect(budget.reserved_requests).toBe(0);
+  });
+
+  it("abandonPlan from planned state does not touch reservations", async () => {
+    const { createPlan, abandonPlan } = await import("../../src/scheduling/plans.js");
+    insertBudget(10000);
+
+    const plan = createPlan({
+      projectId: PROJECT,
+      agentId: AGENT,
+      plannedItems: [
+        { agentId: "worker", taskTitle: "Never started", estimatedCostCents: 200, confidence: "low" as const },
+      ],
+    }, db);
+
+    // Abandon without starting (no reservation was made)
+    abandonPlan(PROJECT, plan.id, db);
+
+    const budget = db.prepare("SELECT reserved_cents FROM budgets WHERE id = 'budget1'").get() as Record<string, number>;
+    expect(budget.reserved_cents).toBe(0);
+  });
+});
