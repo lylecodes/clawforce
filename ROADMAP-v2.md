@@ -267,10 +267,10 @@ Improve manager's ability to predict session costs.
 - [x] 7.3: Cascading budget allocation (uniform agent tree budget flow)
 - [ ] 7.4: Autonomous scheduling (manager plans own dispatch cadence)
 
-### Phase 8: Memory & Knowledge Lifecycle
-- [ ] 8.1: Memory promotion pipeline (frequently-retrieved → structured knowledge)
-- [ ] 8.2: Knowledge demotion (wrong prompt/skill → memory correction)
-- [ ] 8.3: Skill cap enforcement (soft cap, triggers org split)
+### Phase 8: Memory & Knowledge Lifecycle ✅
+- [x] 8.1: Memory promotion pipeline (frequently-retrieved → structured knowledge)
+- [x] 8.2: Knowledge demotion (wrong prompt/skill → memory correction)
+- [x] 8.3: Skill cap enforcement (soft cap, triggers org split)
 
 ### Phase 9: UX Overhaul
 
