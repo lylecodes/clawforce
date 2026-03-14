@@ -352,6 +352,8 @@ const VALID_SOURCES: ContextSource["source"][] = [
   "channel_messages", "pending_messages", "goal_hierarchy", "planning_delta",
   "velocity", "preferences", "trust_scores", "resources", "initiative_status",
   "cost_forecast", "available_capacity", "knowledge_candidates",
+  "budget_guidance", "onboarding_welcome", "weekly_digest", "intervention_suggestions",
+  "custom_stream",
 ];
 
 function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
@@ -525,6 +527,10 @@ function normalizeContextSources(raw: unknown): ContextSource[] {
       const result: ContextSource = { source };
       if (typeof item.content === "string") result.content = item.content;
       if (typeof item.path === "string") result.path = item.path;
+      if (item.params !== undefined && typeof item.params === "object") {
+        result.params = item.params as Record<string, unknown>;
+      }
+      if (typeof item.streamName === "string") result.streamName = item.streamName;
       if (typeof item.filter === "object" && item.filter !== null) {
         const f = item.filter as Record<string, unknown>;
         result.filter = {

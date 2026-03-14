@@ -523,6 +523,11 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
       "escalations", "workflows", "activity", "sweep_status",
       "proposals", "agent_status", "cost_summary", "policy_status", "health_status",
       "team_status", "team_performance", "soul", "tools_reference",
+      "pending_messages", "goal_hierarchy", "channel_messages", "planning_delta",
+      "velocity", "preferences", "trust_scores", "resources",
+      "initiative_status", "cost_forecast", "available_capacity", "knowledge_candidates",
+      "budget_guidance", "onboarding_welcome", "weekly_digest", "intervention_suggestions",
+      "custom_stream",
     ];
     for (const excluded of config.exclude_briefing) {
       if (!VALID_SOURCES.includes(excluded as ContextSource["source"])) {
