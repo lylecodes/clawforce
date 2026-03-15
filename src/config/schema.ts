@@ -47,6 +47,11 @@ export type DomainConfig = {
   safety?: Record<string, unknown>;
   channels?: unknown[];
   event_handlers?: Record<string, unknown>;
+  dashboard_assistant?: {
+    enabled?: boolean;
+    model?: string;
+    agentId?: string;
+  };
   operational_profile?: OperationalProfile;
   [key: string]: unknown;
 };
