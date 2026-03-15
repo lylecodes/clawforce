@@ -24,6 +24,14 @@ import { getDirectReports, getDepartmentAgents } from "../org.js";
 import { listDisabledAgents } from "../enforcement/disabled-store.js";
 import { getActiveSessions } from "../enforcement/tracker.js";
 import type { TaskState, TaskPriority, EventStatus } from "../types.js";
+import { listPendingProposals } from "../approval/resolve.js";
+import { getBudgetStatus } from "../budget-windows.js";
+import { computeDailySnapshot, computeWeeklyTrend, computeMonthlyProjection } from "../budget/forecast.js";
+import { getAllCategoryStats, getActiveTrustOverrides } from "../trust/tracker.js";
+import { listChannels, getChannel } from "../channels/store.js";
+import { buildChannelTranscript } from "../channels/messages.js";
+import { getMeetingStatus } from "../channels/meeting.js";
+import { getDb } from "../db.js";
 
 export type PaginationParams = {
   limit?: number;
@@ -374,4 +382,164 @@ export function queryMessages(
   },
 ) {
   return searchMessages(projectId, filters);
+}
+
+// ─── Extended queries for dashboard ────────────────────────────────────────────
+
+/** Dashboard summary: 4 metric cards (budget utilization, active agents, tasks in flight, pending approvals). */
+export function queryDashboardSummary(projectId: string) {
+  // Budget utilization
+  let budgetUtilization = { spent: 0, limit: 0, pct: 0, exhaustionEta: undefined as string | undefined };
+  try {
+    const budgetStatus = getBudgetStatus(projectId);
+    const spent = budgetStatus.windows.reduce((acc, w) => acc + (w.spent ?? 0), 0);
+    const limit = budgetStatus.windows.reduce((acc, w) => acc + (w.limit ?? 0), 0);
+    budgetUtilization = {
+      spent,
+      limit,
+      pct: limit > 0 ? Math.round((spent / limit) * 100) : 0,
+    };
+  } catch { /* no budget configured */ }
+
+  // Active agents
+  const allAgentIds = getRegisteredAgentIds();
+  const activeSessions = getActiveSessions();
+  const projectAgentIds = allAgentIds.filter((aid) => {
+    const entry = getAgentConfig(aid);
+    return entry?.projectId === projectId;
+  });
+  const activeAgents = projectAgentIds.filter((aid) =>
+    activeSessions.some((s) => s.agentId === aid && s.projectId === projectId),
+  ).length;
+
+  // Tasks in flight (ASSIGNED + IN_PROGRESS)
+  let tasksInFlight = 0;
+  try {
+    const { tasks } = queryTasks(projectId, {
+      state: ["ASSIGNED", "IN_PROGRESS"] as TaskState[],
+    });
+    tasksInFlight = tasks.length;
+  } catch { /* ignore */ }
+
+  // Pending approvals
+  let pendingApprovals = 0;
+  try {
+    pendingApprovals = listPendingProposals(projectId).length;
+  } catch { /* ignore */ }
+
+  return {
+    budgetUtilization,
+    activeAgents,
+    totalAgents: projectAgentIds.length,
+    tasksInFlight,
+    pendingApprovals,
+  };
+}
+
+/** Query approval proposals with optional status filter. */
+export function queryApprovals(
+  projectId: string,
+  filters?: { status?: "pending" | "approved" | "rejected"; limit?: number },
+) {
+  const limit = filters?.limit ?? 50;
+
+  if (!filters?.status || filters.status === "pending") {
+    const proposals = listPendingProposals(projectId);
+    return { proposals: proposals.slice(0, limit), count: proposals.length };
+  }
+
+  // For resolved proposals, query the database directly
+  const db = getDb(projectId);
+  const rows = db.prepare(
+    "SELECT * FROM proposals WHERE project_id = ? AND status = ? ORDER BY resolved_at DESC LIMIT ?",
+  ).all(projectId, filters.status, limit) as Record<string, unknown>[];
+  return { proposals: rows, count: rows.length };
+}
+
+/** Query budget status with window breakdowns. */
+export function queryBudgetStatus(projectId: string) {
+  try {
+    return getBudgetStatus(projectId);
+  } catch {
+    return { windows: [], alerts: [] };
+  }
+}
+
+/** Query budget forecast (daily snapshot, weekly trend, monthly projection). */
+export function queryBudgetForecast(projectId: string) {
+  const db = getDb(projectId);
+  try {
+    const daily = computeDailySnapshot(projectId, db);
+    const weekly = computeWeeklyTrend(projectId, db);
+    const monthly = computeMonthlyProjection(projectId, db);
+    return { daily, weekly, monthly };
+  } catch {
+    return { daily: null, weekly: null, monthly: null };
+  }
+}
+
+/** Query trust scores per agent grouped by category. */
+export function queryTrustScores(projectId: string) {
+  try {
+    const stats = getAllCategoryStats(projectId);
+    const overrides = getActiveTrustOverrides(projectId);
+
+    // Group stats by agent-like categories (the trust system tracks categories, not agents directly)
+    return {
+      agents: stats,
+      overrides,
+    };
+  } catch {
+    return { agents: [], overrides: [] };
+  }
+}
+
+/** Read current config for a project. */
+export function queryConfig(projectId: string) {
+  const extConfig = getExtendedProjectConfig(projectId);
+  if (!extConfig) return null;
+
+  return {
+    agents: extConfig.agents ?? {},
+    budget: extConfig.budget ?? {},
+    toolGates: extConfig.tool_gates ?? extConfig.toolGates ?? {},
+    initiatives: extConfig.initiatives ?? [],
+    jobs: extConfig.jobs ?? {},
+    safety: extConfig.safety ?? {},
+    monitoring: extConfig.monitoring ?? {},
+    policies: extConfig.policies ?? [],
+  };
+}
+
+/** Query meetings (channels with type='meeting'). */
+export function queryMeetings(
+  projectId: string,
+  filters?: { status?: string; limit?: number },
+) {
+  const meetings = listChannels(projectId, {
+    type: "meeting" as any,
+    status: filters?.status as any,
+    limit: filters?.limit ?? 50,
+  });
+  return { meetings, count: meetings.length };
+}
+
+/** Query meeting detail with transcript. */
+export function queryMeetingDetail(projectId: string, meetingId: string) {
+  const channel = getChannel(projectId, meetingId);
+  if (!channel) return null;
+
+  try {
+    const status = getMeetingStatus(projectId, meetingId);
+    return {
+      channel,
+      currentTurn: status.currentTurn,
+      participants: status.participants,
+      transcript: status.transcript,
+    };
+  } catch {
+    // If meeting status fails (not a meeting channel, etc.), return basic channel info
+    const transcript = buildChannelTranscript(projectId, meetingId);
+    return { channel, transcript };
+  }
 }

@@ -21,4 +21,12 @@ export {
   queryAlerts,
   queryOrgChart,
   queryHealth,
+  queryDashboardSummary,
+  queryApprovals,
+  queryBudgetStatus,
+  queryBudgetForecast,
+  queryTrustScores,
+  queryConfig,
+  queryMeetings,
+  queryMeetingDetail,
 } from "./queries.js";
