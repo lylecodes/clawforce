@@ -404,8 +404,8 @@ System onboards agents but not the user. No guided first experience.
 - [x] 9.9: Human onboarding (welcome flow, first-week digest, guided intervention)
 
 ### Phase 10: Polish & Optimization
-- [ ] 10.1: Context assembly optimization (cache static, refresh dynamic)
-- [ ] 10.2: Session length optimization (max turns per cycle)
+- [x] 10.1: Context assembly optimization (cache static, refresh dynamic)
+- [x] 10.2: Session length optimization (max turns per cycle)
 - [x] 10.3: Cost forecasting accuracy (moving average with confidence)
 
 ### OpenClaw Thinning (Architectural)
