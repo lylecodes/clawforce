@@ -1,5 +1,6 @@
 import { Outlet } from "react-router-dom";
 import { NavBar } from "./NavBar";
+import { AssistantWidget } from "./AssistantWidget";
 import { useSSEConnection } from "../hooks/useSSE";
 import { useAppStore } from "../store";
 
@@ -15,6 +16,7 @@ export function Layout() {
       <main className="flex-1 p-4 lg:p-6 max-w-[1600px] w-full mx-auto">
         <Outlet />
       </main>
+      <AssistantWidget />
     </div>
   );
 }
