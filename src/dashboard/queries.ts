@@ -496,20 +496,67 @@ export function queryTrustScores(projectId: string) {
   }
 }
 
-/** Read current config for a project. */
+/** Read current config for a project, shaped for the dashboard DomainConfig type. */
 export function queryConfig(projectId: string) {
   const extConfig = getExtendedProjectConfig(projectId);
-  if (!extConfig) return null;
+
+  // Build agents list from the agent registry
+  const allAgentIds = getRegisteredAgentIds();
+  const agents = allAgentIds
+    .map((aid) => {
+      const entry = getAgentConfig(aid);
+      if (!entry || entry.projectId !== projectId) return null;
+      return {
+        id: aid,
+        extends: entry.config.extends,
+        title: entry.config.title,
+        persona: entry.config.persona,
+        reports_to: entry.config.reports_to,
+        department: entry.config.department,
+        team: entry.config.team,
+        channel: entry.config.channel,
+        briefing: entry.config.briefing,
+        expectations: entry.config.expectations,
+        performance_policy: entry.config.performance_policy,
+      };
+    })
+    .filter(Boolean);
+
+  // Build budget from budget-windows status, falling back to domain config
+  let budget: Record<string, unknown> = {};
+  try {
+    const budgetStatus = getBudgetStatus(projectId);
+    if (budgetStatus.hourly || budgetStatus.daily || budgetStatus.monthly) {
+      budget = {
+        daily: budgetStatus.daily ? { cents: budgetStatus.daily.limitCents } : undefined,
+        hourly: budgetStatus.hourly ? { cents: budgetStatus.hourly.limitCents } : undefined,
+        monthly: budgetStatus.monthly ? { cents: budgetStatus.monthly.limitCents } : undefined,
+      };
+    }
+  } catch { /* no budget configured */ }
+
+  // Build tool_gates array from extConfig.toolGates
+  const toolGatesConfig = extConfig?.toolGates ?? {};
+  const toolGates = Object.entries(toolGatesConfig).map(([tool, gate]) => ({
+    tool,
+    category: (gate as Record<string, unknown>)?.category as string | undefined,
+    risk_tier: (gate as Record<string, unknown>)?.risk_tier as string ?? "low",
+  }));
+
+  // Build safety from extConfig
+  const safety = extConfig?.safety ?? {};
 
   return {
-    toolGates: extConfig.toolGates ?? {},
-    riskTiers: extConfig.riskTiers ?? {},
-    dispatch: extConfig.dispatch ?? {},
-    safety: extConfig.safety ?? {},
-    monitoring: extConfig.monitoring ?? {},
-    policies: extConfig.policies ?? [],
-    channels: extConfig.channels ?? [],
-    review: extConfig.review ?? {},
+    agents,
+    budget,
+    tool_gates: toolGates,
+    initiatives: {},
+    jobs: [],
+    safety,
+    profile: {},
+    rules: [],
+    event_handlers: extConfig?.eventHandlers ? Object.values(extConfig.eventHandlers) : [],
+    memory: {},
   };
 }
 

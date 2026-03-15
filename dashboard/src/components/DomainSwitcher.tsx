@@ -34,7 +34,7 @@ export function DomainSwitcher() {
           }`}
         >
           {domain.id}
-          <span className="ml-1 text-xxs opacity-70">{domain.agentCount}</span>
+          <span className="ml-1.5 text-xxs opacity-60 bg-white/10 px-1.5 py-0.5 rounded-full">{domain.agentCount}</span>
         </button>
       ))}
     </div>

@@ -6,7 +6,7 @@ import { InitiativeCard } from "../components/InitiativeCard";
 import { ActivityFeed } from "../components/ActivityFeed";
 import { AgentRoster } from "../components/AgentRoster";
 import { WelcomeScreen } from "../components/WelcomeScreen";
-import type { DashboardSummary, Agent } from "../api/types";
+import type { DashboardSummary, Agent, Goal } from "../api/types";
 
 function budgetVariant(pct: number): "success" | "warning" | "danger" {
   if (pct > 90) return "danger";
@@ -128,26 +128,70 @@ export function CommandCenter() {
 
 /**
  * Initiatives section — fetches goals to show as initiative cards.
- * Falls back to an empty state when no goals are configured.
+ * Falls back to task-based grouping when no goals exist.
  */
 function InitiativesSection({ domain }: { domain: string }) {
-  const { data } = useQuery({
+  const { data: goalsData } = useQuery({
     queryKey: ["goals", domain, "top-level"],
+    queryFn: () => api.getGoals(domain, { parent: "none" }),
+    enabled: !!domain,
+    staleTime: 30_000,
+  });
+
+  const { data: tasksData } = useQuery({
+    queryKey: ["tasks", domain, "initiative-counts"],
     queryFn: () =>
       api.getTasks(domain, { state: "OPEN,ASSIGNED,IN_PROGRESS,DONE" }),
     enabled: !!domain,
     staleTime: 30_000,
   });
 
-  // For now, show a placeholder when no initiative data
-  // This will be enhanced when we have the goals/initiative grouping endpoint
-  if (!data || data.count === 0) {
+  const colors = ["#58a6ff", "#3fb950", "#d29922", "#f85149", "#bc8cff"];
+
+  // Prefer goals if available
+  const goals: Goal[] = goalsData?.goals ?? [];
+  if (goals.length > 0) {
+    // Count tasks per department for context
+    const tasksByDept = new Map<string, { open: number; inProgress: number; done: number }>();
+    if (tasksData) {
+      for (const task of tasksData.tasks) {
+        const dept = task.department ?? "Unassigned";
+        const entry = tasksByDept.get(dept) ?? { open: 0, inProgress: 0, done: 0 };
+        if (task.state === "OPEN" || task.state === "ASSIGNED") entry.open++;
+        else if (task.state === "IN_PROGRESS") entry.inProgress++;
+        else if (task.state === "DONE") entry.done++;
+        tasksByDept.set(dept, entry);
+      }
+    }
+
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {goals.map((goal, i) => {
+          const deptCounts = tasksByDept.get(goal.department ?? "") ?? { open: 0, inProgress: 0, done: 0 };
+          const total = deptCounts.open + deptCounts.inProgress + deptCounts.done;
+          return (
+            <InitiativeCard
+              key={goal.id}
+              name={goal.title}
+              allocationPct={goal.allocation ?? 0}
+              spentPct={total > 0 ? Math.round((deptCounts.done / total) * 100) : 0}
+              taskCounts={deptCounts}
+              activeAgents={[]}
+              color={colors[i % colors.length]}
+            />
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Fallback: group tasks by department
+  if (!tasksData || tasksData.count === 0) {
     return null;
   }
 
-  // Group tasks by department as a proxy for initiatives
   const byDept = new Map<string, { open: number; inProgress: number; done: number }>();
-  for (const task of data.tasks) {
+  for (const task of tasksData.tasks) {
     const dept = task.department ?? "Unassigned";
     const entry = byDept.get(dept) ?? { open: 0, inProgress: 0, done: 0 };
     if (task.state === "OPEN" || task.state === "ASSIGNED") entry.open++;
@@ -158,7 +202,6 @@ function InitiativesSection({ domain }: { domain: string }) {
 
   if (byDept.size === 0) return null;
 
-  const colors = ["#58a6ff", "#3fb950", "#d29922", "#f85149", "#bc8cff"];
   const depts = Array.from(byDept.entries());
 
   return (
@@ -169,7 +212,7 @@ function InitiativesSection({ domain }: { domain: string }) {
           <InitiativeCard
             key={dept}
             name={dept}
-            allocationPct={Math.round((total / data.count) * 100)}
+            allocationPct={Math.round((total / tasksData.count) * 100)}
             spentPct={total > 0 ? Math.round((counts.done / total) * 100) : 0}
             taskCounts={counts}
             activeAgents={[]}

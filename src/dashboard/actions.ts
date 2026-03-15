@@ -18,6 +18,7 @@ import { createDemoConfig } from "./demo.js";
 import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
 import { loadGlobalConfig } from "../config/loader.js";
 import { initializeAllDomains } from "../config/init.js";
+import { createGoal } from "../goals/ops.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -347,6 +348,25 @@ export function handleDemoCreate(): RouteResult {
     // Load the new domain config into the running runtime so queries work immediately
     const initResult = initializeAllDomains(baseDir);
     const loadedOk = initResult.domains.includes(domain.name);
+
+    // Create goal records for demo initiatives so they show in the Command Center
+    if (loadedOk && domainExtras.goals) {
+      try {
+        const goals = domainExtras.goals as Record<string, { allocation?: number; description?: string; department?: string }>;
+        for (const [goalId, goalDef] of Object.entries(goals)) {
+          createGoal({
+            projectId: domain.name,
+            title: goalId.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+            description: goalDef.description,
+            department: goalDef.department,
+            allocation: goalDef.allocation,
+            createdBy: "demo-setup",
+          });
+        }
+      } catch {
+        // Non-fatal: goals are nice-to-have for the demo
+      }
+    }
 
     return {
       status: 201,

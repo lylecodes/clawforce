@@ -23,6 +23,7 @@ import type {
   DomainConfig,
   ConfigChangePreview,
   ConfigValidationResult,
+  GoalListResponse,
 } from "./types";
 
 const BASE = "/api";
@@ -119,6 +120,10 @@ export const api = {
     postJson(`/${domain}/meetings/${meetingId}/end`),
   sendThreadMessage: (domain: string, threadId: string, content: string) =>
     postJson(`/${domain}/messages/${threadId}/send`, { content }),
+
+  // -- Goals --
+  getGoals: (domain: string, params?: Record<string, string>) =>
+    fetchJson<GoalListResponse>(`/${domain}/goals${qs(params)}`),
 
   // -- Config --
   getConfig: (domain: string) =>

@@ -237,6 +237,26 @@ export type MeetingListResponse = {
   count: number;
 };
 
+// --- Goal / Initiative types ---
+
+export type Goal = {
+  id: string;
+  title: string;
+  description?: string;
+  status: string;
+  department?: string;
+  team?: string;
+  allocation?: number;
+  ownerAgentId?: string;
+  createdAt: number;
+};
+
+export type GoalListResponse = {
+  goals: Goal[];
+  hasMore: boolean;
+  count: number;
+};
+
 // --- Config Editor types ---
 
 export type ConfigSection =

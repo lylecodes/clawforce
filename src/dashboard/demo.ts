@@ -111,9 +111,11 @@ export function createDemoConfig(): DemoConfig {
 
   const domainExtras: Record<string, unknown> = {
     budget: {
-      daily: { cents: 15000, tokens: 10_000_000 },
-      hourly: { cents: 3000 },
-      monthly: { cents: 300_000 },
+      project: {
+        daily: { cents: 15000, tokens: 10_000_000 },
+        hourly: { cents: 3000 },
+        monthly: { cents: 300_000 },
+      },
     },
     safety: {
       max_spawn_depth: 3,
