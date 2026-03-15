@@ -115,7 +115,7 @@ export function AssistantWidget() {
     <>
       {/* Floating button */}
       <button
-        onClick={() => setIsOpen((prev) => !prev)}
+        onClick={() => setIsOpen(!isOpen)}
         className={`fixed bottom-6 right-6 z-50 w-12 h-12 rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-105 ${
           isOpen
             ? "bg-cf-bg-tertiary border border-cf-border text-cf-text-muted"
