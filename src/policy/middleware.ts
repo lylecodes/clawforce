@@ -22,7 +22,7 @@ import { getAgentConfig } from "../project.js";
 import { resolveEffectiveScope } from "../scope.js";
 import { checkPolicies, type PolicyContext } from "./engine.js";
 
-export type ToolExecuteFunction = (params: Record<string, unknown>) => Promise<{
+export type ToolExecuteFunction = (...args: unknown[]) => Promise<{
   content: Array<{ type: string; text: string }>;
   details: unknown;
 }>;
@@ -162,7 +162,10 @@ export function withPolicyCheck(
   execute: ToolExecuteFunction,
   context: PolicyMiddlewareContext,
 ): ToolExecuteFunction {
-  return async (params: Record<string, unknown>) => {
+  return async (...args: unknown[]) => {
+    // AgentTool.execute signature: (toolCallId, params, signal?, onUpdate?)
+    // Extract params from the correct position
+    const params = (args.length >= 2 ? args[1] : args[0]) as Record<string, unknown>;
     const result = enforceToolPolicy(context, params);
 
     if (!result.allowed) {
@@ -180,7 +183,7 @@ export function withPolicyCheck(
       };
     }
 
-    return execute(params);
+    return execute(...args);
   };
 }
 
