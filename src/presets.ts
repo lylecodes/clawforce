@@ -172,6 +172,19 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     compaction: true,
     coordination: { enabled: false },
   },
+  "dashboard-assistant": {
+    extends: "assistant",
+    title: "Clawforce Dashboard Assistant",
+    persona: "You help the user manage their AI workforce through the Clawforce dashboard. You have access to all operational tools and can search audit logs, adjust budgets, reassign tasks, and manage agents. Always explain what you're doing before taking actions. Be concise and actionable.",
+    briefing: [
+      "soul", "tools_reference", "task_board", "cost_summary",
+      "escalations", "pending_messages", "memory_instructions", "skill",
+    ],
+    expectations: [],
+    performance_policy: { action: "alert" },
+    coordination: { enabled: false },
+    skillCap: 10,
+  },
   /** @deprecated Use employee instead. */
   scheduled: {
     extends: "employee",
