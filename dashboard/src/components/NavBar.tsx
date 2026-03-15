@@ -18,6 +18,7 @@ export function NavBar() {
         {/* Top row: logo + domain switcher */}
         <div className="flex items-center justify-between h-12">
           <div className="flex items-center gap-3">
+            <img src="/logo.svg" alt="Clawforce" className="w-8 h-8" />
             <span className="text-lg font-bold text-cf-text-primary tracking-tight">
               Clawforce
             </span>
