@@ -114,6 +114,8 @@ export function ConfigEditor() {
     markDirty,
     save,
     isSaving,
+    saveResult,
+    clearSaveResult,
     preview,
     requestPreview,
     isPreviewLoading,
@@ -141,7 +143,27 @@ export function ConfigEditor() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-120px)] bg-cf-bg-primary rounded-lg border border-cf-border overflow-hidden">
+    <div className="flex flex-col h-[calc(100vh-120px)] bg-cf-bg-primary rounded-lg border border-cf-border overflow-hidden">
+      {/* Save result toast */}
+      {saveResult && (
+        <div
+          className={`px-4 py-2 text-xs font-medium flex items-center justify-between shrink-0 ${
+            saveResult.type === "success"
+              ? "bg-cf-accent-green/15 text-cf-accent-green border-b border-cf-accent-green/30"
+              : "bg-cf-accent-red/15 text-cf-accent-red border-b border-cf-accent-red/30"
+          }`}
+        >
+          <span>{saveResult.message}</span>
+          <button
+            onClick={clearSaveResult}
+            className="ml-2 opacity-70 hover:opacity-100 transition-opacity"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      <div className="flex flex-1 min-h-0">
       {/* Left sidebar: section tabs */}
       <div className="w-[200px] shrink-0 border-r border-cf-border bg-cf-bg-secondary flex flex-col">
         <div className="px-3 py-3 border-b border-cf-border-muted">
@@ -272,6 +294,7 @@ export function ConfigEditor() {
           />
         )}
       </div>
+      </div>{/* end flex flex-1 wrapper */}
     </div>
   );
 }

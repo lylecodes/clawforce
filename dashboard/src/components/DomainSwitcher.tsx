@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 
 export function DomainSwitcher() {
-  const { activeDomain, setActiveDomain, setDomains, domains } = useAppStore();
+  const { activeDomain, setActiveDomain, setDomains, domains, domainsLoaded } = useAppStore();
 
   useQuery({
     queryKey: ["domains"],
@@ -14,6 +14,12 @@ export function DomainSwitcher() {
     },
     staleTime: 30_000,
   });
+
+  if (!domainsLoaded) {
+    return (
+      <div className="text-sm text-cf-text-muted">Loading domains...</div>
+    );
+  }
 
   if (domains.length === 0) {
     return (
@@ -33,8 +39,8 @@ export function DomainSwitcher() {
               : "bg-cf-bg-tertiary text-cf-text-secondary border border-cf-border hover:text-cf-text-primary hover:border-cf-text-muted"
           }`}
         >
-          {domain.id}
-          <span className="ml-1.5 text-xxs opacity-60 bg-white/10 px-1.5 py-0.5 rounded-full">{domain.agentCount}</span>
+          <span>{domain.id}</span>
+          <span className="inline-flex items-center justify-center ml-1.5 text-xxs opacity-60 bg-white/10 px-1.5 py-0.5 rounded-full min-w-[20px] tabular-nums">{domain.agentCount}</span>
         </button>
       ))}
     </div>

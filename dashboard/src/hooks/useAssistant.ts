@@ -149,10 +149,15 @@ export function useAssistant() {
     setMessages([]);
   }, []);
 
+  const addLocalMessages = useCallback((msgs: AssistantMessage[]) => {
+    setMessages((prev) => [...prev, ...msgs]);
+  }, []);
+
   return {
     messages,
     sendMessage,
     clearMessages,
+    addLocalMessages,
     isSending,
     isStreaming,
   };

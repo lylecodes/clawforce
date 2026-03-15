@@ -24,6 +24,7 @@ import type {
   ConfigChangePreview,
   ConfigValidationResult,
   GoalListResponse,
+  Goal,
 } from "./types";
 
 const BASE = "/api";
@@ -124,6 +125,8 @@ export const api = {
   // -- Goals --
   getGoals: (domain: string, params?: Record<string, string>) =>
     fetchJson<GoalListResponse>(`/${domain}/goals${qs(params)}`),
+  getGoal: (domain: string, goalId: string) =>
+    fetchJson<Goal>(`/${domain}/goals/${goalId}`),
 
   // -- Config --
   getConfig: (domain: string) =>

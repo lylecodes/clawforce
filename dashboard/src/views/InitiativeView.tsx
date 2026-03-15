@@ -4,13 +4,24 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "rec
 import { useAppStore } from "../store";
 import { api } from "../api/client";
 import { ActivityFeed } from "../components/ActivityFeed";
-import type { Task, Agent, DailyCost } from "../api/types";
+import type { Task, Agent, DailyCost, Goal } from "../api/types";
 import { theme } from "../styles/theme";
 
 export function InitiativeView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const activeDomain = useAppStore((s) => s.activeDomain);
+
+  const { data: goalDetail } = useQuery({
+    queryKey: ["goal-detail", activeDomain, id],
+    queryFn: () => api.getGoal(activeDomain!, id!),
+    enabled: !!activeDomain && !!id,
+    staleTime: 60_000,
+    retry: false, // Goal may not exist — don't retry
+  });
+
+  // Goal detail API returns { goal: { title, ... } }
+  const goalTitle = (goalDetail as { goal?: Goal } | undefined)?.goal?.title ?? id;
 
   const { data: taskData, isLoading: tasksLoading } = useQuery({
     queryKey: ["tasks", activeDomain, { initiative: id }],
@@ -88,7 +99,7 @@ export function InitiativeView() {
           >
             &larr; Back
           </button>
-          <h1 className="text-lg font-semibold text-cf-text-primary">{id}</h1>
+          <h1 className="text-lg font-semibold text-cf-text-primary">{goalTitle}</h1>
         </div>
       </div>
 

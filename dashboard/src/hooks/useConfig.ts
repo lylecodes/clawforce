@@ -28,6 +28,7 @@ export function useConfig() {
   const [dirtyKeys, setDirtyKeys] = useState<Set<ConfigSection>>(new Set());
   const [preview, setPreview] = useState<ConfigChangePreview | null>(null);
   const [validation, setValidation] = useState<ConfigValidationResult | null>(null);
+  const [saveResult, setSaveResult] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const { data: config, isLoading } = useQuery({
     queryKey: ["config", activeDomain],
@@ -48,6 +49,13 @@ export function useConfig() {
       });
       setPreview(null);
       setValidation(null);
+      setSaveResult({ type: "success", message: `${vars.section} configuration saved successfully.` });
+      setTimeout(() => setSaveResult(null), 4000);
+    },
+    onError: (err, vars) => {
+      const message = err instanceof Error ? err.message : String(err);
+      setSaveResult({ type: "error", message: `Failed to save ${vars.section}: ${message}` });
+      setTimeout(() => setSaveResult(null), 6000);
     },
   });
 
@@ -99,6 +107,8 @@ export function useConfig() {
     markDirty,
     save,
     isSaving: saveMutation.isPending,
+    saveResult,
+    clearSaveResult: () => setSaveResult(null),
     validate,
     isValidating: validateMutation.isPending,
     validation,

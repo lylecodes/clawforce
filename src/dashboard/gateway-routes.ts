@@ -117,6 +117,27 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
 
       if (req.method === "POST") {
         const body = await parseBody(req);
+
+        // Special handling for assistant widget messages:
+        // Return an SSE-formatted acknowledgment response so the chat widget
+        // displays a helpful message instead of a cryptic error.
+        if (resource.match(/^agents\/[^/]+\/message$/)) {
+          const agentId = resource.split("/")[1]!;
+          const assistantResponse = agentId === "clawforce-assistant"
+            ? "The Clawforce assistant is not yet connected to a live AI backend. To enable AI-powered assistance, configure a `dashboard-assistant` agent in your domain config and connect it to an LLM provider.\n\nIn the meantime, you can use the dashboard directly to:\n- View and manage agents in the Org Chart\n- Approve or reject proposals in the Approval Queue\n- Monitor costs and trust scores in Analytics\n- Edit configuration in the Config Editor"
+            : `Message received by agent "${agentId}". Note: real-time agent messaging requires an active OpenClaw agent session with adapter wiring configured.`;
+
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          });
+          res.write(`data: ${JSON.stringify({ content: assistantResponse })}\n\n`);
+          res.write("data: [DONE]\n\n");
+          res.end();
+          return;
+        }
+
         const result = handleAction(domain, resource, body);
         respondJson(res, result.status, result.body);
         return;

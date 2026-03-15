@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { useAppStore } from "../store";
 import { api } from "../api/client";
 import { MetricCard } from "../components/MetricCard";
@@ -23,6 +24,7 @@ function approvalVariant(count: number): "default" | "warning" | "danger" {
 export function CommandCenter() {
   const activeDomain = useAppStore((s) => s.activeDomain);
   const domains = useAppStore((s) => s.domains);
+  const domainsLoaded = useAppStore((s) => s.domainsLoaded);
 
   const { data: summary, isLoading: summaryLoading } = useQuery({
     queryKey: ["dashboard", activeDomain],
@@ -38,7 +40,19 @@ export function CommandCenter() {
     refetchInterval: 30_000,
   });
 
-  // Show welcome/onboarding screen when no domains are configured
+  // While domains are still being fetched, show a loading spinner (not the WelcomeScreen)
+  if (!domainsLoaded) {
+    return (
+      <div className="flex items-center justify-center h-full min-h-[400px]">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-cf-accent-blue border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-cf-text-muted text-sm">Loading domains...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show welcome/onboarding screen only when domains query has completed and confirmed empty
   if (domains.length === 0 && !activeDomain) {
     return <WelcomeScreen />;
   }
@@ -132,6 +146,7 @@ export function CommandCenter() {
  * Uses task data only for per-department counts within the goal cards.
  */
 function InitiativesSection({ domain }: { domain: string }) {
+  const navigate = useNavigate();
   const { data: goalsData } = useQuery({
     queryKey: ["goals", domain, "top-level"],
     queryFn: () => api.getGoals(domain, { parent: "none" }),
@@ -149,12 +164,12 @@ function InitiativesSection({ domain }: { domain: string }) {
 
   const colors = ["#58a6ff", "#3fb950", "#d29922", "#f85149", "#bc8cff"];
 
-  // Deduplicate goals by ID (guards against duplicate DB entries from repeated demo setup)
+  // Deduplicate goals by title (guards against duplicate DB entries from repeated demo setup)
   const rawGoals: Goal[] = goalsData?.goals ?? [];
-  const seenIds = new Set<string>();
+  const seenTitles = new Set<string>();
   const goals = rawGoals.filter((g) => {
-    if (seenIds.has(g.id)) return false;
-    seenIds.add(g.id);
+    if (seenTitles.has(g.title)) return false;
+    seenTitles.add(g.title);
     return true;
   });
 
@@ -196,6 +211,7 @@ function InitiativesSection({ domain }: { domain: string }) {
             taskCounts={deptCounts}
             activeAgents={[]}
             color={colors[i % colors.length]}
+            onClick={() => navigate(`/initiatives/${encodeURIComponent(goal.id)}`)}
           />
         );
       })}

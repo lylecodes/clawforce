@@ -65,7 +65,7 @@ export function AssistantWidget() {
   const isOpen = assistantOpen;
   const setIsOpen = setAssistantOpen;
 
-  const { messages, sendMessage, clearMessages, isSending, isStreaming } = useAssistant();
+  const { messages, sendMessage, clearMessages, addLocalMessages, isSending, isStreaming } = useAssistant();
   const [inputValue, setInputValue] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -89,13 +89,40 @@ export function AssistantWidget() {
       contextSentRef.current = true;
       // Clear existing conversation and send context as first message
       clearMessages();
-      sendMessage(assistantInitialContext);
+      // Attempt to send via the backend. If no domain is active, sendMessage
+      // will silently bail, so we add the messages locally as a fallback.
+      const contextText = assistantInitialContext;
       clearAssistantContext();
+      sendMessage(contextText);
+
+      // Check after a tick: if the message wasn't added (no domain), add it locally
+      setTimeout(() => {
+        // If messages are still empty, the send was a no-op (no domain active)
+        // Add the context as a local user message + a helpful assistant reply
+        const store = useAppStore.getState();
+        if (!store.activeDomain) {
+          // The sendMessage bailed because no domain is active; show local feedback
+          const localUserMsg: import("../hooks/useAssistant").AssistantMessage = {
+            id: `ctx-user-${Date.now()}`,
+            role: "user",
+            content: contextText,
+            timestamp: Date.now(),
+          };
+          const localAssistantMsg: import("../hooks/useAssistant").AssistantMessage = {
+            id: `ctx-asst-${Date.now()}`,
+            role: "assistant",
+            content:
+              "Welcome! To get started, I recommend clicking \"Explore with a demo\" on the welcome screen to set up a sample domain. Once a domain is active, I can help you configure governance, budgets, and agent structure.\n\nAlternatively, you can set up a domain manually via the OpenClaw CLI and then return here.",
+            timestamp: Date.now(),
+          };
+          addLocalMessages([localUserMsg, localAssistantMsg]);
+        }
+      }, 100);
     }
     if (!assistantInitialContext) {
       contextSentRef.current = false;
     }
-  }, [isOpen, assistantInitialContext, sendMessage, clearMessages, clearAssistantContext]);
+  }, [isOpen, assistantInitialContext, sendMessage, clearMessages, clearAssistantContext, addLocalMessages]);
 
   const handleSend = () => {
     const trimmed = inputValue.trim();
