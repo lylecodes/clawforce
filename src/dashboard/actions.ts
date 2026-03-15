@@ -17,6 +17,7 @@ import type { TaskPriority, TaskState } from "../types.js";
 import { createDemoConfig } from "./demo.js";
 import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
 import { loadGlobalConfig } from "../config/loader.js";
+import { initializeAllDomains } from "../config/init.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -343,11 +344,15 @@ export function handleDemoCreate(): RouteResult {
     // If demo domain already exists, overwrite it
     fs.writeFileSync(domainPath, YAML.stringify(domainYaml), "utf-8");
 
+    // Load the new domain config into the running runtime so queries work immediately
+    const initResult = initializeAllDomains(baseDir);
+    const loadedOk = initResult.domains.includes(domain.name);
+
     return {
       status: 201,
       body: {
         domainId: domain.name,
-        message: `Demo domain "${domain.name}" created with ${domain.agents.length} agents.`,
+        message: `Demo domain "${domain.name}" created with ${domain.agents.length} agents.${loadedOk ? "" : " Warning: domain written but not loaded into runtime."}`,
       },
     };
   } catch (err) {

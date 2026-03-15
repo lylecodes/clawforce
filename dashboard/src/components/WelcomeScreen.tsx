@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAppStore } from "../store";
 import { api } from "../api/client";
 
@@ -8,6 +9,7 @@ export function WelcomeScreen() {
   const [demoLoading, setDemoLoading] = useState(false);
   const [demoError, setDemoError] = useState<string | null>(null);
   const openAssistant = useAppStore((s) => s.openAssistantWithContext);
+  const queryClient = useQueryClient();
 
   const handlePathClick = (path: OnboardingPath) => {
     switch (path) {
@@ -32,13 +34,15 @@ export function WelcomeScreen() {
     setDemoError(null);
     try {
       const result = await api.createDemo();
-      // After demo creation, refresh domains
+      // After demo creation, refresh domains and invalidate all cached queries
       const projects = await api.getProjects();
       const { setDomains, setActiveDomain } = useAppStore.getState();
       setDomains(projects);
       if (result.domainId) {
         setActiveDomain(result.domainId);
       }
+      // Invalidate all queries so views re-fetch with the new domain data
+      await queryClient.invalidateQueries();
     } catch (err) {
       setDemoError(
         err instanceof Error ? err.message : "Failed to create demo",

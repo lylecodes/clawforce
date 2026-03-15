@@ -102,13 +102,13 @@ export function Analytics() {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <SummaryCard
             label="Total Spend"
-            value={`$${(costData.totalCents / 100).toFixed(2)}`}
+            value={`$${((costData.totalCents ?? 0) / 100).toFixed(2)}`}
             subtitle={`Last ${days} day${days !== 1 ? "s" : ""}`}
           />
           <SummaryCard
             label="Avg Daily"
             value={
-              dailyCosts.length > 0
+              dailyCosts.length > 0 && costData.totalCents != null
                 ? `$${(costData.totalCents / 100 / dailyCosts.length).toFixed(2)}`
                 : "$0.00"
             }
@@ -124,9 +124,9 @@ export function Analytics() {
             value={
               trustAgents.length > 0
                 ? `${Math.round(trustAgents.reduce((s, a) => s + a.overall, 0) / trustAgents.length)}%`
-                : "--%"
+                : "N/A"
             }
-            subtitle={`${trustAgents.length} scored`}
+            subtitle={trustAgents.length > 0 ? `${trustAgents.length} scored` : "No data"}
           />
         </div>
       )}
