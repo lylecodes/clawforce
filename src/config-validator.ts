@@ -9,7 +9,7 @@ import type { DomainConfig } from "./config/schema.js";
 import { validatePolicyConfigs } from "./policy/normalizer.js";
 import { isKnownCategory } from "./risk/categories.js";
 import type { AgentConfig, CompactionConfig, ContextSource, RiskGateAction, RiskTier, WorkforceConfig } from "./types.js";
-import { EVENT_ACTION_TYPES } from "./types.js";
+import { EVENT_ACTION_TYPES, OPERATIONAL_PROFILES } from "./types.js";
 
 const VALID_RISK_TIERS: RiskTier[] = ["low", "medium", "high", "critical"];
 const VALID_GATE_ACTIONS: RiskGateAction[] = ["none", "delay", "confirm", "approval", "human_approval"];
@@ -404,6 +404,16 @@ export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
       level: "suggest",
       message: `Domain "${domain.domain}" has no rules — rules automate recurring decisions and reduce LLM costs.`,
     });
+  }
+
+  // Validate operational_profile if present
+  if (domain.operational_profile !== undefined) {
+    if (!OPERATIONAL_PROFILES.includes(domain.operational_profile as any)) {
+      results.push({
+        level: "error",
+        message: `Domain "${domain.domain}": operational_profile "${domain.operational_profile}" is invalid. Valid: ${OPERATIONAL_PROFILES.join(", ")}`,
+      });
+    }
   }
 
   return results;

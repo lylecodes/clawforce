@@ -18,6 +18,8 @@ export type InitDomainOpts = {
   agents: string[];
   /** Map of agent name → preset name for agents that should be auto-added to global config */
   agentPresets?: Record<string, string>;
+  /** Operational profile level for this domain. */
+  operational_profile?: "low" | "medium" | "high" | "ultra";
 };
 
 /**
@@ -72,6 +74,7 @@ export function initDomain(baseDir: string, opts: InitDomainOpts): void {
   };
   if (opts.orchestrator) domainConfig.orchestrator = opts.orchestrator;
   if (opts.paths && opts.paths.length > 0) domainConfig.paths = opts.paths;
+  if (opts.operational_profile) domainConfig.operational_profile = opts.operational_profile;
 
   // Write domain file
   fs.writeFileSync(domainPath, YAML.stringify(domainConfig), "utf-8");

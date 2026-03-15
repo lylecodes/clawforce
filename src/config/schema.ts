@@ -5,7 +5,7 @@
  * plus runtime validators that return structured error lists.
  */
 
-import type { RuleDefinition } from "../types.js";
+import type { OperationalProfile, RuleDefinition } from "../types.js";
 
 // --- Types ---
 
@@ -47,6 +47,7 @@ export type DomainConfig = {
   safety?: Record<string, unknown>;
   channels?: unknown[];
   event_handlers?: Record<string, unknown>;
+  operational_profile?: OperationalProfile;
   [key: string]: unknown;
 };
 

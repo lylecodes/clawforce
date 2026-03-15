@@ -15,6 +15,7 @@ import { safeLog } from "../diagnostics.js";
 import type { AgentConfig, WorkforceConfig } from "../types.js";
 import type { GlobalConfig, DomainConfig, GlobalAgentDef } from "./schema.js";
 import { inferPreset, markInferred } from "./inference.js";
+import { normalizeDomainProfile } from "../profiles/operational.js";
 
 export type InitResult = {
   domains: string[];
@@ -53,8 +54,11 @@ export function initializeAllDomains(baseDir: string): InitResult {
     return result;
   }
 
-  for (const domainConfig of domainConfigs) {
+  for (let domainConfig of domainConfigs) {
     try {
+      // Expand operational profile (pure config transform — no cron registration)
+      domainConfig = normalizeDomainProfile(domainConfig, globalConfig);
+
       // Validate agents exist in global config
       const agentWarnings = validateDomainAgents(globalConfig, domainConfig);
       result.warnings.push(...agentWarnings);

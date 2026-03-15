@@ -35,6 +35,7 @@ export type InitAnswers = {
   reporting: Record<string, string>;
   budget_cents: number;
   model_preference?: string;
+  operational_profile?: "low" | "medium" | "high" | "ultra";
 };
 
 export function getInitQuestions(): InitQuestion[] {
@@ -73,6 +74,13 @@ export function getInitQuestions(): InitQuestion[] {
       prompt: "Daily budget in dollars?",
       description:
         "How much to spend per day across all agents. We'll show a recommendation based on your team size.",
+    },
+    {
+      id: "operational_profile",
+      type: "choice",
+      prompt: "Pick an operational level",
+      description: "Controls how intensively your agents coordinate, remember, and communicate.",
+      choices: ["low", "medium", "high", "ultra"],
     },
     {
       id: "model_preference",
@@ -123,6 +131,10 @@ export function buildConfigFromAnswers(answers: InitAnswers): {
     name: answers.domain_name,
     agents: agentNames,
   };
+
+  if (answers.operational_profile) {
+    domain.operational_profile = answers.operational_profile;
+  }
 
   return { global, domain };
 }
