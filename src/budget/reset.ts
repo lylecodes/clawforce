@@ -6,7 +6,7 @@
  * Reservations are NOT reset — they persist until plan completion.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 
 export function getNextHourBoundary(now: number): number {
   const d = new Date(now);
@@ -52,7 +52,7 @@ export function ensureWindowsCurrent(
   if (!row) return;
 
   const resets: string[] = [];
-  const params: unknown[] = [];
+  const params: SQLInputValue[] = [];
 
   // Hourly reset
   if (row.hourly_reset_at && now >= row.hourly_reset_at) {

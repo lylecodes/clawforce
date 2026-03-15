@@ -6,7 +6,7 @@
  * Child limits are bounded by the parent's remaining allocatable budget.
  */
 
-import { type DatabaseSync } from "node:sqlite";
+import { type DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { getDb } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import type { BudgetConfigV2, BudgetWindowConfig } from "./types.js";
@@ -133,7 +133,7 @@ export function allocateBudget(
   if (existing) {
     // Build SET clause for all provided limits
     const setClauses: string[] = [];
-    const setParams: unknown[] = [];
+    const setParams: SQLInputValue[] = [];
 
     for (const win of WINDOWS) {
       const windowConfig = allocation[win];
@@ -160,7 +160,7 @@ export function allocateBudget(
 
     // Build columns and values lists
     const cols = ["id", "project_id", "agent_id", "daily_spent_cents", "daily_reset_at", "created_at", "updated_at"];
-    const vals: unknown[] = [id, params.projectId, params.childAgentId, 0, getNextMidnightUTC(now), now, now];
+    const vals: SQLInputValue[] = [id, params.projectId, params.childAgentId, 0, getNextMidnightUTC(now), now, now];
 
     for (const win of WINDOWS) {
       const windowConfig = allocation[win];

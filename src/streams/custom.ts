@@ -5,7 +5,7 @@
  * Results formatted as table, JSON, or summary for briefing/webhook use.
  */
 
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 export type CustomStreamDef = {
   name: string;
@@ -41,12 +41,12 @@ export function executeCustomStream(
     }
 
     // Build bindings array from params
-    const bindings: unknown[] = [];
+    const bindings: SQLInputValue[] = [];
     if (params) {
       // Support positional params (keys are "1", "2", etc.)
       const keys = Object.keys(params).sort((a, b) => Number(a) - Number(b));
       for (const key of keys) {
-        bindings.push(params[key]);
+        bindings.push(params[key] as SQLInputValue);
       }
     }
 
