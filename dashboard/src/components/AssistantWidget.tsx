@@ -131,14 +131,7 @@ export function AssistantWidget() {
           </svg>
         ) : (
           /* Clawforce icon - chat bubble with claw */
-          <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-            <path
-              d="M11 2C5.48 2 1 5.58 1 10c0 2.39 1.33 4.53 3.41 5.97L3 20l4.34-2.17C8.51 18.27 9.73 18.5 11 18.5c5.52 0 10-3.58 10-8S16.52 2 11 2z"
-              fill="currentColor"
-              opacity="0.9"
-            />
-          </svg>
-          <img src="/logo.svg" alt="" className="w-5 h-5 absolute" />
+          <img src="/logo.svg" alt="Clawforce" className="w-7 h-7" />
         )}
       </button>
 
