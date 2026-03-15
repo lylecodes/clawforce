@@ -159,6 +159,7 @@ function createMockApi(pluginConfig?: Record<string, unknown>) {
     registerCommand: vi.fn((cmd: any) => { commands.push(cmd); }),
     registerService: vi.fn((svc: any) => { services.push(svc); }),
     registerGatewayMethod: vi.fn((name: string, handler: Function) => { gatewayMethods.set(name, handler); }),
+    registerHttpRoute: vi.fn(),
     injectAgentMessage: vi.fn(),
     // Accessors for testing
     _hooks: hooks,
