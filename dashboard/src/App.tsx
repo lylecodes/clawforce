@@ -5,6 +5,9 @@ import { TaskBoard } from "./views/TaskBoard";
 import { ApprovalQueue } from "./views/ApprovalQueue";
 import { OrgChart } from "./views/OrgChart";
 import { Analytics } from "./views/Analytics";
+import { CommsCenter } from "./views/CommsCenter";
+import { ConfigEditor } from "./views/ConfigEditor";
+import { InitiativeView } from "./views/InitiativeView";
 
 export function App() {
   return (
@@ -14,19 +17,11 @@ export function App() {
         <Route path="tasks" element={<TaskBoard />} />
         <Route path="approvals" element={<ApprovalQueue />} />
         <Route path="org" element={<OrgChart />} />
-        <Route path="comms" element={<Placeholder name="Comms Center" />} />
-        <Route path="config" element={<Placeholder name="Config Editor" />} />
+        <Route path="comms" element={<CommsCenter />} />
+        <Route path="config" element={<ConfigEditor />} />
         <Route path="analytics" element={<Analytics />} />
-        <Route path="initiatives/:id" element={<Placeholder name="Initiative Detail" />} />
+        <Route path="initiatives/:id" element={<InitiativeView />} />
       </Route>
     </Routes>
-  );
-}
-
-function Placeholder({ name }: { name: string }) {
-  return (
-    <div className="flex items-center justify-center h-full min-h-[400px]">
-      <p className="text-cf-text-muted text-lg">{name} — coming soon</p>
-    </div>
   );
 }

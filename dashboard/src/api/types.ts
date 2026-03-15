@@ -185,3 +185,146 @@ export type SSEEventType =
   | "meeting:turn"
   | "meeting:ended"
   | "config:changed";
+
+// --- Comms Center types ---
+
+export type MessageRole = "manager" | "employee" | "user";
+
+export type Message = {
+  id: string;
+  threadId: string;
+  from: string;
+  role: MessageRole;
+  content: string;
+  timestamp: number;
+  attachments?: string[];
+  linkedTaskId?: string;
+  mentionedAgents?: string[];
+};
+
+export type Thread = {
+  id: string;
+  type: "message" | "escalation" | "meeting";
+  participants: string[];
+  title?: string;
+  lastMessage?: string;
+  lastTimestamp: number;
+  unreadCount: number;
+  isActive?: boolean; // for meetings: currently live
+};
+
+export type MessageListResponse = {
+  threads: Thread[];
+  count: number;
+};
+
+export type ThreadMessagesResponse = {
+  messages: Message[];
+  count: number;
+};
+
+export type Meeting = {
+  id: string;
+  topic?: string;
+  participants: string[];
+  status: "active" | "ended";
+  startedAt: number;
+  endedAt?: number;
+};
+
+export type MeetingListResponse = {
+  meetings: Meeting[];
+  count: number;
+};
+
+// --- Config Editor types ---
+
+export type ConfigSection =
+  | "agents"
+  | "budget"
+  | "tool_gates"
+  | "initiatives"
+  | "jobs"
+  | "safety"
+  | "profile"
+  | "rules"
+  | "event_handlers"
+  | "memory";
+
+export type AgentConfig = {
+  id: string;
+  extends?: string;
+  title?: string;
+  persona?: string;
+  reports_to?: string;
+  department?: string;
+  team?: string;
+  channel?: string;
+  briefing?: string[];
+  expectations?: string[];
+  performance_policy?: {
+    action?: string;
+    max_retries?: number;
+    then?: string;
+  };
+};
+
+export type BudgetConfig = {
+  operational_profile?: string;
+  daily?: { cents?: number; tokens?: number; requests?: number };
+  hourly?: { cents?: number; tokens?: number; requests?: number };
+  monthly?: { cents?: number; tokens?: number; requests?: number };
+  initiatives?: Record<string, number>;
+};
+
+export type ToolGate = {
+  tool: string;
+  category?: string;
+  risk_tier: "low" | "medium" | "high" | "critical";
+};
+
+export type JobConfig = {
+  id: string;
+  agent: string;
+  cron: string;
+  enabled: boolean;
+  description?: string;
+};
+
+export type SafetyConfig = {
+  circuit_breaker_multiplier?: number;
+  spawn_depth_limit?: number;
+  loop_detection_threshold?: number;
+};
+
+export type DomainConfig = {
+  agents: AgentConfig[];
+  budget: BudgetConfig;
+  tool_gates: ToolGate[];
+  initiatives: Record<string, { allocation_pct: number; goal?: string }>;
+  jobs: JobConfig[];
+  safety: SafetyConfig;
+  profile: Record<string, unknown>;
+  rules: Record<string, unknown>[];
+  event_handlers: Record<string, unknown>[];
+  memory: Record<string, unknown>;
+};
+
+export type ConfigChangePreview = {
+  costDelta: string;
+  costDirection: "cheaper" | "more_expensive" | "neutral";
+  consequence: string;
+  risk: "LOW" | "MEDIUM" | "HIGH";
+  riskExplanation?: string;
+  buckets?: {
+    management: number;
+    execution: number;
+    intelligence: number;
+  };
+};
+
+export type ConfigValidationResult = {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+};

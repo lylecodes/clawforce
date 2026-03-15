@@ -16,6 +16,13 @@ import type {
   TrustScores,
   OrgChart,
   CostResponse,
+  MessageListResponse,
+  ThreadMessagesResponse,
+  MeetingListResponse,
+  Meeting,
+  DomainConfig,
+  ConfigChangePreview,
+  ConfigValidationResult,
 } from "./types";
 
 const BASE = "/clawforce/api";
@@ -96,6 +103,32 @@ export const api = {
 
   // -- Org --
   getOrgChart: (domain: string) => fetchJson<OrgChart>(`/${domain}/org`),
+
+  // -- Messages / Comms --
+  getMessages: (domain: string, params?: Record<string, string>) =>
+    fetchJson<MessageListResponse>(`/${domain}/messages${qs(params)}`),
+  getThreadMessages: (domain: string, threadId: string) =>
+    fetchJson<ThreadMessagesResponse>(`/${domain}/messages/${threadId}`),
+  getMeetings: (domain: string) =>
+    fetchJson<MeetingListResponse>(`/${domain}/meetings`),
+  createMeeting: (domain: string, data: { participants: string[]; topic?: string }) =>
+    postJson<Meeting>(`/${domain}/meetings/create`, data),
+  sendMeetingMessage: (domain: string, meetingId: string, content: string) =>
+    postJson(`/${domain}/meetings/${meetingId}/message`, { content }),
+  endMeeting: (domain: string, meetingId: string) =>
+    postJson(`/${domain}/meetings/${meetingId}/end`),
+  sendThreadMessage: (domain: string, threadId: string, content: string) =>
+    postJson(`/${domain}/messages/${threadId}/send`, { content }),
+
+  // -- Config --
+  getConfig: (domain: string) =>
+    fetchJson<DomainConfig>(`/${domain}/config`),
+  saveConfig: (domain: string, section: string, data: unknown) =>
+    postJson(`/${domain}/config/save`, { section, data }),
+  validateConfig: (domain: string, section: string, data: unknown) =>
+    postJson<ConfigValidationResult>(`/${domain}/config/validate`, { section, data }),
+  previewConfig: (domain: string, current: unknown, proposed: unknown) =>
+    postJson<ConfigChangePreview>(`/${domain}/config/preview`, { current, proposed }),
 
   // -- Actions --
   disableAgent: (domain: string, agentId: string, reason?: string) =>

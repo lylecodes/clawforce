@@ -47,6 +47,15 @@ export function useSSEConnection(domain: string | null) {
           break;
         case "message:new":
           queryClient.invalidateQueries({ queryKey: ["messages", domain] });
+          queryClient.invalidateQueries({ queryKey: ["thread-messages", domain] });
+          break;
+        case "meeting:started":
+        case "meeting:ended":
+          queryClient.invalidateQueries({ queryKey: ["meetings", domain] });
+          queryClient.invalidateQueries({ queryKey: ["messages", domain] });
+          break;
+        case "meeting:turn":
+          queryClient.invalidateQueries({ queryKey: ["thread-messages", domain] });
           break;
         case "config:changed":
           queryClient.invalidateQueries({ queryKey: ["config", domain] });
