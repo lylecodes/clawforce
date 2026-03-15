@@ -1090,3 +1090,70 @@ export type RuleDefinition = {
   action: RuleAction;
   enabled?: boolean;
 };
+
+// --- Operational Profile types ---
+
+export type OperationalProfile = "low" | "medium" | "high" | "ultra";
+
+export const OPERATIONAL_PROFILES: readonly OperationalProfile[] = ["low", "medium", "high", "ultra"] as const;
+
+export type OperationalProfileConfig = {
+  profile: OperationalProfile;
+  coordination: {
+    sessionTarget: "isolated" | "main";
+    sessionPersistHours?: number;
+    cronSchedule: string;
+    adaptiveWake: boolean;
+    wakeBounds?: [string, string];
+  };
+  memory: {
+    reviewSchedule: string;
+    reviewAggressiveness: "low" | "medium" | "high";
+    ghostRecallIntensity: "low" | "medium" | "high";
+    expectations: boolean;
+  };
+  meetings: {
+    standupSchedule?: string;
+    reflectionSchedule: string;
+  };
+  models: {
+    managerRecommended: string;
+    employeeRecommended: string;
+  };
+  sessionReset?: {
+    enabled: boolean;
+    schedule?: string;
+  };
+};
+
+export type CostLineItem = {
+  label: string;
+  cents: number;
+};
+
+export type CostBucket = {
+  name: string;
+  totalCents: number;
+  items: CostLineItem[];
+};
+
+export type ProfileCostEstimate = {
+  profile: OperationalProfile;
+  dailyCents: number;
+  monthlyCents: number;
+  buckets: CostBucket[];
+  fitsInBudget: boolean;
+  headroomCents: number;
+  headroomPercent: number;
+};
+
+export type ProfileRecommendation = {
+  recommended: OperationalProfile;
+  reason: string;
+  allProfiles: Array<{
+    profile: OperationalProfile;
+    estimatedCents: number;
+    fitsInBudget: boolean;
+    headroomPercent: number;
+  }>;
+};
