@@ -1,18 +1,22 @@
 import { Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { CommandCenter } from "./views/CommandCenter";
+import { TaskBoard } from "./views/TaskBoard";
+import { ApprovalQueue } from "./views/ApprovalQueue";
+import { OrgChart } from "./views/OrgChart";
+import { Analytics } from "./views/Analytics";
 
 export function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<CommandCenter />} />
-        <Route path="tasks" element={<Placeholder name="Task Board" />} />
-        <Route path="approvals" element={<Placeholder name="Approval Queue" />} />
-        <Route path="org" element={<Placeholder name="Org Chart" />} />
+        <Route path="tasks" element={<TaskBoard />} />
+        <Route path="approvals" element={<ApprovalQueue />} />
+        <Route path="org" element={<OrgChart />} />
         <Route path="comms" element={<Placeholder name="Comms Center" />} />
         <Route path="config" element={<Placeholder name="Config Editor" />} />
-        <Route path="analytics" element={<Placeholder name="Analytics" />} />
+        <Route path="analytics" element={<Analytics />} />
         <Route path="initiatives/:id" element={<Placeholder name="Initiative Detail" />} />
       </Route>
     </Routes>

@@ -15,6 +15,7 @@ import type {
   BudgetForecast,
   TrustScores,
   OrgChart,
+  CostResponse,
 } from "./types";
 
 const BASE = "/clawforce/api";
@@ -88,6 +89,10 @@ export const api = {
   // -- Trust --
   getTrustScores: (domain: string) =>
     fetchJson<TrustScores>(`/${domain}/trust`),
+
+  // -- Costs --
+  getCosts: (domain: string, params?: Record<string, string>) =>
+    fetchJson<CostResponse>(`/${domain}/costs${qs(params)}`),
 
   // -- Org --
   getOrgChart: (domain: string) => fetchJson<OrgChart>(`/${domain}/org`),

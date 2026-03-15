@@ -124,8 +124,37 @@ export type BudgetForecast = {
 };
 
 export type TrustScores = {
-  agents: unknown[];
+  agents: AgentTrustScore[];
   overrides: unknown[];
+};
+
+export type AgentTrustScore = {
+  agentId: string;
+  overall: number;
+  categories: Record<string, number>;
+  trend: "up" | "down" | "stable";
+};
+
+/** Daily cost entry from GET /:domain/costs */
+export type DailyCost = {
+  date: string;
+  totalCents: number;
+  byInitiative: Record<string, number>;
+};
+
+export type CostResponse = {
+  daily: DailyCost[];
+  totalCents: number;
+  currency: string;
+};
+
+/** Agent performance data for Analytics */
+export type AgentPerformance = {
+  agentId: string;
+  tasksCompleted: number;
+  compliancePct: number;
+  totalCostCents: number;
+  costPerTask: number;
 };
 
 export type OrgAgent = {
