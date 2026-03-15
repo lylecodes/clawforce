@@ -1575,6 +1575,18 @@ const clawforcePlugin = {
       start: async () => {
         await dashboardServer.start();
         api.logger.info("Clawforce dashboard at http://localhost:3117");
+
+        // Delayed self-init: call clawforce.init via the gateway WebSocket after a short delay
+        // This ensures the gateway is fully ready before we try to capture cron/channels
+        setTimeout(async () => {
+          try {
+            const { execSync } = await import("node:child_process");
+            execSync('openclaw gateway call clawforce.init 2>/dev/null', { timeout: 15000, stdio: 'ignore' });
+            api.logger.info("Clawforce: self-init via gateway call succeeded");
+          } catch {
+            api.logger.warn("Clawforce: self-init via gateway call failed (cron jobs may not be registered)");
+          }
+        }, 5000);
       },
       stop: async () => {
         await dashboardServer.stop();
