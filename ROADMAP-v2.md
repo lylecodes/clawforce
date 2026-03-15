@@ -439,3 +439,9 @@ System onboards agents but not the user. No guided first experience.
 - [ ] Public GitHub repo
 - [ ] npm package / OpenClaw plugin registry listing
 - [ ] EU AI Act compliance positioning (audit trails, budget enforcement, accountability)
+
+### OpenClaw Upstream
+- [ ] Request: Plugin HTTP routes should take priority over Control UI SPA fallback (enables /clawforce/ on gateway port)
+- [ ] Request: Export loadSessionCostSummary from plugin-sdk (enables direct cost data reading)
+- [ ] Request: Export loadProviderUsageSummary from plugin-sdk (enables direct rate limit reading)
+- [ ] Request: Per-agent compaction config (enables per-agent memoryFlush prompts natively)
