@@ -408,6 +408,77 @@ Wire SSE event emission into existing hooks:
 - Existing Clawforce REST API (dashboard/routes.ts)
 - OpenClaw gateway for HTTP route registration
 
+## 100% UI-Configurable
+
+The dashboard must support configuring EVERYTHING without touching YAML. Config Editor tabs:
+
+| Tab | What it configures |
+|-----|--------------------|
+| Agents | Agent definitions, titles, persona, reports_to, department, team, channel |
+| Budget | Daily/hourly/monthly limits (cents + tokens + requests), initiative allocation sliders |
+| Tool Gates | Risk tiers per tool, gate actions, bulk thresholds |
+| Initiatives | Goals with allocation %, priority, department assignment |
+| Jobs | Per-agent job schedules, enable/disable, cron builder |
+| Safety | Circuit breaker, spawn depth, loop detection, message rate |
+| Profile | Operational profile selector (low/medium/high/ultra) with cost preview |
+| Rules | Event trigger → action definitions (create_task, notify, escalate, etc.) |
+| Event Handlers | User-defined event types and their action arrays |
+| Memory | Memory governance: instructions (bool/string), expectations (bool), review config |
+
+Additionally:
+- **New Domain** flow accessible from domain switcher (+ button)
+- **Domain settings** (name, paths, orchestrator) editable
+
+---
+
+## Clawforce Assistant Agent
+
+A chat widget embedded in the dashboard — an actual Clawforce-managed agent that helps the user operate their workforce.
+
+**What it does:**
+- Answers questions: "Why did DevOps fail?" → searches audit logs, explains
+- Takes actions: "Reassign that task to Backend" → calls the API
+- Recommends: "Frontend has 45% trust for code:merge_pr — lower the approval tier?"
+- Has full context: sees dashboard state, knows the config, understands the org
+
+**Implementation:**
+- Embedded OpenClaw chat session in a slide-out panel (bottom-right)
+- Agent uses `assistant` preset with `clawforce_ops` and `clawforce_task` tools
+- Runs on the user's model and API key (their budget)
+- Tool gates on destructive actions (disable agent, kill session)
+- Has memory — remembers past conversations with the user
+- Is itself a Clawforce-managed agent with expectations and compliance
+
+**Config:**
+```yaml
+# Auto-created when dashboard is enabled
+agents:
+  clawforce-assistant:
+    extends: assistant
+    title: Clawforce Dashboard Assistant
+    persona: "You help the user manage their AI workforce through the Clawforce dashboard. You have access to all operational tools. Always explain what you're doing before taking actions."
+    tools: [clawforce_ops, clawforce_task, clawforce_goal, memory_search]
+```
+
+This is Clawforce eating its own dog food — the control plane has its own AI assistant.
+
+---
+
+## Autonomous UI Review Skill
+
+Post-launch: a skill that uses Playwright MCP to navigate every dashboard view, screenshot, check for bugs, and fix autonomously.
+
+- Navigate all 8 views + config editor tabs
+- Screenshot each state
+- Check: layout broken? Empty states handled? Console errors? Interactions work?
+- Click through key flows: approve a proposal, drag a task, expand an approval row
+- Report issues with screenshots
+- Fix → re-verify loop
+
+Not part of the initial build — created after the dashboard ships as a QA tool.
+
+---
+
 ## Non-Goals
 
 - Mobile app (responsive web is fine)
@@ -422,3 +493,4 @@ Wire SSE event emission into existing hooks:
 - Org Chart and Config Editor are the most complex (drag-and-drop) — save for later
 - Analytics is pure read, no interactions — quick win
 - Comms Center meeting mode requires `injectAgentMessage` integration — medium complexity
+- Clawforce assistant agent is Phase 5+ — requires the chat interface from Comms Center
