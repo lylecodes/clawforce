@@ -137,10 +137,8 @@ export function AssistantWidget() {
               fill="currentColor"
               opacity="0.9"
             />
-            <text x="7" y="13" fontSize="8" fill="white" fontWeight="bold">
-              CF
-            </text>
           </svg>
+          <img src="/logo.svg" alt="" className="w-5 h-5 absolute" />
         )}
       </button>
 
@@ -153,9 +151,7 @@ export function AssistantWidget() {
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-cf-border bg-cf-bg-secondary">
             <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded-full bg-cf-accent-blue/20 flex items-center justify-center">
-                <span className="text-xxs font-bold text-cf-accent-blue">CF</span>
-              </div>
+              <img src="/logo.svg" alt="Clawforce" className="w-6 h-6" />
               <div>
                 <h3 className="text-xs font-semibold text-cf-text-primary">
                   Dashboard Assistant
@@ -178,9 +174,7 @@ export function AssistantWidget() {
           <div className="flex-1 overflow-y-auto py-2">
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center h-full text-center px-6">
-                <div className="w-10 h-10 rounded-full bg-cf-accent-blue/10 flex items-center justify-center mb-3">
-                  <span className="text-sm font-bold text-cf-accent-blue">CF</span>
-                </div>
+                <img src="/logo.svg" alt="Clawforce" className="w-10 h-10 mb-3" />
                 <p className="text-xs text-cf-text-secondary font-medium mb-1">
                   Clawforce Assistant
                 </p>

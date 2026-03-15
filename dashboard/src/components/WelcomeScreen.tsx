@@ -53,10 +53,8 @@ export function WelcomeScreen() {
       <div className="max-w-3xl w-full px-6">
         {/* Logo / Branding */}
         <div className="flex flex-col items-center mb-10">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-cf-accent-blue to-cf-accent-purple flex items-center justify-center mb-5 shadow-lg shadow-cf-accent-blue/20">
-            <span className="text-2xl font-black text-white tracking-tight">
-              CF
-            </span>
+          <div className="mb-5">
+            <img src="/logo.svg" alt="Clawforce" className="w-20 h-20" />
           </div>
           <h1 className="text-3xl font-bold text-cf-text-primary mb-3 text-center">
             Welcome to Clawforce
