@@ -173,3 +173,5 @@ function InitiativesSection({ domain }: { domain: string }) {
     </div>
   );
 }
+
+export default CommandCenter;

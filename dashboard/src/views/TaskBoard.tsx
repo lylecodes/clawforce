@@ -210,3 +210,5 @@ export function TaskBoard() {
     </div>
   );
 }
+
+export default TaskBoard;

@@ -160,3 +160,5 @@ export function ApprovalQueue() {
     </div>
   );
 }
+
+export default ApprovalQueue;

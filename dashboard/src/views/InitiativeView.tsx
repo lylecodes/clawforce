@@ -282,3 +282,5 @@ function TaskRow({ task }: { task: Task }) {
     </div>
   );
 }
+
+export default InitiativeView;

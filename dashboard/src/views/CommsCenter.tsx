@@ -348,3 +348,5 @@ function NewMeetingModal({
     </div>
   );
 }
+
+export default CommsCenter;

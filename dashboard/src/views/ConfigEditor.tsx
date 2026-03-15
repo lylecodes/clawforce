@@ -1326,3 +1326,5 @@ function SaveFooter({
     </div>
   );
 }
+
+export default ConfigEditor;

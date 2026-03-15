@@ -153,3 +153,5 @@ function SummaryCard({
     </div>
   );
 }
+
+export default Analytics;
