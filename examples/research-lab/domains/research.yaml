@@ -1,0 +1,30 @@
+domain: llm-research
+agents:
+  - pi
+  - reasoning-lead
+  - reasoning-agent
+  - memory-lead
+  - memory-agent
+  - reviewer
+
+paths: ["~/research/llm-reasoning"]
+
+budget:
+  daily: { cents: 8000, tokens: 20000000 }
+  monthly: { cents: 150000 }
+
+operational_profile: medium
+
+goals:
+  reasoning-benchmarks:
+    allocation: 40
+    description: "Run and analyze chain-of-thought reasoning benchmarks across model families"
+  memory-architecture:
+    allocation: 35
+    description: "Compare RAG vs fine-tuned vs hybrid memory architectures for long-term retention"
+  # 25% reserve for ad-hoc experiments and literature review
+
+safety:
+  max_spawn_depth: 2
+  cost_circuit_breaker: 1.5
+  loop_detection_threshold: 5
