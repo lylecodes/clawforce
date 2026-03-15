@@ -395,18 +395,18 @@ System onboards agents but not the user. No guided first experience.
 ### Phase 9: UX Overhaul
 - [x] 9.1: Minimal viable config (role inference, smart defaults)
 - [x] 9.2: Interactive setup (`clawforce init` flow)
-- [ ] 9.3: Config quality feedback (lint-style best practice warnings)
+- [x] 9.3: Config quality feedback (lint-style best practice warnings)
 - [x] 9.4: Budget guidance (cost estimation, recommendations)
-- [ ] 9.5: Config hot-reload (watch, diff, apply without restart)
-- [ ] 9.6: Live actionable dashboard (real-time, approve/reassign/message from UI)
-- [ ] 9.7: Cron schedule automation (system determines frequency)
+- [x] 9.5: Config hot-reload (watch, diff, apply without restart)
+- [x] 9.6: Live actionable dashboard (real-time, approve/reassign/message from UI)
+- [x] 9.7: Cron schedule automation (system determines frequency)
 - [x] 9.8: Data streams (catalog, parameterized sources, custom queries, multi-output routing)
 - [x] 9.9: Human onboarding (welcome flow, first-week digest, guided intervention)
 
 ### Phase 10: Polish & Optimization
 - [ ] 10.1: Context assembly optimization (cache static, refresh dynamic)
 - [ ] 10.2: Session length optimization (max turns per cycle)
-- [ ] 10.3: Cost forecasting accuracy (moving average with confidence)
+- [x] 10.3: Cost forecasting accuracy (moving average with confidence)
 
 ### OpenClaw Thinning (Architectural)
 - [x] Strip runtime config (model/provider) from Clawforce types
@@ -418,24 +418,24 @@ System onboards agents but not the user. No guided first experience.
 - [ ] Cost data: OpenClaw API primary, llm_output fallback (skipped — loadSessionCostSummary not exported from plugin-sdk)
 
 ### Memory Governance
-- [ ] Memory instructions (role-based prompt injection — where to write, when to search)
-- [ ] Memory expectations (manager must search memory, compliance-enforced)
-- [ ] Memory review job preset (daily Sonnet-class extraction from session transcripts)
-- [ ] Memory review context source (transcript assembly for review agent)
+- [x] Memory instructions (role-based prompt injection — where to write, when to search)
+- [x] Memory expectations (manager must search memory, compliance-enforced)
+- [x] Memory review job preset (daily Sonnet-class extraction from session transcripts)
+- [x] Memory review context source (transcript assembly for review agent)
 
 ### Operational Profiles
-- [ ] Profile definitions (low/medium/high/ultra) with all knob defaults
-- [ ] Cost preview engine (estimate daily cost from profile + team size)
-- [ ] Smart recommendation (suggest profile based on budget + team)
-- [ ] Init wizard integration (pick level, see breakdown)
-- [ ] Manager persistent session lifecycle (24h session with daily reset)
-- [ ] Dashboard profile switcher
+- [x] Profile definitions (low/medium/high/ultra) with all knob defaults
+- [x] Cost preview engine (estimate daily cost from profile + team size)
+- [x] Smart recommendation (suggest profile based on budget + team)
+- [x] Init wizard integration (pick level, see breakdown)
+- [x] Manager persistent session lifecycle (24h session with daily reset)
+- [x] Dashboard profile switcher
 
 ### Launch Readiness (Target: May/June 2026)
 - [x] README that sells in 30 seconds (pitch, minimal config example, before/after)
 - [x] Config reference documentation (all configurable surfaces — Phase 5.4)
 - [x] Example configs (3-agent team, 10-agent org with departments)
-- [ ] Dashboard (9.6 — full control plane: command center, org chart, tasks, comms, approvals, config editor, analytics)
+- [x] Dashboard (9.6 — full control plane: command center, org chart, tasks, comms, approvals, config editor, analytics)
 - [ ] Public GitHub repo
 - [ ] npm package / OpenClaw plugin registry listing
 - [ ] EU AI Act compliance positioning (audit trails, budget enforcement, accountability)
