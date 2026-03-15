@@ -1,0 +1,10 @@
+{
+  "id": "clawforce",
+  "name": "Clawforce",
+  "description": "Accountability layer for autonomous AI agents — budget enforcement, compliance tracking, org hierarchy, performance management, and trust evolution",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
