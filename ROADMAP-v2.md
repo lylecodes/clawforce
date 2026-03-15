@@ -415,7 +415,7 @@ System onboards agents but not the user. No guided first experience.
 - [x] Delegate memory flush timing to OpenClaw native memoryFlush
 - [x] Import cron types from OpenClaw (delete redefinitions)
 - [x] Unified channel delivery adapter (replace 3 setter patterns)
-- [ ] Cost data: OpenClaw API primary, llm_output fallback (skipped — loadSessionCostSummary not exported from plugin-sdk)
+- [-] Cost data: OpenClaw API primary (deferred — loadSessionCostSummary not exported from plugin-sdk; existing llm_output path works)
 
 ### Memory Governance
 - [x] Memory instructions (role-based prompt injection — where to write, when to search)
