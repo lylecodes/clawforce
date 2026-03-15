@@ -60,7 +60,7 @@ function qs(params?: Record<string, string | undefined>): string {
 
 export const api = {
   // -- Projects / Domains --
-  getProjects: () => fetchJson<Project[]>("/projects"),
+  getProjects: () => fetchJson<Project[]>("/domains"),
 
   // -- Dashboard Summary --
   getDashboard: (domain: string) =>

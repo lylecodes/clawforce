@@ -84,6 +84,21 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
     // API routes: /clawforce/api/:domain/...
     if (url.pathname.startsWith("/clawforce/api/")) {
       // Handle non-domain-scoped endpoints first
+      if (url.pathname === "/clawforce/api/domains" && req.method === "GET") {
+        try {
+          const { getActiveProjectIds } = await import("../../src/lifecycle.js");
+          const { getRegisteredAgentIds } = await import("../../src/project.js");
+          const projectIds = getActiveProjectIds();
+          const domains = projectIds.map((id: string) => ({
+            id,
+            agentCount: getRegisteredAgentIds().filter(() => true).length, // approximate
+          }));
+          respondJson(res, 200, domains);
+        } catch {
+          respondJson(res, 200, []);
+        }
+        return;
+      }
       if (url.pathname === "/clawforce/api/demo/create" && req.method === "POST") {
         const result = handleDemoCreate();
         respondJson(res, result.status, result.body);

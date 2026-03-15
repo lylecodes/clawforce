@@ -12,20 +12,22 @@ const CommsCenter = lazy(() => import("./views/CommsCenter"));
 const ConfigEditor = lazy(() => import("./views/ConfigEditor"));
 const InitiativeView = lazy(() => import("./views/InitiativeView"));
 
+function SuspenseWrapper({ children }: { children: React.ReactNode }) {
+  return <Suspense fallback={<Loading />}>{children}</Suspense>;
+}
+
 export function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Suspense fallback={<Loading />}>
-          <Route index element={<CommandCenter />} />
-          <Route path="tasks" element={<TaskBoard />} />
-          <Route path="approvals" element={<ApprovalQueue />} />
-          <Route path="org" element={<OrgChart />} />
-          <Route path="comms" element={<CommsCenter />} />
-          <Route path="config" element={<ConfigEditor />} />
-          <Route path="analytics" element={<Analytics />} />
-          <Route path="initiatives/:id" element={<InitiativeView />} />
-        </Suspense>
+        <Route index element={<SuspenseWrapper><CommandCenter /></SuspenseWrapper>} />
+        <Route path="tasks" element={<SuspenseWrapper><TaskBoard /></SuspenseWrapper>} />
+        <Route path="approvals" element={<SuspenseWrapper><ApprovalQueue /></SuspenseWrapper>} />
+        <Route path="org" element={<SuspenseWrapper><OrgChart /></SuspenseWrapper>} />
+        <Route path="comms" element={<SuspenseWrapper><CommsCenter /></SuspenseWrapper>} />
+        <Route path="config" element={<SuspenseWrapper><ConfigEditor /></SuspenseWrapper>} />
+        <Route path="analytics" element={<SuspenseWrapper><Analytics /></SuspenseWrapper>} />
+        <Route path="initiatives/:id" element={<SuspenseWrapper><InitiativeView /></SuspenseWrapper>} />
       </Route>
     </Routes>
   );
