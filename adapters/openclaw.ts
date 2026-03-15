@@ -1545,6 +1545,26 @@ const clawforcePlugin = {
         for (const err of domainResult.errors) {
           api.logger.warn(`Clawforce domain error: ${err}`);
         }
+
+        // Sync agents to OpenClaw's agents.list so they're addressable
+        const agentIds = getRegisteredAgentIds();
+        const agentsToSync = agentIds
+          .map((id) => {
+            const entry = getAgentConfig(id);
+            if (!entry) return null;
+            return { agentId: id, config: entry.config, projectDir: entry.projectDir };
+          })
+          .filter((e): e is NonNullable<typeof e> => e !== null);
+
+        if (agentsToSync.length > 0) {
+          void syncAgentsToOpenClaw({
+            agents: agentsToSync,
+            loadConfig: () => api.runtime.config.loadConfig(),
+            writeConfigFile: (c) => api.runtime.config.writeConfigFile(c as never),
+            logger: api.logger,
+          });
+          api.logger.info(`Clawforce: synced ${agentsToSync.length} agent(s) to OpenClaw`);
+        }
       } catch (err) {
         api.logger.warn(`Clawforce auto-init failed: ${err instanceof Error ? err.message : String(err)}`);
       }
