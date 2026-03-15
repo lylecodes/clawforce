@@ -12,10 +12,19 @@ type AppState = {
   domains: Domain[];
   /** Recent activity events (for the activity feed) */
   activityEvents: ActivityEvent[];
+  /** Context message to pre-load into the assistant widget on open */
+  assistantInitialContext: string | null;
+  /** Whether the assistant widget should be open */
+  assistantOpen: boolean;
 
   setActiveDomain: (domain: string | null) => void;
   setDomains: (domains: Domain[]) => void;
   addActivityEvent: (event: ActivityEvent) => void;
+  /** Open the assistant widget with a pre-loaded context message */
+  openAssistantWithContext: (context: string) => void;
+  /** Clear the initial context after it has been consumed */
+  clearAssistantContext: () => void;
+  setAssistantOpen: (open: boolean) => void;
 };
 
 export type ActivityEvent = {
@@ -29,6 +38,8 @@ export const useAppStore = create<AppState>((set) => ({
   activeDomain: localStorage.getItem("clawforce:activeDomain"),
   domains: [],
   activityEvents: [],
+  assistantInitialContext: null,
+  assistantOpen: false,
 
   setActiveDomain: (domain) => {
     if (domain) {
@@ -54,4 +65,13 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({
       activityEvents: [event, ...state.activityEvents].slice(0, 200),
     })),
+
+  openAssistantWithContext: (context) =>
+    set({ assistantInitialContext: context, assistantOpen: true }),
+
+  clearAssistantContext: () =>
+    set({ assistantInitialContext: null }),
+
+  setAssistantOpen: (open) =>
+    set({ assistantOpen: open }),
 }));

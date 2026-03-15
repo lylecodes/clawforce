@@ -130,6 +130,10 @@ export const api = {
   previewConfig: (domain: string, current: unknown, proposed: unknown) =>
     postJson<ConfigChangePreview>(`/${domain}/config/preview`, { current, proposed }),
 
+  // -- Demo --
+  createDemo: () =>
+    postJson<{ domainId: string; message: string }>("/demo/create"),
+
   // -- Actions --
   disableAgent: (domain: string, agentId: string, reason?: string) =>
     postJson(`/${domain}/agents/${agentId}/disable`, { reason }),

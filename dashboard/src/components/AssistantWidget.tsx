@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useAssistant, type AssistantMessage } from "../hooks/useAssistant";
+import { useAppStore } from "../store";
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
@@ -56,11 +57,19 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
 }
 
 export function AssistantWidget() {
-  const [isOpen, setIsOpen] = useState(false);
+  const assistantOpen = useAppStore((s) => s.assistantOpen);
+  const setAssistantOpen = useAppStore((s) => s.setAssistantOpen);
+  const assistantInitialContext = useAppStore((s) => s.assistantInitialContext);
+  const clearAssistantContext = useAppStore((s) => s.clearAssistantContext);
+
+  const isOpen = assistantOpen;
+  const setIsOpen = setAssistantOpen;
+
   const { messages, sendMessage, clearMessages, isSending, isStreaming } = useAssistant();
   const [inputValue, setInputValue] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const contextSentRef = useRef(false);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -73,6 +82,20 @@ export function AssistantWidget() {
       setTimeout(() => inputRef.current?.focus(), 100);
     }
   }, [isOpen]);
+
+  // Send initial context message when the widget opens with context
+  useEffect(() => {
+    if (isOpen && assistantInitialContext && !contextSentRef.current) {
+      contextSentRef.current = true;
+      // Clear existing conversation and send context as first message
+      clearMessages();
+      sendMessage(assistantInitialContext);
+      clearAssistantContext();
+    }
+    if (!assistantInitialContext) {
+      contextSentRef.current = false;
+    }
+  }, [isOpen, assistantInitialContext, sendMessage, clearMessages, clearAssistantContext]);
 
   const handleSend = () => {
     const trimmed = inputValue.trim();

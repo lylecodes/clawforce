@@ -5,6 +5,7 @@ import { MetricCard } from "../components/MetricCard";
 import { InitiativeCard } from "../components/InitiativeCard";
 import { ActivityFeed } from "../components/ActivityFeed";
 import { AgentRoster } from "../components/AgentRoster";
+import { WelcomeScreen } from "../components/WelcomeScreen";
 import type { DashboardSummary, Agent } from "../api/types";
 
 function budgetVariant(pct: number): "success" | "warning" | "danger" {
@@ -21,6 +22,7 @@ function approvalVariant(count: number): "default" | "warning" | "danger" {
 
 export function CommandCenter() {
   const activeDomain = useAppStore((s) => s.activeDomain);
+  const domains = useAppStore((s) => s.domains);
 
   const { data: summary, isLoading: summaryLoading } = useQuery({
     queryKey: ["dashboard", activeDomain],
@@ -35,6 +37,11 @@ export function CommandCenter() {
     enabled: !!activeDomain,
     refetchInterval: 30_000,
   });
+
+  // Show welcome/onboarding screen when no domains are configured
+  if (domains.length === 0 && !activeDomain) {
+    return <WelcomeScreen />;
+  }
 
   if (!activeDomain) {
     return (
