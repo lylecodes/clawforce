@@ -46,6 +46,12 @@ export type { AgentBudgetInput, AgentCostEstimate, BudgetEstimate } from "./conf
 export { getInitQuestions, buildConfigFromAnswers, getBudgetGuidance } from "./config/init-flow.js";
 export type { QuestionType, InitQuestion, AgentAnswer, InitAnswers } from "./config/init-flow.js";
 
+// --- Operational Profiles ---
+export { expandProfile, normalizeDomainProfile } from "./profiles/operational.js";
+export { estimateProfileCost, recommendProfile } from "./profiles/cost-preview.js";
+export type { CostAgentInput } from "./profiles/cost-preview.js";
+export { OPERATIONAL_PROFILES } from "./types.js";
+
 // --- Rules ---
 export { matchRules, buildPromptFromRule, evaluateRules } from "./rules/engine.js";
 export type { RuleEvent, MatchedRule } from "./rules/engine.js";
@@ -291,4 +297,10 @@ export type {
   RuleDefinition,
   RuleTrigger,
   RuleAction,
+  OperationalProfile,
+  OperationalProfileConfig,
+  CostBucket,
+  CostLineItem,
+  ProfileCostEstimate,
+  ProfileRecommendation,
 } from "./types.js";
