@@ -17,7 +17,8 @@ export function InitiativeSliders({
   initiatives,
   onChange,
 }: InitiativeSlidersProps) {
-  const entries = Object.entries(initiatives);
+  // Defensive: coerce values to numbers (API may return objects)
+  const entries = Object.entries(initiatives).map(([k, v]) => [k, typeof v === "number" ? v : 0] as [string, number]);
   const total = entries.reduce((sum, [, v]) => sum + v, 0);
 
   const handleChange = useCallback(

@@ -148,12 +148,24 @@ export function AgentDetailPanel({ agent, onClose }: AgentDetailPanelProps) {
               Expectations
             </h3>
             <ul className="space-y-1">
-              {detail.expectations.map((exp, i) => (
-                <li key={i} className="text-xxs text-cf-text-secondary flex gap-1.5">
-                  <span className="text-cf-accent-blue shrink-0">-</span>
-                  {exp}
-                </li>
-              ))}
+              {detail.expectations.map((exp, i) => {
+                // Defensive: exp may be an Expectation object {tool, action, min_calls}
+                // from the backend instead of a plain string
+                const label =
+                  typeof exp === "string"
+                    ? exp
+                    : typeof exp === "object" && exp !== null
+                      ? (exp as Record<string, unknown>).tool
+                        ? `${(exp as Record<string, unknown>).tool}${(exp as Record<string, unknown>).action ? `: ${(exp as Record<string, unknown>).action}` : ""}`
+                        : JSON.stringify(exp)
+                      : String(exp);
+                return (
+                  <li key={i} className="text-xxs text-cf-text-secondary flex gap-1.5">
+                    <span className="text-cf-accent-blue shrink-0">-</span>
+                    {label}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}

@@ -43,12 +43,21 @@ export function BriefingBuilder({
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
 
+  // Defensive: ensure active items are strings (API may return ContextSource objects)
+  const safeActive = active.map((item) => {
+    if (typeof item === "string") return item;
+    if (typeof item === "object" && item !== null && "source" in (item as Record<string, unknown>)) {
+      return String((item as Record<string, unknown>).source);
+    }
+    return String(item);
+  });
+
   // Compute available items that aren't active
   const availableItems = (
     available.length > 0
       ? available
       : ALL_BRIEFING_SOURCES
-  ).filter((s) => !active.includes(s));
+  ).filter((s) => !safeActive.includes(s));
 
   const handleDragStart = (event: DragStartEvent) => {
     setDraggedItem(event.active.id as string);
@@ -62,10 +71,10 @@ export function BriefingBuilder({
     const itemId = dragActive.id as string;
     const targetZone = over.id as string;
 
-    if (targetZone === "active-zone" && !active.includes(itemId)) {
-      onChange([...active, itemId]);
-    } else if (targetZone === "available-zone" && active.includes(itemId)) {
-      onChange(active.filter((s) => s !== itemId));
+    if (targetZone === "active-zone" && !safeActive.includes(itemId)) {
+      onChange([...safeActive, itemId]);
+    } else if (targetZone === "available-zone" && safeActive.includes(itemId)) {
+      onChange(safeActive.filter((s) => s !== itemId));
     }
   };
 
@@ -79,13 +88,13 @@ export function BriefingBuilder({
       <div className="space-y-3">
         {/* Active zone */}
         <DroppableZone id="active-zone" label="Active Briefing Sources">
-          {active.length === 0 ? (
+          {safeActive.length === 0 ? (
             <p className="text-xxs text-cf-text-muted p-2">
               Drag sources here to activate
             </p>
           ) : (
             <div className="flex flex-wrap gap-1.5">
-              {active.map((source) => (
+              {safeActive.map((source) => (
                 <DraggableChip key={source} id={source} variant="active" />
               ))}
             </div>

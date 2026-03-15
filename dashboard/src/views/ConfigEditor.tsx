@@ -16,6 +16,80 @@ import type {
   SafetyConfig,
 } from "../api/types";
 
+// ---------------------------------------------------------------------------
+// Helpers — the backend may return richer object types for certain agent fields
+// (e.g. expectations as { tool, action, min_calls } objects, briefing as
+// { source, params, ... } objects). These helpers safely coerce values to the
+// primitive types the UI components expect.
+// ---------------------------------------------------------------------------
+
+/** Safely convert a value to a displayable string (never returns an object). */
+function safeString(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "object") {
+    // Expectation objects from backend: { tool, action, min_calls }
+    const obj = value as Record<string, unknown>;
+    if ("tool" in obj && typeof obj.tool === "string") {
+      const action = Array.isArray(obj.action) ? obj.action.join(", ") : String(obj.action ?? "");
+      return action ? `${obj.tool}: ${action}` : obj.tool;
+    }
+    // ContextSource objects from backend: { source, content?, path? }
+    if ("source" in obj && typeof obj.source === "string") {
+      return obj.source;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+/**
+ * Normalize an array from the API into string[].
+ * Handles arrays of objects (e.g. Expectation[]) by extracting a display string.
+ */
+function toStringArray(arr: unknown): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.map(safeString);
+}
+
+/**
+ * Normalize a briefing array from the API into string[] of source names.
+ * Backend sends ContextSource[] like [{ source: "pending_tasks" }, ...].
+ */
+function toBriefingStrings(arr: unknown): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((item) => {
+    if (typeof item === "string") return item;
+    if (typeof item === "object" && item !== null && "source" in item) {
+      return String((item as Record<string, unknown>).source ?? "");
+    }
+    return safeString(item);
+  }).filter(Boolean);
+}
+
+/**
+ * Normalize an AgentConfig from the API, coercing object fields to UI-safe types.
+ */
+function normalizeAgent(raw: AgentConfig): AgentConfig {
+  return {
+    ...raw,
+    briefing: toBriefingStrings(raw.briefing) as string[],
+    expectations: toStringArray(raw.expectations) as string[],
+    performance_policy: raw.performance_policy && typeof raw.performance_policy === "object"
+      ? {
+          action: String((raw.performance_policy as Record<string, unknown>).action ?? "warn"),
+          max_retries: Number((raw.performance_policy as Record<string, unknown>).max_retries ?? 3),
+          then: String((raw.performance_policy as Record<string, unknown>).then ?? "escalate"),
+        }
+      : raw.performance_policy,
+  };
+}
+
 const TABS: { id: ConfigSection; label: string }[] = [
   { id: "agents", label: "Agents" },
   { id: "budget", label: "Budget" },
@@ -232,7 +306,7 @@ function AgentsTab({
   );
   const [editState, setEditState] = useState<Record<string, AgentConfig>>(() => {
     const map: Record<string, AgentConfig> = {};
-    for (const a of agents) map[a.id] = { ...a };
+    for (const a of agents) map[a.id] = normalizeAgent(a);
     return map;
   });
 
@@ -1002,7 +1076,15 @@ function SafetyTab({
   markDirty: () => void;
   isDirty: boolean;
 }) {
-  const [editSafety, setEditSafety] = useState<SafetyConfig>({ ...safety });
+  // Defensive: ensure safety values are numbers (API may return unexpected types)
+  const [editSafety, setEditSafety] = useState<SafetyConfig>(() => ({
+    circuit_breaker_multiplier: typeof safety.circuit_breaker_multiplier === "number"
+      ? safety.circuit_breaker_multiplier : undefined,
+    spawn_depth_limit: typeof safety.spawn_depth_limit === "number"
+      ? safety.spawn_depth_limit : undefined,
+    loop_detection_threshold: typeof safety.loop_detection_threshold === "number"
+      ? safety.loop_detection_threshold : undefined,
+  }));
 
   const update = (partial: Partial<SafetyConfig>) => {
     setEditSafety((prev) => ({ ...prev, ...partial }));
@@ -1142,9 +1224,13 @@ function GenericJsonTab({
   markDirty: () => void;
   isDirty: boolean;
 }) {
-  const [jsonText, setJsonText] = useState(() =>
-    JSON.stringify(data, null, 2),
-  );
+  const [jsonText, setJsonText] = useState(() => {
+    try {
+      return JSON.stringify(data, null, 2);
+    } catch {
+      return "{}";
+    }
+  });
   const [parseError, setParseError] = useState<string | null>(null);
 
   const handleChange = (value: string) => {
@@ -1230,20 +1316,25 @@ function ExpectationsList({
 }) {
   const [newItem, setNewItem] = useState("");
 
+  // Defensive: ensure all items are strings (API may return objects)
+  const safeItems = items.map((item) =>
+    typeof item === "string" ? item : safeString(item),
+  );
+
   const handleAdd = () => {
     const trimmed = newItem.trim();
     if (!trimmed) return;
-    onChange([...items, trimmed]);
+    onChange([...safeItems, trimmed]);
     setNewItem("");
   };
 
   const handleRemove = (index: number) => {
-    onChange(items.filter((_, i) => i !== index));
+    onChange(safeItems.filter((_, i) => i !== index));
   };
 
   return (
     <div className="space-y-1.5">
-      {items.map((item, i) => (
+      {safeItems.map((item, i) => (
         <div
           key={i}
           className="flex items-center gap-2 bg-cf-bg-tertiary border border-cf-border rounded px-2 py-1.5"

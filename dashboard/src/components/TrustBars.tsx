@@ -90,16 +90,19 @@ export function TrustBars({ agents }: TrustBarsProps) {
               </div>
 
               {/* Category breakdown (compact) */}
-              {Object.keys(agent.categories).length > 0 && (
+              {agent.categories && typeof agent.categories === "object" && Object.keys(agent.categories).length > 0 && (
                 <div className="flex gap-3 mt-1">
-                  {Object.entries(agent.categories).map(([cat, score]) => (
-                    <span
-                      key={cat}
-                      className="text-xxs text-cf-text-muted"
-                    >
-                      {cat}: <span className="font-mono" style={{ color: scoreColor(score) }}>{score}</span>
-                    </span>
-                  ))}
+                  {Object.entries(agent.categories).map(([cat, score]) => {
+                    const numScore = typeof score === "number" ? score : 0;
+                    return (
+                      <span
+                        key={cat}
+                        className="text-xxs text-cf-text-muted"
+                      >
+                        {cat}: <span className="font-mono" style={{ color: scoreColor(numScore) }}>{numScore}</span>
+                      </span>
+                    );
+                  })}
                 </div>
               )}
             </div>
