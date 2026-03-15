@@ -389,11 +389,13 @@ export function queryMessages(
 /** Dashboard summary: 4 metric cards (budget utilization, active agents, tasks in flight, pending approvals). */
 export function queryDashboardSummary(projectId: string) {
   // Budget utilization
-  let budgetUtilization = { spent: 0, limit: 0, pct: 0, exhaustionEta: undefined as string | undefined };
+  let budgetUtilization = { spent: 0, limit: 0, pct: 0 };
   try {
     const budgetStatus = getBudgetStatus(projectId);
-    const spent = budgetStatus.windows.reduce((acc, w) => acc + (w.spent ?? 0), 0);
-    const limit = budgetStatus.windows.reduce((acc, w) => acc + (w.limit ?? 0), 0);
+    // BudgetStatus has hourly/daily/monthly WindowStatus fields
+    const windows = [budgetStatus.hourly, budgetStatus.daily, budgetStatus.monthly].filter(Boolean);
+    const spent = windows.reduce((acc, w) => acc + (w?.spentCents ?? 0), 0);
+    const limit = windows.reduce((acc, w) => acc + (w?.limitCents ?? 0), 0);
     budgetUtilization = {
       spent,
       limit,
@@ -500,14 +502,14 @@ export function queryConfig(projectId: string) {
   if (!extConfig) return null;
 
   return {
-    agents: extConfig.agents ?? {},
-    budget: extConfig.budget ?? {},
-    toolGates: extConfig.tool_gates ?? extConfig.toolGates ?? {},
-    initiatives: extConfig.initiatives ?? [],
-    jobs: extConfig.jobs ?? {},
+    toolGates: extConfig.toolGates ?? {},
+    riskTiers: extConfig.riskTiers ?? {},
+    dispatch: extConfig.dispatch ?? {},
     safety: extConfig.safety ?? {},
     monitoring: extConfig.monitoring ?? {},
     policies: extConfig.policies ?? [],
+    channels: extConfig.channels ?? [],
+    review: extConfig.review ?? {},
   };
 }
 
@@ -531,12 +533,14 @@ export function queryMeetingDetail(projectId: string, meetingId: string) {
 
   try {
     const status = getMeetingStatus(projectId, meetingId);
-    return {
-      channel,
-      currentTurn: status.currentTurn,
-      participants: status.participants,
-      transcript: status.transcript,
-    };
+    if (status) {
+      return {
+        channel,
+        currentTurn: status.currentTurn,
+        participants: status.participants,
+        transcript: status.transcript,
+      };
+    }
   } catch {
     // If meeting status fails (not a meeting channel, etc.), return basic channel info
     const transcript = buildChannelTranscript(projectId, meetingId);

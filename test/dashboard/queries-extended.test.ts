@@ -108,10 +108,9 @@ vi.mock("../../src/approval/resolve.js", () => ({
 
 vi.mock("../../src/budget-windows.js", () => ({
   getBudgetStatus: vi.fn(() => ({
-    windows: [
-      { name: "hourly", spent: 5, limit: 10 },
-      { name: "daily", spent: 20, limit: 100 },
-    ],
+    hourly: { window: "hourly", limitCents: 1000, spentCents: 500, remainingCents: 500, usedPercent: 50 },
+    daily: { window: "daily", limitCents: 10000, spentCents: 2000, remainingCents: 8000, usedPercent: 20 },
+    monthly: undefined,
     alerts: [],
   })),
 }));
@@ -182,8 +181,8 @@ describe("queryDashboardSummary", () => {
     expect(result.activeAgents).toBe(1); // agent-dev has active session
     expect(result.totalAgents).toBe(2);
     expect(result.pendingApprovals).toBe(2);
-    expect(result.budgetUtilization.spent).toBe(25); // 5 + 20
-    expect(result.budgetUtilization.limit).toBe(110); // 10 + 100
+    expect(result.budgetUtilization.spent).toBe(2500); // 500 + 2000
+    expect(result.budgetUtilization.limit).toBe(11000); // 1000 + 10000
   });
 });
 
@@ -208,8 +207,9 @@ describe("queryApprovals", () => {
 describe("queryBudgetStatus", () => {
   it("returns window breakdowns", () => {
     const result = queryBudgetStatus("proj1");
-    expect(result).toHaveProperty("windows");
-    expect(result.windows).toHaveLength(2);
+    expect(result).toHaveProperty("hourly");
+    expect(result).toHaveProperty("daily");
+    expect(result).toHaveProperty("alerts");
   });
 });
 
@@ -236,11 +236,11 @@ describe("queryConfig", () => {
   it("returns structured config sections", () => {
     const result = queryConfig("proj1");
     expect(result).not.toBeNull();
-    expect(result).toHaveProperty("agents");
-    expect(result).toHaveProperty("budget");
     expect(result).toHaveProperty("toolGates");
     expect(result).toHaveProperty("monitoring");
     expect(result).toHaveProperty("policies");
+    expect(result).toHaveProperty("safety");
+    expect(result).toHaveProperty("channels");
   });
 
   it("returns null for unknown project", () => {

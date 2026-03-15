@@ -91,6 +91,9 @@ import { registerBulkPricing } from "../src/pricing.js";
 import { updateProviderUsage } from "../src/rate-limits.js";
 import { initializeAllDomains } from "../src/config/init.js";
 import type { CronRegistrar, CronRegistrarInput } from "../src/types.js";
+// Dashboard
+import { createDashboardHandler } from "../src/dashboard/gateway-routes.js";
+import { emitSSE } from "../src/dashboard/sse.js";
 
 type GhostRecallConfig = {
   enabled?: boolean;
@@ -298,6 +301,13 @@ const clawforcePlugin = {
 
         // Start compliance tracking after confirmed context success
         startTracking(sessionKey, agentId, entry.projectId, config, jobName ?? undefined);
+
+        // SSE: notify dashboard that agent is now active
+        emitSSE(entry.projectId, "agent:status", {
+          agentId,
+          status: "active",
+          sessionKey,
+        });
 
         // Detect dispatch context (links session to dispatch queue item)
         const dispatchCtx = resolveDispatchContext((event as { prompt?: string }).prompt);
@@ -645,6 +655,18 @@ const clawforcePlugin = {
     api.on("agent_end", async (event, ctx) => {
       if (!ctx.sessionKey) return;
 
+      // SSE: notify dashboard that agent session ended
+      if (ctx.agentId) {
+        const agentEntry = getAgentConfig(ctx.agentId);
+        if (agentEntry) {
+          emitSSE(agentEntry.projectId, "agent:status", {
+            agentId: ctx.agentId,
+            status: "idle",
+            sessionKey: ctx.sessionKey,
+          });
+        }
+      }
+
       // --- Compliance check ---
       const session = endSession(ctx.sessionKey);
 
@@ -774,6 +796,13 @@ const clawforcePlugin = {
           provider: event.provider,
           model: event.model,
           usage: event.usage ?? {},
+        });
+        // SSE: notify dashboard of cost/budget updates
+        emitSSE(entry.projectId, "budget:update", {
+          projectId: entry.projectId,
+          agentId: ctx.agentId,
+          provider: event.provider,
+          model: event.model,
         });
       } catch (err) {
         api.logger.warn(`Clawforce: cost capture failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1454,6 +1483,19 @@ const clawforcePlugin = {
         memoryModeStore.set(key, !current);
         return { text: `Memory mode ${!current ? "ON — max intensity recall on every turn" : "OFF — normal recall"}` };
       },
+    });
+
+    // --- Dashboard HTTP handler ---
+    const dashboardHandler = createDashboardHandler({
+      staticDir: path.resolve(import.meta.dirname, "../dashboard/dist"),
+      injectAgentMessage: (params) => api.injectAgentMessage(params),
+    });
+
+    api.registerHttpRoute({
+      path: "/clawforce",
+      auth: "gateway",
+      match: "prefix",
+      handler: dashboardHandler,
     });
 
     // --- Sweep service ---

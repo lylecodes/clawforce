@@ -30,3 +30,8 @@ export {
   queryMeetings,
   queryMeetingDetail,
 } from "./queries.js";
+export { SSEManager, getSSEManager, emitSSE } from "./sse.js";
+export type { SSEEventType } from "./sse.js";
+export { handleAction } from "./actions.js";
+export { createDashboardHandler } from "./gateway-routes.js";
+export type { DashboardHandlerOptions } from "./gateway-routes.js";
