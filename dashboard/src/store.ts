@@ -10,6 +10,8 @@ type AppState = {
   activeDomain: string | null;
   /** All available domains */
   domains: Domain[];
+  /** Whether the domains list has been fetched at least once */
+  domainsLoaded: boolean;
   /** Recent activity events (for the activity feed) */
   activityEvents: ActivityEvent[];
   /** Context message to pre-load into the assistant widget on open */
@@ -37,6 +39,7 @@ export type ActivityEvent = {
 export const useAppStore = create<AppState>((set) => ({
   activeDomain: localStorage.getItem("clawforce:activeDomain"),
   domains: [],
+  domainsLoaded: false,
   activityEvents: [],
   assistantInitialContext: null,
   assistantOpen: false,
@@ -52,12 +55,18 @@ export const useAppStore = create<AppState>((set) => ({
 
   setDomains: (domains) => {
     set((state) => {
-      // Auto-select first domain if none selected
+      // Auto-select first domain if none selected, or validate stored domain still exists
       const activeDomain =
         state.activeDomain && domains.some((d) => d.id === state.activeDomain)
           ? state.activeDomain
           : domains[0]?.id ?? null;
-      return { domains, activeDomain };
+      // Persist the (possibly corrected) activeDomain
+      if (activeDomain) {
+        localStorage.setItem("clawforce:activeDomain", activeDomain);
+      } else {
+        localStorage.removeItem("clawforce:activeDomain");
+      }
+      return { domains, activeDomain, domainsLoaded: true };
     });
   },
 
