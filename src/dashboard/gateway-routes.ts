@@ -12,7 +12,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { handleAction } from "./actions.js";
+import { handleAction, handleDemoCreate } from "./actions.js";
 import { getSSEManager } from "./sse.js";
 import {
   queryAgents,
@@ -83,6 +83,13 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
 
     // API routes: /clawforce/api/:domain/...
     if (url.pathname.startsWith("/clawforce/api/")) {
+      // Handle non-domain-scoped endpoints first
+      if (url.pathname === "/clawforce/api/demo/create" && req.method === "POST") {
+        const result = handleDemoCreate();
+        respondJson(res, result.status, result.body);
+        return;
+      }
+
       const apiPath = url.pathname.slice("/clawforce/api/".length);
       const slashIdx = apiPath.indexOf("/");
       const domain = slashIdx === -1 ? apiPath : apiPath.slice(0, slashIdx);

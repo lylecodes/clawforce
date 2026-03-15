@@ -14,6 +14,13 @@ import { startMeeting, concludeMeeting } from "../channels/meeting.js";
 import { sendChannelMessage } from "../channels/messages.js";
 import { emitSSE } from "./sse.js";
 import type { TaskPriority, TaskState } from "../types.js";
+import { createDemoConfig } from "./demo.js";
+import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
+import { loadGlobalConfig } from "../config/loader.js";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import YAML from "yaml";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -286,6 +293,68 @@ function handleBudgetAction(
       return { status: 501, body: { error: "Budget allocation not yet implemented" } };
     default:
       return notFound(`Unknown budget action: ${action}`);
+  }
+}
+
+/**
+ * Handle POST /clawforce/api/demo/create
+ * Creates a demo domain with the full-org example config.
+ */
+export function handleDemoCreate(): RouteResult {
+  try {
+    const { global, domain, domainExtras } = createDemoConfig();
+    const baseDir = path.join(os.homedir(), ".clawforce");
+
+    // Scaffold config directory
+    scaffoldConfigDir(baseDir);
+
+    // Write agents to global config
+    if (global.agents) {
+      const configPath = path.join(baseDir, "config.yaml");
+      let existing: Record<string, unknown>;
+
+      try {
+        existing = loadGlobalConfig(baseDir) as Record<string, unknown>;
+      } catch {
+        existing = { agents: {} };
+      }
+
+      const existingAgents = (existing.agents ?? {}) as Record<string, unknown>;
+      Object.assign(existingAgents, global.agents);
+      existing.agents = existingAgents;
+
+      fs.writeFileSync(configPath, YAML.stringify(existing), "utf-8");
+    }
+
+    // Build domain YAML with extras (budget, safety, goals)
+    const domainYaml: Record<string, unknown> = {
+      domain: domain.name,
+      agents: domain.agents,
+    };
+    if (domain.orchestrator) domainYaml.orchestrator = domain.orchestrator;
+    if (domain.operational_profile) domainYaml.operational_profile = domain.operational_profile;
+    Object.assign(domainYaml, domainExtras);
+
+    // Write domain file
+    const domainsDir = path.join(baseDir, "domains");
+    fs.mkdirSync(domainsDir, { recursive: true });
+    const domainPath = path.join(domainsDir, `${domain.name}.yaml`);
+
+    // If demo domain already exists, overwrite it
+    fs.writeFileSync(domainPath, YAML.stringify(domainYaml), "utf-8");
+
+    return {
+      status: 201,
+      body: {
+        domainId: domain.name,
+        message: `Demo domain "${domain.name}" created with ${domain.agents.length} agents.`,
+      },
+    };
+  } catch (err) {
+    return {
+      status: 500,
+      body: { error: err instanceof Error ? err.message : String(err) },
+    };
   }
 }
 
