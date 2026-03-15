@@ -1512,7 +1512,7 @@ const clawforcePlugin = {
 
     api.registerHttpRoute({
       path: "/clawforce",
-      auth: "gateway",
+      auth: "none",
       match: "prefix",
       handler: dashboardHandler,
     });
