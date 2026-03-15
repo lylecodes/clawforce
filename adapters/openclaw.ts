@@ -180,6 +180,7 @@ function resolveMemoryFlush(raw?: Record<string, unknown>): Required<MemoryFlush
 type ResolvedConfig = {
   enabled: boolean;
   projectsDir: string;
+  configDir?: string;
   sweepIntervalMs: number;
   defaultMaxRetries: number;
   staleTaskHours: number;
@@ -195,6 +196,7 @@ function resolveConfig(raw?: Record<string, unknown>): ResolvedConfig {
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONFIG.enabled,
     projectsDir: typeof raw.projectsDir === "string" ? raw.projectsDir : DEFAULT_CONFIG.projectsDir,
+    configDir: typeof raw.configDir === "string" ? raw.configDir : undefined,
     sweepIntervalMs: typeof raw.sweepIntervalMs === "number" ? raw.sweepIntervalMs : DEFAULT_CONFIG.sweepIntervalMs,
     defaultMaxRetries: typeof raw.defaultMaxRetries === "number" ? raw.defaultMaxRetries : DEFAULT_CONFIG.defaultMaxRetries,
     staleTaskHours: typeof raw.staleTaskHours === "number" ? raw.staleTaskHours : DEFAULT_CONFIG.staleTaskHours,
@@ -247,6 +249,9 @@ const clawforcePlugin = {
 
     // --- Memory mode toggle (per-session) ---
     const memoryModeStore = new Map<string, boolean>();
+
+    // --- Turn counter (per-session) for maxTurnsPerCycle ---
+    const sessionTurnCountStore = new Map<string, number>();
 
     // --- Meeting session tracking (per-session) ---
     const meetingSessionStore = new Map<string, { channelId: string; turnIndex: number; projectId: string }>();
@@ -411,7 +416,18 @@ const clawforcePlugin = {
           expectationsContext = formatExpectationsReminder(config.expectations);
         }
 
-        const parts = [content, ghostContext, expectationsContext].filter(Boolean);
+        // Session length guard: inject wrap-up instruction when maxTurnsPerCycle exceeded
+        let wrapUpContext: string | null = null;
+        const maxTurns = config.scheduling?.maxTurnsPerCycle;
+        if (maxTurns !== undefined) {
+          const currentTurn = (sessionTurnCountStore.get(sessionKey) ?? 0) + 1;
+          sessionTurnCountStore.set(sessionKey, currentTurn);
+          if (currentTurn > maxTurns) {
+            wrapUpContext = `## Coordination Cycle Limit\n\nYou've been running for ${currentTurn} turns this cycle (limit: ${maxTurns}). Wrap up your current work, log your decisions, and conclude. Your next coordination cycle will continue where you left off.`;
+          }
+        }
+
+        const parts = [content, ghostContext, expectationsContext, wrapUpContext].filter(Boolean);
         if (parts.length > 0) {
           return { prependContext: parts.join("\n\n") };
         }
@@ -675,6 +691,7 @@ const clawforcePlugin = {
       clearCooldown(ctx.sessionKey);
       clearAssemblerCache(ctx.sessionKey);
       memoryModeStore.delete(ctx.sessionKey);
+      sessionTurnCountStore.delete(ctx.sessionKey);
 
       // --- Meeting turn advancement ---
       const meetingCtx = meetingSessionStore.get(ctx.sessionKey);

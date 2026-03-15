@@ -257,6 +257,13 @@ export type SchedulingConfig = {
   adaptiveWake?: boolean;
   planning?: boolean;
   wakeBounds?: [string, string];
+  /**
+   * Maximum number of turns per coordination cycle.
+   * When the turn count exceeds this value, a "wrap up" instruction is injected
+   * so the agent concludes gracefully. The next cron wake starts fresh.
+   * Default: undefined (no limit — backward compatible).
+   */
+  maxTurnsPerCycle?: number;
 };
 
 /** Per-agent configuration. */

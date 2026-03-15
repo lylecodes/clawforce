@@ -141,7 +141,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     performance_policy: { action: "alert" },
     compaction: true,
     coordination: { enabled: true, schedule: "*/30 * * * *" },
-    scheduling: { adaptiveWake: true, planning: true, wakeBounds: ["*/15 * * * *", "*/120 * * * *"] },
+    scheduling: { adaptiveWake: true, planning: true, wakeBounds: ["*/15 * * * *", "*/120 * * * *"], maxTurnsPerCycle: 50 },
     skillCap: 12,
   },
   employee: {
