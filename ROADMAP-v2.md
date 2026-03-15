@@ -423,11 +423,19 @@ System onboards agents but not the user. No guided first experience.
 - [ ] Memory review job preset (daily Sonnet-class extraction from session transcripts)
 - [ ] Memory review context source (transcript assembly for review agent)
 
+### Operational Profiles
+- [ ] Profile definitions (low/medium/high/ultra) with all knob defaults
+- [ ] Cost preview engine (estimate daily cost from profile + team size)
+- [ ] Smart recommendation (suggest profile based on budget + team)
+- [ ] Init wizard integration (pick level, see breakdown)
+- [ ] Manager persistent session lifecycle (24h session with daily reset)
+- [ ] Dashboard profile switcher
+
 ### Launch Readiness (Target: May/June 2026)
-- [ ] README that sells in 30 seconds (pitch, minimal config example, before/after)
-- [ ] Config reference documentation (all configurable surfaces — Phase 5.4)
-- [ ] Example configs (3-agent team, 10-agent org with departments)
-- [ ] Dashboard MVP (9.6 — real-time budget, task board, approval queue, drag-and-drop config)
+- [x] README that sells in 30 seconds (pitch, minimal config example, before/after)
+- [x] Config reference documentation (all configurable surfaces — Phase 5.4)
+- [x] Example configs (3-agent team, 10-agent org with departments)
+- [ ] Dashboard (9.6 — full control plane: command center, org chart, tasks, comms, approvals, config editor, analytics)
 - [ ] Public GitHub repo
 - [ ] npm package / OpenClaw plugin registry listing
 - [ ] EU AI Act compliance positioning (audit trails, budget enforcement, accountability)
