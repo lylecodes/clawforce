@@ -1526,6 +1526,30 @@ const clawforcePlugin = {
       injectAgentMessage: (params) => api.injectAgentMessage(params),
     });
 
+    // --- Auto-init domains on gateway start (no external clawforce.init call needed) ---
+    api.on("gateway_start", async () => {
+      // Simulate what clawforce.init does — initialize domains from config
+      const defaultConfigDir = path.join(process.env.HOME ?? "/tmp", ".clawforce");
+      try {
+        initClawforce({
+          enabled: true,
+          projectsDir: defaultConfigDir,
+          sweepIntervalMs: 60_000,
+          defaultMaxRetries: 3,
+          verificationRequired: true,
+        });
+        const domainResult = initializeAllDomains(defaultConfigDir);
+        if (domainResult.domains.length > 0) {
+          api.logger.info(`Clawforce auto-init: ${domainResult.domains.length} domain(s): ${domainResult.domains.join(", ")}`);
+        }
+        for (const err of domainResult.errors) {
+          api.logger.warn(`Clawforce domain error: ${err}`);
+        }
+      } catch (err) {
+        api.logger.warn(`Clawforce auto-init failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+
     api.registerService({
       id: "clawforce-dashboard",
       start: async () => {
