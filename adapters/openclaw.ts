@@ -20,7 +20,7 @@ type OpenClawPluginApi = _OpenClawPluginApi & {
   }): Promise<{ runId?: string }>;
 };
 
-import { assembleContext } from "../src/context/assembler.js";
+import { assembleContext, clearAssemblerCache } from "../src/context/assembler.js";
 import { resolveJobName, resolveDispatchContext, resolveEffectiveConfig } from "../src/jobs.js";
 import { checkCompliance } from "../src/enforcement/check.js";
 import { executeFailureAction, executeCrashAction, recordCompliantRun } from "../src/enforcement/actions.js";
@@ -293,6 +293,7 @@ const clawforcePlugin = {
           content = assembleContext(agentId, config, {
             projectId: entry.projectId,
             projectDir: entry.projectDir,
+            sessionKey,
           });
         } catch (err) {
           api.logger.warn(`Clawforce: context assembly failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -672,6 +673,7 @@ const clawforcePlugin = {
 
       // Clean up session state
       clearCooldown(ctx.sessionKey);
+      clearAssemblerCache(ctx.sessionKey);
       memoryModeStore.delete(ctx.sessionKey);
 
       // --- Meeting turn advancement ---

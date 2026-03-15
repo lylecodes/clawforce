@@ -58,16 +58,44 @@ export type AssemblerContext = {
 };
 
 /**
+ * Sources that are static within a session — their content does not change between turns.
+ * These are cached per session key to avoid redundant re-resolution on every turn.
+ */
+const STATIC_SOURCES = new Set<string>([
+  "soul",
+  "project_md",
+  "skill",
+  "tools_reference",
+  "memory_instructions",
+  "instructions",
+]);
+
+/** Session-scoped cache: `${sessionKey}:${sourceName}` → content */
+const assemblerCache = new Map<string, string | null>();
+
+/**
+ * Clear the assembler cache for a given session at session end.
+ */
+export function clearAssemblerCache(sessionKey: string): void {
+  for (const key of assemblerCache.keys()) {
+    if (key.startsWith(`${sessionKey}:`)) {
+      assemblerCache.delete(key);
+    }
+  }
+}
+
+/**
  * Assemble the session-start context for an agent.
  * Returns a markdown string to inject via before_prompt_build.
  */
 export function assembleContext(
   agentId: string,
   config: AgentConfig,
-  opts?: { projectId?: string; projectDir?: string; budgetChars?: number },
+  opts?: { projectId?: string; projectDir?: string; budgetChars?: number; sessionKey?: string },
 ): string {
   const ctx: AssemblerContext = { agentId, config, projectId: opts?.projectId, projectDir: opts?.projectDir };
   const budgetChars = opts?.budgetChars ?? 15_000;
+  const sessionKey = opts?.sessionKey;
   const sections: string[] = [];
 
   // Inject title and persona at the top of the context
@@ -77,7 +105,7 @@ export function assembleContext(
   }
 
   for (const source of config.briefing) {
-    const content = resolveSource(source, ctx);
+    const content = resolveSource(source, ctx, sessionKey);
     if (content) {
       sections.push(content);
     }
@@ -104,8 +132,27 @@ export function assembleContext(
 
 /**
  * Resolve a single context source to its content.
+ * Static sources (soul, project_md, skill, tools_reference, memory_instructions, instructions)
+ * are cached per session key to avoid redundant re-resolution on every turn.
  */
-function resolveSource(source: ContextSource, ctx: AssemblerContext): string | null {
+function resolveSource(source: ContextSource, ctx: AssemblerContext, sessionKey?: string): string | null {
+  // Cache lookup for static sources
+  if (sessionKey && STATIC_SOURCES.has(source.source)) {
+    const cacheKey = `${sessionKey}:${source.source}`;
+    if (assemblerCache.has(cacheKey)) {
+      return assemblerCache.get(cacheKey) ?? null;
+    }
+    const result = resolveSourceRaw(source, ctx);
+    assemblerCache.set(cacheKey, result);
+    return result;
+  }
+  return resolveSourceRaw(source, ctx);
+}
+
+/**
+ * Internal: resolve a source without caching.
+ */
+function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string | null {
   switch (source.source) {
     case "instructions":
       return buildInstructions(ctx.config.expectations);
