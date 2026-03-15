@@ -9,7 +9,7 @@ export type AssistantMessage = {
 };
 
 const ASSISTANT_AGENT_ID = "clawforce-assistant";
-const BASE = "/clawforce/api";
+const BASE = "/api";
 
 /**
  * Manages chat state for the dashboard assistant widget.

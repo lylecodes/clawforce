@@ -1,7 +1,7 @@
 /**
  * Clawforce REST API client.
  *
- * All endpoints are domain-scoped at /clawforce/api/:domain/:resource.
+ * All endpoints are domain-scoped at /api/:domain/:resource.
  */
 import type {
   Project,
@@ -25,7 +25,7 @@ import type {
   ConfigValidationResult,
 } from "./types";
 
-const BASE = "/clawforce/api";
+const BASE = "/api";
 
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`);

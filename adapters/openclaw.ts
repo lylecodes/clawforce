@@ -93,6 +93,7 @@ import { initializeAllDomains } from "../src/config/init.js";
 import type { CronRegistrar, CronRegistrarInput } from "../src/types.js";
 // Dashboard
 import { createDashboardHandler } from "../src/dashboard/gateway-routes.js";
+import { createDashboardServer } from "../src/dashboard/server.js";
 import { emitSSE } from "../src/dashboard/sse.js";
 
 type GhostRecallConfig = {
@@ -1515,6 +1516,26 @@ const clawforcePlugin = {
       auth: "none",
       match: "prefix",
       handler: dashboardHandler,
+    });
+
+    // --- Standalone dashboard server (port 3117) ---
+    // Serves the React SPA + API from a dedicated port, bypassing the
+    // gateway's Control UI SPA catch-all that intercepts /clawforce/ paths.
+    const dashboardServer = createDashboardServer({
+      port: 3117,
+      injectAgentMessage: (params) => api.injectAgentMessage(params),
+    });
+
+    api.registerService({
+      id: "clawforce-dashboard",
+      start: async () => {
+        await dashboardServer.start();
+        api.logger.info("Clawforce dashboard at http://localhost:3117");
+      },
+      stop: async () => {
+        await dashboardServer.stop();
+        api.logger.info("Clawforce dashboard server stopped");
+      },
     });
 
     // --- Sweep service ---

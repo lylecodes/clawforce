@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: "/clawforce/",
+  base: "/",
   build: {
     outDir: "dist",
     emptyOutDir: true,
@@ -20,7 +20,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/clawforce/api": "http://localhost:3000",
+      "/api": "http://localhost:3117",
     },
   },
 });

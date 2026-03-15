@@ -1,7 +1,7 @@
 /**
  * SSE connection manager for the Clawforce dashboard.
  *
- * Connects to /clawforce/api/sse?domain=<id> and dispatches typed events.
+ * Connects to /api/sse?domain=<id> and dispatches typed events.
  */
 import type { SSEEventType } from "./types";
 
@@ -30,7 +30,7 @@ export function connectSSE(
   domain: string,
   onEvent: SSEEventHandler,
 ): () => void {
-  const url = `/clawforce/api/sse?domain=${encodeURIComponent(domain)}`;
+  const url = `/api/sse?domain=${encodeURIComponent(domain)}`;
   let es: EventSource | null = new EventSource(url);
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let closed = false;

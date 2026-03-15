@@ -1,12 +1,20 @@
 /**
- * Clawforce — Dashboard HTTP server
+ * Clawforce — Dashboard HTTP server (standalone)
  *
- * Lightweight Node.js http server with no external dependencies.
- * Configurable port, optional bearer token auth, CORS headers.
+ * Serves BOTH the React SPA static files AND the API routes from a single
+ * Node.js HTTP server on a dedicated port (default 3117).
+ *
+ * Request routing:
+ *   /api/*  → gateway-routes handler (SSE, REST reads, REST actions)
+ *   /*      → static files from dashboard/dist/ with SPA fallback
  */
 
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { handleRequest } from "./routes.js";
+import { createDashboardHandler } from "./gateway-routes.js";
+import type { DashboardHandlerOptions } from "./gateway-routes.js";
 
 export type DashboardOptions = {
   /** Port to listen on (default 3117). */
@@ -17,6 +25,25 @@ export type DashboardOptions = {
   corsOrigin?: string;
   /** Hostname to bind (default "127.0.0.1"). */
   host?: string;
+  /** Function to inject a message into an agent session */
+  injectAgentMessage?: DashboardHandlerOptions["injectAgentMessage"];
+};
+
+// --- MIME types ---
+
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html",
+  ".js": "application/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".map": "application/json",
 };
 
 export function createDashboardServer(options?: DashboardOptions) {
@@ -24,6 +51,18 @@ export function createDashboardServer(options?: DashboardOptions) {
   const host = options?.host ?? "127.0.0.1";
   const corsOrigin = options?.corsOrigin ?? "*";
   const token = options?.token;
+
+  // Resolve static dir — dashboard/dist/ relative to this file's location
+  // This file lives at src/dashboard/server.ts, so ../../dashboard/dist
+  const staticDir = path.resolve(import.meta.dirname, "../../dashboard/dist");
+
+  // Create the gateway-routes handler for /api/* requests.
+  // The gateway-routes handler expects paths prefixed with /clawforce/api/,
+  // so we'll rewrite /api/* → /clawforce/api/* before delegating.
+  const gatewayHandler = createDashboardHandler({
+    staticDir,
+    injectAgentMessage: options?.injectAgentMessage,
+  });
 
   const server = http.createServer((req, res) => {
     // CORS headers
@@ -38,12 +77,6 @@ export function createDashboardServer(options?: DashboardOptions) {
       return;
     }
 
-    // Only GET and POST
-    if (req.method !== "GET" && req.method !== "POST") {
-      respondJson(res, 405, { error: "Method not allowed" });
-      return;
-    }
-
     // Auth check
     if (token) {
       const auth = req.headers.authorization;
@@ -53,41 +86,68 @@ export function createDashboardServer(options?: DashboardOptions) {
       }
     }
 
-    // Parse URL
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const pathname = url.pathname;
-    const params: Record<string, string> = {};
-    for (const [key, value] of url.searchParams) {
-      params[key] = value;
+
+    // --- API routes: /api/* → delegate to gateway handler ---
+    if (pathname.startsWith("/api/") || pathname === "/api") {
+      // Rewrite the URL to add /clawforce prefix so gateway-routes can parse it
+      req.url = `/clawforce${req.url}`;
+      gatewayHandler(req, res);
+      return;
     }
 
-    const route = (body?: Record<string, unknown>) => {
-      try {
-        const result = handleRequest(pathname, params, req.method, body);
-        respondJson(res, result.status, result.body);
-      } catch (err) {
-        respondJson(res, 500, {
-          error: "Internal server error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    };
+    // --- Static files ---
+    if (req.method !== "GET") {
+      respondJson(res, 405, { error: "Method not allowed" });
+      return;
+    }
 
-    if (req.method === "POST") {
-      const chunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => chunks.push(chunk));
-      req.on("end", () => {
-        try {
-          const raw = Buffer.concat(chunks).toString("utf-8");
-          const body = raw.length > 0 ? JSON.parse(raw) : {};
-          route(body);
-        } catch {
-          respondJson(res, 400, { error: "Invalid JSON body" });
-        }
+    // Try to serve a static file from dashboard/dist/
+    const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+    const filePath = path.join(staticDir, relativePath);
+
+    // Security: prevent path traversal
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(staticDir)) {
+      respondJson(res, 403, { error: "Forbidden" });
+      return;
+    }
+
+    if (fs.existsSync(resolved) && !fs.statSync(resolved).isDirectory()) {
+      const ext = path.extname(resolved);
+      const mimeType = MIME_TYPES[ext] ?? "application/octet-stream";
+      const content = fs.readFileSync(resolved);
+
+      // Assets get long cache, everything else no-cache
+      const isAsset = pathname.startsWith("/assets/");
+      const cacheControl = isAsset
+        ? "public, max-age=31536000, immutable"
+        : "no-cache";
+
+      res.writeHead(200, {
+        "Content-Type": mimeType,
+        "Content-Length": content.byteLength,
+        "Cache-Control": cacheControl,
       });
-    } else {
-      route();
+      res.end(content);
+      return;
     }
+
+    // SPA fallback: serve index.html for non-asset paths
+    const indexPath = path.join(staticDir, "index.html");
+    if (fs.existsSync(indexPath)) {
+      const content = fs.readFileSync(indexPath);
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Content-Length": content.byteLength,
+        "Cache-Control": "no-cache",
+      });
+      res.end(content);
+      return;
+    }
+
+    respondJson(res, 404, { error: "Not found" });
   });
 
   return {
