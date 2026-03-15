@@ -122,10 +122,10 @@ export function PerformanceTable({ agents }: PerformanceTableProps) {
                 className="border-b border-cf-border-muted last:border-0 hover:bg-cf-bg-tertiary/50 transition-colors"
               >
                 <td className="px-4 py-2 text-cf-text-primary font-medium">
-                  <div>
-                    {row.agentId}
+                  <div className="flex flex-col">
+                    <span>{row.agentId}</span>
                     {row.title && (
-                      <span className="text-cf-text-muted ml-1.5 font-normal">
+                      <span className="text-cf-text-muted text-xs font-normal">
                         {row.title}
                       </span>
                     )}

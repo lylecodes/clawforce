@@ -127,8 +127,9 @@ export function CommandCenter() {
 }
 
 /**
- * Initiatives section — fetches goals to show as initiative cards.
- * Falls back to task-based grouping when no goals exist.
+ * Initiatives section — fetches goals and renders one card per goal.
+ * Renders nothing while loading or when no goals are configured.
+ * Uses task data only for per-department counts within the goal cards.
  */
 function InitiativesSection({ domain }: { domain: string }) {
   const { data: goalsData } = useQuery({
@@ -148,73 +149,51 @@ function InitiativesSection({ domain }: { domain: string }) {
 
   const colors = ["#58a6ff", "#3fb950", "#d29922", "#f85149", "#bc8cff"];
 
-  // Prefer goals if available
-  const goals: Goal[] = goalsData?.goals ?? [];
-  if (goals.length > 0) {
-    // Count tasks per department for context
-    const tasksByDept = new Map<string, { open: number; inProgress: number; done: number }>();
-    if (tasksData) {
-      for (const task of tasksData.tasks) {
-        const dept = task.department ?? "Unassigned";
-        const entry = tasksByDept.get(dept) ?? { open: 0, inProgress: 0, done: 0 };
-        if (task.state === "OPEN" || task.state === "ASSIGNED") entry.open++;
-        else if (task.state === "IN_PROGRESS") entry.inProgress++;
-        else if (task.state === "DONE") entry.done++;
-        tasksByDept.set(dept, entry);
-      }
-    }
+  // Deduplicate goals by ID (guards against duplicate DB entries from repeated demo setup)
+  const rawGoals: Goal[] = goalsData?.goals ?? [];
+  const seenIds = new Set<string>();
+  const goals = rawGoals.filter((g) => {
+    if (seenIds.has(g.id)) return false;
+    seenIds.add(g.id);
+    return true;
+  });
 
-    return (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {goals.map((goal, i) => {
-          const deptCounts = tasksByDept.get(goal.department ?? "") ?? { open: 0, inProgress: 0, done: 0 };
-          const total = deptCounts.open + deptCounts.inProgress + deptCounts.done;
-          return (
-            <InitiativeCard
-              key={goal.id}
-              name={goal.title}
-              allocationPct={goal.allocation ?? 0}
-              spentPct={total > 0 ? Math.round((deptCounts.done / total) * 100) : 0}
-              taskCounts={deptCounts}
-              activeAgents={[]}
-              color={colors[i % colors.length]}
-            />
-          );
-        })}
-      </div>
-    );
-  }
-
-  // Fallback: group tasks by department
-  if (!tasksData || tasksData.count === 0) {
+  // Render from goals only — don't fall back to task-based department grouping
+  // to prevent duplicate cards when both data sources are available.
+  if (!goalsData) {
+    // Still loading — render nothing to avoid flash of task-based cards
     return null;
   }
 
-  const byDept = new Map<string, { open: number; inProgress: number; done: number }>();
-  for (const task of tasksData.tasks) {
-    const dept = task.department ?? "Unassigned";
-    const entry = byDept.get(dept) ?? { open: 0, inProgress: 0, done: 0 };
-    if (task.state === "OPEN" || task.state === "ASSIGNED") entry.open++;
-    else if (task.state === "IN_PROGRESS") entry.inProgress++;
-    else if (task.state === "DONE") entry.done++;
-    byDept.set(dept, entry);
+  if (goals.length === 0) {
+    return null;
   }
 
-  if (byDept.size === 0) return null;
-
-  const depts = Array.from(byDept.entries());
+  // Count tasks per department for context
+  const tasksByDept = new Map<string, { open: number; inProgress: number; done: number }>();
+  if (tasksData) {
+    for (const task of tasksData.tasks) {
+      const dept = task.department ?? "Unassigned";
+      const entry = tasksByDept.get(dept) ?? { open: 0, inProgress: 0, done: 0 };
+      if (task.state === "OPEN" || task.state === "ASSIGNED") entry.open++;
+      else if (task.state === "IN_PROGRESS") entry.inProgress++;
+      else if (task.state === "DONE") entry.done++;
+      tasksByDept.set(dept, entry);
+    }
+  }
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      {depts.map(([dept, counts], i) => {
-        const total = counts.open + counts.inProgress + counts.done;
+      {goals.map((goal, i) => {
+        const deptCounts = tasksByDept.get(goal.department ?? "") ?? { open: 0, inProgress: 0, done: 0 };
+        const total = deptCounts.open + deptCounts.inProgress + deptCounts.done;
         return (
           <InitiativeCard
-            key={dept}
-            name={dept}
-            allocationPct={Math.round((total / tasksData.count) * 100)}
-            spentPct={total > 0 ? Math.round((counts.done / total) * 100) : 0}
-            taskCounts={counts}
+            key={goal.id}
+            name={goal.title}
+            allocationPct={goal.allocation ?? 0}
+            spentPct={total > 0 ? Math.round((deptCounts.done / total) * 100) : 0}
+            taskCounts={deptCounts}
             activeAgents={[]}
             color={colors[i % colors.length]}
           />
