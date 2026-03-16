@@ -123,7 +123,7 @@ export function Analytics() {
             label="Avg Trust"
             value={
               trustAgents.length > 0
-                ? `${Math.round(trustAgents.reduce((s, a) => s + a.overall, 0) / trustAgents.length)}%`
+                ? `${Math.round(trustAgents.reduce((s, a) => s + a.overall * 100, 0) / trustAgents.length)}%`
                 : "N/A"
             }
             subtitle={trustAgents.length > 0 ? `${trustAgents.length} scored` : "No data"}

@@ -13,14 +13,12 @@ export type SSEEventType =
   | "approval:new"
   | "approval:resolved"
   | "message:new"
-  | "message:sent"
   | "plan:update"
   | "escalation:new"
   | "meeting:started"
   | "meeting:turn"
   | "meeting:ended"
-  | "config:changed"
-  | "config:updated";
+  | "config:changed";
 
 type Client = {
   id: string;

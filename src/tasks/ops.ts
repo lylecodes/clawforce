@@ -578,6 +578,17 @@ export function transitionTask(
     } catch (err) { safeLog("transition.failedEvent", err); }
   }
 
+  // Emit task_transitioned event for every state transition
+  try {
+    ingestEvent(params.projectId, "task_transitioned", "internal", {
+      taskId: params.taskId,
+      fromState: task.state,
+      toState: params.toState,
+      agentId: params.actor,
+      transitionId,
+    }, `task-transitioned:${params.taskId}:${transitionId}`, db);
+  } catch (err) { safeLog("transition.transitionedEvent", err); }
+
   const updatedTask = getTask(params.projectId, params.taskId, db)!;
   const transition: Transition = {
     id: transitionId,
@@ -685,20 +696,30 @@ export function reassignTask(
     safeLog("reassign.sign", err);
   }
 
-  // Update assigned_to (optimistic lock on state)
-  const updateResult = db.prepare(
-    "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ? AND state = 'ASSIGNED' AND project_id = ?",
-  ).run(params.newAssignee, now, params.taskId, params.projectId);
+  // Wrap UPDATE + INSERT in a transaction for atomicity (matching transitionTask pattern)
+  db.prepare("BEGIN IMMEDIATE").run();
+  try {
+    // Update assigned_to (optimistic lock on state)
+    const updateResult = db.prepare(
+      "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ? AND state = 'ASSIGNED' AND project_id = ?",
+    ).run(params.newAssignee, now, params.taskId, params.projectId);
 
-  if (updateResult.changes === 0) {
-    return { ok: false, reason: "Concurrent state change: task no longer in ASSIGNED state" };
+    if (updateResult.changes === 0) {
+      db.prepare("ROLLBACK").run();
+      return { ok: false, reason: "Concurrent state change: task no longer in ASSIGNED state" };
+    }
+
+    // Record transition
+    db.prepare(`
+      INSERT INTO transitions (id, task_id, from_state, to_state, actor, actor_signature, reason, created_at)
+      VALUES (?, ?, 'ASSIGNED', 'ASSIGNED', ?, ?, ?, ?)
+    `).run(transitionId, params.taskId, params.actor, actorSignature ?? null, reassignReason, now);
+
+    db.prepare("COMMIT").run();
+  } catch (err) {
+    try { db.prepare("ROLLBACK").run(); } catch { /* already rolled back */ }
+    throw err;
   }
-
-  // Record transition
-  db.prepare(`
-    INSERT INTO transitions (id, task_id, from_state, to_state, actor, actor_signature, reason, created_at)
-    VALUES (?, ?, 'ASSIGNED', 'ASSIGNED', ?, ?, ?, ?)
-  `).run(transitionId, params.taskId, params.actor, actorSignature ?? null, reassignReason, now);
 
   // Worker registry
   if (previousAssignee) {

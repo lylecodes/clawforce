@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAppStore } from "../store";
 import { api } from "../api/client";
@@ -80,6 +81,26 @@ export function useTasks(filters: TaskFilters = {}) {
     },
   });
 
+  const transitionMutation = useMutation({
+    mutationFn: ({
+      taskId,
+      toState,
+    }: {
+      taskId: string;
+      toState: TaskState;
+    }) => api.transitionTask(activeDomain!, taskId, toState),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tasks", activeDomain] });
+    },
+  });
+
+  const transitionTask = useCallback(
+    (taskId: string, toState: TaskState) => {
+      transitionMutation.mutate({ taskId, toState });
+    },
+    [transitionMutation],
+  );
+
   const createTaskMutation = useMutation({
     mutationFn: (taskData: Record<string, unknown>) =>
       api.createTask(activeDomain!, taskData),
@@ -95,8 +116,10 @@ export function useTasks(filters: TaskFilters = {}) {
     isLoading,
     error,
     reassignTask: reassignMutation.mutate,
+    transitionTask,
     createTask: createTaskMutation.mutate,
     isReassigning: reassignMutation.isPending,
+    isTransitioning: transitionMutation.isPending,
     isCreating: createTaskMutation.isPending,
   };
 }

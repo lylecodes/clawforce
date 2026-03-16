@@ -28,6 +28,8 @@ const EVENT_ICONS: Record<string, string> = {
   "meeting:ended": "X",
   "meeting_started": "M",
   "meeting_concluded": "M",
+  "agent_disabled": "A",
+  "agent_enabled": "A",
   "config:changed": "C",
   "cost_recorded": "$",
 };
@@ -53,9 +55,19 @@ const EVENT_COLORS: Record<string, string> = {
   "goal_achieved": "bg-cf-accent-green/20 text-cf-accent-green",
   "meeting_started": "bg-cf-accent-purple/20 text-cf-accent-purple",
   "meeting_concluded": "bg-cf-accent-green/20 text-cf-accent-green",
+  "agent_disabled": "bg-cf-accent-orange/20 text-cf-accent-orange",
+  "agent_enabled": "bg-cf-accent-green/20 text-cf-accent-green",
   "config:changed": "bg-cf-accent-orange/20 text-cf-accent-orange",
   "cost_recorded": "bg-cf-accent-orange/20 text-cf-accent-orange",
 };
+
+/** Shorten a UUID to its first 8 characters for display */
+function shortId(id: unknown): string {
+  if (typeof id !== "string") return String(id ?? "unknown");
+  // If it looks like a UUID (contains dashes and is 32+ hex chars), truncate
+  if (/^[0-9a-f]{8}-/i.test(id)) return id.slice(0, 8);
+  return id;
+}
 
 function formatEventDescription(event: ActivityEvent): string {
   const data = event.data;
@@ -64,9 +76,9 @@ function formatEventDescription(event: ActivityEvent): string {
       return `Budget updated${data.agentId ? ` for ${data.agentId}` : ""}`;
     case "task:update":
     case "task_transitioned":
-      return `Task ${data.taskId ?? data.title ?? "unknown"} ${data.newState ? `→ ${data.newState}` : "updated"}`;
+      return `Task ${data.title ?? shortId(data.taskId) ?? "unknown"} ${data.newState ? `→ ${data.newState}` : "updated"}`;
     case "task_created":
-      return `Task created: ${data.title ?? data.taskId ?? "new task"}`;
+      return `Task created: ${data.title ?? shortId(data.taskId) ?? "new task"}`;
     case "agent:status":
       return `Agent ${data.agentId ?? "unknown"} is now ${data.status ?? "unknown"}`;
     case "approval:new":
@@ -82,11 +94,11 @@ function formatEventDescription(event: ActivityEvent): string {
     case "dispatch_completed":
       return `Dispatch completed for ${data.agentId ?? "agent"}`;
     case "task_assigned":
-      return `Task assigned: ${data.title ?? data.taskId ?? "task"} → ${data.assignedTo ?? "agent"}`;
+      return `Task assigned: ${data.title ?? shortId(data.taskId) ?? "task"} → ${data.assignedTo ?? "agent"}`;
     case "task_completed":
-      return `Task completed: ${data.title ?? data.taskId ?? "task"}`;
+      return `Task completed: ${data.title ?? shortId(data.taskId) ?? "task"}`;
     case "task_failed":
-      return `Task failed: ${data.title ?? data.taskId ?? "task"}${data.reason ? ` — ${data.reason}` : ""}`;
+      return `Task failed: ${data.title ?? shortId(data.taskId) ?? "task"}${data.reason ? ` — ${data.reason}` : ""}`;
     case "dispatch_started":
       return `Dispatch started for ${data.agentId ?? "agent"}`;
     case "dispatch_succeeded":
@@ -101,6 +113,10 @@ function formatEventDescription(event: ActivityEvent): string {
       return `Meeting started: ${data.channelName ?? data.channelId ?? "meeting"}`;
     case "meeting_concluded":
       return `Meeting concluded: ${data.channelName ?? data.channelId ?? "meeting"}`;
+    case "agent_disabled":
+      return `Agent disabled: ${data.agentId ?? "agent"}${data.reason ? ` — ${data.reason}` : ""}`;
+    case "agent_enabled":
+      return `Agent enabled: ${data.agentId ?? "agent"}`;
     case "config:changed":
       return `Config updated${data.section ? `: ${data.section}` : ""}`;
     default:

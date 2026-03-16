@@ -323,6 +323,16 @@ function handleDispatchFailed(event: ClawforceEvent, db: DatabaseSync): EventHan
   const taskId = event.payload.taskId as string | undefined;
   if (!taskId) return { action: "ignored" };
 
+  // Do NOT re-enqueue when failure is due to budget exceeded or rate limiting.
+  // Re-enqueueing budget-blocked tasks creates a tight retry loop (877+ failed
+  // entries and 1,656 dispatch_failed events). These tasks should wait for the
+  // next budget window reset rather than spinning.
+  const budgetExceeded = event.payload.budgetExceeded === true;
+  const rateLimited = event.payload.rateLimited === true;
+  if (budgetExceeded || rateLimited) {
+    return { action: "handled", taskId };
+  }
+
   // Re-enqueue the task at same priority (dedup will skip if a non-terminal item exists)
   try {
     const result = enqueue(event.projectId, taskId, undefined, undefined, db);
@@ -392,10 +402,12 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   ].filter(Boolean).join("\n");
 
   try {
+    // skipStateCheck=true: REVIEW tasks are normally blocked from dispatch,
+    // but verification dispatches are the intended consumer of REVIEW tasks.
     const result = enqueue(event.projectId, taskId, {
       prompt: verifyPrompt,
       projectDir: verifierProjectDir ?? process.cwd(),
-    }, undefined, db);
+    }, undefined, db, undefined, true);
 
     if (result) {
       return { action: "enqueued", taskId, queueItemId: result.id };

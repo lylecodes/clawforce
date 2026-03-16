@@ -182,8 +182,11 @@ describe("queryDashboardSummary", () => {
     expect(result.activeAgents).toBe(1); // agent-dev has active session
     expect(result.totalAgents).toBe(2);
     expect(result.pendingApprovals).toBe(2);
-    expect(result.budgetUtilization.spent).toBe(2500); // 500 + 2000
-    expect(result.budgetUtilization.limit).toBe(11000); // 1000 + 10000
+    // Should report the worst-case window (hourly: 50%), not sum across windows
+    expect(result.budgetUtilization.spent).toBe(500); // hourly window (50% > daily 20%)
+    expect(result.budgetUtilization.limit).toBe(1000); // hourly limit
+    expect(result.budgetUtilization.pct).toBe(50);
+    expect(result.budgetUtilization.dimension).toBe("cents");
   });
 });
 

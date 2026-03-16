@@ -46,16 +46,20 @@ export function enqueue(
   priority?: number,
   dbOverride?: DatabaseSync,
   riskTier?: string,
+  /** Skip the task-state guard (e.g. when dispatching a verifier for a REVIEW task). */
+  skipStateCheck?: boolean,
 ): DispatchQueueItem | null {
   const db = dbOverride ?? getDb(projectId);
 
-  // Skip tasks in terminal states — they will never be dispatched
-  const taskRow = db.prepare(
-    "SELECT state FROM tasks WHERE id = ? AND project_id = ?",
-  ).get(taskId, projectId) as Record<string, unknown> | undefined;
+  // Skip tasks in non-dispatchable states — unless caller explicitly opts out
+  if (!skipStateCheck) {
+    const taskRow = db.prepare(
+      "SELECT state FROM tasks WHERE id = ? AND project_id = ?",
+    ).get(taskId, projectId) as Record<string, unknown> | undefined;
 
-  if (taskRow && ["DONE", "CANCELLED", "FAILED"].includes(taskRow.state as string)) {
-    return null;
+    if (taskRow && ["DONE", "CANCELLED", "FAILED", "REVIEW", "BLOCKED"].includes(taskRow.state as string)) {
+      return null;
+    }
   }
 
   // Dedup: check for existing non-terminal item

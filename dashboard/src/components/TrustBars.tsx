@@ -53,7 +53,8 @@ export function TrustBars({ agents }: TrustBarsProps) {
       <div className="space-y-3">
         {sorted.map((agent) => {
           const arrow = trendArrow(agent.trend);
-          const barColor = scoreColor(agent.overall);
+          const overallPct = Math.round(agent.overall * 100);
+          const barColor = scoreColor(overallPct);
 
           return (
             <div key={agent.agentId}>
@@ -73,7 +74,7 @@ export function TrustBars({ agents }: TrustBarsProps) {
                     className="text-xs font-mono font-bold"
                     style={{ color: barColor }}
                   >
-                    {agent.overall}%
+                    {overallPct}%
                   </span>
                 </div>
               </div>
@@ -83,7 +84,7 @@ export function TrustBars({ agents }: TrustBarsProps) {
                 <div
                   className="h-full rounded-full transition-all duration-500"
                   style={{
-                    width: `${Math.min(agent.overall, 100)}%`,
+                    width: `${Math.min(overallPct, 100)}%`,
                     backgroundColor: barColor,
                   }}
                 />
@@ -93,7 +94,7 @@ export function TrustBars({ agents }: TrustBarsProps) {
               {agent.categories && typeof agent.categories === "object" && Object.keys(agent.categories).length > 0 && (
                 <div className="flex gap-3 mt-1">
                   {Object.entries(agent.categories).map(([cat, score]) => {
-                    const numScore = typeof score === "number" ? score : 0;
+                    const numScore = typeof score === "number" ? Math.round(score * 100) : 0;
                     return (
                       <span
                         key={cat}

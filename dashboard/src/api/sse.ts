@@ -14,12 +14,14 @@ const EVENT_TYPES: SSEEventType[] = [
   "approval:new",
   "approval:resolved",
   "message:new",
+  "message:sent",
   "plan:update",
   "escalation:new",
   "meeting:started",
   "meeting:turn",
   "meeting:ended",
   "config:changed",
+  "config:updated",
 ];
 
 /**

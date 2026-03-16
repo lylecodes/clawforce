@@ -54,7 +54,9 @@ export function requestVerification(request: VerificationRequest): VerificationR
   if (verifierModel) payload.model = verifierModel;
   if (timeoutMs) payload.timeoutMs = timeoutMs;
 
-  const queueItem = enqueue(projectId, taskId, payload);
+  // skipStateCheck=true: REVIEW tasks are normally blocked from dispatch,
+  // but verification dispatches are the intended consumer of REVIEW tasks.
+  const queueItem = enqueue(projectId, taskId, payload, undefined, undefined, undefined, true);
   if (!queueItem) {
     return { ok: true, queued: false, reason: "Verification already queued (dedup)" };
   }

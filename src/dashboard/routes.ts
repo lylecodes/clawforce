@@ -147,6 +147,7 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           taskId: params.task,
           since: params.since ? parseInt(params.since, 10) : undefined,
           until: params.until ? parseInt(params.until, 10) : undefined,
+          days: params.days,
         }));
       }
 

@@ -152,6 +152,8 @@ export const api = {
     postJson(`/${domain}/agents/${agentId}/enable`),
   reassignTask: (domain: string, taskId: string, newAssignee: string) =>
     postJson(`/${domain}/tasks/${taskId}/reassign`, { newAssignee }),
+  transitionTask: (domain: string, taskId: string, toState: string) =>
+    postJson<{ ok: boolean; reason?: string }>(`/${domain}/tasks/${taskId}/transition`, { toState }),
   createTask: (domain: string, data: Record<string, unknown>) =>
     postJson(`/${domain}/tasks/create`, data),
 };

@@ -426,14 +426,13 @@ export function queryHealth(projectId: string) {
   let sloBreach = 0;
   let alertsFired = 0;
 
-  // Evaluate SLOs
-  if (extConfig?.monitoring?.slos) {
-    try {
-      const sloResults = evaluateSlos(projectId, extConfig.monitoring.slos as Record<string, any>);
-      sloChecked = sloResults.length;
-      sloBreach = sloResults.filter((s: any) => s.status === "breach").length;
-    } catch { /* ignore */ }
-  }
+  // Evaluate SLOs — use querySlos which handles both config-based and DB-based SLOs
+  try {
+    const sloData = querySlos(projectId);
+    const sloResults = sloData.slos ?? [];
+    sloChecked = sloResults.filter((s: any) => !s.noData).length;
+    sloBreach = sloResults.filter((s: any) => s.passed === false && !s.noData).length;
+  } catch { /* ignore */ }
 
   // Evaluate alerts
   if (extConfig?.monitoring?.alertRules) {
@@ -513,7 +512,7 @@ export function queryGoalDetail(projectId: string, goalId: string) {
   const tasks = getGoalTasks(projectId, goalId);
   const progress = computeGoalProgress(projectId, goalId);
 
-  return { goal, childGoals, tasks, progress };
+  return { ...goal, childGoals, tasks, progress };
 }
 
 /** Query messages for a specific thread/channel, shaped for the dashboard ThreadMessagesResponse type. */
@@ -584,6 +583,10 @@ export function queryMessages(
     participants: [...t.participants],
     messages: t.messages,
     lastMessageAt: t.lastMessageAt,
+    lastTimestamp: t.lastMessageAt,
+    unreadCount: t.messages.filter((m: any) => !m.readAt).length,
+    title: t.messages[0]?.channelId || t.id,
+    lastMessage: t.messages[t.messages.length - 1]?.content?.substring(0, 100),
     channelId: t.channelId,
   }));
 
@@ -597,18 +600,61 @@ export function queryMessages(
 
 /** Dashboard summary: 4 metric cards (budget utilization, active agents, tasks in flight, pending approvals). */
 export function queryDashboardSummary(projectId: string) {
-  // Budget utilization
-  let budgetUtilization = { spent: 0, limit: 0, pct: 0 };
+  // Budget utilization — report the worst-case pressure across all windows and dimensions
+  let budgetUtilization = { spent: 0, limit: 0, pct: 0, dimension: "cents" as string };
   try {
     const budgetStatus = getBudgetStatus(projectId);
-    // BudgetStatus has hourly/daily/monthly WindowStatus fields
+    // Find the window with the highest cents utilization percentage
     const windows = [budgetStatus.hourly, budgetStatus.daily, budgetStatus.monthly].filter(Boolean);
-    const spent = windows.reduce((acc, w) => acc + (w?.spentCents ?? 0), 0);
-    const limit = windows.reduce((acc, w) => acc + (w?.limitCents ?? 0), 0);
+    let worstPct = 0;
+    let worstSpent = 0;
+    let worstLimit = 0;
+    let worstDimension = "cents";
+
+    for (const w of windows) {
+      if (w && w.limitCents > 0) {
+        const pct = Math.round((w.spentCents / w.limitCents) * 100);
+        if (pct > worstPct) {
+          worstPct = pct;
+          worstSpent = w.spentCents;
+          worstLimit = w.limitCents;
+          worstDimension = "cents";
+        }
+      }
+    }
+
+    // Also check token utilization from the budgets table directly
+    try {
+      const db = getDb(projectId);
+      const budgetRow = db.prepare(
+        "SELECT hourly_limit_tokens, hourly_spent_tokens, daily_limit_tokens, daily_spent_tokens, monthly_limit_tokens, monthly_spent_tokens FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+      ).get(projectId) as Record<string, number | null> | undefined;
+
+      if (budgetRow) {
+        const tokenWindows = [
+          { limit: budgetRow.hourly_limit_tokens, spent: budgetRow.hourly_spent_tokens },
+          { limit: budgetRow.daily_limit_tokens, spent: budgetRow.daily_spent_tokens },
+          { limit: budgetRow.monthly_limit_tokens, spent: budgetRow.monthly_spent_tokens },
+        ];
+        for (const tw of tokenWindows) {
+          if (tw.limit != null && tw.limit > 0) {
+            const pct = Math.round(((tw.spent ?? 0) / tw.limit) * 100);
+            if (pct > worstPct) {
+              worstPct = pct;
+              worstSpent = tw.spent ?? 0;
+              worstLimit = tw.limit;
+              worstDimension = "tokens";
+            }
+          }
+        }
+      }
+    } catch { /* budgets table may not have token columns */ }
+
     budgetUtilization = {
-      spent,
-      limit,
-      pct: limit > 0 ? Math.round((spent / limit) * 100) : 0,
+      spent: worstSpent,
+      limit: worstLimit,
+      pct: worstPct,
+      dimension: worstDimension,
     };
   } catch { /* no budget configured */ }
 

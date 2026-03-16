@@ -39,7 +39,7 @@ export function TaskBoard() {
   const {
     columns,
     isLoading,
-    reassignTask,
+    transitionTask,
     createTask,
     isCreating,
     tasks,
@@ -97,17 +97,14 @@ export function TaskBoard() {
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return;
 
-      // Only reassign if the column actually changed
+      // Only transition if the column actually changed
       const currentCol = task.state === "ASSIGNED" ? "OPEN" : task.state;
       if (currentCol === targetColumnId) return;
 
-      // Use reassign endpoint (backend handles state transition)
-      reassignTask({
-        taskId,
-        newAssignee: task.assignedTo ?? "",
-      });
+      // Use transition endpoint to move task to the target state
+      transitionTask(taskId, targetState);
     },
-    [tasks, reassignTask],
+    [tasks, transitionTask],
   );
 
   const handleCreateTask = useCallback(

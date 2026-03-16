@@ -98,6 +98,18 @@ export function getBudgetStatus(
     if (pct >= ALERT_THRESHOLD) {
       alerts.push(`${w.key.charAt(0).toUpperCase() + w.key.slice(1)} budget ${pct}% consumed`);
     }
+
+    // Also check token dimension for this window
+    const tokenLimitCol = `${w.key}_limit_tokens`;
+    const tokenSpentCol = `${w.key}_spent_tokens`;
+    const tokenLimit = budget[tokenLimitCol] as number | null;
+    if (tokenLimit != null && tokenLimit > 0) {
+      const tokenSpent = (budget[tokenSpentCol] as number) ?? 0;
+      const tokenPct = Math.round((tokenSpent / tokenLimit) * 100);
+      if (tokenPct >= ALERT_THRESHOLD) {
+        alerts.push(`${w.key.charAt(0).toUpperCase() + w.key.slice(1)} token budget ${tokenPct}% consumed`);
+      }
+    }
   }
 
   return result;

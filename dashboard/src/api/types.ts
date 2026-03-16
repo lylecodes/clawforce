@@ -157,6 +157,9 @@ export type CostResponse = {
   daily: DailyCost[];
   totalCents: number;
   currency: string;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  recordCount?: number;
 };
 
 /** Agent performance data for Analytics */
@@ -190,12 +193,14 @@ export type SSEEventType =
   | "approval:new"
   | "approval:resolved"
   | "message:new"
+  | "message:sent"
   | "plan:update"
   | "escalation:new"
   | "meeting:started"
   | "meeting:turn"
   | "meeting:ended"
-  | "config:changed";
+  | "config:changed"
+  | "config:updated";
 
 // --- Comms Center types ---
 
@@ -220,6 +225,7 @@ export type Thread = {
   title?: string;
   lastMessage?: string;
   lastTimestamp: number;
+  lastMessageAt?: number;
   unreadCount: number;
   isActive?: boolean; // for meetings: currently live
 };

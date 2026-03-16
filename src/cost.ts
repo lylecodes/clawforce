@@ -89,7 +89,35 @@ export function recordCost(
       now,
     );
 
-    // Update all budget window counters (hourly/daily/monthly × cents/tokens/requests)
+    // Update budget window counters (hourly/daily/monthly × cents/tokens/requests).
+    // Use separate statements for project-level and agent-level budgets to prevent
+    // drift when one exists but the other doesn't. A single UPDATE with
+    // (agent_id = ? OR agent_id IS NULL) silently updates zero rows if no budget
+    // row matches, causing cost_records to diverge from budget counters.
+    const budgetUpdateSql = `
+      UPDATE budgets SET
+        hourly_spent_cents = hourly_spent_cents + ?,
+        daily_spent_cents = daily_spent_cents + ?,
+        monthly_spent_cents = monthly_spent_cents + ?,
+        hourly_spent_tokens = hourly_spent_tokens + ?,
+        daily_spent_tokens = daily_spent_tokens + ?,
+        monthly_spent_tokens = monthly_spent_tokens + ?,
+        hourly_spent_requests = hourly_spent_requests + 1,
+        daily_spent_requests = daily_spent_requests + 1,
+        monthly_spent_requests = monthly_spent_requests + 1,
+        updated_at = ?
+      WHERE project_id = ? AND agent_id IS NULL
+    `;
+
+    // Always update the project-level budget row
+    db.prepare(budgetUpdateSql).run(
+      costCents, costCents, costCents,
+      totalTokens, totalTokens, totalTokens,
+      now,
+      params.projectId,
+    );
+
+    // Also update the agent-specific budget row if it exists
     db.prepare(`
       UPDATE budgets SET
         hourly_spent_cents = hourly_spent_cents + ?,
@@ -102,7 +130,7 @@ export function recordCost(
         daily_spent_requests = daily_spent_requests + 1,
         monthly_spent_requests = monthly_spent_requests + 1,
         updated_at = ?
-      WHERE project_id = ? AND (agent_id = ? OR agent_id IS NULL)
+      WHERE project_id = ? AND agent_id = ?
     `).run(
       costCents, costCents, costCents,
       totalTokens, totalTokens, totalTokens,

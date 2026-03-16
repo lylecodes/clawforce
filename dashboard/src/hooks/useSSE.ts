@@ -46,6 +46,7 @@ export function useSSEConnection(domain: string | null) {
           queryClient.invalidateQueries({ queryKey: ["approvals", domain] });
           break;
         case "message:new":
+        case "message:sent":
           queryClient.invalidateQueries({ queryKey: ["messages", domain] });
           queryClient.invalidateQueries({ queryKey: ["thread-messages", domain] });
           break;
@@ -58,6 +59,7 @@ export function useSSEConnection(domain: string | null) {
           queryClient.invalidateQueries({ queryKey: ["thread-messages", domain] });
           break;
         case "config:changed":
+        case "config:updated":
           queryClient.invalidateQueries({ queryKey: ["config", domain] });
           break;
         default:

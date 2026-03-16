@@ -51,7 +51,7 @@ vi.mock("../../src/db.js", () => ({
 }));
 
 vi.mock("../../src/monitoring/slo.js", () => ({
-  evaluateSlos: vi.fn(() => [{ id: "slo1", status: "ok" }]),
+  evaluateSlos: vi.fn(() => [{ sloName: "slo1", metricKey: "latency", threshold: 100, actual: 50, passed: true, noData: false }]),
 }));
 
 vi.mock("../../src/monitoring/alerts.js", () => ({

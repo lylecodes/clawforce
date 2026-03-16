@@ -21,6 +21,7 @@ import { loadGlobalConfig } from "../config/loader.js";
 import { initializeAllDomains } from "../config/init.js";
 import { createGoal } from "../goals/ops.js";
 import { getDb } from "../db.js";
+import { getRegisteredAgentIds, getAgentConfig, getExtendedProjectConfig } from "../project.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -188,6 +189,22 @@ function handleAgentAction(
   const agentId = segments[1]!;
   const action = segments[2]!;
 
+  // Validate agent exists when agents are registered (lenient for test environments)
+  if (action === "disable" || action === "enable") {
+    try {
+      const allAgentIds = getRegisteredAgentIds();
+      const projectAgentIds = allAgentIds.filter((id) => {
+        const entry = getAgentConfig(id);
+        return entry?.projectId === projectId;
+      });
+      if (projectAgentIds.length > 0 && !projectAgentIds.includes(agentId)) {
+        return notFound(`Agent "${agentId}" is not registered in project "${projectId}".`);
+      }
+    } catch {
+      // If project module is unavailable, skip validation
+    }
+  }
+
   switch (action) {
     case "disable": {
       const reason = (body.reason as string) ?? "Disabled via dashboard";
@@ -237,6 +254,23 @@ function handleMeetingAction(
     const participants = body.participants as string[];
     if (!participants || !Array.isArray(participants) || participants.length === 0) {
       return badRequest("participants array is required");
+    }
+
+    // Validate participants exist when agents are registered (lenient for test environments)
+    try {
+      const allAgentIds = getRegisteredAgentIds();
+      const projectAgentIds = allAgentIds.filter((id) => {
+        const entry = getAgentConfig(id);
+        return entry?.projectId === projectId;
+      });
+      if (projectAgentIds.length > 0) {
+        const invalid = participants.filter((p) => !projectAgentIds.includes(p));
+        if (invalid.length > 0) {
+          return badRequest(`Invalid participant(s): ${invalid.join(", ")}. These agents are not registered in project "${projectId}".`);
+        }
+      }
+    } catch {
+      // If project module is unavailable, skip validation
     }
 
     try {
@@ -322,7 +356,7 @@ function handleMessageAction(
           projectId,
           content,
         });
-        emitSSE(projectId, "message:sent", { threadId, messageId: msg.id });
+        emitSSE(projectId, "message:new", { threadId, messageId: msg.id });
         return ok(msg);
       } catch (err) {
         return badRequest(err instanceof Error ? err.message : String(err));
@@ -342,8 +376,37 @@ function handleConfigAction(
   switch (action) {
     case "save": {
       const section = body.section as string;
-      const data = body.data;
+      let data = body.data;
       if (!section) return badRequest("section is required");
+
+      // When saving the "agents" section, convert bare string briefing items
+      // back to ContextSource objects to prevent data loss. The frontend
+      // BriefingBuilder normalizes ContextSource objects to bare strings,
+      // which destroys rich fields like path, content, and filter.
+      if (section === "agents" && data && typeof data === "object") {
+        const agents = data as Record<string, Record<string, unknown>>;
+        for (const agentId of Object.keys(agents)) {
+          const agentData = agents[agentId];
+          if (agentData && Array.isArray(agentData.briefing)) {
+            agentData.briefing = (agentData.briefing as unknown[]).map((item) =>
+              typeof item === "string" ? { source: item } : item,
+            );
+          }
+          // Also handle briefing inside jobs
+          if (agentData && agentData.jobs && typeof agentData.jobs === "object") {
+            const jobs = agentData.jobs as Record<string, Record<string, unknown>>;
+            for (const jobId of Object.keys(jobs)) {
+              const jobData = jobs[jobId];
+              if (jobData && Array.isArray(jobData.briefing)) {
+                jobData.briefing = (jobData.briefing as unknown[]).map((item) =>
+                  typeof item === "string" ? { source: item } : item,
+                );
+              }
+            }
+          }
+        }
+        data = agents;
+      }
 
       // Attempt to persist the config change to the domain YAML file
       try {
@@ -367,7 +430,7 @@ function handleConfigAction(
           // Non-fatal: file is saved even if runtime reload fails
         }
 
-        emitSSE(projectId, "config:updated", { section });
+        emitSSE(projectId, "config:changed", { section });
         try {
           ingestEvent(projectId, "config_updated", "internal", {
             section,
@@ -382,8 +445,9 @@ function handleConfigAction(
     case "validate": {
       const section = body.section as string;
       if (!section) return badRequest("section is required");
-      // Basic validation: check that the data is well-formed
-      return ok({ valid: true, section, errors: [], warnings: [] });
+      const validationData = body.data;
+      const { errors, warnings } = validateConfigSection(section, validationData);
+      return ok({ valid: errors.length === 0, section, errors, warnings });
     }
     case "preview": {
       const current = body.current;
@@ -525,6 +589,111 @@ export function handleDemoCreate(): RouteResult {
       body: { error: err instanceof Error ? err.message : String(err) },
     };
   }
+}
+
+// --- Config validation ---
+
+function validateConfigSection(
+  section: string,
+  data: unknown,
+): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (data == null) {
+    errors.push(`${section}: data is required`);
+    return { errors, warnings };
+  }
+
+  switch (section) {
+    case "agents": {
+      if (typeof data !== "object" || Array.isArray(data)) {
+        errors.push("agents: must be an object mapping agent IDs to configs");
+        break;
+      }
+      const agents = data as Record<string, unknown>;
+      for (const [agentId, agentConfig] of Object.entries(agents)) {
+        if (!agentId || typeof agentId !== "string") {
+          errors.push("agents: each agent must have a string id");
+          continue;
+        }
+        if (agentConfig == null || typeof agentConfig !== "object") {
+          errors.push(`agents.${agentId}: config must be an object`);
+          continue;
+        }
+        const cfg = agentConfig as Record<string, unknown>;
+        if (cfg.persona !== undefined && typeof cfg.persona !== "string") {
+          errors.push(`agents.${agentId}.persona: must be a string`);
+        }
+        if (cfg.title !== undefined && typeof cfg.title !== "string") {
+          errors.push(`agents.${agentId}.title: must be a string`);
+        }
+      }
+      break;
+    }
+    case "budget": {
+      if (typeof data !== "object" || Array.isArray(data)) {
+        errors.push("budget: must be an object");
+        break;
+      }
+      const budget = data as Record<string, unknown>;
+      const windowKeys = ["hourly", "daily", "monthly"];
+      for (const wk of windowKeys) {
+        if (budget[wk] === undefined) continue;
+        if (typeof budget[wk] !== "object" || budget[wk] === null) {
+          errors.push(`budget.${wk}: must be an object`);
+          continue;
+        }
+        const win = budget[wk] as Record<string, unknown>;
+        for (const dim of ["cents", "tokens", "requests"]) {
+          if (win[dim] === undefined) continue;
+          if (typeof win[dim] !== "number") {
+            errors.push(`budget.${wk}.${dim}: must be a number`);
+          } else if ((win[dim] as number) < 0) {
+            errors.push(`budget.${wk}.${dim}: must be non-negative`);
+          }
+        }
+      }
+      break;
+    }
+    case "safety": {
+      if (typeof data !== "object" || Array.isArray(data)) {
+        errors.push("safety: must be an object");
+        break;
+      }
+      const safety = data as Record<string, unknown>;
+      if (safety.maxSpawnDepth !== undefined) {
+        if (typeof safety.maxSpawnDepth !== "number") {
+          errors.push("safety.maxSpawnDepth: must be a number");
+        } else if ((safety.maxSpawnDepth as number) < 1 || (safety.maxSpawnDepth as number) > 100) {
+          errors.push("safety.maxSpawnDepth: must be between 1 and 100");
+        }
+      }
+      if (safety.maxConcurrentSessions !== undefined) {
+        if (typeof safety.maxConcurrentSessions !== "number") {
+          errors.push("safety.maxConcurrentSessions: must be a number");
+        } else if ((safety.maxConcurrentSessions as number) < 1 || (safety.maxConcurrentSessions as number) > 50) {
+          errors.push("safety.maxConcurrentSessions: must be between 1 and 50");
+        }
+      }
+      if (safety.maxCostPerSessionCents !== undefined) {
+        if (typeof safety.maxCostPerSessionCents !== "number") {
+          errors.push("safety.maxCostPerSessionCents: must be a number");
+        } else if ((safety.maxCostPerSessionCents as number) < 0) {
+          errors.push("safety.maxCostPerSessionCents: must be non-negative");
+        }
+      }
+      break;
+    }
+    default:
+      // For unknown sections, just validate it's a valid object
+      if (typeof data !== "object") {
+        warnings.push(`${section}: expected an object`);
+      }
+      break;
+  }
+
+  return { errors, warnings };
 }
 
 // --- Helpers ---
