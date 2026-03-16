@@ -380,10 +380,12 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
   const rawRole = typeof raw.role === "string" && raw.role.trim()
     ? raw.role.trim()
     : undefined;
-  // Map legacy role aliases
+  // Map legacy role aliases (applies to both extends and role for backward compat)
+  // e.g. role: worker → extends: worker (via alias) → employee (via legacy map)
   const ROLE_ALIAS: Record<string, string> = { orchestrator: "manager", worker: "employee" };
+  const mappedExtends = rawExtends ? (ROLE_ALIAS[rawExtends] ?? rawExtends) : undefined;
   const mappedRole = rawRole ? (ROLE_ALIAS[rawRole] ?? rawRole) : undefined;
-  const extendsFrom = rawExtends ?? mappedRole ?? "employee";
+  const extendsFrom = mappedExtends ?? mappedRole ?? "employee";
 
   // Accept both old and new field names for migration
   const briefing = normalizeContextSources(raw.briefing ?? raw.context_in);
