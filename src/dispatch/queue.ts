@@ -256,7 +256,7 @@ export function markDispatched(
   dbOverride?: DatabaseSync,
   projectId?: string,
 ): void {
-  const db = dbOverride ?? getDb("");
+  const db = dbOverride ?? getDb(projectId ?? "");
   db.prepare(
     `UPDATE dispatch_queue
      SET status = 'dispatched', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL
@@ -276,7 +276,7 @@ export function completeItem(
   dbOverride?: DatabaseSync,
   projectId?: string,
 ): void {
-  const db = dbOverride ?? getDb("");
+  const db = dbOverride ?? getDb(projectId ?? "");
   db.prepare(
     "UPDATE dispatch_queue SET status = 'completed', completed_at = ? WHERE id = ?",
   ).run(Date.now(), id);
@@ -295,7 +295,7 @@ export function failItem(
   dbOverride?: DatabaseSync,
   projectId?: string,
 ): void {
-  const db = dbOverride ?? getDb("");
+  const db = dbOverride ?? getDb(projectId ?? "");
   db.prepare(
     "UPDATE dispatch_queue SET status = 'failed', last_error = ?, completed_at = ? WHERE id = ?",
   ).run(error, Date.now(), id);
