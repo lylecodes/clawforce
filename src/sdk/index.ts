@@ -5,8 +5,13 @@ import { BudgetNamespace } from "./budget.js";
 import { AgentsNamespace } from "./agents.js";
 import { TrustNamespace } from "./trust.js";
 import { GoalsNamespace } from "./goals.js";
+import { KnowledgeNamespace } from "./knowledge.js";
 import { MessagesNamespace } from "./messages.js";
 import { MonitoringNamespace } from "./monitoring.js";
+import { DbNamespace } from "./db.js";
+import { DispatchNamespace } from "./dispatch.js";
+import { ConfigNamespace } from "./config.js";
+import { HooksNamespace } from "./hooks.js";
 
 export class Clawforce {
   readonly domain: string;
@@ -18,8 +23,13 @@ export class Clawforce {
   private _agents?: AgentsNamespace;
   private _trust?: TrustNamespace;
   private _goals?: GoalsNamespace;
+  private _knowledge?: KnowledgeNamespace;
   private _messages?: MessagesNamespace;
   private _monitoring?: MonitoringNamespace;
+  private _db?: DbNamespace;
+  private _dispatch?: DispatchNamespace;
+  private _config?: ConfigNamespace;
+  private _hooks?: HooksNamespace;
 
   private constructor(opts: ClawforceOptions) {
     this.opts = opts;
@@ -48,11 +58,26 @@ export class Clawforce {
   get goals(): GoalsNamespace {
     return (this._goals ??= new GoalsNamespace(this.domain));
   }
+  get knowledge(): KnowledgeNamespace {
+    return (this._knowledge ??= new KnowledgeNamespace(this.domain));
+  }
   get messages(): MessagesNamespace {
     return (this._messages ??= new MessagesNamespace(this.domain));
   }
   get monitoring(): MonitoringNamespace {
     return (this._monitoring ??= new MonitoringNamespace(this.domain));
+  }
+  get db(): DbNamespace {
+    return (this._db ??= new DbNamespace(this.domain));
+  }
+  get dispatch(): DispatchNamespace {
+    return (this._dispatch ??= new DispatchNamespace(this.domain));
+  }
+  get config(): ConfigNamespace {
+    return (this._config ??= new ConfigNamespace(this.domain));
+  }
+  get hooks(): HooksNamespace {
+    return (this._hooks ??= new HooksNamespace(this.domain));
   }
 }
 
