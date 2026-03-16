@@ -1093,6 +1093,22 @@ export function registerWorkforceConfig(
     approvalPolicies.set(projectId, wfConfig.approval);
   }
 
+  // Register manager cron if configured
+  const mgrConfig = wfConfig.manager ?? wfConfig.orchestrator;
+  if (mgrConfig?.enabled) {
+    if (projectDir) {
+      mgrConfig.projectDir = projectDir;
+    }
+    registerManagerProject(projectId, mgrConfig);
+    if (mgrConfig.cronSchedule) {
+      void registerManagerCron(
+        projectId,
+        mgrConfig.agentId,
+        mgrConfig.cronSchedule,
+      );
+    }
+  }
+
   // Register custom skill topics
   if (wfConfig.skills && projectDir) {
     try {

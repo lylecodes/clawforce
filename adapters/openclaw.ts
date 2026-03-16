@@ -1542,6 +1542,7 @@ const clawforcePlugin = {
         if (domainResult.domains.length > 0) {
           api.logger.info(`Clawforce auto-init: ${domainResult.domains.length} domain(s): ${domainResult.domains.join(", ")}`);
         }
+        api.logger.info(`Clawforce: pendingCronJobs=${pendingCronJobs.length}, capturedCronAdd=${!!capturedCronAdd}`);
         for (const err of domainResult.errors) {
           api.logger.warn(`Clawforce domain error: ${err}`);
         }
