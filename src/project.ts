@@ -17,6 +17,7 @@ import { registerManagerCron } from "./manager-cron.js";
 import { resolveEscalationChain } from "./org.js";
 import { applyProfile } from "./profiles.js";
 import { BUILTIN_AGENT_PRESETS } from "./presets.js";
+import { normalizeAgentConfig as resolveAliases } from "./config/aliases.js";
 import { registerCustomSkills } from "./skills/registry.js";
 import type {
   AgentConfig,
@@ -358,7 +359,11 @@ const VALID_SOURCES: ContextSource["source"][] = [
   "custom_stream",
 ];
 
-function normalizeAgentConfig(raw: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
+function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
+  // Resolve config aliases (group→department, subgroup→team, role→extends)
+  // before any other processing so canonical names are always available.
+  const raw = resolveAliases(rawInput);
+
   // Handle extends field — error if old role: field used
   if (raw.role !== undefined) {
     const oldRole = raw.role as string;

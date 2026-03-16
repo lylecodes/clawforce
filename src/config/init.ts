@@ -7,6 +7,7 @@
 
 import path from "node:path";
 import { loadGlobalConfig, loadAllDomains, validateDomainAgents } from "./loader.js";
+import { normalizeAgentConfig as resolveAliases } from "./aliases.js";
 import { registerGlobalAgents, assignAgentsToDomain } from "./registry.js";
 import { registerDomain } from "../lifecycle.js";
 import { registerWorkforceConfig } from "../project.js";
@@ -134,12 +135,17 @@ function buildWorkforceConfig(
     const globalDef = global.agents[agentId];
     if (!globalDef) continue; // warned about in validateDomainAgents
 
-    // Resolve preset inheritance using BUILTIN_AGENT_PRESETS
-    const resolved = resolveConfig({ ...globalDef }, BUILTIN_AGENT_PRESETS);
+    // Resolve config aliases (group→department, subgroup→team, role→extends)
+    const normalizedDef = resolveAliases({ ...globalDef } as Record<string, unknown>);
 
-    // Preserve the extends field in the resolved config (resolveConfig strips it)
-    if (globalDef.extends) {
-      resolved.extends = globalDef.extends;
+    // Resolve preset inheritance using BUILTIN_AGENT_PRESETS
+    const resolved = resolveConfig(normalizedDef, BUILTIN_AGENT_PRESETS);
+
+    // Preserve the extends field in the resolved config (resolveConfig strips it).
+    // Use normalizedDef so that `role` alias is captured as well.
+    const effectiveExtends = normalizedDef.extends ?? globalDef.extends;
+    if (effectiveExtends) {
+      resolved.extends = effectiveExtends as string;
     }
 
     // Apply global defaults
