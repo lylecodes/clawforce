@@ -100,11 +100,8 @@ export function handleWorkflowCompletion(
       priority: "P1",
       createdBy: "system:completion",
       tags: ["verification", "goal-check"],
+      goalId,
     }, db);
-
-    // Link task to goal
-    db.prepare("UPDATE tasks SET goal_id = ? WHERE id = ? AND project_id = ?")
-      .run(goalId, task.id, projectId);
 
     createdTasks.push(task.id);
 

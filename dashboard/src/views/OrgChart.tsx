@@ -44,22 +44,43 @@ export function OrgChart() {
     return map;
   }, [agents]);
 
-  // Build trust map
+  // Build trust map and compliance map
   const trustMap = useMemo(() => {
     const map: Record<string, number> = {};
     if (trustData?.agents) {
       for (const entry of trustData.agents) {
         const a = entry as { agentId?: string; overall?: number };
         if (a.agentId !== undefined && a.overall !== undefined) {
-          map[a.agentId] = a.overall;
+          map[a.agentId] = Math.round(a.overall * 100);
         }
       }
     }
     return map;
   }, [trustData]);
 
-  // Spend map placeholder (would be populated from cost data)
-  const spendMap = useMemo<Record<string, number>>(() => ({}), []);
+  const complianceMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (trustData?.agents) {
+      for (const entry of trustData.agents) {
+        const a = entry as { agentId?: string; categories?: Record<string, number> };
+        if (a.agentId !== undefined && a.categories?.compliance !== undefined) {
+          map[a.agentId] = Math.round(a.categories.compliance * 100);
+        }
+      }
+    }
+    return map;
+  }, [trustData]);
+
+  // Build spend map from agents' cost data (in cents — AgentNode formats)
+  const spendMap = useMemo<Record<string, number>>(() => {
+    const map: Record<string, number> = {};
+    if (agents) {
+      for (const a of agents) {
+        if (a.totalCostCents) map[a.id] = a.totalCostCents;
+      }
+    }
+    return map;
+  }, [agents]);
 
   if (!activeDomain) {
     return (
@@ -139,6 +160,8 @@ export function OrgChart() {
           />
           <AgentDetailPanel
             agent={selectedAgent}
+            trustScore={trustMap[selectedAgent.id]}
+            compliancePct={complianceMap[selectedAgent.id]}
             onClose={() => setSelectedAgent(null)}
           />
         </>

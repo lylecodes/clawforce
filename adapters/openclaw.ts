@@ -1547,6 +1547,65 @@ const clawforcePlugin = {
           api.logger.warn(`Clawforce domain error: ${err}`);
         }
 
+        // Set up file-based cron service fallback for dispatch system.
+        // The live cron service is only available via gateway method context,
+        // but dispatch needs it immediately. This writes jobs to the cron store
+        // JSON file, which OpenClaw's cron runtime re-reads every tick.
+        if (!capturedCronService) {
+          const cronStorePath = path.join(process.env.HOME ?? "/tmp", ".openclaw", "cron", "jobs.json");
+          const fileCronService: import("../src/manager-cron.js").CronServiceLike = {
+            async list() {
+              try {
+                if (!fs.existsSync(cronStorePath)) return [];
+                const store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
+                return store.jobs ?? [];
+              } catch { return []; }
+            },
+            async add(input: CronRegistrarInput) {
+              try {
+                let store = { version: 1, jobs: [] as Record<string, unknown>[] };
+                if (fs.existsSync(cronStorePath)) {
+                  store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
+                } else {
+                  fs.mkdirSync(path.dirname(cronStorePath), { recursive: true });
+                }
+                const names = new Set(store.jobs.map((j) => j.name as string));
+                if (names.has(input.name)) return;
+                store.jobs.push({
+                  id: crypto.randomUUID(),
+                  ...input,
+                  createdAtMs: Date.now(),
+                  updatedAtMs: Date.now(),
+                  state: {},
+                });
+                const tmp = `${cronStorePath}.tmp.${process.pid}`;
+                fs.writeFileSync(tmp, JSON.stringify(store, null, 2), "utf-8");
+                fs.renameSync(tmp, cronStorePath);
+              } catch (err) {
+                api.logger.warn(`File cron add failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            },
+            async update(id: string, patch: Record<string, unknown>) {
+              try {
+                const store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
+                const job = store.jobs.find((j: Record<string, unknown>) => j.id === id);
+                if (job) Object.assign(job, patch, { updatedAtMs: Date.now() });
+                fs.writeFileSync(cronStorePath, JSON.stringify(store, null, 2), "utf-8");
+              } catch { /* ignore */ }
+            },
+            async remove(id: string) {
+              try {
+                const store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
+                store.jobs = store.jobs.filter((j: Record<string, unknown>) => j.id !== id);
+                fs.writeFileSync(cronStorePath, JSON.stringify(store, null, 2), "utf-8");
+              } catch { /* ignore */ }
+            },
+          };
+          capturedCronService = fileCronService;
+          setCronService(fileCronService);
+          api.logger.info("Clawforce: file-based cron service fallback active");
+        }
+
         // Sync agents to OpenClaw's agents.list so they're addressable
         const agentIds = getRegisteredAgentIds();
         const agentsToSync = agentIds

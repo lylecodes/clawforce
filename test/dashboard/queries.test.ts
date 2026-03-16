@@ -38,7 +38,16 @@ vi.mock("../../src/metrics.js", () => ({
 }));
 
 vi.mock("../../src/cost.js", () => ({
-  getCostSummary: vi.fn(() => ({ totalCents: 42 })),
+  getCostSummary: vi.fn(() => ({ totalCostCents: 42, totalInputTokens: 100, totalOutputTokens: 200, recordCount: 3 })),
+}));
+
+vi.mock("../../src/db.js", () => ({
+  getDb: vi.fn(() => ({
+    prepare: vi.fn(() => ({
+      all: vi.fn(() => []),
+      get: vi.fn(() => ({})),
+    })),
+  })),
 }));
 
 vi.mock("../../src/monitoring/slo.js", () => ({
@@ -55,6 +64,7 @@ vi.mock("../../src/monitoring/health-tier.js", () => ({
 
 vi.mock("../../src/events/store.js", () => ({
   listEvents: vi.fn(() => [{ id: "e1", type: "task.created" }]),
+  countEvents: vi.fn(() => 1),
 }));
 
 vi.mock("../../src/org.js", () => ({
@@ -147,10 +157,13 @@ describe("querySessions", () => {
 });
 
 describe("queryEvents", () => {
-  it("returns events", () => {
+  it("returns events with total count and pagination info", () => {
     const result = queryEvents("proj1");
     expect(result.events).toHaveLength(1);
+    expect(result.total).toBe(1);
     expect(result.count).toBe(1);
+    expect(result.limit).toBe(50);
+    expect(result.offset).toBe(0);
   });
 });
 

@@ -61,26 +61,19 @@ export function setApprovalNotifier(n: ApprovalNotifier | null): void {
 export function getApprovalNotifier(): ApprovalNotifier | null {
   if (notifier) return notifier;
 
-  // Fallback: use unified delivery adapter
+  // Fallback: log the notification (no valid Telegram chatId available —
+  // payload.projectId is a domain name, not a chat ID)
   return {
     async sendProposalNotification(payload: NotificationPayload) {
       const message = formatTelegramMessage(payload);
-      const buttons = buildApprovalButtons(payload.projectId, payload.proposalId);
-      const result = await deliverMessage({
-        channel: "telegram",
-        content: message,
-        target: { chatId: payload.projectId },
-        options: { buttons, format: "markdown" },
-      });
       return {
-        sent: result.delivered,
-        channel: "telegram" as ApprovalChannel,
-        messageId: result.messageId,
-        error: result.error,
+        sent: false,
+        channel: "dashboard" as ApprovalChannel,
+        error: "No approval notifier configured — proposal visible in dashboard",
       };
     },
     async editProposalMessage() {
-      // Edit not supported via unified delivery fallback
+      // Edit not supported without explicit notifier
     },
   };
 }

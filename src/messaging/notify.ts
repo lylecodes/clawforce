@@ -64,15 +64,12 @@ export async function notifyMessage(message: Message): Promise<void> {
     return;
   }
 
-  // Fallback: use unified delivery adapter
+  // Fallback: use unified delivery adapter (only if a real delivery channel is configured)
+  // Note: message.toAgent is an agent ID, not a Telegram chatId — we log instead of
+  // attempting delivery with an invalid target that would always fail.
   try {
     const content = formatMessageNotification(message);
-    await deliverMessage({
-      channel: "telegram",
-      content,
-      target: { chatId: message.toAgent },
-      options: { format: "markdown" },
-    });
+    safeLog("messaging.notify", `[${message.fromAgent} → ${message.toAgent}] ${content.slice(0, 200)}`);
   } catch (err) {
     safeLog("messaging.notify", err);
   }

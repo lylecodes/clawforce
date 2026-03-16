@@ -165,13 +165,11 @@ export function reclaimStaleEvents(
   return Number(result.changes);
 }
 
-/** List events with optional filtering. */
-export function listEvents(
+/** Build WHERE clause and parameter values for event queries. */
+function buildEventFilter(
   projectId: string,
-  filter?: { status?: EventStatus; type?: string; limit?: number },
-  dbOverride?: DatabaseSync,
-): ClawforceEvent[] {
-  const db = dbOverride ?? getDb(projectId);
+  filter?: { status?: EventStatus; type?: string },
+): { where: string; values: (string | number)[] } {
   const conditions: string[] = ["project_id = ?"];
   const values: (string | number)[] = [projectId];
 
@@ -184,10 +182,36 @@ export function listEvents(
     values.push(filter.type);
   }
 
+  return { where: conditions.join(" AND "), values };
+}
+
+/** List events with optional filtering. */
+export function listEvents(
+  projectId: string,
+  filter?: { status?: EventStatus; type?: string; limit?: number },
+  dbOverride?: DatabaseSync,
+): ClawforceEvent[] {
+  const db = dbOverride ?? getDb(projectId);
+  const { where, values } = buildEventFilter(projectId, filter);
+
   const limit = filter?.limit ?? 50;
-  const sql = `SELECT * FROM events WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ?`;
+  const sql = `SELECT * FROM events WHERE ${where} ORDER BY created_at DESC LIMIT ?`;
   values.push(limit);
 
   const rows = db.prepare(sql).all(...values) as Record<string, unknown>[];
   return rows.map(rowToEvent);
+}
+
+/** Count total events matching the given filters (ignoring pagination). */
+export function countEvents(
+  projectId: string,
+  filter?: { status?: EventStatus; type?: string },
+  dbOverride?: DatabaseSync,
+): number {
+  const db = dbOverride ?? getDb(projectId);
+  const { where, values } = buildEventFilter(projectId, filter);
+
+  const sql = `SELECT COUNT(*) as total FROM events WHERE ${where}`;
+  const row = db.prepare(sql).get(...values) as { total: number };
+  return row.total;
 }

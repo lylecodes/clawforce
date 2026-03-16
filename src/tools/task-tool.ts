@@ -54,6 +54,7 @@ const ClawforceTaskSchema = Type.Object({
   deadline: Type.Optional(Type.Number({ description: "Deadline as Unix timestamp ms (for create)." })),
   workflow_id: Type.Optional(Type.String({ description: "Workflow ID (for create/list)." })),
   state: Type.Optional(Type.Array(Type.String(), { description: "Filter by state(s): OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE, FAILED, BLOCKED." })),
+  goal_id: Type.Optional(Type.String({ description: "Goal ID to link task to (for create)." })),
   department: Type.Optional(Type.String({ description: "Filter by department (for list)." })),
   team: Type.Optional(Type.String({ description: "Filter by team (for list)." })),
   limit: Type.Optional(Type.Number({ description: "Max results (for list, default 100)." })),
@@ -75,6 +76,7 @@ const ClawforceTaskSchema = Type.Object({
       max_retries: Type.Optional(Type.Number()),
       deadline: Type.Optional(Type.Number()),
       workflow_id: Type.Optional(Type.String()),
+      goal_id: Type.Optional(Type.String()),
     }),
     { description: "Array of task definitions (for bulk_create)." },
   )),
@@ -125,6 +127,7 @@ export function createClawforceTaskTool(options?: {
           const deadline = readNumberParam(params, "deadline", { integer: true });
           const tags = readStringArrayParam(params, "tags");
           const workflowId = readStringParam(params, "workflow_id");
+          const goalId = readStringParam(params, "goal_id");
 
           const task = createTask({
             projectId,
@@ -137,6 +140,7 @@ export function createClawforceTaskTool(options?: {
             deadline: deadline ?? undefined,
             tags: tags ?? undefined,
             workflowId: workflowId ?? undefined,
+            goalId: goalId ?? undefined,
           });
           const dupWarning = (task as Record<string, unknown>).duplicateWarning as string | undefined;
           const result: Record<string, unknown> = { ok: true, task };
@@ -384,6 +388,7 @@ export function createClawforceTaskTool(options?: {
               deadline: typeof t.deadline === "number" ? t.deadline : undefined,
               tags: Array.isArray(t.tags) ? t.tags.map(String) : undefined,
               workflowId: (t.workflow_id as string) ?? undefined,
+              goalId: (t.goal_id as string) ?? undefined,
             });
             results.push({ ok: true, task });
           }

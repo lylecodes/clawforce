@@ -63,6 +63,7 @@ vi.mock("../../src/monitoring/health-tier.js", () => ({
 
 vi.mock("../../src/events/store.js", () => ({
   listEvents: vi.fn(() => []),
+  countEvents: vi.fn(() => 0),
 }));
 
 vi.mock("../../src/messaging/store.js", () => ({

@@ -197,7 +197,7 @@ export function resetDailyBudgets(
   const nextMidnight = getNextMidnightUTC(now);
 
   const result = db.prepare(`
-    UPDATE budgets SET daily_spent_cents = 0, daily_reset_at = ?, updated_at = ?
+    UPDATE budgets SET daily_spent_cents = 0, daily_spent_tokens = 0, daily_spent_requests = 0, daily_reset_at = ?, updated_at = ?
     WHERE project_id = ? AND daily_reset_at <= ?
   `).run(nextMidnight, now, projectId, now);
 

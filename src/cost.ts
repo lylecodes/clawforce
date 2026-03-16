@@ -60,32 +60,36 @@ export function recordCost(
   const now = Date.now();
   const costCents = calculateCostCents(params);
 
-  db.prepare(`
-    INSERT INTO cost_records (id, project_id, agent_id, session_key, task_id,
-      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-      cost_cents, model, provider, source, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    params.projectId,
-    params.agentId,
-    params.sessionKey ?? null,
-    params.taskId ?? null,
-    params.inputTokens,
-    params.outputTokens,
-    params.cacheReadTokens ?? 0,
-    params.cacheWriteTokens ?? 0,
-    costCents,
-    params.model ?? null,
-    params.provider ?? null,
-    params.source ?? "dispatch",
-    now,
-  );
-
-  // Update all budget window counters (hourly/daily/monthly × cents/tokens/requests)
+  // Atomically insert cost record + update budget counters in a single transaction.
+  // This prevents the budget counter from drifting out of sync with cost_records.
   const totalTokens = params.inputTokens + params.outputTokens +
     (params.cacheReadTokens ?? 0) + (params.cacheWriteTokens ?? 0);
+
+  db.prepare("BEGIN IMMEDIATE").run();
   try {
+    db.prepare(`
+      INSERT INTO cost_records (id, project_id, agent_id, session_key, task_id,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        cost_cents, model, provider, source, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      params.projectId,
+      params.agentId,
+      params.sessionKey ?? null,
+      params.taskId ?? null,
+      params.inputTokens,
+      params.outputTokens,
+      params.cacheReadTokens ?? 0,
+      params.cacheWriteTokens ?? 0,
+      costCents,
+      params.model ?? null,
+      params.provider ?? null,
+      params.source ?? "dispatch",
+      now,
+    );
+
+    // Update all budget window counters (hourly/daily/monthly × cents/tokens/requests)
     db.prepare(`
       UPDATE budgets SET
         hourly_spent_cents = hourly_spent_cents + ?,
@@ -105,8 +109,11 @@ export function recordCost(
       now,
       params.projectId, params.agentId,
     );
+
+    db.prepare("COMMIT").run();
   } catch (err) {
-    safeLog("cost.updateBudget", err);
+    try { db.prepare("ROLLBACK").run(); } catch { /* already rolled back */ }
+    throw err;
   }
 
   // Dual-write to metrics for aggregation

@@ -91,7 +91,7 @@ export function Analytics() {
         <InitiativeDonut data={dailyCosts} />
 
         {/* 3. Agent performance table */}
-        <PerformanceTable agents={agentList} />
+        <PerformanceTable agents={agentList} trustScores={trustAgents} />
 
         {/* 4. Trust score bars */}
         <TrustBars agents={trustAgents} />

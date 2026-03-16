@@ -14,7 +14,7 @@ import { getCostSummary } from "../cost.js";
 import { evaluateSlos } from "../monitoring/slo.js";
 import { evaluateAlertRules } from "../monitoring/alerts.js";
 import { computeHealthTier } from "../monitoring/health-tier.js";
-import { listEvents } from "../events/store.js";
+import { listEvents, countEvents } from "../events/store.js";
 import { searchMessages } from "../messaging/store.js";
 import { getActiveProtocols } from "../messaging/protocols.js";
 import type { MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
@@ -28,7 +28,7 @@ import { listPendingProposals } from "../approval/resolve.js";
 import { getBudgetStatus } from "../budget-windows.js";
 import { computeDailySnapshot, computeWeeklyTrend, computeMonthlyProjection } from "../budget/forecast.js";
 import { getAllCategoryStats, getActiveTrustOverrides } from "../trust/tracker.js";
-import { listChannels, getChannel } from "../channels/store.js";
+import { listChannels, getChannel, getChannelMessages } from "../channels/store.js";
 import { buildChannelTranscript } from "../channels/messages.js";
 import { getMeetingStatus } from "../channels/meeting.js";
 import { getDb } from "../db.js";
@@ -50,18 +50,36 @@ export function queryProjects() {
   });
 }
 
-/** List agents for a project with their status. */
+/** List agents for a project with their status, task counts, and costs. */
 export function queryAgents(projectId: string) {
   const allAgentIds = getRegisteredAgentIds();
   const activeSessions = getActiveSessions();
   const disabled = listDisabledAgents(projectId);
   const disabledSet = new Set(disabled.map((d) => d.agentId));
 
+  // Pre-fetch per-agent task counts and costs from DB
+  let taskCounts: Record<string, number> = {};
+  let costCents: Record<string, number> = {};
+  try {
+    const db = getDb(projectId);
+    const taskRows = db.prepare(
+      "SELECT assigned_to, COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state = 'DONE' GROUP BY assigned_to",
+    ).all(projectId) as Array<{ assigned_to: string; cnt: number }>;
+    for (const r of taskRows) taskCounts[r.assigned_to] = r.cnt;
+
+    const costRows = db.prepare(
+      "SELECT agent_id, COALESCE(SUM(cost_cents), 0) as total FROM cost_records WHERE project_id = ? GROUP BY agent_id",
+    ).all(projectId) as Array<{ agent_id: string; total: number }>;
+    for (const r of costRows) costCents[r.agent_id] = r.total;
+  } catch { /* DB may not exist */ }
+
   return allAgentIds
     .map((aid) => {
       const entry = getAgentConfig(aid);
       if (!entry || entry.projectId !== projectId) return null;
       const session = activeSessions.find((s) => s.agentId === aid && s.projectId === projectId);
+      const tasks = taskCounts[aid] ?? 0;
+      const cost = costCents[aid] ?? 0;
       return {
         id: aid,
         extends: entry.config.extends,
@@ -70,12 +88,14 @@ export function queryAgents(projectId: string) {
         team: entry.config.team,
         status: disabledSet.has(aid) ? "disabled" : session ? "active" : "idle",
         currentSessionKey: session?.sessionKey,
+        tasksCompleted: tasks,
+        totalCostCents: cost,
       };
     })
     .filter(Boolean);
 }
 
-/** Get detailed info for a single agent. */
+/** Get detailed info for a single agent (includes tasksCompleted and totalCostCents like the list endpoint). */
 export function queryAgentDetail(projectId: string, agentId: string) {
   const entry = getAgentConfig(agentId);
   if (!entry || entry.projectId !== projectId) return null;
@@ -84,6 +104,22 @@ export function queryAgentDetail(projectId: string, agentId: string) {
   const session = activeSessions.find((s) => s.agentId === agentId && s.projectId === projectId);
   const disabled = listDisabledAgents(projectId).find((d) => d.agentId === agentId);
   const directReports = getDirectReports(projectId, agentId);
+
+  // Compute tasksCompleted and totalCostCents (same as queryAgents list)
+  let tasksCompleted = 0;
+  let totalCostCents = 0;
+  try {
+    const db = getDb(projectId);
+    const taskRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND assigned_to = ? AND state = 'DONE'",
+    ).get(projectId, agentId) as { cnt: number } | undefined;
+    if (taskRow) tasksCompleted = taskRow.cnt;
+
+    const costRow = db.prepare(
+      "SELECT COALESCE(SUM(cost_cents), 0) as total FROM cost_records WHERE project_id = ? AND agent_id = ?",
+    ).get(projectId, agentId) as { total: number } | undefined;
+    if (costRow) totalCostCents = costRow.total;
+  } catch { /* DB may not exist */ }
 
   return {
     id: agentId,
@@ -102,6 +138,8 @@ export function queryAgentDetail(projectId: string, agentId: string) {
     } : null,
     expectations: entry.config.expectations,
     performancePolicy: entry.config.performance_policy,
+    tasksCompleted,
+    totalCostCents,
   };
 }
 
@@ -166,20 +204,25 @@ export function querySessions(projectId: string, pagination?: PaginationParams) 
   };
 }
 
-/** List events with filters. */
+/** List events with filters. Adds `timestamp` alias of `createdAt` for frontend compatibility. */
 export function queryEvents(
   projectId: string,
   filters?: { status?: EventStatus; type?: string },
   pagination?: PaginationParams,
 ) {
   const limit = pagination?.limit ?? 50;
-  const events = listEvents(projectId, {
+  const offset = pagination?.offset ?? 0;
+  const rawEvents = listEvents(projectId, {
     status: filters?.status,
     type: filters?.type,
     limit,
   });
+  const total = countEvents(projectId, filters);
 
-  return { events, count: events.length };
+  // Add timestamp alias for frontend EventEntry type
+  const events = rawEvents.map((e) => ({ ...e, timestamp: e.createdAt }));
+
+  return { events, total, count: events.length, limit, offset };
 }
 
 /** Query metrics with aggregation. */
@@ -206,18 +249,50 @@ export function queryMetricsDashboard(
   return { metrics, count: metrics.length };
 }
 
-/** Get cost summary. */
+/** Get cost summary with daily breakdown for charts. */
 export function queryCosts(
   projectId: string,
-  params?: { agentId?: string; taskId?: string; since?: number; until?: number },
+  params?: { agentId?: string; taskId?: string; since?: number; until?: number; days?: string },
 ) {
-  return getCostSummary({
+  // Compute time range from days param
+  const daysNum = params?.days ? parseInt(params.days, 10) : 7;
+  const since = params?.since ?? Date.now() - daysNum * 86_400_000;
+  const until = params?.until ?? Date.now();
+
+  const summary = getCostSummary({
     projectId,
     agentId: params?.agentId,
     taskId: params?.taskId,
-    since: params?.since,
-    until: params?.until,
+    since,
+    until,
   });
+
+  // Build daily breakdown from cost_records
+  const db = getDb(projectId);
+  let daily: Array<{ date: string; totalCents: number; byInitiative: Record<string, number> }> = [];
+  try {
+    const rows = db.prepare(`
+      SELECT date(created_at / 1000, 'unixepoch', 'localtime') as day,
+             COALESCE(SUM(cost_cents), 0) as total
+      FROM cost_records
+      WHERE project_id = ? AND created_at >= ? AND created_at <= ?
+      GROUP BY day ORDER BY day
+    `).all(projectId, since, until) as Array<{ day: string; total: number }>;
+    daily = rows.map((r) => ({
+      date: r.day,
+      totalCents: r.total,
+      byInitiative: {},
+    }));
+  } catch { /* table may not exist in test DBs */ }
+
+  return {
+    daily,
+    totalCents: summary.totalCostCents,
+    currency: "USD",
+    totalInputTokens: summary.totalInputTokens,
+    totalOutputTokens: summary.totalOutputTokens,
+    recordCount: summary.recordCount,
+  };
 }
 
 /** Get active policies and recent violations. */
@@ -228,23 +303,93 @@ export function queryPolicies(projectId: string) {
   };
 }
 
-/** Evaluate SLOs. */
+/** Evaluate SLOs. Normalizes raw config keys to SloDefinition fields. */
 export function querySlos(projectId: string) {
   const extConfig = getExtendedProjectConfig(projectId);
   if (!extConfig?.monitoring?.slos) return { slos: [] };
 
-  const slos = extConfig.monitoring.slos as Record<string, any>;
-  const results = evaluateSlos(projectId, slos);
+  const raw = extConfig.monitoring.slos as Record<string, Record<string, unknown>>;
+  const normalized: Record<string, Record<string, unknown>> = {};
+  for (const [name, cfg] of Object.entries(raw)) {
+    normalized[name] = {
+      name,
+      metricType: String(cfg.metric_type ?? cfg.metricType ?? ""),
+      metricKey: String(cfg.metric_key ?? cfg.metricKey ?? ""),
+      aggregation: String(cfg.aggregation ?? "avg"),
+      condition: String(cfg.condition ?? "lt"),
+      threshold: Number(cfg.threshold ?? 0),
+      windowMs: Number(cfg.window_ms ?? cfg.windowMs ?? 3600000),
+      severity: String(cfg.severity ?? "warning"),
+      denominatorKey: typeof cfg.denominator_key === "string" ? cfg.denominator_key : undefined,
+      noDataPolicy: cfg.no_data_policy ?? cfg.noDataPolicy ?? "pass",
+    };
+  }
+  const results = evaluateSlos(projectId, normalized as any);
+
+  // Post-process: compute actual values for well-known SLOs that lack metric data
+  const db = getDb(projectId);
+  for (const result of results) {
+    if (result.actual === null && result.metricKey === "completion_rate") {
+      // Compute task-completion-rate directly from the tasks table
+      try {
+        const doneRow = db.prepare(
+          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state = 'DONE'",
+        ).get(projectId) as { cnt: number } | undefined;
+        const totalRow = db.prepare(
+          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state != 'CANCELLED'",
+        ).get(projectId) as { cnt: number } | undefined;
+
+        const done = doneRow?.cnt ?? 0;
+        const total = totalRow?.cnt ?? 0;
+
+        if (total > 0) {
+          result.actual = done / total;
+          // Re-evaluate the condition with the computed actual value
+          const sloConfig = normalized[result.sloName];
+          if (sloConfig) {
+            const threshold = Number(sloConfig.threshold);
+            const condition = String(sloConfig.condition);
+            switch (condition) {
+              case "lt": result.passed = result.actual < threshold; break;
+              case "gt": result.passed = result.actual > threshold; break;
+              case "lte": result.passed = result.actual <= threshold; break;
+              case "gte": result.passed = result.actual >= threshold; break;
+            }
+          }
+          result.noData = false;
+        }
+      } catch { /* tasks table may not exist */ }
+    }
+  }
+
   return { slos: results };
 }
 
-/** Evaluate alert rules. */
+/** Evaluate alert rules. Normalizes raw config keys. */
 export function queryAlerts(projectId: string) {
   const extConfig = getExtendedProjectConfig(projectId);
   if (!extConfig?.monitoring?.alertRules) return { alerts: [] };
 
-  const rules = extConfig.monitoring.alertRules as Record<string, any>;
-  const results = evaluateAlertRules(projectId, rules);
+  const raw = extConfig.monitoring.alertRules as Record<string, Record<string, unknown>>;
+  const normalized: Record<string, Record<string, unknown>> = {};
+  for (const [name, cfg] of Object.entries(raw)) {
+    // Normalize operator/condition: support both YAML field names and symbolic operators
+    const rawCondition = String(cfg.condition ?? cfg.operator ?? "gt");
+    const conditionMap: Record<string, string> = { ">": "gt", "<": "lt", ">=": "gte", "<=": "lte", "==": "eq", "=": "eq" };
+    const condition = conditionMap[rawCondition] ?? rawCondition;
+
+    normalized[name] = {
+      name,
+      metricType: String(cfg.metric_type ?? cfg.metricType ?? ""),
+      metricKey: String(cfg.metric_key ?? cfg.metricKey ?? ""),
+      aggregation: String(cfg.aggregation ?? "sum"),
+      condition,
+      threshold: Number(cfg.threshold ?? 0),
+      windowMs: Number(cfg.window_ms ?? cfg.windowMs ?? 3600000),
+      cooldownMs: Number(cfg.cooldown_ms ?? cfg.cooldownMs ?? 3600000),
+    };
+  }
+  const results = evaluateAlertRules(projectId, normalized as any);
   return { alerts: results };
 }
 
@@ -355,7 +500,8 @@ export function queryGoals(
     limit: limit + 1,
   });
   const hasMore = goals.length > limit;
-  return { goals: goals.slice(0, limit), hasMore, count: goals.length };
+  const sliced = goals.slice(0, limit);
+  return { goals: sliced, hasMore, count: sliced.length };
 }
 
 /** Query goal detail with children, tasks, and progress. */
@@ -370,7 +516,20 @@ export function queryGoalDetail(projectId: string, goalId: string) {
   return { goal, childGoals, tasks, progress };
 }
 
-/** Query messages for a project with optional filters. */
+/** Query messages for a specific thread/channel, shaped for the dashboard ThreadMessagesResponse type. */
+export function queryThreadMessages(
+  projectId: string,
+  threadId: string,
+  filters?: { limit?: number; since?: number },
+) {
+  const messages = getChannelMessages(projectId, threadId, {
+    limit: filters?.limit ?? 100,
+    since: filters?.since,
+  });
+  return { messages, count: messages.length };
+}
+
+/** Query messages for a project with optional filters, grouped into threads. */
 export function queryMessages(
   projectId: string,
   filters?: {
@@ -381,7 +540,57 @@ export function queryMessages(
     limit?: number;
   },
 ) {
-  return searchMessages(projectId, filters);
+  const { messages } = searchMessages(projectId, filters);
+
+  // Group messages by channelId (or parentMessageId, or create a synthetic thread per DM pair)
+  const threadMap = new Map<string, {
+    id: string;
+    type: string;
+    participants: Set<string>;
+    messages: typeof messages;
+    lastMessageAt: number;
+    channelId?: string;
+  }>();
+
+  for (const msg of messages) {
+    // Thread key: channelId if available, otherwise parentMessageId, otherwise synthesize from participants
+    const threadKey = msg.channelId
+      ?? msg.parentMessageId
+      ?? [msg.fromAgent, msg.toAgent].sort().join("::");
+
+    const existing = threadMap.get(threadKey);
+    if (existing) {
+      existing.participants.add(msg.fromAgent);
+      existing.participants.add(msg.toAgent);
+      existing.messages.push(msg);
+      if (msg.createdAt > existing.lastMessageAt) {
+        existing.lastMessageAt = msg.createdAt;
+      }
+    } else {
+      threadMap.set(threadKey, {
+        id: threadKey,
+        type: msg.type ?? "direct",
+        participants: new Set([msg.fromAgent, msg.toAgent]),
+        messages: [msg],
+        lastMessageAt: msg.createdAt,
+        channelId: msg.channelId ?? undefined,
+      });
+    }
+  }
+
+  const threads = Array.from(threadMap.values()).map((t) => ({
+    id: t.id,
+    type: t.type,
+    participants: [...t.participants],
+    messages: t.messages,
+    lastMessageAt: t.lastMessageAt,
+    channelId: t.channelId,
+  }));
+
+  // Sort threads by most recent message first
+  threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+
+  return { threads, count: threads.length };
 }
 
 // ─── Extended queries for dashboard ────────────────────────────────────────────
@@ -414,11 +623,11 @@ export function queryDashboardSummary(projectId: string) {
     activeSessions.some((s) => s.agentId === aid && s.projectId === projectId),
   ).length;
 
-  // Tasks in flight (ASSIGNED + IN_PROGRESS)
+  // Tasks in flight (ASSIGNED + IN_PROGRESS + REVIEW)
   let tasksInFlight = 0;
   try {
     const { tasks } = queryTasks(projectId, {
-      state: ["ASSIGNED", "IN_PROGRESS"] as TaskState[],
+      state: ["ASSIGNED", "IN_PROGRESS", "REVIEW"] as TaskState[],
     });
     tasksInFlight = tasks.length;
   } catch { /* ignore */ }
@@ -438,6 +647,25 @@ export function queryDashboardSummary(projectId: string) {
   };
 }
 
+/** Transform a raw proposal DB row (snake_case) to camelCase for the frontend. */
+function mapProposalRow(row: Record<string, unknown>) {
+  return {
+    id: row.id as string,
+    title: row.title as string,
+    description: (row.description as string) ?? undefined,
+    agentId: row.proposed_by as string,
+    status: row.status as string,
+    createdAt: row.created_at as number,
+    resolvedAt: (row.resolved_at as number) ?? undefined,
+    feedback: (row.user_feedback as string) ?? undefined,
+    riskTier: (row.risk_tier as string) ?? undefined,
+    policySnapshot: (row.approval_policy_snapshot as string) ?? undefined,
+    toolName: undefined as string | undefined,
+    category: undefined as string | undefined,
+    summary: (row.description as string) ?? (row.title as string),
+  };
+}
+
 /** Query approval proposals with optional status filter. */
 export function queryApprovals(
   projectId: string,
@@ -446,8 +674,9 @@ export function queryApprovals(
   const limit = filters?.limit ?? 50;
 
   if (!filters?.status || filters.status === "pending") {
-    const proposals = listPendingProposals(projectId);
-    return { proposals: proposals.slice(0, limit), count: proposals.length };
+    const rawProposals = listPendingProposals(projectId);
+    const proposals = rawProposals.slice(0, limit).map((p) => mapProposalRow(p as unknown as Record<string, unknown>));
+    return { proposals, count: rawProposals.length };
   }
 
   // For resolved proposals, query the database directly
@@ -455,7 +684,8 @@ export function queryApprovals(
   const rows = db.prepare(
     "SELECT * FROM proposals WHERE project_id = ? AND status = ? ORDER BY resolved_at DESC LIMIT ?",
   ).all(projectId, filters.status, limit) as Record<string, unknown>[];
-  return { proposals: rows, count: rows.length };
+  const proposals = rows.map(mapProposalRow);
+  return { proposals, count: proposals.length };
 }
 
 /** Query budget status with window breakdowns. */
@@ -480,17 +710,63 @@ export function queryBudgetForecast(projectId: string) {
   }
 }
 
-/** Query trust scores per agent grouped by category. */
+/** Query trust scores per agent, aggregated from category-level trust decisions. */
 export function queryTrustScores(projectId: string) {
   try {
-    const stats = getAllCategoryStats(projectId);
     const overrides = getActiveTrustOverrides(projectId);
 
-    // Group stats by agent-like categories (the trust system tracks categories, not agents directly)
-    return {
-      agents: stats,
-      overrides,
-    };
+    // Query trust decisions grouped by agent and category from DB
+    const db = getDb(projectId);
+    let agentCategoryRows: Array<{ agent_id: string; category: string; approved: number; total: number }> = [];
+    try {
+      agentCategoryRows = db.prepare(`
+        SELECT agent_id, category,
+               SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END) as approved,
+               COUNT(*) as total
+        FROM trust_decisions
+        WHERE project_id = ? AND agent_id IS NOT NULL
+        GROUP BY agent_id, category
+      `).all(projectId) as Array<{ agent_id: string; category: string; approved: number; total: number }>;
+    } catch { /* trust_decisions table may be empty or not exist */ }
+
+    if (agentCategoryRows.length > 0) {
+      // Aggregate trust data by agent
+      const agentMap = new Map<string, { categories: Record<string, number>; totalApproved: number; totalDecisions: number }>();
+      for (const row of agentCategoryRows) {
+        const entry = agentMap.get(row.agent_id) ?? { categories: {}, totalApproved: 0, totalDecisions: 0 };
+        const rate = row.total > 0 ? row.approved / row.total : 0;
+        entry.categories[row.category] = rate;
+        entry.totalApproved += row.approved;
+        entry.totalDecisions += row.total;
+        agentMap.set(row.agent_id, entry);
+      }
+
+      const agents = Array.from(agentMap.entries()).map(([agentId, data]) => ({
+        agentId,
+        overall: data.totalDecisions > 0 ? data.totalApproved / data.totalDecisions : 1,
+        categories: data.categories,
+        trend: "stable" as const,
+      }));
+
+      return { agents, overrides };
+    }
+
+    // If no trust decisions exist, return agents from the domain config with default scores
+    const allAgentIds = getRegisteredAgentIds();
+    const agents = allAgentIds
+      .map((aid) => {
+        const entry = getAgentConfig(aid);
+        if (!entry || entry.projectId !== projectId) return null;
+        return {
+          agentId: aid,
+          overall: 1,
+          categories: {} as Record<string, number>,
+          trend: "stable" as const,
+        };
+      })
+      .filter(Boolean) as Array<{ agentId: string; overall: number; categories: Record<string, number>; trend: "stable" }>;
+
+    return { agents, overrides };
   } catch {
     return { agents: [], overrides: [] };
   }

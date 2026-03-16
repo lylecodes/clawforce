@@ -20,16 +20,16 @@ type BriefingBuilderProps = {
 };
 
 const ALL_BRIEFING_SOURCES = [
-  "pending_tasks",
-  "recent_events",
-  "budget_status",
+  "task_board",
+  "activity",
+  "cost_summary",
   "team_status",
-  "pending_approvals",
-  "initiative_progress",
-  "escalation_summary",
-  "performance_metrics",
-  "knowledge_base",
-  "tool_usage",
+  "proposals",
+  "initiative_status",
+  "escalations",
+  "team_performance",
+  "knowledge",
+  "tools_reference",
 ];
 
 export function BriefingBuilder({
@@ -42,6 +42,22 @@ export function BriefingBuilder({
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
+
+  // Click-to-toggle: move chip between active/available on click
+  const handleChipClick = (id: string) => {
+    const safeActiveNow = active.map((item) => {
+      if (typeof item === "string") return item;
+      if (typeof item === "object" && item !== null && "source" in (item as Record<string, unknown>)) {
+        return String((item as Record<string, unknown>).source);
+      }
+      return String(item);
+    });
+    if (safeActiveNow.includes(id)) {
+      onChange(safeActiveNow.filter((s) => s !== id));
+    } else {
+      onChange([...safeActiveNow, id]);
+    }
+  };
 
   // Defensive: ensure active items are strings (API may return ContextSource objects)
   const safeActive = active.map((item) => {
@@ -95,7 +111,7 @@ export function BriefingBuilder({
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {safeActive.map((source) => (
-                <DraggableChip key={source} id={source} variant="active" />
+                <DraggableChip key={source} id={source} variant="active" onClick={handleChipClick} />
               ))}
             </div>
           )}
@@ -110,7 +126,7 @@ export function BriefingBuilder({
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {availableItems.map((source) => (
-                <DraggableChip key={source} id={source} variant="available" />
+                <DraggableChip key={source} id={source} variant="available" onClick={handleChipClick} />
               ))}
             </div>
           )}
@@ -155,9 +171,11 @@ function DroppableZone({
 function DraggableChip({
   id,
   variant,
+  onClick,
 }: {
   id: string;
   variant: "active" | "available";
+  onClick?: (id: string) => void;
 }) {
   const {
     attributes,
@@ -175,18 +193,28 @@ function DraggableChip({
 
   const label = id.replace(/_/g, " ");
 
+  // Click handler: only fire if the pointer didn't move (i.e. not a drag).
+  // dnd-kit's PointerSensor has a distance threshold of 5px, so a stationary
+  // click won't trigger drag and will reach onClick.
+  const handleClick = () => {
+    if (onClick) onClick(id);
+  };
+
   return (
     <span
       ref={setNodeRef}
       style={style}
       {...attributes}
       {...listeners}
-      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xxs font-medium cursor-grab active:cursor-grabbing transition-colors ${
+      onClick={handleClick}
+      role="button"
+      tabIndex={0}
+      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xxs font-medium cursor-pointer transition-colors ${
         isDragging ? "opacity-50" : ""
       } ${
         variant === "active"
-          ? "bg-cf-accent-blue/15 text-cf-accent-blue border border-cf-accent-blue/30"
-          : "bg-cf-bg-secondary text-cf-text-secondary border border-cf-border hover:border-cf-text-muted"
+          ? "bg-cf-accent-blue/15 text-cf-accent-blue border border-cf-accent-blue/30 hover:bg-cf-accent-blue/25"
+          : "bg-cf-bg-secondary text-cf-text-secondary border border-cf-border hover:border-cf-text-muted hover:bg-cf-bg-tertiary"
       }`}
     >
       {label}

@@ -25,6 +25,8 @@ export type Agent = {
   team?: string;
   status: "active" | "idle" | "disabled";
   currentSessionKey?: string;
+  tasksCompleted?: number;
+  totalCostCents?: number;
 };
 
 export type AgentDetail = Agent & {
@@ -47,6 +49,7 @@ export type TaskState =
   | "REVIEW"
   | "BLOCKED"
   | "DONE"
+  | "FAILED"
   | "CANCELLED";
 
 export type TaskPriority = "P0" | "P1" | "P2" | "P3";
@@ -94,14 +97,22 @@ export type EventEntry = {
   id: string;
   type: string;
   source: string;
-  timestamp: number;
+  timestamp?: number;
+  createdAt?: number;
   payload: Record<string, unknown>;
   status?: string;
 };
 
 export type EventListResponse = {
   events: EventEntry[];
+  /** Total number of events matching the filters (ignoring pagination). */
+  total: number;
+  /** Number of events returned in this page (backward compat). */
   count: number;
+  /** Page size used for this request. */
+  limit: number;
+  /** Offset into the result set. */
+  offset: number;
 };
 
 export type BudgetStatus = {
@@ -204,7 +215,7 @@ export type Message = {
 
 export type Thread = {
   id: string;
-  type: "message" | "escalation" | "meeting";
+  type: "message" | "direct" | "escalation" | "meeting";
   participants: string[];
   title?: string;
   lastMessage?: string;

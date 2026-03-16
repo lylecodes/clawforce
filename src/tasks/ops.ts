@@ -28,10 +28,12 @@ import type {
   Transition,
   TransitionResult,
 } from "../types.js";
-import { recordTaskCycleTime } from "../metrics.js";
+import { recordMetric, recordTaskCycleTime } from "../metrics.js";
 import { clearWorkerAssignment, registerWorkerAssignment } from "../worker-registry.js";
 import { ingestEvent } from "../events/store.js";
 import { validateEvidence } from "./evidence-schema.js";
+import { completeItem as completeQueueItem, failItem as failQueueItem } from "../dispatch/queue.js";
+import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 
 function rowToTask(row: Record<string, unknown>): Task {
   return {
@@ -54,6 +56,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     parentTaskId: (row.parent_task_id as string) ?? undefined,
     department: (row.department as string) ?? undefined,
     team: (row.team as string) ?? undefined,
+    goalId: (row.goal_id as string) ?? undefined,
     metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
   };
 }
@@ -101,6 +104,7 @@ export function createTask(
     parentTaskId?: string;
     department?: string;
     team?: string;
+    goalId?: string;
     metadata?: Record<string, unknown>;
   },
   dbOverride?: DatabaseSync,
@@ -121,8 +125,8 @@ export function createTask(
   const stmt = db.prepare(`
     INSERT INTO tasks (id, project_id, title, description, state, priority, assigned_to,
       created_by, created_at, updated_at, deadline, retry_count, max_retries, tags,
-      workflow_id, workflow_phase, parent_task_id, department, team, metadata)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+      workflow_id, workflow_phase, parent_task_id, department, team, goal_id, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -144,6 +148,7 @@ export function createTask(
     params.parentTaskId ?? null,
     params.department ?? null,
     params.team ?? null,
+    params.goalId ?? null,
     params.metadata ? JSON.stringify(params.metadata) : null,
   );
 
@@ -198,6 +203,7 @@ export function createTask(
   try {
     ingestEvent(params.projectId, "task_created", "internal", {
       taskId: id,
+      title: params.title,
       state,
       assignedTo: params.assignedTo,
       department: params.department,
@@ -212,7 +218,7 @@ export function createTask(
         taskId: id,
         assignedTo: params.assignedTo,
         fromState: "OPEN",
-      }, `task-assigned:${id}`, db);
+      }, `task-assigned:${id}:${params.assignedTo}`, db);
     } catch (err) { safeLog("task.create.assignedEvent", err); }
   }
 
@@ -481,11 +487,56 @@ export function transitionTask(
     if (task.assignedTo) clearWorkerAssignment(task.assignedTo, db);
   }
 
+  // Update dispatch queue item when task leaves dispatchable states
+  // This ensures the queue reflects completion even if the adapter hook doesn't fire
+  try {
+    const activeQueueItem = db.prepare(
+      `SELECT id FROM dispatch_queue
+       WHERE project_id = ? AND task_id = ? AND status IN ('dispatched', 'leased')
+       LIMIT 1`,
+    ).get(params.projectId, params.taskId) as Record<string, unknown> | undefined;
+    if (activeQueueItem) {
+      const queueItemId = activeQueueItem.id as string;
+      if (params.toState === "FAILED" || params.toState === "CANCELLED") {
+        failQueueItem(queueItemId, `Task transitioned to ${params.toState}`, db, params.projectId);
+      } else if (params.toState !== "ASSIGNED" && params.toState !== "IN_PROGRESS") {
+        // Task advanced past dispatch states (e.g. REVIEW, DONE) — mark completed
+        completeQueueItem(queueItemId, db, params.projectId);
+      }
+    }
+  } catch (err) { safeLog("transition.queueUpdate", err); }
+
   // Record cycle time metric when task reaches DONE
   if (params.toState === "DONE") {
     try {
       recordTaskCycleTime(params.projectId, params.taskId, task.createdAt, now, task.assignedTo, db);
     } catch (err) { safeLog("transition.cycleTime", err); }
+
+    // Record completion_rate metric (value 1.0 = completed) for SLO tracking
+    try {
+      recordMetric({
+        projectId: params.projectId,
+        type: "task",
+        subject: params.taskId,
+        key: "completion_rate",
+        value: 1,
+        tags: { assignedTo: task.assignedTo, department: task.department },
+      }, db);
+    } catch (err) { safeLog("transition.completionRate", err); }
+  }
+
+  // Record completion_rate metric (value 0 = failed) for SLO tracking
+  if (params.toState === "FAILED") {
+    try {
+      recordMetric({
+        projectId: params.projectId,
+        type: "task",
+        subject: params.taskId,
+        key: "completion_rate",
+        value: 0,
+        tags: { assignedTo: task.assignedTo, department: task.department },
+      }, db);
+    } catch (err) { safeLog("transition.completionRateFailed", err); }
   }
 
   // Emit task_review_ready when transitioning from IN_PROGRESS to REVIEW
@@ -575,6 +626,24 @@ export function reassignTask(
   const task = getTask(params.projectId, params.taskId, db);
   if (!task) return { ok: false, reason: "Task not found" };
 
+  // Validate that the target agent exists in the domain config (when agents are registered)
+  try {
+    const allAgentIds = getRegisteredAgentIds();
+    const projectAgentIds = allAgentIds.filter((id) => {
+      const entry = getAgentConfig(id);
+      return entry?.projectId === params.projectId;
+    });
+    // Only enforce when agents are registered for this project (skip in test/bare setups)
+    if (projectAgentIds.length > 0 && !projectAgentIds.includes(params.newAssignee)) {
+      return {
+        ok: false,
+        reason: `Agent "${params.newAssignee}" is not registered in project "${params.projectId}". Cannot reassign to a non-existent agent.`,
+      };
+    }
+  } catch {
+    // If project module is unavailable, skip validation
+  }
+
   if (task.state !== "ASSIGNED" && task.state !== "IN_PROGRESS") {
     return {
       ok: false,
@@ -663,6 +732,15 @@ export function reassignTask(
   } catch (err) {
     safeLog("reassign.diagnostic", err);
   }
+
+  // Emit task_assigned event so audit logs and notifications capture reassignment
+  try {
+    ingestEvent(params.projectId, "task_assigned", "internal", {
+      taskId: params.taskId,
+      assignedTo: params.newAssignee,
+      fromState: "ASSIGNED",
+    }, `task-assigned:${params.taskId}:${params.newAssignee}`, db);
+  } catch (err) { safeLog("reassign.assignedEvent", err); }
 
   const updatedTask = getTask(params.projectId, params.taskId, db)!;
   const transition: Transition = {

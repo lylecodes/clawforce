@@ -1099,7 +1099,10 @@ export function registerWorkforceConfig(
     if (projectDir) {
       mgrConfig.projectDir = projectDir;
     }
-    registerManagerProject(projectId, mgrConfig);
+    registerManagerProject(projectId, {
+      ...mgrConfig,
+      directives: (mgrConfig as Record<string, unknown>).directives as string[] ?? [],
+    });
     if (mgrConfig.cronSchedule) {
       void registerManagerCron(
         projectId,

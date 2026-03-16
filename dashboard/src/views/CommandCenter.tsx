@@ -111,7 +111,7 @@ export function CommandCenter() {
         <MetricCard
           label="Tasks in Flight"
           value={summaryLoading ? "--" : dash.tasksInFlight}
-          subtitle="Assigned + In Progress"
+          subtitle="Active tasks"
           variant="default"
         />
         <MetricCard
@@ -184,31 +184,35 @@ function InitiativesSection({ domain }: { domain: string }) {
     return null;
   }
 
-  // Count tasks per department for context
-  const tasksByDept = new Map<string, { open: number; inProgress: number; done: number }>();
+  // Count tasks per goal: match by goalId linkage OR by department
+  const tasksByGoal = new Map<string, { open: number; inProgress: number; done: number }>();
   if (tasksData) {
-    for (const task of tasksData.tasks) {
-      const dept = task.department ?? "Unassigned";
-      const entry = tasksByDept.get(dept) ?? { open: 0, inProgress: 0, done: 0 };
-      if (task.state === "OPEN" || task.state === "ASSIGNED") entry.open++;
-      else if (task.state === "IN_PROGRESS") entry.inProgress++;
-      else if (task.state === "DONE") entry.done++;
-      tasksByDept.set(dept, entry);
+    for (const goal of goals) {
+      const counts = { open: 0, inProgress: 0, done: 0 };
+      for (const task of tasksData.tasks) {
+        // Match task to goal via explicit goalId or department
+        const linked = task.goalId === goal.id || (goal.department && task.department === goal.department);
+        if (!linked) continue;
+        if (task.state === "OPEN" || task.state === "ASSIGNED") counts.open++;
+        else if (task.state === "IN_PROGRESS") counts.inProgress++;
+        else if (task.state === "DONE") counts.done++;
+      }
+      tasksByGoal.set(goal.id, counts);
     }
   }
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {goals.map((goal, i) => {
-        const deptCounts = tasksByDept.get(goal.department ?? "") ?? { open: 0, inProgress: 0, done: 0 };
-        const total = deptCounts.open + deptCounts.inProgress + deptCounts.done;
+        const goalCounts = tasksByGoal.get(goal.id) ?? { open: 0, inProgress: 0, done: 0 };
+        const total = goalCounts.open + goalCounts.inProgress + goalCounts.done;
         return (
           <InitiativeCard
             key={goal.id}
             name={goal.title}
             allocationPct={goal.allocation ?? 0}
-            spentPct={total > 0 ? Math.round((deptCounts.done / total) * 100) : 0}
-            taskCounts={deptCounts}
+            spentPct={total > 0 ? Math.round((goalCounts.done / total) * 100) : 0}
+            taskCounts={goalCounts}
             activeAgents={[]}
             color={colors[i % colors.length]}
             onClick={() => navigate(`/initiatives/${encodeURIComponent(goal.id)}`)}

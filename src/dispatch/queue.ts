@@ -49,6 +49,15 @@ export function enqueue(
 ): DispatchQueueItem | null {
   const db = dbOverride ?? getDb(projectId);
 
+  // Skip tasks in terminal states — they will never be dispatched
+  const taskRow = db.prepare(
+    "SELECT state FROM tasks WHERE id = ? AND project_id = ?",
+  ).get(taskId, projectId) as Record<string, unknown> | undefined;
+
+  if (taskRow && ["DONE", "CANCELLED", "FAILED"].includes(taskRow.state as string)) {
+    return null;
+  }
+
   // Dedup: check for existing non-terminal item
   const existing = db.prepare(
     `SELECT id FROM dispatch_queue

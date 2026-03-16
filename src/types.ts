@@ -56,6 +56,7 @@ export type Task = {
   parentTaskId?: string;
   department?: string;
   team?: string;
+  goalId?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -371,6 +372,10 @@ export type SkillPack = {
 /** Full project config with workforce management. */
 export type WorkforceConfig = {
   name: string;
+  /** Unique project/domain identifier. */
+  id?: string;
+  /** Project root directory path. */
+  dir?: string;
   approval?: ApprovalPolicy;
   agents: Record<string, AgentConfig>;
   budgets?: {
@@ -418,6 +423,20 @@ export type WorkforceConfig = {
   goals?: Record<string, GoalConfigEntry>;
   /** Knowledge lifecycle configuration (promotion thresholds, etc.). */
   knowledge?: KnowledgeConfig;
+  /** Manager/orchestrator cron configuration. */
+  manager?: {
+    enabled: boolean;
+    agentId: string;
+    cronSchedule?: string;
+    projectDir?: string;
+  };
+  /** Legacy alias for manager. */
+  orchestrator?: {
+    enabled: boolean;
+    agentId: string;
+    cronSchedule?: string;
+    projectDir?: string;
+  };
 };
 
 // --- Goal config types ---

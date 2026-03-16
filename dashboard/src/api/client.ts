@@ -114,7 +114,10 @@ export const api = {
   getMeetings: (domain: string) =>
     fetchJson<MeetingListResponse>(`/${domain}/meetings`),
   createMeeting: (domain: string, data: { participants: string[]; topic?: string }) =>
-    postJson<Meeting>(`/${domain}/meetings/create`, data),
+    postJson<Meeting>(`/${domain}/meetings/create`, {
+      participants: data.participants,
+      prompt: data.topic,
+    }),
   sendMeetingMessage: (domain: string, meetingId: string, content: string) =>
     postJson(`/${domain}/meetings/${meetingId}/message`, { content }),
   endMeeting: (domain: string, meetingId: string) =>

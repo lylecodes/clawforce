@@ -16,6 +16,9 @@ import type { AgentConfig, WorkforceConfig } from "../types.js";
 import type { GlobalConfig, DomainConfig, GlobalAgentDef } from "./schema.js";
 import { inferPreset, markInferred } from "./inference.js";
 import { normalizeDomainProfile } from "../profiles/operational.js";
+import { createGoal, listGoals } from "../goals/ops.js";
+import { getDb } from "../db.js";
+import type { GoalConfigEntry } from "../types.js";
 
 export type InitResult = {
   domains: string[];
@@ -80,6 +83,11 @@ export function initializeAllDomains(baseDir: string): InitResult {
       // Register in lifecycle
       registerDomain(domainConfig.domain);
 
+      // Seed goals from domain config (idempotent)
+      if (wfConfig.goals) {
+        seedGoals(domainConfig.domain, wfConfig.goals);
+      }
+
       result.domains.push(domainConfig.domain);
     } catch (err) {
       const msg = `Failed to initialize domain "${domainConfig.domain}": ${err instanceof Error ? err.message : String(err)}`;
@@ -118,6 +126,10 @@ function buildWorkforceConfig(
     }
   }
 
+  // Extract manager_overrides from profile expansion (if any)
+  const managerOverrides = (domain as Record<string, unknown>).manager_overrides as
+    Record<string, Record<string, unknown>> | undefined;
+
   for (const agentId of domain.agents) {
     const globalDef = global.agents[agentId];
     if (!globalDef) continue; // warned about in validateDomainAgents
@@ -134,6 +146,20 @@ function buildWorkforceConfig(
     if (global.defaults?.performance_policy && !resolved.performance_policy) {
       resolved.performance_policy =
         global.defaults.performance_policy as AgentConfig["performance_policy"];
+    }
+
+    // Apply operational profile overrides (jobs, scheduling, memory)
+    const overrides = managerOverrides?.[agentId];
+    if (overrides) {
+      if (overrides.jobs) {
+        resolved.jobs = { ...(resolved.jobs as Record<string, unknown> ?? {}), ...overrides.jobs };
+      }
+      if (overrides.scheduling) {
+        resolved.scheduling = { ...(resolved.scheduling as Record<string, unknown> ?? {}), ...overrides.scheduling };
+      }
+      if (overrides.memory) {
+        resolved.memory = { ...(resolved.memory as Record<string, unknown> ?? {}), ...overrides.memory };
+      }
     }
 
     agents[agentId] = resolved as AgentConfig;
@@ -164,6 +190,10 @@ function buildWorkforceConfig(
       domain.event_handlers as WorkforceConfig["event_handlers"];
   if (domain.knowledge)
     wfConfig.knowledge = domain.knowledge as WorkforceConfig["knowledge"];
+  if (domain.goals)
+    wfConfig.goals = domain.goals as WorkforceConfig["goals"];
+  if (domain.monitoring)
+    wfConfig.monitoring = domain.monitoring as WorkforceConfig["monitoring"];
 
   // Build manager config from orchestrator or first manager agent with coordination
   if (domain.orchestrator || domain.manager) {
@@ -189,6 +219,44 @@ function buildWorkforceConfig(
   }
 
   return wfConfig;
+}
+
+/**
+ * Idempotently seed goals from domain config into the DB.
+ * Skips goals that already exist (matched by title).
+ */
+function seedGoals(projectId: string, goals: Record<string, GoalConfigEntry>): void {
+  try {
+    const existing = listGoals(projectId, { status: "active" });
+    const existingTitles = new Set(existing.map((g: { title: string }) => g.title));
+
+    for (const [goalId, goalDef] of Object.entries(goals)) {
+      const title = goalId.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+      if (existingTitles.has(title)) {
+        // Update existing goal's department/allocation if changed in config
+        const match = existing.find((g: { title: string }) => g.title === title) as { id: string } | undefined;
+        if (match && (goalDef.department || goalDef.allocation)) {
+          try {
+            const db = getDb(projectId);
+            db.prepare("UPDATE goals SET department = COALESCE(?, department), allocation = COALESCE(?, allocation) WHERE id = ?")
+              .run(goalDef.department ?? null, goalDef.allocation ?? null, match.id);
+          } catch { /* ignore update failures */ }
+        }
+        continue;
+      }
+
+      createGoal({
+        projectId,
+        title,
+        description: goalDef.description,
+        department: goalDef.department,
+        allocation: goalDef.allocation,
+        createdBy: "system:config",
+      });
+    }
+  } catch (err) {
+    safeLog("config.init.seedGoals", err);
+  }
 }
 
 function resolveHomePath(p: string): string {

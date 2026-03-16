@@ -1,17 +1,18 @@
 import { useState, useMemo } from "react";
-import type { Agent } from "../api/types";
+import type { Agent, AgentTrustScore } from "../api/types";
 
 type PerformanceRow = {
   agentId: string;
   title?: string;
   tasksCompleted: number;
-  compliancePct: number;
+  compliancePct: number | null;
   totalCostCents: number;
   costPerTask: number;
 };
 
 type PerformanceTableProps = {
   agents: Agent[];
+  trustScores?: AgentTrustScore[];
 };
 
 type SortKey = "agentId" | "tasksCompleted" | "compliancePct" | "totalCostCents" | "costPerTask";
@@ -25,24 +26,34 @@ const columns: { key: SortKey; label: string; align: "left" | "right" }[] = [
   { key: "costPerTask", label: "$/Task", align: "right" },
 ];
 
-export function PerformanceTable({ agents }: PerformanceTableProps) {
+export function PerformanceTable({ agents, trustScores }: PerformanceTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("agentId");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
-  // Build performance rows from agent data
-  // In a real app, these would come from a performance API.
-  // For now, we derive placeholder data from agent status.
   const rows: PerformanceRow[] = useMemo(
-    () =>
-      agents.map((a) => ({
-        agentId: a.id,
-        title: a.title,
-        tasksCompleted: 0,
-        compliancePct: 100,
-        totalCostCents: 0,
-        costPerTask: 0,
-      })),
-    [agents],
+    () => {
+      const complianceMap: Record<string, number> = {};
+      if (trustScores) {
+        for (const ts of trustScores) {
+          if (ts.categories?.compliance != null) {
+            complianceMap[ts.agentId] = Math.round(ts.categories.compliance * 100);
+          }
+        }
+      }
+      return agents.map((a) => {
+        const tasks = a.tasksCompleted ?? 0;
+        const cost = a.totalCostCents ?? 0;
+        return {
+          agentId: a.id,
+          title: a.title,
+          tasksCompleted: tasks,
+          compliancePct: complianceMap[a.id] ?? null,
+          totalCostCents: cost,
+          costPerTask: tasks > 0 ? cost / 100 / tasks : 0,
+        };
+      });
+    },
+    [agents, trustScores],
   );
 
   const sorted = useMemo(() => {
@@ -135,17 +146,21 @@ export function PerformanceTable({ agents }: PerformanceTableProps) {
                   {row.tasksCompleted}
                 </td>
                 <td className="px-4 py-2 text-right">
-                  <span
-                    className={`font-mono ${
-                      row.compliancePct >= 90
-                        ? "text-cf-accent-green"
-                        : row.compliancePct >= 70
-                          ? "text-cf-accent-orange"
-                          : "text-cf-accent-red"
-                    }`}
-                  >
-                    {row.compliancePct}%
-                  </span>
+                  {row.compliancePct != null ? (
+                    <span
+                      className={`font-mono ${
+                        row.compliancePct >= 90
+                          ? "text-cf-accent-green"
+                          : row.compliancePct >= 70
+                            ? "text-cf-accent-orange"
+                            : "text-cf-accent-red"
+                      }`}
+                    >
+                      {row.compliancePct}%
+                    </span>
+                  ) : (
+                    <span className="font-mono text-cf-text-muted">--</span>
+                  )}
                 </td>
                 <td className="px-4 py-2 text-right text-cf-text-secondary font-mono">
                   ${(row.totalCostCents / 100).toFixed(2)}

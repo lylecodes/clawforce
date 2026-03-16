@@ -8,6 +8,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "../db.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
+import { recordMetric } from "../metrics.js";
 import { getExtendedProjectConfig } from "../project.js";
 import type { AlertRuleDefinition, AnomalyConfig, SloDefinition } from "../types.js";
 import { evaluateAlertRules } from "./alerts.js";
@@ -76,6 +77,13 @@ export function runMonitoringSweep(
     }
   }
 
+  // Record budget utilization metrics so alert rules can evaluate them
+  try {
+    recordBudgetUtilizationMetrics(projectId, db);
+  } catch (err) {
+    safeLog("monitoring.budgetMetrics", err);
+  }
+
   // Evaluate alert rules
   if (config.monitoring.alertRules) {
     try {
@@ -89,6 +97,44 @@ export function runMonitoringSweep(
 
   const healthTier = computeHealthTier({ sloChecked, sloBreach, alertsFired, anomaliesDetected });
   return { sloChecked, sloBreach, alertsFired, anomaliesDetected, healthTier };
+}
+
+/**
+ * Record budget utilization metrics for all budget rows so alert rules can evaluate them.
+ * Records utilization as a percentage (0-100+) for cents and tokens dimensions.
+ */
+function recordBudgetUtilizationMetrics(projectId: string, db: DatabaseSync): void {
+  const budgetRows = db.prepare(
+    "SELECT * FROM budgets WHERE project_id = ?",
+  ).all(projectId) as Record<string, number | string | null>[];
+
+  for (const row of budgetRows) {
+    const agentId = row.agent_id as string | null;
+    const subject = agentId ?? projectId;
+
+    const windows = ["hourly", "daily", "monthly"] as const;
+    const dimensions = ["cents", "tokens", "requests"] as const;
+
+    for (const win of windows) {
+      for (const dim of dimensions) {
+        const limit = row[`${win}_limit_${dim}`] as number | null;
+        if (limit == null || limit <= 0) continue;
+
+        const spent = (row[`${win}_spent_${dim}`] as number) ?? 0;
+        const utilPct = Math.round((spent / limit) * 100);
+
+        recordMetric({
+          projectId,
+          type: "cost",
+          subject,
+          key: `budget_${win}_${dim}_utilization`,
+          value: utilPct,
+          unit: "percent",
+          tags: { agentId, window: win, dimension: dim, spent, limit },
+        }, db);
+      }
+    }
+  }
 }
 
 function normalizeSloConfigs(raw: Record<string, Record<string, unknown>>): Record<string, SloDefinition> {
@@ -133,14 +179,20 @@ function normalizeAnomalyConfigs(raw: Record<string, Record<string, unknown>>): 
   return result;
 }
 
+const OPERATOR_TO_CONDITION: Record<string, string> = { ">": "gt", "<": "lt", ">=": "gte", "<=": "lte", "==": "eq", "=": "eq" };
+
 function normalizeAlertConfigs(raw: Record<string, Record<string, unknown>>): Record<string, AlertRuleDefinition> {
   const result: Record<string, AlertRuleDefinition> = {};
   for (const [name, config] of Object.entries(raw)) {
+    // Support both 'condition' and 'operator' field names, and symbolic operators like ">"
+    const rawCondition = String(config.condition ?? config.operator ?? "gt");
+    const condition = (OPERATOR_TO_CONDITION[rawCondition] ?? rawCondition) as AlertRuleDefinition["condition"];
+
     result[name] = {
       name,
       metricType: String(config.metric_type ?? ""),
       metricKey: String(config.metric_key ?? ""),
-      condition: (String(config.condition ?? "gt")) as AlertRuleDefinition["condition"],
+      condition,
       threshold: Number(config.threshold ?? 0),
       windowMs: Number(config.window_ms ?? 300000),
       action: (String(config.action ?? "create_task")) as AlertRuleDefinition["action"],

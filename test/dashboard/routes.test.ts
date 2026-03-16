@@ -20,7 +20,7 @@ vi.mock("../../src/dashboard/queries.js", () => ({
     return null;
   }),
   querySessions: vi.fn(() => ({ sessions: [], hasMore: false })),
-  queryEvents: vi.fn(() => ({ events: [], count: 0 })),
+  queryEvents: vi.fn(() => ({ events: [], total: 0, count: 0, limit: 50, offset: 0 })),
   queryMetricsDashboard: vi.fn(() => ({ metrics: [], count: 0 })),
   queryCosts: vi.fn(() => ({ totalCents: 0 })),
   queryPolicies: vi.fn(() => ({ policies: [] })),

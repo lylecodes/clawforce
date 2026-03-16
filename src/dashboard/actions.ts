@@ -8,12 +8,13 @@
 
 import type { RouteResult } from "./routes.js";
 import { approveProposal, rejectProposal } from "../approval/resolve.js";
-import { createTask, reassignTask, transitionTask } from "../tasks/ops.js";
+import { attachEvidence, createTask, reassignTask, transitionTask } from "../tasks/ops.js";
 import { disableAgent, enableAgent } from "../enforcement/disabled-store.js";
 import { startMeeting, concludeMeeting } from "../channels/meeting.js";
 import { sendChannelMessage } from "../channels/messages.js";
 import { emitSSE } from "./sse.js";
-import type { TaskPriority, TaskState } from "../types.js";
+import type { EvidenceType, TaskPriority, TaskState } from "../types.js";
+import { ingestEvent } from "../events/store.js";
 import { createDemoConfig } from "./demo.js";
 import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
 import { loadGlobalConfig } from "../config/loader.js";
@@ -113,6 +114,7 @@ function handleTaskAction(
       tags: body.tags as string[] | undefined,
       department: body.department as string | undefined,
       team: body.team as string | undefined,
+      goalId: body.goalId as string | undefined,
     });
     emitSSE(projectId, "task:update", { taskId: task.id, action: "created" });
     return { status: 201, body: task };
@@ -155,6 +157,21 @@ function handleTaskAction(
       emitSSE(projectId, "task:update", { taskId, action: "transitioned", toState });
       return ok(result);
     }
+    case "evidence": {
+      const content = body.content as string;
+      if (!content) return badRequest("content is required");
+
+      const evidence = attachEvidence({
+        projectId,
+        taskId,
+        type: (body.type as EvidenceType) ?? "custom",
+        content,
+        attachedBy: (body.attachedBy as string) ?? "dashboard",
+        metadata: body.metadata as Record<string, unknown> | undefined,
+      });
+      emitSSE(projectId, "task:update", { taskId, action: "evidence_attached", evidenceId: evidence.id });
+      return { status: 201, body: { ok: true, evidence: { id: evidence.id, content: evidence.content, type: evidence.type } } };
+    }
     default:
       return notFound(`Unknown task action: ${action}`);
   }
@@ -176,11 +193,24 @@ function handleAgentAction(
       const reason = (body.reason as string) ?? "Disabled via dashboard";
       disableAgent(projectId, agentId, reason);
       emitSSE(projectId, "agent:status", { agentId, status: "disabled", reason });
+      try {
+        ingestEvent(projectId, "agent_disabled", "internal", {
+          agentId,
+          reason,
+          actor: (body.actor as string) ?? "dashboard",
+        }, `agent-disabled:${agentId}:${Date.now()}`);
+      } catch { /* non-fatal */ }
       return ok({ agentId, status: "disabled" });
     }
     case "enable": {
       enableAgent(projectId, agentId);
       emitSSE(projectId, "agent:status", { agentId, status: "idle" });
+      try {
+        ingestEvent(projectId, "agent_enabled", "internal", {
+          agentId,
+          actor: (body.actor as string) ?? "dashboard",
+        }, `agent-enabled:${agentId}:${Date.now()}`);
+      } catch { /* non-fatal */ }
       return ok({ agentId, status: "enabled" });
     }
     case "message": {
@@ -338,6 +368,12 @@ function handleConfigAction(
         }
 
         emitSSE(projectId, "config:updated", { section });
+        try {
+          ingestEvent(projectId, "config_updated", "internal", {
+            section,
+            actor: (body.actor as string) ?? "dashboard",
+          }, `config-updated:${section}:${Date.now()}`);
+        } catch { /* non-fatal */ }
         return ok({ saved: true, section });
       } catch (err) {
         return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };

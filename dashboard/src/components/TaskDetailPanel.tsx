@@ -13,6 +13,7 @@ const STATE_LABELS: Record<TaskState, { label: string; color: string }> = {
   REVIEW: { label: "Review", color: "bg-cf-accent-purple/15 text-cf-accent-purple" },
   BLOCKED: { label: "Blocked", color: "bg-cf-accent-red/15 text-cf-accent-red" },
   DONE: { label: "Done", color: "bg-cf-accent-green/15 text-cf-accent-green" },
+  FAILED: { label: "Failed", color: "bg-cf-accent-red/15 text-cf-accent-red" },
   CANCELLED: { label: "Cancelled", color: "bg-cf-bg-tertiary text-cf-text-muted" },
 };
 

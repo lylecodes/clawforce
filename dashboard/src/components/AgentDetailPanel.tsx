@@ -6,10 +6,12 @@ import type { OrgAgent } from "../api/types";
 
 type AgentDetailPanelProps = {
   agent: OrgAgent;
+  trustScore?: number;
+  compliancePct?: number;
   onClose: () => void;
 };
 
-export function AgentDetailPanel({ agent, onClose }: AgentDetailPanelProps) {
+export function AgentDetailPanel({ agent, trustScore, compliancePct, onClose }: AgentDetailPanelProps) {
   const activeDomain = useAppStore((s) => s.activeDomain);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -73,19 +75,21 @@ export function AgentDetailPanel({ agent, onClose }: AgentDetailPanelProps) {
         <div className="grid grid-cols-2 gap-3">
           <StatBox
             label="Total Cost"
-            value={detail ? "$--" : "--"}
+            value={detail?.totalCostCents != null
+              ? `$${(detail.totalCostCents / 100).toFixed(2)}`
+              : "--"}
           />
           <StatBox
             label="Trust Score"
-            value={detail ? "--%" : "--"}
+            value={trustScore != null ? `${trustScore}%` : "--"}
           />
           <StatBox
             label="Tasks Done"
-            value={detail?.currentSession ? String(detail.currentSession.toolCalls) : "0"}
+            value={detail?.tasksCompleted != null ? String(detail.tasksCompleted) : "0"}
           />
           <StatBox
             label="Compliance"
-            value="--%"
+            value={compliancePct != null ? `${compliancePct}%` : "--"}
           />
         </div>
 

@@ -32,6 +32,7 @@ import {
   queryConfig,
   queryMeetings,
   queryMeetingDetail,
+  queryThreadMessages,
   queryHealth,
   querySlos,
   queryAlerts,
@@ -87,11 +88,15 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
       if (url.pathname === "/clawforce/api/domains" && req.method === "GET") {
         try {
           const { getActiveProjectIds } = await import("../../src/lifecycle.js");
-          const { getRegisteredAgentIds } = await import("../../src/project.js");
+          const { getRegisteredAgentIds, getAgentConfig } = await import("../../src/project.js");
           const projectIds = getActiveProjectIds();
+          const allAgentIds = getRegisteredAgentIds();
           const domains = projectIds.map((id: string) => ({
             id,
-            agentCount: getRegisteredAgentIds().filter(() => true).length, // approximate
+            agentCount: allAgentIds.filter((aid: string) => {
+              const entry = getAgentConfig(aid);
+              return entry?.projectId === id;
+            }).length,
           }));
           respondJson(res, 200, domains);
         } catch {
@@ -221,7 +226,15 @@ function routeRead(
         limit: params.limit ? parseInt(params.limit, 10) : undefined,
       }));
 
-    case "messages":
+    case "messages": {
+      if (segments[1]) {
+        // GET /:domain/messages/:threadId — fetch messages for a specific thread/channel
+        const detail = queryThreadMessages(domain, segments[1], {
+          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          since: params.since ? parseInt(params.since, 10) : undefined,
+        });
+        return ok(detail);
+      }
       return ok(queryMessages(domain, {
         agentId: params.agent,
         type: params.type as MessageType | undefined,
@@ -229,6 +242,7 @@ function routeRead(
         since: params.since ? parseInt(params.since, 10) : undefined,
         limit: params.limit ? parseInt(params.limit, 10) : undefined,
       }));
+    }
 
     case "meetings": {
       if (segments[1]) {
@@ -256,6 +270,7 @@ function routeRead(
         taskId: params.task,
         since: params.since ? parseInt(params.since, 10) : undefined,
         until: params.until ? parseInt(params.until, 10) : undefined,
+        days: params.days,
       }));
 
     case "goals": {
