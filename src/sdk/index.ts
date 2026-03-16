@@ -43,13 +43,13 @@ export class Clawforce {
   }
 
   get tasks(): TasksNamespace {
-    return (this._tasks ??= new TasksNamespace(this.domain));
+    return (this._tasks ??= new TasksNamespace(this.domain, () => this.hooks));
   }
   get events(): EventsNamespace {
     return (this._events ??= new EventsNamespace(this.domain));
   }
   get budget(): BudgetNamespace {
-    return (this._budget ??= new BudgetNamespace(this.domain));
+    return (this._budget ??= new BudgetNamespace(this.domain, () => this.hooks));
   }
   get agents(): AgentsNamespace {
     return (this._agents ??= new AgentsNamespace(this.domain));
@@ -73,7 +73,7 @@ export class Clawforce {
     return (this._db ??= new DbNamespace(this.domain));
   }
   get dispatch(): DispatchNamespace {
-    return (this._dispatch ??= new DispatchNamespace(this.domain));
+    return (this._dispatch ??= new DispatchNamespace(this.domain, () => this.hooks));
   }
   get config(): ConfigNamespace {
     return (this._config ??= new ConfigNamespace(this.domain));

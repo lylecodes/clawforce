@@ -22,6 +22,7 @@ import {
 
 import type { Task as InternalTask } from "../types.js";
 import type { Task, TaskParams, TaskState } from "./types.js";
+import { HooksNamespace } from "./hooks.js";
 
 /** Map internal Task (with snake_case semantics already resolved by rowToTask) to public SDK Task */
 function toPublicTask(t: InternalTask): Task {
@@ -43,7 +44,16 @@ function toPublicTask(t: InternalTask): Task {
 }
 
 export class TasksNamespace {
-  constructor(readonly domain: string) {}
+  private readonly getHooks: () => HooksNamespace;
+
+  constructor(readonly domain: string, getHooks?: () => HooksNamespace) {
+    if (getHooks) {
+      this.getHooks = getHooks;
+    } else {
+      const fallback = new HooksNamespace(domain);
+      this.getHooks = () => fallback;
+    }
+  }
 
   /**
    * Create a new task. Maps `group` → `department`, `subgroup` → `team`.
@@ -94,7 +104,8 @@ export class TasksNamespace {
   }
 
   /**
-   * Transition a task to a new state. Throws an Error if the transition is rejected.
+   * Transition a task to a new state. Throws an Error if the transition is rejected
+   * or blocked by a beforeTransition hook.
    * Returns the updated public Task on success.
    */
   transition(
@@ -102,6 +113,16 @@ export class TasksNamespace {
     toState: TaskState,
     opts?: { actor?: string; reason?: string },
   ): Task {
+    const currentTask = internalGetTask(this.domain, taskId);
+    const hookResult = this.getHooks().execute("beforeTransition", {
+      taskId,
+      fromState: currentTask?.state ?? "unknown",
+      toState,
+      actor: opts?.actor ?? "sdk",
+    });
+    if (hookResult.blocked) {
+      throw new Error(`Transition blocked: ${hookResult.reason}`);
+    }
     const result = internalTransitionTask({
       projectId: this.domain,
       taskId,

@@ -24,9 +24,21 @@ import {
 } from "../dispatch/dispatcher.js";
 
 import type { DispatchQueueItem } from "../types.js";
+import { HooksNamespace } from "./hooks.js";
 
 export class DispatchNamespace {
-  constructor(readonly domain: string) {}
+  private readonly getHooks: () => HooksNamespace;
+
+  constructor(readonly domain: string, getHooks?: () => HooksNamespace) {
+    // Fall back to a no-op HooksNamespace when constructed without hooks wiring
+    // (e.g. in unit tests that construct DispatchNamespace directly)
+    if (getHooks) {
+      this.getHooks = getHooks;
+    } else {
+      const fallback = new HooksNamespace(domain);
+      this.getHooks = () => fallback;
+    }
+  }
 
   /**
    * Enqueue a task for agent dispatch.
@@ -40,8 +52,16 @@ export class DispatchNamespace {
    */
   enqueue(
     taskId: string,
-    opts?: { priority?: number; skipStateCheck?: boolean },
+    opts?: { priority?: number; agentId?: string; skipStateCheck?: boolean },
   ): DispatchQueueItem | null {
+    const hookResult = this.getHooks().execute("beforeDispatch", {
+      taskId,
+      agentId: opts?.agentId,
+      priority: opts?.priority,
+    });
+    if (hookResult.blocked) {
+      return null;
+    }
     return internalEnqueue(
       this.domain,
       taskId,

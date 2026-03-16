@@ -18,6 +18,7 @@ import { getBudgetStatus as internalGetBudgetStatus } from "../budget-windows.js
 
 import type { BudgetCheckResult, BudgetConfig, CostParams } from "./types.js";
 import type { BudgetCheckResult as InternalBudgetCheckResult } from "../types.js";
+import { HooksNamespace } from "./hooks.js";
 
 /** Map internal BudgetCheckResult (remaining is a flat cents number) to SDK type. */
 function toPublicCheckResult(internal: InternalBudgetCheckResult): BudgetCheckResult {
@@ -29,17 +30,36 @@ function toPublicCheckResult(internal: InternalBudgetCheckResult): BudgetCheckRe
 }
 
 export class BudgetNamespace {
-  constructor(readonly domain: string) {}
+  private readonly getHooks: () => HooksNamespace;
+
+  constructor(readonly domain: string, getHooks?: () => HooksNamespace) {
+    if (getHooks) {
+      this.getHooks = getHooks;
+    } else {
+      const fallback = new HooksNamespace(domain);
+      this.getHooks = () => fallback;
+    }
+  }
 
   /**
    * Check if the project (or a specific agent) is within budget.
    * Returns { ok: true } when within limits or no budget is configured.
+   * Fires the onBudgetExceeded hook when the check fails.
    */
   check(agentId?: string): BudgetCheckResult {
-    return toPublicCheckResult(internalCheckBudget({
+    const internal = internalCheckBudget({
       projectId: this.domain,
       agentId,
-    }));
+    });
+    const result = toPublicCheckResult(internal);
+    if (!result.ok) {
+      this.getHooks().execute("onBudgetExceeded", {
+        agentId,
+        costCents: 0,
+        remaining: internal.remaining ?? 0,
+      });
+    }
+    return result;
   }
 
   /**
