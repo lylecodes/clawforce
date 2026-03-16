@@ -1,7 +1,7 @@
 {
   "name": "clawforce",
   "version": "0.2.0",
-  "description": "Reliability and accountability engine for autonomous agents",
+  "description": "Governance SDK for autonomous agents — budget, trust, tasks, approvals, events",
   "type": "module",
   "engines": {
     "node": ">=22"

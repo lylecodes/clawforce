@@ -1,4 +1,4 @@
-# clawforce
+# ClawForce
 
 **Governance SDK for autonomous agents.** Budget enforcement, trust scoring, task orchestration, approval flows, and event-driven coordination — in one `npm install`. Zero infrastructure. Framework-agnostic.
 
@@ -25,15 +25,15 @@ cf.hooks.beforeDispatch((ctx) => {
 });
 ```
 
-## Why Clawforce
+## Why ClawForce
 
 Everyone is building agent frameworks. Nobody is building agent governance.
 
 LangGraph, CrewAI, AutoGen — they answer "how do I make agents think and act?" None of them answer: how do I stop 50 agents from blowing my budget? How do I know which agent to trust? Who approves risky actions? Where's the audit trail?
 
-Clawforce is the governance layer that sits under any agent framework. It manages the organizational concerns so you can focus on the interesting problems.
+ClawForce is the governance layer that sits under any agent framework. It manages the organizational concerns so you can focus on the interesting problems.
 
-| | Clawforce | CrewAI | LangGraph | AutoGen |
+| | ClawForce | CrewAI | LangGraph | AutoGen |
 |---|---|---|---|---|
 | Budget enforcement (hard gates) | 3 dimensions, 3 windows | No | No | No |
 | Trust / earned autonomy | Track record based | No | No | No |
@@ -143,7 +143,7 @@ cf.db.tables(); // list all tables
 
 ## Use Cases
 
-Clawforce uses abstract vocabulary — groups, roles, capabilities — not corporate jargon. It works for any multi-agent system.
+ClawForce uses abstract vocabulary — groups, roles, capabilities — not corporate jargon. It works for any multi-agent system.
 
 ### AI Workforce (Content Team)
 
@@ -205,17 +205,17 @@ cf.hooks.beforeDispatch((ctx) => {
 
 ## Architecture
 
-Clawforce is an **SDK**, not a server. It runs in-process with your application, backed by SQLite. No network calls, no infrastructure, no latency.
+ClawForce is an **SDK**, not a server. It runs in-process with your application, backed by SQLite. No network calls, no infrastructure, no latency.
 
 ```
 Your Application
 ├── Agent Framework (LangGraph, CrewAI, custom, etc.)
-├── Clawforce SDK (governance layer)
+├── ClawForce SDK (governance layer)
 │   ├── Tasks, Events, Budget, Trust, Dispatch
 │   ├── Approvals, Knowledge, Goals, Messages
 │   ├── Monitoring, Config, Hooks, DB
 │   └── SQLite (zero-config persistence)
-└── Optional: Clawforce Dashboard (plugin)
+└── Optional: ClawForce Dashboard (plugin)
 ```
 
 The dashboard is an optional plugin for visual monitoring:
@@ -277,7 +277,7 @@ Every transition is recorded. Evidence can be attached. Hooks can intercept tran
 
 ## OpenClaw Integration
 
-Clawforce works standalone as an SDK, but also integrates deeply with [OpenClaw](https://github.com/openclaw/openclaw) as a plugin for full agent runtime:
+ClawForce works standalone as an SDK, but also integrates deeply with [OpenClaw](https://github.com/openclaw/openclaw) as a plugin for full agent runtime:
 
 ```typescript
 import { serveDashboard } from "clawforce/dashboard";
