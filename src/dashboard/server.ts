@@ -64,7 +64,7 @@ export function createDashboardServer(options?: DashboardOptions) {
     injectAgentMessage: options?.injectAgentMessage,
   });
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     // CORS headers
     res.setHeader("Access-Control-Allow-Origin", corsOrigin);
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -93,7 +93,16 @@ export function createDashboardServer(options?: DashboardOptions) {
     if (pathname.startsWith("/api/") || pathname === "/api") {
       // Rewrite the URL to add /clawforce prefix so gateway-routes can parse it
       req.url = `/clawforce${req.url}`;
-      gatewayHandler(req, res);
+      try {
+        await gatewayHandler(req, res);
+      } catch (err) {
+        if (!res.headersSent) {
+          respondJson(res, 500, {
+            error: "Internal server error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       return;
     }
 

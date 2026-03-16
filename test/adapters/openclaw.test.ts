@@ -185,8 +185,8 @@ describe("clawforce plugin", () => {
       clawforcePlugin.register(api as any);
     });
 
-    it("registers 6 hooks", () => {
-      expect(api.on).toHaveBeenCalledTimes(6);
+    it("registers 7 hooks", () => {
+      expect(api.on).toHaveBeenCalledTimes(7);
     });
 
     it("registers the expected hook names", () => {
@@ -199,6 +199,7 @@ describe("clawforce plugin", () => {
       expect(registeredEvents).toContain("agent_end");
       expect(registeredEvents).toContain("subagent_ended");
       expect(registeredEvents).toContain("llm_output");
+      expect(registeredEvents).toContain("gateway_start");
     });
 
     it("registers 12 tools", () => {
@@ -219,10 +220,12 @@ describe("clawforce plugin", () => {
       expect(names).toContain("clawforce-memory");
     });
 
-    it("registers 1 service", () => {
-      expect(api.registerService).toHaveBeenCalledTimes(1);
-      expect(api._services).toHaveLength(1);
-      expect(api._services[0].id).toBe("clawforce-sweep");
+    it("registers 2 services", () => {
+      expect(api.registerService).toHaveBeenCalledTimes(2);
+      expect(api._services).toHaveLength(2);
+      const serviceIds = api._services.map((s: { id: string }) => s.id);
+      expect(serviceIds).toContain("clawforce-dashboard");
+      expect(serviceIds).toContain("clawforce-sweep");
     });
 
     it("registers 3 gateway methods", () => {
@@ -259,7 +262,7 @@ describe("clawforce plugin", () => {
       const partialApi = createMockApi({ enabled: true });
       clawforcePlugin.register(partialApi as any);
       // Service registration means it ran fully — default projectsDir was applied
-      expect(partialApi.registerService).toHaveBeenCalledTimes(1);
+      expect(partialApi.registerService).toHaveBeenCalledTimes(2);
     });
 
     it("uses default sweepIntervalMs of 60000 when not specified", () => {
@@ -274,7 +277,7 @@ describe("clawforce plugin", () => {
       const customApi = createMockApi({ enabled: true, sweepIntervalMs: 5000 });
       // Should not throw; register completes normally
       expect(() => clawforcePlugin.register(customApi as any)).not.toThrow();
-      expect(customApi.registerService).toHaveBeenCalledTimes(1);
+      expect(customApi.registerService).toHaveBeenCalledTimes(2);
     });
 
     it("all commands have acceptsArgs set to true", () => {

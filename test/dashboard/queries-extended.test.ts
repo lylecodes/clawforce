@@ -236,16 +236,16 @@ describe("queryConfig", () => {
   it("returns structured config sections", () => {
     const result = queryConfig("proj1");
     expect(result).not.toBeNull();
-    expect(result).toHaveProperty("toolGates");
-    expect(result).toHaveProperty("monitoring");
-    expect(result).toHaveProperty("policies");
+    expect(result).toHaveProperty("tool_gates");
     expect(result).toHaveProperty("safety");
-    expect(result).toHaveProperty("channels");
+    expect(result).toHaveProperty("agents");
+    expect(result).toHaveProperty("budget");
   });
 
-  it("returns null for unknown project", () => {
+  it("returns empty data for unknown project", () => {
     const result = queryConfig("unknown-project");
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result.agents).toHaveLength(0);
   });
 });
 

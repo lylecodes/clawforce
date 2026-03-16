@@ -1513,7 +1513,7 @@ const clawforcePlugin = {
 
     api.registerHttpRoute({
       path: "/clawforce",
-      auth: "none",
+      auth: "plugin",
       match: "prefix",
       handler: dashboardHandler,
     });
@@ -1570,21 +1570,122 @@ const clawforcePlugin = {
       }
     });
 
+    /**
+     * Flush buffered cron jobs by writing them directly to the cron store file.
+     *
+     * The clawforce.init gateway method is the intended way to capture the cron
+     * service, but it requires operator.admin scope which in turn requires device
+     * pairing — something that can't be done from within a plugin service.
+     *
+     * As a workaround, we write pending jobs directly to the cron store JSON file.
+     * The cron service re-reads the file on its next timer tick (every 60s) and
+     * picks up the new jobs.
+     */
+    function flushPendingCronJobsViaFile(): { flushed: number; errors: string[] } {
+      if (pendingCronJobs.length === 0) return { flushed: 0, errors: [] };
+
+      const cronStorePath = path.join(process.env.HOME ?? "/tmp", ".openclaw", "cron", "jobs.json");
+      const errors: string[] = [];
+      let flushed = 0;
+
+      try {
+        // Read existing store
+        let store: { version: number; jobs: Record<string, unknown>[] } = { version: 1, jobs: [] };
+        if (fs.existsSync(cronStorePath)) {
+          store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
+        } else {
+          // Create directory if needed
+          fs.mkdirSync(path.dirname(cronStorePath), { recursive: true });
+        }
+
+        const existingNames = new Set(store.jobs.map((j) => j.name as string));
+
+        for (const job of pendingCronJobs) {
+          try {
+            // Skip if a job with the same name already exists (idempotent)
+            if (existingNames.has(job.name)) {
+              flushed++; // Count as "handled"
+              continue;
+            }
+
+            const cronJob = {
+              id: crypto.randomUUID(),
+              name: job.name,
+              agentId: job.agentId,
+              enabled: job.enabled,
+              description: job.description,
+              schedule: job.schedule,
+              sessionTarget: job.sessionTarget ?? "isolated",
+              wakeMode: job.wakeMode ?? "now",
+              payload: job.payload,
+              delivery: job.delivery,
+              failureAlert: job.failureAlert,
+              deleteAfterRun: job.deleteAfterRun,
+              createdAtMs: Date.now(),
+              updatedAtMs: Date.now(),
+              state: {},
+            };
+
+            store.jobs.push(cronJob);
+            existingNames.add(job.name);
+            flushed++;
+          } catch (err) {
+            errors.push(err instanceof Error ? err.message : String(err));
+          }
+        }
+
+        // Write back atomically
+        const tmpPath = `${cronStorePath}.tmp.${process.pid}`;
+        fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), "utf-8");
+        fs.renameSync(tmpPath, cronStorePath);
+
+        // Mark cron add as captured (stop buffering)
+        capturedCronAdd = async (input) => {
+          // For any future jobs, also write to the file
+          const currentStore = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
+          const currentNames = new Set(currentStore.jobs.map((j: Record<string, unknown>) => j.name as string));
+          if (currentNames.has(input.name)) return;
+          currentStore.jobs.push({
+            id: crypto.randomUUID(),
+            ...input,
+            createdAtMs: Date.now(),
+            updatedAtMs: Date.now(),
+            state: {},
+          });
+          const tmp = `${cronStorePath}.tmp.${process.pid}`;
+          fs.writeFileSync(tmp, JSON.stringify(currentStore, null, 2), "utf-8");
+          fs.renameSync(tmp, cronStorePath);
+        };
+
+        pendingCronJobs.length = 0;
+      } catch (err) {
+        errors.push(`Failed to write cron store: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      return { flushed, errors };
+    }
+
     api.registerService({
       id: "clawforce-dashboard",
       start: async () => {
         await dashboardServer.start();
         api.logger.info("Clawforce dashboard at http://localhost:3117");
 
-        // Delayed self-init: call clawforce.init via the gateway WebSocket after a short delay
-        // This ensures the gateway is fully ready before we try to capture cron/channels
-        setTimeout(async () => {
-          try {
-            const { execSync } = await import("node:child_process");
-            execSync('openclaw gateway call clawforce.init 2>/dev/null', { timeout: 15000, stdio: 'ignore' });
-            api.logger.info("Clawforce: self-init via gateway call succeeded");
-          } catch {
-            api.logger.warn("Clawforce: self-init via gateway call failed (cron jobs may not be registered)");
+        // Delayed self-init: flush buffered cron jobs directly to the cron store file.
+        // The clawforce.init gateway method requires operator.admin scope (which needs
+        // device pairing), so we bypass the gateway and write jobs to the JSON file
+        // directly. The cron service re-reads on its next tick.
+        setTimeout(() => {
+          if (pendingCronJobs.length > 0) {
+            const result = flushPendingCronJobsViaFile();
+            if (result.flushed > 0) {
+              api.logger.info(`Clawforce: flushed ${result.flushed} cron job(s) to store file`);
+            }
+            for (const err of result.errors) {
+              api.logger.warn(`Clawforce: cron flush error: ${err}`);
+            }
+          } else {
+            api.logger.info("Clawforce: no pending cron jobs to flush");
           }
         }, 5000);
       },

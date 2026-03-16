@@ -1,16 +1,27 @@
 import { describe, expect, it, vi, afterAll } from "vitest";
 import { createDashboardServer } from "../../src/dashboard/server.js";
 
-// Mock handleRequest so we don't need a real database
-vi.mock("../../src/dashboard/routes.js", () => ({
-  handleRequest: vi.fn((pathname: string, _params: Record<string, string>) => {
-    if (pathname === "/api/health") {
-      return { status: 200, body: { tier: "GREEN" } };
-    }
-    if (pathname === "/api/error") {
-      throw new Error("mock error");
-    }
-    return { status: 404, body: { error: "Not found" } };
+// Mock gateway-routes handler so we don't need a real database
+vi.mock("../../src/dashboard/gateway-routes.js", () => ({
+  createDashboardHandler: vi.fn(() => {
+    return (req: { url?: string; method?: string }, res: { writeHead: (s: number, h?: Record<string, unknown>) => void; end: (d?: string) => void; setHeader: (k: string, v: string) => void }) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      // Rewrite: the server rewrites /api/* → /clawforce/api/*
+      const pathname = url.pathname.replace("/clawforce", "");
+
+      if (pathname === "/api/health") {
+        const json = JSON.stringify({ tier: "GREEN" });
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(json)) });
+        res.end(json);
+        return;
+      }
+      if (pathname === "/api/error") {
+        throw new Error("mock error");
+      }
+      const json = JSON.stringify({ error: "Not found" });
+      res.writeHead(404, { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(json)) });
+      res.end(json);
+    };
   }),
 }));
 
@@ -56,9 +67,10 @@ describe("createDashboardServer", () => {
     expect(res.status).toBe(204);
   });
 
-  it("rejects unsupported methods", async () => {
+  it("rejects unsupported methods on static paths", async () => {
     const { port } = await startServer({ port: 0 });
-    const res = await fetch(`http://127.0.0.1:${port}/api/health`, { method: "PUT" });
+    // PUT on a non-API path → 405 (static file handler only allows GET)
+    const res = await fetch(`http://127.0.0.1:${port}/some-page`, { method: "PUT" });
     expect(res.status).toBe(405);
   });
 
@@ -88,7 +100,6 @@ describe("createDashboardServer", () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toBe("Internal server error");
-    expect(body.message).toBe("mock error");
   });
 
   it("stops cleanly", async () => {

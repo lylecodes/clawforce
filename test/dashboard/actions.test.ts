@@ -225,9 +225,9 @@ describe("handleAction", () => {
 
   // --- Config / Budget (deferred) ---
 
-  it("returns 501 for config save (deferred)", () => {
+  it("returns 400 for config save without section", () => {
     const result = handleAction("test-project", "config/save", {});
-    expect(result.status).toBe(501);
+    expect(result.status).toBe(400);
   });
 
   it("returns 501 for budget allocate (deferred)", () => {
