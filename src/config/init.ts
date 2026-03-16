@@ -139,9 +139,15 @@ function buildWorkforceConfig(
     agents[agentId] = resolved as AgentConfig;
   }
 
+  const projectDir = domain.paths?.[0]
+    ? resolveHomePath(domain.paths[0])
+    : undefined;
+
   const wfConfig: WorkforceConfig = {
     name: domain.domain,
     agents,
+    dir: projectDir ?? ".",
+    id: domain.domain,
   };
 
   // Pass through domain-level config sections
