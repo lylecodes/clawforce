@@ -12,6 +12,11 @@ const PRIORITY_STYLES: Record<string, { bg: string; text: string; label: string 
   P1: { bg: "bg-cf-accent-orange/15", text: "text-cf-accent-orange", label: "P1" },
   P2: { bg: "bg-cf-accent-blue/15", text: "text-cf-accent-blue", label: "P2" },
   P3: { bg: "bg-cf-bg-tertiary", text: "text-cf-text-muted", label: "P3" },
+  // Word-form aliases (tasks created via API may use "critical"/"high"/"medium"/"low")
+  critical: { bg: "bg-cf-accent-red/15", text: "text-cf-accent-red", label: "Critical" },
+  high: { bg: "bg-cf-accent-orange/15", text: "text-cf-accent-orange", label: "High" },
+  medium: { bg: "bg-cf-accent-blue/15", text: "text-cf-accent-blue", label: "Medium" },
+  low: { bg: "bg-cf-bg-tertiary", text: "text-cf-text-muted", label: "Low" },
 };
 
 const INITIATIVE_COLORS = [

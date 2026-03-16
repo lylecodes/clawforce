@@ -136,7 +136,11 @@ export function queryAgentDetail(projectId: string, agentId: string) {
       startedAt: session.metrics.startedAt,
       toolCalls: session.metrics.toolCalls.length,
     } : null,
-    expectations: entry.config.expectations,
+    expectations: (entry.config.expectations ?? []).map((exp) =>
+      typeof exp === "string"
+        ? exp
+        : `${exp.tool}${Array.isArray(exp.action) ? `: ${exp.action.join(", ")}` : exp.action ? `: ${exp.action}` : ""} (min: ${exp.min_calls})`,
+    ),
     performancePolicy: entry.config.performance_policy,
     tasksCompleted,
     totalCostCents,
@@ -216,6 +220,7 @@ export function queryEvents(
     status: filters?.status,
     type: filters?.type,
     limit,
+    offset,
   });
   const total = countEvents(projectId, filters);
 
@@ -837,8 +842,14 @@ export function queryConfig(projectId: string) {
         department: entry.config.department,
         team: entry.config.team,
         channel: entry.config.channel,
-        briefing: entry.config.briefing,
-        expectations: entry.config.expectations,
+        briefing: (entry.config.briefing ?? []).map((b) =>
+          typeof b === "string" ? b : b.source,
+        ),
+        expectations: (entry.config.expectations ?? []).map((exp) =>
+          typeof exp === "string"
+            ? exp
+            : `${exp.tool}${Array.isArray(exp.action) ? `: ${exp.action.join(", ")}` : exp.action ? `: ${exp.action}` : ""} (min: ${exp.min_calls})`,
+        ),
         performance_policy: entry.config.performance_policy,
       };
     })
@@ -862,7 +873,7 @@ export function queryConfig(projectId: string) {
   const toolGates = Object.entries(toolGatesConfig).map(([tool, gate]) => ({
     tool,
     category: (gate as Record<string, unknown>)?.category as string | undefined,
-    risk_tier: (gate as Record<string, unknown>)?.risk_tier as string ?? "low",
+    risk_tier: ((gate as Record<string, unknown>)?.tier ?? (gate as Record<string, unknown>)?.risk_tier ?? "low") as string,
   }));
 
   // Build safety from extConfig

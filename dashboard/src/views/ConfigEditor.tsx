@@ -82,9 +82,9 @@ function normalizeAgent(raw: AgentConfig): AgentConfig {
     expectations: toStringArray(raw.expectations) as string[],
     performance_policy: raw.performance_policy && typeof raw.performance_policy === "object"
       ? {
-          action: String((raw.performance_policy as Record<string, unknown>).action ?? "warn"),
+          action: String((raw.performance_policy as Record<string, unknown>).action ?? "alert"),
           max_retries: Number((raw.performance_policy as Record<string, unknown>).max_retries ?? 3),
-          then: String((raw.performance_policy as Record<string, unknown>).then ?? "escalate"),
+          then: String((raw.performance_policy as Record<string, unknown>).then ?? "alert"),
         }
       : raw.performance_policy,
   };
@@ -498,9 +498,9 @@ function AgentsTab({
                     }
                     className="w-full bg-cf-bg-tertiary border border-cf-border rounded px-2 py-1.5 text-xxs text-cf-text-primary focus:outline-none focus:border-cf-accent-blue"
                   >
-                    <option value="warn">Warn</option>
-                    <option value="escalate">Escalate</option>
-                    <option value="disable">Disable</option>
+                    <option value="retry">Retry</option>
+                    <option value="alert">Alert</option>
+                    <option value="terminate_and_alert">Terminate & Alert</option>
                   </select>
                 </div>
                 <div>
@@ -535,17 +535,16 @@ function AgentsTab({
                     }
                     className="w-full bg-cf-bg-tertiary border border-cf-border rounded px-2 py-1.5 text-xxs text-cf-text-primary focus:outline-none focus:border-cf-accent-blue"
                   >
-                    <option value="escalate">Escalate</option>
-                    <option value="disable">Disable</option>
-                    <option value="ignore">Ignore</option>
+                    <option value="alert">Alert</option>
+                    <option value="terminate_and_alert">Terminate & Alert</option>
                   </select>
                 </div>
               </div>
             </FormField>
 
-            {/* YAML Preview */}
+            {/* YAML Preview — normalize both sides so format-only diffs are suppressed */}
             <YamlPreview
-              current={agents.find((a) => a.id === selectedId) ?? {}}
+              current={normalizeAgent(agents.find((a) => a.id === selectedId) ?? {} as AgentConfig)}
               proposed={selectedAgent}
               title="Agent Config Diff"
             />

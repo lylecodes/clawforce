@@ -188,15 +188,16 @@ function buildEventFilter(
 /** List events with optional filtering. */
 export function listEvents(
   projectId: string,
-  filter?: { status?: EventStatus; type?: string; limit?: number },
+  filter?: { status?: EventStatus; type?: string; limit?: number; offset?: number },
   dbOverride?: DatabaseSync,
 ): ClawforceEvent[] {
   const db = dbOverride ?? getDb(projectId);
   const { where, values } = buildEventFilter(projectId, filter);
 
   const limit = filter?.limit ?? 50;
-  const sql = `SELECT * FROM events WHERE ${where} ORDER BY created_at DESC LIMIT ?`;
-  values.push(limit);
+  const offset = filter?.offset ?? 0;
+  const sql = `SELECT * FROM events WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  values.push(limit, offset);
 
   const rows = db.prepare(sql).all(...values) as Record<string, unknown>[];
   return rows.map(rowToEvent);

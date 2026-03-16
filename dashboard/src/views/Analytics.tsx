@@ -76,59 +76,61 @@ export function Analytics() {
         <TimeRangeSelector value={timeRange} onChange={setTimeRange} />
       </div>
 
-      {isLoading && (
+      {isLoading ? (
         <div className="flex items-center justify-center py-8">
           <p className="text-cf-text-muted text-sm">Loading analytics...</p>
         </div>
-      )}
+      ) : (
+        <>
+          {/* 4-panel grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* 1. Daily cost bar chart */}
+            <CostChart data={dailyCosts} />
 
-      {/* 4-panel grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* 1. Daily cost bar chart */}
-        <CostChart data={dailyCosts} />
+            {/* 2. Cost by initiative donut */}
+            <InitiativeDonut data={dailyCosts} />
 
-        {/* 2. Cost by initiative donut */}
-        <InitiativeDonut data={dailyCosts} />
+            {/* 3. Agent performance table */}
+            <PerformanceTable agents={agentList} trustScores={trustAgents} />
 
-        {/* 3. Agent performance table */}
-        <PerformanceTable agents={agentList} trustScores={trustAgents} />
+            {/* 4. Trust score bars */}
+            <TrustBars agents={trustAgents} />
+          </div>
 
-        {/* 4. Trust score bars */}
-        <TrustBars agents={trustAgents} />
-      </div>
-
-      {/* Summary stats row */}
-      {costData && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <SummaryCard
-            label="Total Spend"
-            value={`$${((costData.totalCents ?? 0) / 100).toFixed(2)}`}
-            subtitle={`Last ${days} day${days !== 1 ? "s" : ""}`}
-          />
-          <SummaryCard
-            label="Avg Daily"
-            value={
-              dailyCosts.length > 0 && costData.totalCents != null
-                ? `$${(costData.totalCents / 100 / dailyCosts.length).toFixed(2)}`
-                : "$0.00"
-            }
-            subtitle="Per day"
-          />
-          <SummaryCard
-            label="Active Agents"
-            value={String(agentList.filter((a) => a.status === "active").length)}
-            subtitle={`${agentList.length} total`}
-          />
-          <SummaryCard
-            label="Avg Trust"
-            value={
-              trustAgents.length > 0
-                ? `${Math.round(trustAgents.reduce((s, a) => s + a.overall * 100, 0) / trustAgents.length)}%`
-                : "N/A"
-            }
-            subtitle={trustAgents.length > 0 ? `${trustAgents.length} scored` : "No data"}
-          />
-        </div>
+          {/* Summary stats row */}
+          {costData && (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <SummaryCard
+                label="Total Spend"
+                value={`$${((costData.totalCents ?? 0) / 100).toFixed(2)}`}
+                subtitle={`Last ${days} day${days !== 1 ? "s" : ""}`}
+              />
+              <SummaryCard
+                label="Avg Daily"
+                value={
+                  dailyCosts.length > 0 && costData.totalCents != null
+                    ? `$${(costData.totalCents / 100 / dailyCosts.length).toFixed(2)}`
+                    : "$0.00"
+                }
+                subtitle="Per day"
+              />
+              <SummaryCard
+                label="Active Agents"
+                value={String(agentList.filter((a) => a.status === "active").length)}
+                subtitle={`${agentList.length} total`}
+              />
+              <SummaryCard
+                label="Avg Trust"
+                value={
+                  trustAgents.length > 0
+                    ? `${Math.round(trustAgents.reduce((s, a) => s + a.overall * 100, 0) / trustAgents.length)}%`
+                    : "N/A"
+                }
+                subtitle={trustAgents.length > 0 ? `${trustAgents.length} scored` : "No data"}
+              />
+            </div>
+          )}
+        </>
       )}
     </div>
   );

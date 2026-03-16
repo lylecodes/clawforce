@@ -9,6 +9,13 @@ import { AgentRoster } from "../components/AgentRoster";
 import { WelcomeScreen } from "../components/WelcomeScreen";
 import type { DashboardSummary, Agent, Goal } from "../api/types";
 
+/** Format large token counts as human-readable strings (e.g. "8.8M", "125K"). */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return String(n);
+}
+
 function budgetVariant(pct: number): "success" | "warning" | "danger" {
   if (pct > 90) return "danger";
   if (pct > 70) return "warning";
@@ -92,7 +99,9 @@ export function CommandCenter() {
           subtitle={
             summaryLoading
               ? "Loading..."
-              : `$${(dash.budgetUtilization.spent / 100).toFixed(2)} / $${(dash.budgetUtilization.limit / 100).toFixed(2)}`
+              : dash.budgetUtilization.dimension === "tokens"
+                ? `${fmtTokens(dash.budgetUtilization.spent)} / ${fmtTokens(dash.budgetUtilization.limit)} tokens`
+                : `$${(dash.budgetUtilization.spent / 100).toFixed(2)} / $${(dash.budgetUtilization.limit / 100).toFixed(2)}`
           }
           progress={dash.budgetUtilization.pct}
           variant={budgetVariant(dash.budgetUtilization.pct)}
@@ -157,7 +166,14 @@ function InitiativesSection({ domain }: { domain: string }) {
   const { data: tasksData } = useQuery({
     queryKey: ["tasks", domain, "initiative-counts"],
     queryFn: () =>
-      api.getTasks(domain, { state: "OPEN,ASSIGNED,IN_PROGRESS,DONE" }),
+      api.getTasks(domain, { state: "OPEN,ASSIGNED,IN_PROGRESS,DONE,REVIEW" }),
+    enabled: !!domain,
+    staleTime: 30_000,
+  });
+
+  const { data: agentsData } = useQuery({
+    queryKey: ["agents", domain],
+    queryFn: () => api.getAgents(domain),
     enabled: !!domain,
     staleTime: 30_000,
   });
@@ -184,17 +200,27 @@ function InitiativesSection({ domain }: { domain: string }) {
     return null;
   }
 
-  // Count tasks per goal: match by goalId linkage OR by department
+  // Build agent-id -> department lookup so we can link tasks missing department/goalId
+  // to goals via the assigned agent's department.
+  const agentDeptMap = new Map<string, string>();
+  if (agentsData) {
+    for (const agent of agentsData) {
+      if (agent.department) agentDeptMap.set(agent.id, agent.department);
+    }
+  }
+
+  // Count tasks per goal: match by goalId, task department, or agent department
   const tasksByGoal = new Map<string, { open: number; inProgress: number; done: number }>();
   if (tasksData) {
     for (const goal of goals) {
       const counts = { open: 0, inProgress: 0, done: 0 };
       for (const task of tasksData.tasks) {
-        // Match task to goal via explicit goalId or department
-        const linked = task.goalId === goal.id || (goal.department && task.department === goal.department);
+        // Match task to goal via explicit goalId, task department, or assigned agent's department
+        const taskDept = task.department || (task.assignedTo ? agentDeptMap.get(task.assignedTo) : undefined);
+        const linked = task.goalId === goal.id || (goal.department && taskDept === goal.department);
         if (!linked) continue;
         if (task.state === "OPEN" || task.state === "ASSIGNED") counts.open++;
-        else if (task.state === "IN_PROGRESS") counts.inProgress++;
+        else if (task.state === "IN_PROGRESS" || task.state === "REVIEW") counts.inProgress++;
         else if (task.state === "DONE") counts.done++;
       }
       tasksByGoal.set(goal.id, counts);

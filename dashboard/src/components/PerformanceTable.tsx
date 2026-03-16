@@ -35,8 +35,10 @@ export function PerformanceTable({ agents, trustScores }: PerformanceTableProps)
       const complianceMap: Record<string, number> = {};
       if (trustScores) {
         for (const ts of trustScores) {
-          if (ts.categories?.compliance != null) {
-            complianceMap[ts.agentId] = Math.round(ts.categories.compliance * 100);
+          // Prefer the specific compliance category; fall back to overall trust score
+          const raw = ts.categories?.compliance ?? ts.overall;
+          if (raw != null) {
+            complianceMap[ts.agentId] = Math.round(raw * 100);
           }
         }
       }

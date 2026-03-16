@@ -10,6 +10,8 @@ export type DashboardSummary = {
     spent: number;
     limit: number;
     pct: number;
+    /** Which dimension is the worst-case: "cents" or "tokens". */
+    dimension?: string;
   };
   activeAgents: number;
   totalAgents: number;
