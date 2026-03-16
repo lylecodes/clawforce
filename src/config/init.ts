@@ -159,6 +159,29 @@ function buildWorkforceConfig(
   if (domain.knowledge)
     wfConfig.knowledge = domain.knowledge as WorkforceConfig["knowledge"];
 
+  // Build manager config from orchestrator or first manager agent with coordination
+  if (domain.orchestrator || domain.manager) {
+    const mgrRaw = domain.manager as Record<string, unknown> | undefined;
+    wfConfig.manager = {
+      enabled: true,
+      agentId: domain.orchestrator ?? Object.keys(agents).find(id => agents[id]?.extends === "manager") ?? "manager",
+      cronSchedule: (mgrRaw?.cronSchedule as string) ?? undefined,
+      ...(mgrRaw ?? {}),
+    } as WorkforceConfig["manager"];
+  } else {
+    // Auto-detect: find the first manager agent with coordination enabled
+    for (const [agentId, config] of Object.entries(agents)) {
+      if (config.coordination?.enabled && config.coordination?.schedule) {
+        wfConfig.manager = {
+          enabled: true,
+          agentId,
+          cronSchedule: config.coordination.schedule,
+        } as WorkforceConfig["manager"];
+        break;
+      }
+    }
+  }
+
   return wfConfig;
 }
 
