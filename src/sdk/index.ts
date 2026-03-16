@@ -12,6 +12,7 @@ import { DbNamespace } from "./db.js";
 import { DispatchNamespace } from "./dispatch.js";
 import { ConfigNamespace } from "./config.js";
 import { HooksNamespace } from "./hooks.js";
+import { ApprovalsNamespace } from "./approvals.js";
 
 export class Clawforce {
   readonly domain: string;
@@ -30,6 +31,7 @@ export class Clawforce {
   private _dispatch?: DispatchNamespace;
   private _config?: ConfigNamespace;
   private _hooks?: HooksNamespace;
+  private _approvals?: ApprovalsNamespace;
 
   private constructor(opts: ClawforceOptions) {
     this.opts = opts;
@@ -78,6 +80,9 @@ export class Clawforce {
   }
   get hooks(): HooksNamespace {
     return (this._hooks ??= new HooksNamespace(this.domain));
+  }
+  get approvals(): ApprovalsNamespace {
+    return (this._approvals ??= new ApprovalsNamespace(this.domain));
   }
 }
 
