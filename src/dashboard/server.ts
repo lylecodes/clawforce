@@ -25,6 +25,12 @@ export type DashboardOptions = {
   corsOrigin?: string;
   /** Hostname to bind (default "127.0.0.1"). */
   host?: string;
+  /**
+   * Absolute path to the dashboard dist directory containing the built SPA.
+   * Defaults to `../clawforce-dashboard/dist` (sibling project).
+   * Override to point at a custom dashboard build output.
+   */
+  dashboardDir?: string;
   /** Function to inject a message into an agent session */
   injectAgentMessage?: DashboardHandlerOptions["injectAgentMessage"];
 };
@@ -52,9 +58,10 @@ export function createDashboardServer(options?: DashboardOptions) {
   const corsOrigin = options?.corsOrigin ?? "*";
   const token = options?.token;
 
-  // Resolve static dir — dashboard/dist/ relative to this file's location
-  // This file lives at src/dashboard/server.ts, so ../../dashboard/dist
-  const staticDir = path.resolve(import.meta.dirname, "../../dashboard/dist");
+  // Resolve static dir — use the provided dashboardDir or look for
+  // clawforce-dashboard/dist as a sibling project (the extracted dashboard repo)
+  const defaultDir = path.resolve(import.meta.dirname, "../../../clawforce-dashboard/dist");
+  const staticDir = options?.dashboardDir ?? defaultDir;
 
   // Create the gateway-routes handler for /api/* requests.
   // The gateway-routes handler expects paths prefixed with /clawforce/api/,

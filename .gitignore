@@ -1,3 +1,33 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Screenshots and scratch files
+*.png
+config-save-test.md
+content-status.md
+current-state.md
+pipeline-status.md
+researcher-state.md
+writer-state.md
+
+# Config/tool directories
+.claude/
+.openclaw/
+.playwright-mcp/
+.superpowers/
+
+# Scratch content
+content-agency/
+research/
+memory/
+
+# Agent workspace files
+AGENTS.md
+HEARTBEAT.md
+IDENTITY.md
+PIPELINE.md
+SOUL.md
+STATUS.md
+TOOLS.md
+USER.md

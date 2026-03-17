@@ -6,7 +6,7 @@
  *   - SSE endpoint:  GET /clawforce/api/sse?domain=<id>
  *   - REST reads:    GET /clawforce/api/:domain/:resource
  *   - REST actions:  POST /clawforce/api/:domain/:resource/:action
- *   - Static files:  GET /clawforce/* -> dashboard/dist/
+ *   - Static files:  GET /clawforce/* -> clawforce-dashboard/dist/
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -46,7 +46,7 @@ import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
 
 export type DashboardHandlerOptions = {
-  /** Absolute path to dashboard/dist/ for static files */
+  /** Absolute path to dashboard dist directory for static files */
   staticDir?: string;
   /** Function to inject a message into an agent session */
   injectAgentMessage?: (params: { sessionKey: string; message: string }) => Promise<{ runId?: string }>;

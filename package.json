@@ -1,24 +1,68 @@
 {
   "name": "clawforce",
   "version": "0.2.0",
-  "description": "Governance SDK for autonomous agents — budget, trust, tasks, approvals, events",
+  "description": "Team coordination SDK for autonomous AI agents — budget, trust, tasks, approvals, dispatch, and 15 validation layers",
   "type": "module",
+  "license": "MIT",
+  "author": "Lyle Jensen",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lylecodes/clawforce.git"
+  },
+  "homepage": "https://github.com/lylecodes/clawforce",
+  "keywords": [
+    "ai",
+    "agents",
+    "multi-agent",
+    "coordination",
+    "autonomous",
+    "budget",
+    "trust",
+    "approvals",
+    "tasks",
+    "dispatch",
+    "validation",
+    "sdk",
+    "openclaw"
+  ],
   "engines": {
     "node": ">=22"
   },
+  "main": "./dist/src/sdk/index.js",
+  "types": "./dist/src/sdk/index.d.ts",
   "exports": {
-    ".": "./dist/src/sdk/index.js",
-    "./sdk": "./dist/src/sdk/index.js",
-    "./internal": "./dist/src/index.js",
-    "./dashboard": "./dist/src/dashboard/plugin.js",
+    ".": {
+      "types": "./dist/src/sdk/index.d.ts",
+      "default": "./dist/src/sdk/index.js"
+    },
+    "./sdk": {
+      "types": "./dist/src/sdk/index.d.ts",
+      "default": "./dist/src/sdk/index.js"
+    },
+    "./internal": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./dashboard": {
+      "types": "./dist/src/dashboard/plugin.d.ts",
+      "default": "./dist/src/dashboard/plugin.js"
+    },
     "./openclaw": "./adapters/openclaw.ts"
   },
+  "files": [
+    "dist",
+    "adapters",
+    "README.md",
+    "LICENSE"
+  ],
   "openclaw": {
     "extensions": [
       "./adapters/openclaw.ts"
     ]
   },
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build && npm run test",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

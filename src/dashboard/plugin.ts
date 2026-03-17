@@ -3,6 +3,12 @@ import type { Clawforce } from "../sdk/index.js";
 export interface DashboardOptions {
   port?: number;
   host?: string;
+  /**
+   * Absolute path to the dashboard dist directory containing the built SPA.
+   * Defaults to `../clawforce-dashboard/dist` (sibling project).
+   * Override to point at a custom dashboard build output.
+   */
+  dashboardDir?: string;
 }
 
 /**
@@ -26,6 +32,8 @@ export function serveDashboard(cf: Clawforce, opts?: DashboardOptions): void {
   // Full implementation will wire the existing dashboard server
   // to use the SDK instance instead of direct internal imports.
   // For now, it validates the pattern and documents the contract.
+  const dashDir = opts?.dashboardDir ?? "(default: ../clawforce-dashboard/dist)";
   console.log(`[clawforce-dashboard] Ready to serve dashboard for domain "${cf.domain}" on ${_host}:${_port}`);
+  console.log(`[clawforce-dashboard] Dashboard dir: ${dashDir}`);
   console.log(`[clawforce-dashboard] Full implementation pending — use existing gateway routes for now`);
 }
