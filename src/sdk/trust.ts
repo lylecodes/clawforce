@@ -13,14 +13,17 @@ import {
   getActiveTrustOverrides as internalGetActiveTrustOverrides,
 } from "../trust/tracker.js";
 
-import type { TrustDecisionParams, TrustScore } from "./types.js";
+import type { TrustDecisionParams, TrustScore, TrustScoreOptions, TrustTier, TrustTierThresholds } from "./types.js";
+import { getDb } from "../db.js";
+
+const DEFAULT_TIERS: TrustTierThresholds = { high: 0.8, medium: 0.5 };
 
 export class TrustNamespace {
   constructor(readonly domain: string) {}
 
   /**
    * Record a trust decision (approval or rejection) for a category.
-   * The domain is used as the projectId automatically.
+   * Optionally include severity (0-1) — higher severity means bigger trust impact.
    */
   record(params: TrustDecisionParams): any {
     return internalRecordTrustDecision({
@@ -30,42 +33,111 @@ export class TrustNamespace {
       agentId: params.agentId,
       proposalId: params.proposalId,
       toolName: params.toolName,
+      severity: params.severity,
     });
   }
 
   /**
    * Compute an aggregate trust score across all categories.
-   * Returns `overall` (weighted mean of all category approval rates) and
-   * a `categories` map of category → approval rate.
    *
-   * If `agentId` is provided the score is computed only from decisions
-   * made by that agent.  Because the internal getAllCategoryStats does not
-   * support per-agent filtering at the query level we retrieve all stats
-   * and note that agent-scoped filtering is best-effort here — for a
-   * strict per-agent view callers should use `categoryStats` directly with
-   * a custom query. For the common case (agentId = undefined) this returns
-   * the full project-wide score.
+   * Options:
+   * - `recencyDecay`: Weight recent decisions more (0-1 decay factor per day). Default 0.95.
+   * - `tiers`: Custom thresholds for high/medium/low enforcement tiers.
+   *
+   * Returns `overall`, `categories` map, and `tier` (enforcement level).
    */
-  score(agentId?: string): TrustScore {
+  score(agentIdOrOpts?: string | TrustScoreOptions, opts?: TrustScoreOptions): TrustScore {
+    // Handle overloaded signature: score(), score("agent-1"), score({ recencyDecay: 0.9 }), score("agent-1", { ... })
+    let agentId: string | undefined;
+    let options: TrustScoreOptions | undefined;
+    if (typeof agentIdOrOpts === "string") {
+      agentId = agentIdOrOpts;
+      options = opts;
+    } else if (typeof agentIdOrOpts === "object") {
+      options = agentIdOrOpts;
+    }
+
+    const recencyDecay = options?.recencyDecay ?? 0.95;
+    const tiers = options?.tiers ?? DEFAULT_TIERS;
+
+    // Use recency-weighted scoring if decay < 1
+    if (recencyDecay < 1) {
+      return this.computeRecencyWeightedScore(agentId, recencyDecay, tiers);
+    }
+
+    // Fall back to simple approval rate (original behavior)
     const stats = internalGetAllCategoryStats(this.domain);
-
     const categories: Record<string, number> = {};
-
-    // If agentId is supplied we can't filter in the aggregated stats,
-    // so we surface all categories (this matches typical usage where
-    // agentId scoping is advisory).  The agentId param is kept in the
-    // signature for future per-agent DB queries.
     for (const s of stats) {
       categories[s.category] = s.approvalRate;
     }
+    const rates = Object.values(categories);
+    const overall = rates.length > 0
+      ? rates.reduce((sum, r) => sum + r, 0) / rates.length
+      : 0;
+
+    return { overall, categories, tier: computeTier(overall, tiers) };
+  }
+
+  /**
+   * Get the enforcement tier for a given trust score.
+   * - high: allow + notify (score > high threshold)
+   * - medium: warn (score > medium threshold)
+   * - low: block + escalate (score <= medium threshold)
+   */
+  tier(scoreOrAgentId?: number | string): TrustTier {
+    if (typeof scoreOrAgentId === "number") {
+      return computeTier(scoreOrAgentId, DEFAULT_TIERS);
+    }
+    const { tier } = this.score(scoreOrAgentId);
+    return tier;
+  }
+
+  private computeRecencyWeightedScore(
+    _agentId: string | undefined,
+    decayPerDay: number,
+    tiers: TrustTierThresholds,
+  ): TrustScore {
+    const db = getDb(this.domain);
+    const now = Date.now();
+    const msPerDay = 86_400_000;
+
+    // Fetch all decisions with severity
+    const rows = db.prepare(`
+      SELECT category, decision, severity, created_at
+      FROM trust_decisions
+      WHERE project_id = ?
+      ORDER BY created_at DESC
+    `).all(this.domain) as { category: string; decision: string; severity: number; created_at: number }[];
+
+    // Group by category with weighted scoring
+    const categoryWeights = new Map<string, { weightedApproved: number; weightedTotal: number }>();
+
+    for (const row of rows) {
+      const daysAgo = (now - row.created_at) / msPerDay;
+      const recencyWeight = Math.pow(decayPerDay, daysAgo);
+      const severity = row.severity ?? 1.0;
+      const weight = recencyWeight * severity;
+
+      const entry = categoryWeights.get(row.category) ?? { weightedApproved: 0, weightedTotal: 0 };
+      entry.weightedTotal += weight;
+      if (row.decision === "approved") {
+        entry.weightedApproved += weight;
+      }
+      categoryWeights.set(row.category, entry);
+    }
+
+    const categories: Record<string, number> = {};
+    for (const [cat, data] of categoryWeights) {
+      categories[cat] = data.weightedTotal > 0 ? data.weightedApproved / data.weightedTotal : 0;
+    }
 
     const rates = Object.values(categories);
-    const overall =
-      rates.length > 0
-        ? rates.reduce((sum, r) => sum + r, 0) / rates.length
-        : 0;
+    const overall = rates.length > 0
+      ? rates.reduce((sum, r) => sum + r, 0) / rates.length
+      : 0;
 
-    return { overall, categories };
+    return { overall, categories, tier: computeTier(overall, tiers) };
   }
 
   /**
@@ -110,4 +182,11 @@ export class TrustNamespace {
   overrides(): any[] {
     return internalGetActiveTrustOverrides(this.domain);
   }
+}
+
+/** Map a trust score (0-1) to an enforcement tier */
+function computeTier(score: number, thresholds: TrustTierThresholds): TrustTier {
+  if (score > thresholds.high) return "high";
+  if (score > thresholds.medium) return "medium";
+  return "low";
 }

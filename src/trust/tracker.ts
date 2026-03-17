@@ -22,6 +22,12 @@ export type TrustDecision = {
   proposalId?: string;
   toolName?: string;
   riskTier?: string;
+  /** Severity weight (0-1). Higher = bigger impact. Default 1.0 */
+  severity: number;
+  /** Trust score before this decision was recorded */
+  trustBefore?: number;
+  /** Trust score after this decision was recorded */
+  trustAfter?: number;
   createdAt: number;
 };
 
@@ -83,21 +89,37 @@ export function recordTrustDecision(
     proposalId?: string;
     toolName?: string;
     riskTier?: string;
+    severity?: number;
   },
   dbOverride?: DatabaseSync,
 ): TrustDecision {
   const db = dbOverride ?? getDb(params.projectId);
   const id = crypto.randomUUID();
   const now = Date.now();
+  const severity = Math.max(0, Math.min(1, params.severity ?? 1.0));
+
+  // Capture trust score before this decision
+  const statsBefore = getAllCategoryStats(params.projectId, db);
+  const ratesBefore = statsBefore.map((s) => s.approvalRate);
+  const trustBefore = ratesBefore.length > 0
+    ? ratesBefore.reduce((sum, r) => sum + r, 0) / ratesBefore.length
+    : 0;
 
   db.prepare(`
-    INSERT INTO trust_decisions (id, project_id, category, decision, agent_id, proposal_id, tool_name, risk_tier, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO trust_decisions (id, project_id, category, decision, agent_id, proposal_id, tool_name, risk_tier, severity, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, params.projectId, params.category, params.decision,
     params.agentId ?? null, params.proposalId ?? null,
-    params.toolName ?? null, params.riskTier ?? null, now,
+    params.toolName ?? null, params.riskTier ?? null, severity, now,
   );
+
+  // Capture trust score after
+  const statsAfter = getAllCategoryStats(params.projectId, db);
+  const ratesAfter = statsAfter.map((s) => s.approvalRate);
+  const trustAfter = ratesAfter.length > 0
+    ? ratesAfter.reduce((sum, r) => sum + r, 0) / ratesAfter.length
+    : 0;
 
   // Update last_used_at on any active override for this category
   try {
@@ -116,6 +138,9 @@ export function recordTrustDecision(
     proposalId: params.proposalId,
     toolName: params.toolName,
     riskTier: params.riskTier,
+    severity,
+    trustBefore,
+    trustAfter,
     createdAt: now,
   };
 }

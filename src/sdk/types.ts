@@ -162,11 +162,34 @@ export interface TrustDecisionParams {
   decision: "approved" | "rejected";
   proposalId?: string;
   toolName?: string;
+  /** Severity of the decision (0-1). Higher = bigger impact on trust score. Default 1.0 */
+  severity?: number;
+}
+
+/** Trust enforcement tier based on score thresholds */
+export type TrustTier = "high" | "medium" | "low";
+
+/** Configurable thresholds for trust enforcement tiers */
+export interface TrustTierThresholds {
+  /** Score above this = high trust (allow + notify). Default 0.8 */
+  high: number;
+  /** Score above this = medium trust (warn). Default 0.5 */
+  medium: number;
+  /** Score at or below medium = low trust (block + escalate) */
 }
 
 export interface TrustScore {
   overall: number;
   categories: Record<string, number>;
+  /** Enforcement tier based on overall score */
+  tier: TrustTier;
+}
+
+export interface TrustScoreOptions {
+  /** Weight recent decisions more heavily. Decay factor per day (0-1). Default 0.95 (5% decay/day) */
+  recencyDecay?: number;
+  /** Custom tier thresholds */
+  tiers?: TrustTierThresholds;
 }
 
 // ---------------------------------------------------------------------------

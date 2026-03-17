@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 28;
+export const SCHEMA_VERSION = 29;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -42,6 +42,7 @@ const migrations: Record<number, Migration> = {
   26: migrateV26,
   27: migrateV27,
   28: migrateV28,
+  29: migrateV29,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -988,6 +989,13 @@ function migrateV28(db: DatabaseSync): void {
 
   // Add started_at to dispatch_plans for reservation crash recovery TTL
   safeAlterTable(db, "ALTER TABLE dispatch_plans ADD COLUMN started_at INTEGER");
+}
+
+// --- Migration V29: Trust severity + recency-weighted scoring ---
+
+function migrateV29(db: DatabaseSync): void {
+  // Add severity column to trust decisions (0-1, default 1.0)
+  safeAlterTable(db, "ALTER TABLE trust_decisions ADD COLUMN severity REAL NOT NULL DEFAULT 1.0");
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */
