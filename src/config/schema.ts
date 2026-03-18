@@ -32,6 +32,10 @@ export type GlobalConfig = {
 
 export type DomainConfig = {
   domain: string;
+  /** Path to DIRECTION.md file (relative to domain config or project root). */
+  direction?: string;
+  /** Template preset name (e.g. "startup"). */
+  template?: string;
   orchestrator?: string;
   paths?: string[];
   agents: string[];
