@@ -354,6 +354,8 @@ export type JobDefinition = {
   compaction?: boolean | CompactionConfig;
   /** Nudge text for the cron payload (replaces default nudge). */
   nudge?: string;
+  /** Tool scope for this job. Intersects with agent's tool list — only these tools are available during this job. If omitted, all agent tools are available. */
+  tools?: string[];
 };
 
 /** Top-level approval policy configuration. */
