@@ -316,6 +316,8 @@ export type AgentConfig = {
   skillCap?: number;
   /** Memory governance configuration. */
   memory?: MemoryGovernanceConfig;
+  /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. */
+  observe?: string[];
 };
 
 /** A scoped session definition for an agent. */
