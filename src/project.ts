@@ -1200,3 +1200,16 @@ export function resetEnforcementConfigForTest(): void {
   approvalPolicies.clear();
   projectExtendedConfig.clear();
 }
+
+/**
+ * Register a single agent into the config registry at runtime.
+ * Used by adaptation flows (e.g. agent hiring) to spin up new agents.
+ */
+export function registerAgentInProject(
+  projectId: string,
+  agentId: string,
+  config: AgentConfig,
+  projectDir?: string,
+): void {
+  agentConfigRegistry.set(agentId, { projectId, config, projectDir });
+}
