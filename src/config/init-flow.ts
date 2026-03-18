@@ -9,6 +9,7 @@
 import type { GlobalAgentDef, GlobalConfig } from "./schema.js";
 import type { InitDomainOpts } from "./wizard.js";
 import { estimateBudget, formatBudgetSummary } from "./budget-guide.js";
+import type { Direction, Autonomy } from "../direction.js";
 
 export type QuestionType = "text" | "choice" | "number" | "structured";
 
@@ -36,10 +37,38 @@ export type InitAnswers = {
   budget_cents: number;
   model_preference?: string;
   operational_profile?: "low" | "medium" | "high" | "ultra";
+  vision?: string;
+  autonomy?: Autonomy;
+  template?: string;
 };
 
 export function getInitQuestions(): InitQuestion[] {
   return [
+    {
+      id: "template",
+      type: "choice",
+      prompt: "Pick a team template",
+      description:
+        "Templates provide pre-configured team structures. 'startup' is lean (just a lead + devs). 'custom' lets you define everything.",
+      choices: ["startup", "custom"],
+      default: "startup",
+    },
+    {
+      id: "vision",
+      type: "text",
+      prompt: "What's the vision? Describe what you want to build.",
+      description:
+        "This becomes the DIRECTION.md that guides the team. Can be a sentence or a paragraph.",
+    },
+    {
+      id: "autonomy",
+      type: "choice",
+      prompt: "How much autonomy should the team have?",
+      description:
+        "Low = all adaptations need your approval. Medium = routine changes auto-approved. High = team self-manages within budget.",
+      choices: ["low", "medium", "high"],
+      default: "low",
+    },
     {
       id: "domain_name",
       type: "text",
@@ -112,6 +141,7 @@ export function getBudgetGuidance(answers: Partial<InitAnswers>): string | null 
 export function buildConfigFromAnswers(answers: InitAnswers): {
   global: Partial<GlobalConfig>;
   domain: InitDomainOpts;
+  direction?: Partial<Direction>;
 } {
   const agents: Record<string, GlobalAgentDef> = {};
   const agentNames: string[] = [];
@@ -136,5 +166,16 @@ export function buildConfigFromAnswers(answers: InitAnswers): {
     domain.operational_profile = answers.operational_profile;
   }
 
-  return { global, domain };
+  if (answers.template) {
+    domain.template = answers.template;
+  }
+
+  const direction = answers.vision
+    ? {
+        vision: answers.vision,
+        autonomy: (answers.autonomy ?? "low") as Autonomy,
+      }
+    : undefined;
+
+  return { global, domain, direction };
 }

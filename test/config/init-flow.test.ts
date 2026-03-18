@@ -10,7 +10,8 @@ describe("init flow", () => {
     it("returns a sequence of questions", () => {
       const questions = getInitQuestions();
       expect(questions.length).toBeGreaterThanOrEqual(4);
-      expect(questions[0].id).toBe("domain_name");
+      expect(questions[0].id).toBe("template");
+      expect(questions.find((q) => q.id === "domain_name")).toBeDefined();
       expect(questions.every((q) => q.id && q.prompt && q.type)).toBe(true);
     });
   });
