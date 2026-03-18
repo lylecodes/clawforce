@@ -108,7 +108,7 @@ describe("db-migration", () => {
 
     const version = getCurrentVersion(db);
     expect(version).toBe(SCHEMA_VERSION);
-    expect(version).toBe(29);
+    expect(version).toBe(30);
 
     db.close();
   });
