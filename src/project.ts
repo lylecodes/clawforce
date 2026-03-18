@@ -356,7 +356,7 @@ const VALID_SOURCES: ContextSource["source"][] = [
   "velocity", "preferences", "trust_scores", "resources", "initiative_status",
   "cost_forecast", "available_capacity", "knowledge_candidates",
   "budget_guidance", "onboarding_welcome", "weekly_digest", "intervention_suggestions",
-  "custom_stream",
+  "custom_stream", "observed_events",
 ];
 
 function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
