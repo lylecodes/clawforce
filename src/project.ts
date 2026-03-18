@@ -479,6 +479,10 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
 
   const jobs = normalizeJobs(raw.jobs);
 
+  const observe = Array.isArray(raw.observe)
+    ? (raw.observe.filter((s: unknown) => typeof s === "string") as string[])
+    : undefined;
+
   const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;
 
   let scheduling: SchedulingConfig | undefined;
@@ -508,6 +512,7 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     skill_pack: skillPackName,
     compaction: compaction === false ? undefined : compaction,
     jobs,
+    observe: observe && observe.length > 0 ? observe : undefined,
     scheduling,
     skillCap,
     memory,
