@@ -20,6 +20,8 @@ export type InitDomainOpts = {
   agentPresets?: Record<string, string>;
   /** Operational profile level for this domain. */
   operational_profile?: "low" | "medium" | "high" | "ultra";
+  /** Team template name (e.g. "startup", "custom"). */
+  template?: string;
 };
 
 /**

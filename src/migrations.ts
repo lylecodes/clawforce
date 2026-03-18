@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 29;
+export const SCHEMA_VERSION = 30;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -43,6 +43,7 @@ const migrations: Record<number, Migration> = {
   27: migrateV27,
   28: migrateV28,
   29: migrateV29,
+  30: migrateV30,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -996,6 +997,16 @@ function migrateV28(db: DatabaseSync): void {
 function migrateV29(db: DatabaseSync): void {
   // Add severity column to trust decisions (0-1, default 1.0)
   safeAlterTable(db, "ALTER TABLE trust_decisions ADD COLUMN severity REAL NOT NULL DEFAULT 1.0");
+}
+
+// --- Migration V30: Add job_name to cost_records for per-job budget tracking ---
+
+function migrateV30(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE cost_records ADD COLUMN job_name TEXT DEFAULT NULL");
+  db.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_cost_records_job_name
+    ON cost_records(project_id, job_name) WHERE job_name IS NOT NULL
+  `).run();
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */

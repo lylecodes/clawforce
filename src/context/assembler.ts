@@ -35,6 +35,7 @@ import { buildPolicyStatus } from "./sources/policy-status.js";
 import { buildResourcesContext } from "./sources/resources.js";
 import { resolveToolsDocs, resolveSoulDoc } from "./sources/agent-docs.js";
 
+import { renderObservedEvents } from "./observed-events.js";
 import { computeAvailableSlots } from "../scheduling/slots.js";
 import { getInitiativeSpend } from "../goals/ops.js";
 import { resolveSkillSource } from "../skills/registry.js";
@@ -313,6 +314,12 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
       // Custom streams with queries are resolved through the router.
       // In briefing context, show the stream description as a reference.
       return `## ${source.streamName}\n\n${streamDef.description}`;
+    }
+
+    case "observed_events": {
+      if (!ctx.projectId) return null;
+      const observe = ctx.config.observe ?? [];
+      return renderObservedEvents(ctx.projectId, observe, source.since ?? 0);
     }
 
     default:

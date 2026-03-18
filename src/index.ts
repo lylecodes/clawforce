@@ -233,6 +233,26 @@ export { createFlag, getFlag, listFlags, resolveFlag, dismissFlag } from "./memo
 export type { CreateFlagParams } from "./memory/demotion.js";
 export { formatExpectationsReminder } from "./memory/ghost-turn.js";
 
+// Adaptation
+export { hireAgent } from "./adaptation/hire.js";
+export type { HireSpec, HireResult } from "./adaptation/hire.js";
+export { reallocateBudget } from "./adaptation/budget-reallocate.js";
+export type { ReallocateParams, ReallocateResult } from "./adaptation/budget-reallocate.js";
+export { checkAdaptationPermission, ADAPTATION_CARDS } from "./adaptation/cards.js";
+export type { AdaptationCard, CardRisk, PermissionResult } from "./adaptation/cards.js";
+export { initializeAutonomy } from "./adaptation/autonomy-init.js";
+
+// Direction
+export { parseDirection, validateDirection } from "./direction.js";
+export type { Direction, DirectionPhase, DirectionConstraints, Autonomy } from "./direction.js";
+
+// Templates
+export { getTemplate, STARTUP_TEMPLATE } from "./templates/startup.js";
+export type { TemplateDefinition } from "./templates/startup.js";
+
+// Context: observed events
+export { renderObservedEvents } from "./context/observed-events.js";
+
 // --- Dispatch Gate ---
 export { shouldDispatch } from "./dispatch/dispatcher.js";
 

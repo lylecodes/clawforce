@@ -200,7 +200,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
@@ -214,6 +214,8 @@ export type ContextSource = {
   params?: Record<string, unknown>;
   /** Custom stream name (for source: "custom_stream"). */
   streamName?: string;
+  /** Timestamp for observed_events source: only show events after this time. */
+  since?: number;
 };
 
 /** A deliverable the agent is responsible for completing. */
@@ -316,6 +318,8 @@ export type AgentConfig = {
   skillCap?: number;
   /** Memory governance configuration. */
   memory?: MemoryGovernanceConfig;
+  /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. */
+  observe?: string[];
 };
 
 /** A scoped session definition for an agent. */
@@ -354,6 +358,8 @@ export type JobDefinition = {
   compaction?: boolean | CompactionConfig;
   /** Nudge text for the cron payload (replaces default nudge). */
   nudge?: string;
+  /** Tool scope for this job. Intersects with agent's tool list — only these tools are available during this job. If omitted, all agent tools are available. */
+  tools?: string[];
 };
 
 /** Top-level approval policy configuration. */
@@ -708,6 +714,7 @@ export type CostRecord = {
   model?: string;
   provider?: string;
   source: string;
+  jobName?: string;
   createdAt: number;
 };
 

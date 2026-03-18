@@ -52,6 +52,7 @@ export function recordCost(
     model?: string;
     provider?: string;
     source?: string;
+    jobName?: string;
   },
   dbOverride?: DatabaseSync,
 ): CostRecord {
@@ -70,8 +71,8 @@ export function recordCost(
     db.prepare(`
       INSERT INTO cost_records (id, project_id, agent_id, session_key, task_id,
         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-        cost_cents, model, provider, source, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        cost_cents, model, provider, source, created_at, job_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       params.projectId,
@@ -87,6 +88,7 @@ export function recordCost(
       params.provider ?? null,
       params.source ?? "dispatch",
       now,
+      params.jobName ?? null,
     );
 
     // Update budget window counters (hourly/daily/monthly × cents/tokens/requests).
@@ -178,6 +180,7 @@ export function recordCost(
     model: params.model,
     provider: params.provider,
     source: params.source ?? "dispatch",
+    jobName: params.jobName,
     createdAt: now,
   };
 }

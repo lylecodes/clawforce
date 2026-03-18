@@ -356,7 +356,7 @@ const VALID_SOURCES: ContextSource["source"][] = [
   "velocity", "preferences", "trust_scores", "resources", "initiative_status",
   "cost_forecast", "available_capacity", "knowledge_candidates",
   "budget_guidance", "onboarding_welcome", "weekly_digest", "intervention_suggestions",
-  "custom_stream",
+  "custom_stream", "observed_events",
 ];
 
 function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
@@ -479,6 +479,10 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
 
   const jobs = normalizeJobs(raw.jobs);
 
+  const observe = Array.isArray(raw.observe)
+    ? (raw.observe.filter((s: unknown) => typeof s === "string") as string[])
+    : undefined;
+
   const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;
 
   let scheduling: SchedulingConfig | undefined;
@@ -508,6 +512,7 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     skill_pack: skillPackName,
     compaction: compaction === false ? undefined : compaction,
     jobs,
+    observe: observe && observe.length > 0 ? observe : undefined,
     scheduling,
     skillCap,
     memory,
@@ -1199,4 +1204,17 @@ export function resetEnforcementConfigForTest(): void {
   agentConfigRegistry.clear();
   approvalPolicies.clear();
   projectExtendedConfig.clear();
+}
+
+/**
+ * Register a single agent into the config registry at runtime.
+ * Used by adaptation flows (e.g. agent hiring) to spin up new agents.
+ */
+export function registerAgentInProject(
+  projectId: string,
+  agentId: string,
+  config: AgentConfig,
+  projectDir?: string,
+): void {
+  agentConfigRegistry.set(agentId, { projectId, config, projectDir });
 }

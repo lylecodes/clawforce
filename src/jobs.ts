@@ -58,12 +58,18 @@ export function resolveEffectiveConfig(
   const performance_policy = job.performance_policy ?? base.performance_policy;
   const compaction = job.compaction !== undefined ? job.compaction : base.compaction;
 
+  // Tool scoping: job.tools narrows the agent's available tools
+  const tools = job.tools && base.tools
+    ? base.tools.filter(t => job.tools!.includes(t))
+    : job.tools ?? base.tools;
+
   return {
     ...base,
     briefing,
     expectations,
     performance_policy,
     compaction,
+    tools,
     // Don't propagate jobs into the effective config
     jobs: undefined,
   };
