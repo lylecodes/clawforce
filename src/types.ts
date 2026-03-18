@@ -714,6 +714,7 @@ export type CostRecord = {
   model?: string;
   provider?: string;
   source: string;
+  jobName?: string;
   createdAt: number;
 };
 
