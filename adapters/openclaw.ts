@@ -788,6 +788,7 @@ const clawforcePlugin = {
             target,
             message: actionResult.alertMessage,
             sourceAgentId: session.agentId,
+            projectId: session.projectId,
             logger: api.logger,
           });
         } catch (err) {
