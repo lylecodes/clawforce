@@ -49,6 +49,8 @@ import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
 import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
 import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
 import { buildReviewContext } from "../memory/review-context.js";
+import { renderDomainContext } from "./domain-context.js";
+import { getProjectsDir } from "../db.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -313,6 +315,14 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
       // Custom streams with queries are resolved through the router.
       // In briefing context, show the stream description as a reference.
       return `## ${source.streamName}\n\n${streamDef.description}`;
+    }
+
+    case "direction":
+    case "policies":
+    case "standards":
+    case "architecture": {
+      if (!ctx.projectId) return null;
+      return renderDomainContext(getProjectsDir(), ctx.projectId, source.source);
     }
 
     default:
