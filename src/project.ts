@@ -48,9 +48,17 @@ import type {
   SloDefinition,
   TaskPriority,
   ToolGatesConfig,
+  TriggerAfterProcess,
+  TriggerAuth,
+  TriggerAuthType,
+  TriggerCondition,
+  TriggerConditionOperator,
+  TriggerDefinition,
+  TriggerSeverity,
+  TriggerSource,
   WorkforceConfig,
 } from "./types.js";
-import { EVENT_ACTION_TYPES } from "./types.js";
+import { EVENT_ACTION_TYPES, TRIGGER_SOURCES } from "./types.js";
 
 export type ProjectConfig = {
   id: string;
@@ -178,6 +186,11 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   // Parse event_handlers config
   if (raw.event_handlers && typeof raw.event_handlers === "object") {
     result.event_handlers = normalizeEventHandlersConfig(raw.event_handlers as Record<string, unknown>);
+  }
+
+  // Parse triggers config
+  if (raw.triggers && typeof raw.triggers === "object") {
+    result.triggers = normalizeTriggerConfig(raw.triggers as Record<string, unknown>);
   }
 
   // Parse review config
@@ -985,6 +998,101 @@ function normalizeEventHandlersConfig(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+const VALID_TRIGGER_ACTIONS: TriggerAfterProcess[] = ["create_task", "emit_event", "enqueue", "none"];
+const VALID_TRIGGER_AUTH_TYPES: TriggerAuthType[] = ["none", "bearer", "hmac", "api_key"];
+const VALID_TRIGGER_SEVERITIES: TriggerSeverity[] = ["low", "medium", "high", "critical"];
+const VALID_TRIGGER_OPERATORS: TriggerConditionOperator[] = [
+  "==", "!=", ">", "<", ">=", "<=", "contains", "matches", "exists", "not_exists",
+];
+
+export function normalizeTriggerConfig(
+  raw: Record<string, unknown>,
+): Record<string, TriggerDefinition> | undefined {
+  const result: Record<string, TriggerDefinition> = {};
+
+  for (const [name, rawDef] of Object.entries(raw)) {
+    if (typeof rawDef !== "object" || rawDef === null) continue;
+    const d = rawDef as Record<string, unknown>;
+
+    const def: TriggerDefinition = {};
+
+    if (typeof d.description === "string" && d.description.trim()) {
+      def.description = d.description.trim();
+    }
+    if (typeof d.enabled === "boolean") {
+      def.enabled = d.enabled;
+    }
+    if (Array.isArray(d.sources)) {
+      const sources = (d.sources as unknown[])
+        .filter((s): s is string => typeof s === "string")
+        .filter((s) => TRIGGER_SOURCES.includes(s as TriggerSource)) as TriggerSource[];
+      if (sources.length > 0) def.sources = sources;
+    }
+    if (typeof d.auth === "object" && d.auth !== null) {
+      const a = d.auth as Record<string, unknown>;
+      const authType = typeof a.type === "string" && VALID_TRIGGER_AUTH_TYPES.includes(a.type as TriggerAuthType)
+        ? (a.type as TriggerAuthType)
+        : "none";
+      const auth: TriggerAuth = { type: authType };
+      if (typeof a.secret === "string") auth.secret = a.secret;
+      if (typeof a.header_name === "string") auth.headerName = a.header_name;
+      def.auth = auth;
+    }
+    if (Array.isArray(d.conditions)) {
+      const conditions: TriggerCondition[] = [];
+      for (const rawCond of d.conditions) {
+        if (typeof rawCond !== "object" || rawCond === null) continue;
+        const c = rawCond as Record<string, unknown>;
+        if (typeof c.field !== "string" || !c.field.trim()) continue;
+        const operator = typeof c.operator === "string" && VALID_TRIGGER_OPERATORS.includes(c.operator as TriggerConditionOperator)
+          ? (c.operator as TriggerConditionOperator)
+          : "==";
+        const cond: TriggerCondition = { field: c.field.trim(), operator };
+        if (c.value !== undefined) cond.value = c.value;
+        conditions.push(cond);
+      }
+      if (conditions.length > 0) def.conditions = conditions;
+    }
+    if (typeof d.action === "string" && VALID_TRIGGER_ACTIONS.includes(d.action as TriggerAfterProcess)) {
+      def.action = d.action as TriggerAfterProcess;
+    }
+    if (typeof d.task_template === "string" && d.task_template.trim()) {
+      def.task_template = d.task_template.trim();
+    }
+    if (typeof d.task_description === "string" && d.task_description.trim()) {
+      def.task_description = d.task_description.trim();
+    }
+    const VALID_TASK_PRIORITIES: string[] = ["P0", "P1", "P2", "P3"];
+    if (typeof d.task_priority === "string" && VALID_TASK_PRIORITIES.includes(d.task_priority)) {
+      def.task_priority = d.task_priority as TaskPriority;
+    }
+    if (typeof d.assign_to === "string" && d.assign_to.trim()) {
+      def.assign_to = d.assign_to.trim();
+    }
+    if (typeof d.cooldown_ms === "number" && d.cooldown_ms > 0) {
+      def.cooldownMs = d.cooldown_ms;
+    }
+    // Also accept camelCase for cooldownMs
+    if (def.cooldownMs === undefined && typeof d.cooldownMs === "number" && (d.cooldownMs as number) > 0) {
+      def.cooldownMs = d.cooldownMs as number;
+    }
+    if (typeof d.severity === "string" && VALID_TRIGGER_SEVERITIES.includes(d.severity as TriggerSeverity)) {
+      def.severity = d.severity as TriggerSeverity;
+    }
+    if (Array.isArray(d.tags)) {
+      const tags = (d.tags as unknown[])
+        .filter((t): t is string => typeof t === "string")
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+      if (tags.length > 0) def.tags = tags;
+    }
+
+    result[name] = def;
+  }
+
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function normalizeReviewConfig(raw: Record<string, unknown>): ReviewConfig {
   const result: ReviewConfig = {};
 
@@ -1073,6 +1181,7 @@ type ExtendedProjectConfig = {
   toolGates?: ToolGatesConfig;
   bulkThresholds?: WorkforceConfig["bulkThresholds"];
   eventHandlers?: Record<string, EventHandlerConfig>;
+  triggers?: Record<string, TriggerDefinition>;
   review?: ReviewConfig;
   channels?: ChannelConfig[];
   safety?: WorkforceConfig["safety"];
@@ -1159,7 +1268,7 @@ export function registerWorkforceConfig(
   }
 
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.review || wfConfig.channels || wfConfig.safety) {
+  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety) {
     projectExtendedConfig.set(projectId, {
       policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
@@ -1169,6 +1278,7 @@ export function registerWorkforceConfig(
       toolGates: wfConfig.toolGates,
       bulkThresholds: wfConfig.bulkThresholds,
       eventHandlers: wfConfig.event_handlers,
+      triggers: wfConfig.triggers,
       review: wfConfig.review,
       channels: wfConfig.channels,
       safety: wfConfig.safety,

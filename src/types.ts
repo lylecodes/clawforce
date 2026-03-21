@@ -421,6 +421,8 @@ export type WorkforceConfig = {
   safety?: SafetyConfig;
   /** Goal definitions with optional allocation percentages. */
   goals?: Record<string, GoalConfigEntry>;
+  /** External trigger definitions. */
+  triggers?: Record<string, TriggerDefinition>;
   /** Knowledge lifecycle configuration (promotion thresholds, etc.). */
   knowledge?: KnowledgeConfig;
   /** Manager/orchestrator cron configuration. */
@@ -1182,4 +1184,76 @@ export type ProfileRecommendation = {
     fitsInBudget: boolean;
     headroomPercent: number;
   }>;
+};
+
+// --- Trigger types ---
+
+/** Source type for an external trigger. */
+export type TriggerSource = "webhook" | "cli" | "file_watcher" | "sdk" | "cron" | "manual";
+
+export const TRIGGER_SOURCES: readonly TriggerSource[] = [
+  "webhook", "cli", "file_watcher", "sdk", "cron", "manual",
+] as const;
+
+/** Authentication type for a trigger. */
+export type TriggerAuthType = "none" | "bearer" | "hmac" | "api_key";
+
+/** Authentication configuration for a trigger endpoint. */
+export type TriggerAuth = {
+  type: TriggerAuthType;
+  /** Secret or token value (for bearer/hmac/api_key). */
+  secret?: string;
+  /** Header name for API key auth (defaults to "x-api-key"). */
+  headerName?: string;
+};
+
+/** Comparison operator for trigger conditions. */
+export type TriggerConditionOperator =
+  | "==" | "!=" | ">" | "<" | ">=" | "<="
+  | "contains" | "matches" | "exists" | "not_exists";
+
+/** A single condition that must pass for a trigger to fire. */
+export type TriggerCondition = {
+  /** Dotted path into the payload (e.g. "data.status"). */
+  field: string;
+  /** Comparison operator. */
+  operator: TriggerConditionOperator;
+  /** Value to compare against (not required for exists/not_exists). */
+  value?: unknown;
+};
+
+/** What to do after a trigger fires. */
+export type TriggerAfterProcess = "create_task" | "emit_event" | "enqueue" | "none";
+
+/** Severity level for a trigger. */
+export type TriggerSeverity = "low" | "medium" | "high" | "critical";
+
+/** A complete trigger definition from the config. */
+export type TriggerDefinition = {
+  /** Human-readable description. */
+  description?: string;
+  /** Whether this trigger is active. Defaults to true. */
+  enabled?: boolean;
+  /** Allowed source types. If omitted, all sources are accepted. */
+  sources?: TriggerSource[];
+  /** Authentication config. */
+  auth?: TriggerAuth;
+  /** Conditions that must ALL pass for the trigger to fire. */
+  conditions?: TriggerCondition[];
+  /** What to do after conditions pass. Defaults to "create_task". */
+  action?: TriggerAfterProcess;
+  /** Title template for created tasks (supports {{payload.field}} interpolation). */
+  task_template?: string;
+  /** Description template for created tasks. */
+  task_description?: string;
+  /** Priority for created tasks. Defaults to "P2". */
+  task_priority?: TaskPriority;
+  /** Agent to assign created tasks to. */
+  assign_to?: string;
+  /** Cooldown in milliseconds — suppress re-fires within this window. */
+  cooldownMs?: number;
+  /** Severity level for this trigger. */
+  severity?: TriggerSeverity;
+  /** Tags to attach to created tasks. */
+  tags?: string[];
 };
