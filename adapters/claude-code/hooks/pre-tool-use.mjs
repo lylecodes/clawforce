@@ -11,10 +11,10 @@
  *         Nothing if allowed (implicit allow)
  */
 
-import { initClawforce, initializeAllDomains } from '../../../dist/src/index.js';
+import { initClawforce, initializeAllDomains } from '../../../src/index.js';
 
 // Dynamic import for enforceToolPolicy — it's in the policy subdirectory
-const { enforceToolPolicy } = await import('../../../dist/src/policy/middleware.js');
+const { enforceToolPolicy } = await import('../../../src/policy/middleware.js');
 
 const projectsDir = process.env.CLAWFORCE_PROJECTS_DIR || `${process.env.HOME}/.clawforce`;
 const agentId = process.env.CLAWFORCE_AGENT_ID;

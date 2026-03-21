@@ -9,7 +9,7 @@
  * Writes: Nothing (compliance result logged to stderr if non-compliant)
  */
 
-import { initClawforce, endSession, checkCompliance, recordCompliantRun, executeFailureAction, getAgentConfig } from '../../../dist/src/index.js';
+import { initClawforce, endSession, checkCompliance, recordCompliantRun, executeFailureAction, getAgentConfig } from '../../../src/index.js';
 
 const projectsDir = process.env.CLAWFORCE_PROJECTS_DIR || `${process.env.HOME}/.clawforce`;
 const sessionKey = process.env.CLAWFORCE_SESSION_KEY;

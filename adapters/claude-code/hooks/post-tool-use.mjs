@@ -9,7 +9,7 @@
  * Writes: Nothing (fire-and-forget tracking)
  */
 
-import { initClawforce, recordToolCall } from '../../../dist/src/index.js';
+import { initClawforce, recordToolCall } from '../../../src/index.js';
 
 const projectsDir = process.env.CLAWFORCE_PROJECTS_DIR || `${process.env.HOME}/.clawforce`;
 const sessionKey = process.env.CLAWFORCE_SESSION_KEY;

@@ -10,7 +10,7 @@
  * Writes: JSON to stdout with { systemPrompt } if context available
  */
 
-import { initClawforce, initializeAllDomains, assembleContext, startTracking, getAgentConfig } from '../../../dist/src/index.js';
+import { initClawforce, initializeAllDomains, assembleContext, startTracking, getAgentConfig } from '../../../src/index.js';
 
 const projectsDir = process.env.CLAWFORCE_PROJECTS_DIR || `${process.env.HOME}/.clawforce`;
 const agentId = process.env.CLAWFORCE_AGENT_ID;
