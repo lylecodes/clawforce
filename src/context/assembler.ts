@@ -107,7 +107,11 @@ export function assembleContext(
     sections.push(profileHeader);
   }
 
-  for (const source of config.briefing) {
+  for (const rawSource of config.briefing) {
+    // Normalize: presets store briefing as string[] but assembler expects ContextSource[]
+    const source: ContextSource = typeof rawSource === "string"
+      ? { source: rawSource as ContextSource["source"] }
+      : rawSource;
     const content = resolveSource(source, ctx, sessionKey);
     if (content) {
       sections.push(content);
