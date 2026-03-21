@@ -242,6 +242,18 @@ export const BUILTIN_JOB_PRESETS: Record<string, Record<string, unknown>> = {
     nudge: "Check on your team. Reassign stuck tasks, handle escalations.",
     performance_policy: { action: "alert" },
   },
+  daily_review: {
+    cron: "0 18 * * *",
+    briefing: [
+      { source: "instructions" },
+      { source: "task_board" },
+      { source: "team_performance" },
+      { source: "velocity" },
+      { source: "trust_scores" },
+      { source: "cost_summary" },
+    ],
+    nudge: "Review today's progress. Check task completion, agent performance, and budget efficiency. Take action: reassign stuck work, adjust priorities, message underperformers with specific feedback.",
+  },
   memory_review: {
     cron: "0 18 * * *",
     model: "anthropic/claude-sonnet-4-6",

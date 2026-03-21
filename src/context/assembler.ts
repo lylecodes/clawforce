@@ -50,6 +50,8 @@ import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
 import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
 import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
 import { buildReviewContext } from "../memory/review-context.js";
+import { renderDomainContext } from "./domain-context.js";
+import { getProjectsDir } from "../db.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -320,6 +322,14 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
       if (!ctx.projectId) return null;
       const observe = ctx.config.observe ?? [];
       return renderObservedEvents(ctx.projectId, observe, source.since ?? 0);
+    }
+
+    case "direction":
+    case "policies":
+    case "standards":
+    case "architecture": {
+      if (!ctx.projectId) return null;
+      return renderDomainContext(getProjectsDir(), ctx.projectId, source.source);
     }
 
     default:

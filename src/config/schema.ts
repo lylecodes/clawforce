@@ -65,6 +65,12 @@ export type DomainConfig = {
     agentId?: string;
   };
   operational_profile?: OperationalProfile;
+  /** Domain-wide defaults inherited by ALL agents in this domain. */
+  defaults?: {
+    briefing?: unknown[];
+    expectations?: unknown[];
+    performance_policy?: Record<string, unknown>;
+  };
   [key: string]: unknown;
 };
 
