@@ -157,18 +157,7 @@ async function dispatchViaClaude(
     }
   }
 
-  // Add explicit ClawForce tool lifecycle instructions
-  contextParts.push(`## ClawForce Task Lifecycle (REQUIRED)
-
-You have ClawForce MCP tools available. You MUST follow this lifecycle:
-
-1. **Start**: Call \`clawforce_task\` with action "transition", task_id "${item.taskId}", project_id "${item.projectId}", new_state "IN_PROGRESS"
-2. **Work**: Execute the task instructions
-3. **Log**: Call \`clawforce_log\` with action "write", project_id "${item.projectId}" to record what you did
-4. **Evidence**: Call \`clawforce_task\` with action "attach_evidence", task_id "${item.taskId}", project_id "${item.projectId}", evidence_type "output", content with your results
-5. **Complete**: Call \`clawforce_task\` with action "transition", task_id "${item.taskId}", project_id "${item.projectId}", new_state "REVIEW"
-
-These are mandatory deliverables. Do not skip them.`);
+  // Lifecycle instructions go in the prompt, not system prompt (agents follow prompt instructions more reliably)
 
   if (contextParts.length > 0) {
     args.push("--append-system-prompt", contextParts.join("\n\n"));
