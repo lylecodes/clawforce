@@ -19,7 +19,8 @@
  *   CLAUDE_MODEL            — Default model override
  */
 
-import { execFile, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { initClawforce } from "../../src/lifecycle.js";
 import { initializeAllDomains } from "../../src/config/init.js";
@@ -55,8 +56,11 @@ let activeDispatches = 0;
 let shutdownRequested = false;
 const activeProcesses = new Set<ChildProcess>();
 
-// --- MCP config path (resolved at startup) ---
-const mcpConfigPath = path.resolve(import.meta.dirname, "clawforce-mcp.json");
+// --- MCP server script path ---
+const mcpServerPath = path.resolve(import.meta.dirname, "mcp-server.js");
+
+// --- Temp dir for per-dispatch MCP configs ---
+const tmpDir = path.join(projectsDir, "tmp");
 
 // --- Initialization ---
 function init(): void {
@@ -69,7 +73,45 @@ function log(msg: string): void {
   process.stderr.write(`[clawforce-runner] ${msg}\n`);
 }
 
-// --- Dispatch via Claude CLI ---
+/**
+ * Generate a per-dispatch MCP config file.
+ * Each dispatch gets its own config so env vars are isolated.
+ */
+function generateMcpConfig(dispatchId: string, agentId: string): string {
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const configPath = path.join(tmpDir, `mcp-config-${dispatchId}.json`);
+
+  const config = {
+    mcpServers: {
+      clawforce: {
+        command: "node",
+        args: [mcpServerPath],
+        env: {
+          CLAWFORCE_PROJECT_ID: projectId!,
+          CLAWFORCE_AGENT_ID: agentId,
+          CLAWFORCE_SESSION_KEY: `dispatch:${dispatchId}`,
+          CLAWFORCE_PROJECTS_DIR: projectsDir,
+        },
+      },
+    },
+  };
+
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  return configPath;
+}
+
+/**
+ * Clean up a per-dispatch MCP config file.
+ */
+function cleanupMcpConfig(dispatchId: string): void {
+  try {
+    fs.unlinkSync(path.join(tmpDir, `mcp-config-${dispatchId}.json`));
+  } catch {
+    // Ignore cleanup errors
+  }
+}
+
+// --- Dispatch via Claude CLI (rentright pattern) ---
 async function dispatchViaClaude(
   item: DispatchQueueItem,
   prompt: string,
@@ -79,64 +121,92 @@ async function dispatchViaClaude(
     projectDir?: string;
     timeoutMs?: number;
   },
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; output?: string }> {
+  // Generate per-dispatch MCP config
+  const mcpConfigPath = generateMcpConfig(item.id, agentId);
+
+  const args: string[] = [
+    "--print",
+    "--output-format", "stream-json",
+    "--mcp-config", mcpConfigPath,
+    "--dangerously-skip-permissions",
+    "--no-session-persistence",
+    "--max-turns", "25",
+  ];
+
+  // Model override
+  const model = options?.model || claudeModel;
+  if (model) {
+    args.push("--model", model);
+  }
+
+  // Prompt
+  args.push(prompt);
+
+  // Clean environment — prevent inheriting parent session state
+  const env = { ...process.env };
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  delete env.CLAUDECODE;
+  env.CLAUDE_CODE_DONT_INHERIT_ENV = "1";
+  env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+  env.CLAWFORCE_PROJECT_ID = item.projectId;
+  env.CLAWFORCE_AGENT_ID = agentId;
+  env.CLAWFORCE_SESSION_KEY = `dispatch:${item.id}`;
+  env.CLAWFORCE_PROJECTS_DIR = projectsDir;
+
   return new Promise((resolve) => {
-    const args: string[] = [
-      "--print",       // Non-interactive, print output
-      "--output-format", "text",
-    ];
-
-    // Model override
-    const model = options?.model || claudeModel;
-    if (model) {
-      args.push("--model", model);
-    }
-
-    // Profile override
-    // No --profile flag — use CLAUDE_BINARY env var to select the right binary
-
-    // MCP server config
-    args.push("--mcp-config", mcpConfigPath);
-
-    // Prompt goes last
-    args.push("-p", prompt);
-
-    // Environment variables for the spawned session
-    const env = {
-      ...process.env,
-      CLAWFORCE_PROJECT_ID: item.projectId,
-      CLAWFORCE_AGENT_ID: agentId,
-      CLAWFORCE_SESSION_KEY: `dispatch:${item.id}`,
-      CLAWFORCE_PROJECTS_DIR: projectsDir,
-      ...(claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
-    };
-
     const startTime = Date.now();
+    let stdout = "";
+    let stderr = "";
 
     try {
-      const childProcess = execFile(claudeBinary, args, {
-        env,
+      const proc = spawn(claudeBinary, args, {
         cwd: options?.projectDir || undefined,
-        timeout: options?.timeoutMs || 10 * 60 * 1000, // 10 minute default
-        maxBuffer: 10 * 1024 * 1024, // 10MB output buffer
-      }, (error, stdout, stderr) => {
-        activeProcesses.delete(childProcess);
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      activeProcesses.add(proc);
+
+      proc.stdout.on("data", (data: Buffer) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on("data", (data: Buffer) => {
+        stderr += data.toString();
+      });
+
+      // Timeout
+      const timeoutMs = options?.timeoutMs || 10 * 60 * 1000;
+      const timer = setTimeout(() => {
+        proc.kill("SIGTERM");
+      }, timeoutMs);
+
+      proc.on("close", (code) => {
+        clearTimeout(timer);
+        activeProcesses.delete(proc);
+        cleanupMcpConfig(item.id);
+
         const durationMs = Date.now() - startTime;
 
-        if (error) {
-          const errorMsg = error.killed
-            ? `Timed out after ${durationMs}ms`
-            : error.message;
-          log(`Dispatch failed for task ${item.taskId}: ${errorMsg}`);
+        if (code !== 0 && code !== null) {
+          const errorMsg = stderr.slice(-500) || `Exit code ${code}`;
+          log(`Dispatch failed for task ${item.taskId} (exit ${code}, ${durationMs}ms): ${errorMsg}`);
           resolve({ ok: false, error: errorMsg });
         } else {
           log(`Dispatch completed for task ${item.taskId} in ${durationMs}ms`);
-          resolve({ ok: true });
+          resolve({ ok: true, output: stdout });
         }
       });
 
-      activeProcesses.add(childProcess);
+      proc.on("error", (err) => {
+        clearTimeout(timer);
+        activeProcesses.delete(proc);
+        cleanupMcpConfig(item.id);
+        resolve({ ok: false, error: `Spawn error: ${err.message}` });
+      });
     } catch (err) {
+      cleanupMcpConfig(item.id);
       resolve({
         ok: false,
         error: `Failed to spawn claude: ${err instanceof Error ? err.message : String(err)}`,
