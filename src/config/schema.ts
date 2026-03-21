@@ -25,9 +25,16 @@ export type GlobalDefaults = {
   };
 };
 
+/** Supported adapter backends for ClawForce dispatch. */
+export type AdapterType = "openclaw" | "claude-code";
+
 export type GlobalConfig = {
   defaults?: GlobalDefaults;
   agents: Record<string, GlobalAgentDef>;
+  /** Adapter backend to use for dispatch (default: "openclaw"). */
+  adapter?: AdapterType;
+  /** Claude Code adapter configuration (used when adapter is "claude-code"). */
+  claude_code?: Record<string, unknown>;
 };
 
 export type DomainConfig = {
@@ -84,6 +91,25 @@ export function validateGlobalConfig(config: unknown): ValidationResult {
     errors.push({
       field: "agents",
       message: "agents must be a non-array object",
+    });
+  }
+
+  // Validate adapter field
+  if (config.adapter !== undefined) {
+    const validAdapters: AdapterType[] = ["openclaw", "claude-code"];
+    if (typeof config.adapter !== "string" || !validAdapters.includes(config.adapter as AdapterType)) {
+      errors.push({
+        field: "adapter",
+        message: `adapter must be one of: ${validAdapters.join(", ")}`,
+      });
+    }
+  }
+
+  // Validate claude_code config shape (detailed validation delegated to adapter)
+  if (config.claude_code !== undefined && !isObject(config.claude_code)) {
+    errors.push({
+      field: "claude_code",
+      message: "claude_code must be an object",
     });
   }
 
