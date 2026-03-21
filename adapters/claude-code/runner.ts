@@ -98,7 +98,7 @@ async function dispatchViaClaude(
     args.push("--mcp-config", mcpConfigPath);
 
     // Prompt goes last
-    args.push("--prompt", prompt);
+    args.push("-p", prompt);
 
     // Environment variables for the spawned session
     const env = {
