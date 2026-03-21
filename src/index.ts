@@ -174,6 +174,13 @@ export type { TemplateContext } from "./events/template.js";
 export { executeAction } from "./events/actions.js";
 export type { ActionResult } from "./events/actions.js";
 
+// --- Triggers ---
+export { evaluateConditions, resolvePath } from "./triggers/conditions.js";
+export type { ConditionResult, ConditionsResult } from "./triggers/conditions.js";
+export { fireTrigger, getTriggerDefinitions, clearCooldowns } from "./triggers/processor.js";
+export type { TriggerFireResult } from "./triggers/processor.js";
+export { normalizeTriggerConfig } from "./project.js";
+
 // --- Diagnostics ---
 export { emitDiagnosticEvent, setDiagnosticEmitter } from "./diagnostics.js";
 
@@ -323,4 +330,12 @@ export type {
   CostLineItem,
   ProfileCostEstimate,
   ProfileRecommendation,
+  TriggerSource,
+  TriggerAuthType,
+  TriggerAuth,
+  TriggerCondition,
+  TriggerConditionOperator,
+  TriggerAfterProcess,
+  TriggerSeverity,
+  TriggerDefinition,
 } from "./types.js";
