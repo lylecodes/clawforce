@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "clawforce": {
+      "command": "node",
+      "args": ["PLACEHOLDER_PATH/adapters/claude-code/mcp-server.js"]
+    }
+  }
+}
