@@ -84,11 +84,6 @@ async function dispatchViaClaude(
       "--output-format", "text",
     ];
 
-    // Set project directory
-    if (options?.projectDir) {
-      args.push("--cwd", options.projectDir);
-    }
-
     // Model override
     const model = options?.model || claudeModel;
     if (model) {
@@ -120,6 +115,7 @@ async function dispatchViaClaude(
     try {
       const childProcess = execFile("claude", args, {
         env,
+        cwd: options?.projectDir || undefined,
         timeout: options?.timeoutMs || 10 * 60 * 1000, // 10 minute default
         maxBuffer: 10 * 1024 * 1024, // 10MB output buffer
       }, (error, stdout, stderr) => {
