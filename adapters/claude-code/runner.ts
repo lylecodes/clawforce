@@ -34,6 +34,7 @@ import { shouldDispatch } from "../../src/dispatch/dispatcher.js";
 import { getDb } from "../../src/db.js";
 import { writeAuditEntry } from "../../src/audit.js";
 import { recordMetric } from "../../src/metrics.js";
+import { assembleContext } from "../../src/context/assembler.js";
 import type { DispatchQueueItem } from "../../src/types.js";
 
 // --- Configuration ---
@@ -120,6 +121,7 @@ async function dispatchViaClaude(
     model?: string;
     projectDir?: string;
     timeoutMs?: number;
+    agentEntry?: { config: import("../../src/types.js").AgentConfig; projectDir?: string };
   },
 ): Promise<{ ok: boolean; error?: string; output?: string }> {
   // Generate per-dispatch MCP config
@@ -138,6 +140,19 @@ async function dispatchViaClaude(
   const model = options?.model || claudeModel;
   if (model) {
     args.push("--model", model);
+  }
+
+  // Assemble ClawForce governance context for the agent
+  const agentEntry = options?.agentEntry;
+  if (agentEntry) {
+    const systemContext = assembleContext(agentId, agentEntry.config, {
+      projectId: item.projectId,
+      projectDir: agentEntry.projectDir,
+      sessionKey: `dispatch:${item.id}`,
+    });
+    if (systemContext) {
+      args.push("--append-system-prompt", systemContext);
+    }
   }
 
   // Prompt
@@ -287,6 +302,7 @@ async function tick(): Promise<number> {
       model,
       projectDir,
       timeoutMs,
+      agentEntry: agentEntry ? { config: agentEntry.config, projectDir: agentEntry.projectDir } : undefined,
     }).then((result) => {
       activeDispatches--;
 
