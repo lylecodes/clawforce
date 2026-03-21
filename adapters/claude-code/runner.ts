@@ -127,7 +127,7 @@ async function dispatchViaClaude(
 
   const args: string[] = [
     "--print",
-    "--output-format", "stream-json",
+    "--output-format", "text",
     "--mcp-config", mcpConfigPath,
     "--dangerously-skip-permissions",
     "--no-session-persistence",
