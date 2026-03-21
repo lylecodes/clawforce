@@ -13,7 +13,7 @@ import { registerDomain } from "../lifecycle.js";
 import { registerWorkforceConfig } from "../project.js";
 import { resolveConfig, BUILTIN_AGENT_PRESETS } from "../presets.js";
 import { safeLog } from "../diagnostics.js";
-import type { AgentConfig, WorkforceConfig } from "../types.js";
+import type { AgentConfig, ContextSource, Expectation, PerformancePolicy, WorkforceConfig } from "../types.js";
 import type { GlobalConfig, DomainConfig, GlobalAgentDef } from "./schema.js";
 import { inferPreset, markInferred } from "./inference.js";
 import { normalizeDomainProfile } from "../profiles/operational.js";
@@ -168,7 +168,9 @@ function buildWorkforceConfig(
       }
     }
 
-    agents[agentId] = resolved as AgentConfig;
+    // Apply domain defaults (briefing prepended, expectations appended, performance_policy fallback)
+    const withDomainDefaults = mergeDomainDefaults(resolved as AgentConfig, domain.defaults);
+    agents[agentId] = withDomainDefaults;
   }
 
   const projectDir = domain.paths?.[0]
@@ -263,6 +265,47 @@ function seedGoals(projectId: string, goals: Record<string, GoalConfigEntry>): v
   } catch (err) {
     safeLog("config.init.seedGoals", err);
   }
+}
+
+/**
+ * Merge domain-level defaults into an agent config.
+ *
+ * Merge order: domain defaults -> preset (manager/employee) -> agent-specific overrides.
+ * - Domain default briefing sources are PREPENDED to the agent's briefing (deduped).
+ * - Domain default expectations are APPENDED to the agent's expectations.
+ * - Domain default performance_policy is used if the agent doesn't specify one explicitly
+ *   (i.e. it only has the inherited preset default).
+ */
+export function mergeDomainDefaults(
+  agentConfig: AgentConfig,
+  domainDefaults: DomainConfig["defaults"],
+): AgentConfig {
+  if (!domainDefaults) return agentConfig;
+
+  const result = { ...agentConfig };
+
+  // Prepend domain default briefing sources (deduped)
+  if (domainDefaults.briefing && Array.isArray(domainDefaults.briefing) && domainDefaults.briefing.length > 0) {
+    const defaultSources = domainDefaults.briefing as ContextSource[];
+    const existingSourceKeys = new Set(result.briefing.map(s => s.source));
+
+    // Only prepend sources not already present
+    const newSources = defaultSources.filter(s => !existingSourceKeys.has(s.source));
+    result.briefing = [...newSources, ...result.briefing];
+  }
+
+  // Append domain default expectations
+  if (domainDefaults.expectations && Array.isArray(domainDefaults.expectations) && domainDefaults.expectations.length > 0) {
+    const defaultExpectations = domainDefaults.expectations as Expectation[];
+    result.expectations = [...result.expectations, ...defaultExpectations];
+  }
+
+  // Use domain default performance_policy if provided
+  if (domainDefaults.performance_policy && typeof domainDefaults.performance_policy === "object") {
+    result.performance_policy = domainDefaults.performance_policy as unknown as PerformancePolicy;
+  }
+
+  return result;
 }
 
 function resolveHomePath(p: string): string {
