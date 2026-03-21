@@ -42,7 +42,7 @@ const projectId = process.env.CLAWFORCE_PROJECT_ID;
 const projectsDir = process.env.CLAWFORCE_PROJECTS_DIR || `${process.env.HOME}/.clawforce`;
 const pollIntervalMs = parseInt(process.env.CLAWFORCE_POLL_INTERVAL || "30000", 10);
 const maxConcurrent = parseInt(process.env.CLAWFORCE_MAX_CONCURRENT || "2", 10);
-const claudeBinary = process.env.CLAUDE_BINARY || "claude";
+const claudeBinary = process.env.CLAUDE_BINARY || `${process.env.HOME}/.local/bin/claude`;
 // Use isolated config dir for dispatched agents — keeps hooks separate from user's personal CC config
 const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || `${projectsDir}/claude-config`;
 const claudeModel = process.env.CLAUDE_MODEL;
