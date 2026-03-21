@@ -41,6 +41,7 @@ const projectsDir = process.env.CLAWFORCE_PROJECTS_DIR || `${process.env.HOME}/.
 const pollIntervalMs = parseInt(process.env.CLAWFORCE_POLL_INTERVAL || "30000", 10);
 const maxConcurrent = parseInt(process.env.CLAWFORCE_MAX_CONCURRENT || "2", 10);
 const claudeBinary = process.env.CLAUDE_BINARY || "claude";
+const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
 const claudeModel = process.env.CLAUDE_MODEL;
 
 if (!projectId) {
@@ -106,6 +107,7 @@ async function dispatchViaClaude(
       CLAWFORCE_AGENT_ID: agentId,
       CLAWFORCE_SESSION_KEY: `dispatch:${item.id}`,
       CLAWFORCE_PROJECTS_DIR: projectsDir,
+      ...(claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
     };
 
     const startTime = Date.now();
