@@ -912,26 +912,37 @@ const clawforcePlugin = {
         if (cfAgentEntry) {
           const jobDef = cfAgentEntry.config.jobs?.[session.jobName];
           if (jobDef?.continuous) {
-            try {
-              const { buildJobCronJob, toCronJobCreate } = await import("../src/manager-cron.js");
-              const cronJob = buildJobCronJob(
-                session.projectId,
-                session.agentId,
-                session.jobName,
-                jobDef,
-                `at:${new Date().toISOString()}`,
-              );
-              cronJob.deleteAfterRun = true;
-              const cronInput = toCronJobCreate(cronJob);
-              // Use the setCronService'd service for dispatch
-              const { getCronService } = await import("../src/manager-cron.js");
-              const cronSvc = getCronService();
-              if (cronSvc) {
-                await cronSvc.add(cronInput);
-                api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
+            // Check safety gates before re-dispatching
+            const { shouldDispatch } = await import("../src/dispatch/dispatcher.js");
+            const { isEmergencyStopActive } = await import("../src/safety.js");
+
+            if (isEmergencyStopActive(session.projectId)) {
+              api.logger.warn(`Clawforce: continuous job "${session.jobName}" blocked — emergency stop active`);
+            } else {
+              const gateCheck = shouldDispatch(session.projectId, session.agentId);
+              if (!gateCheck.ok) {
+                api.logger.warn(`Clawforce: continuous job "${session.jobName}" blocked — ${gateCheck.reason}`);
+              } else {
+                try {
+                  const { buildJobCronJob, toCronJobCreate, getCronService } = await import("../src/manager-cron.js");
+                  const cronJob = buildJobCronJob(
+                    session.projectId,
+                    session.agentId,
+                    session.jobName,
+                    jobDef,
+                    `at:${new Date().toISOString()}`,
+                  );
+                  cronJob.deleteAfterRun = true;
+                  const cronInput = toCronJobCreate(cronJob);
+                  const cronSvc = getCronService();
+                  if (cronSvc) {
+                    await cronSvc.add(cronInput);
+                    api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
+                  }
+                } catch (err) {
+                  api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
+                }
               }
-            } catch (err) {
-              api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
         }

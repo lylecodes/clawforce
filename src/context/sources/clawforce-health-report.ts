@@ -182,6 +182,53 @@ export function buildClawforceHealthReport(
     lines.push("");
   }
 
+  // --- Last completed task ---
+  const lastDone = db.prepare(`
+    SELECT id, title, assigned_to, updated_at
+    FROM tasks
+    WHERE project_id = ? AND state = 'DONE'
+    ORDER BY updated_at DESC LIMIT 1
+  `).get(projectId) as Record<string, unknown> | undefined;
+
+  if (lastDone) {
+    lines.push("### Last Completed Task");
+    lines.push(`- **${lastDone.title}** by ${lastDone.assigned_to}`);
+    // Show recent git changes if projectDir available
+    if (projectDir) {
+      try {
+        const { execSync } = require("node:child_process");
+        const diff = execSync("git log --oneline -5", {
+          cwd: projectDir,
+          encoding: "utf-8",
+          timeout: 5000,
+        }).trim();
+        if (diff) {
+          lines.push("### Recent Commits");
+          lines.push("```");
+          lines.push(diff);
+          lines.push("```");
+        }
+      } catch { /* git not available or not a repo */ }
+    }
+    lines.push("");
+  }
+
+  // --- Pending tasks ---
+  const pendingTasks = db.prepare(`
+    SELECT title, state, assigned_to
+    FROM tasks
+    WHERE project_id = ? AND state NOT IN ('DONE', 'CANCELLED')
+    ORDER BY created_at DESC LIMIT 5
+  `).all(projectId) as Record<string, unknown>[];
+
+  if (pendingTasks.length > 0) {
+    lines.push("### Active Tasks");
+    for (const t of pendingTasks) {
+      lines.push(`- [${t.state}] ${t.title} → ${t.assigned_to || "unassigned"}`);
+    }
+    lines.push("");
+  }
+
   // --- Unimplemented specs ---
   if (projectDir) {
     const specs = listUnimplementedSpecs(projectDir);
