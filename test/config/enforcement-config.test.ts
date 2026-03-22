@@ -592,8 +592,7 @@ agents:
 
     // Inherits employee profile defaults
     expect(w1.briefing.some((s) => s.source === "assigned_task")).toBe(true);
-    expect(w1.expectations.some((r) => r.tool === "clawforce_task")).toBe(true);
-    expect(w1.expectations.some((r) => r.tool === "clawforce_log")).toBe(true);
+    expect(w1.expectations).toEqual([]);
     expect(w1.performance_policy.action).toBe("retry");
     expect(w1.performance_policy.max_retries).toBe(3);
     expect(w1.performance_policy.then).toBe("alert");
@@ -617,9 +616,8 @@ agents:
     expect(sourceNames).toContain("assigned_task");
     expect(sourceNames).toContain("memory_instructions");
     expect(sourceNames).toContain("skill");
-    // Inherits employee profile expectations
-    expect(worker.expectations.some((r) => r.tool === "clawforce_task")).toBe(true);
-    expect(worker.expectations.some((r) => r.tool === "clawforce_log")).toBe(true);
+    // Inherits employee profile expectations (empty — auto-lifecycle: zero ClawForce tools)
+    expect(worker.expectations).toEqual([]);
     // Inherits employee profile performance_policy
     expect(worker.performance_policy.action).toBe("retry");
     expect(worker.performance_policy.max_retries).toBe(3);
