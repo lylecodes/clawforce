@@ -143,10 +143,11 @@ describe("MemoryGovernanceConfig parsing", () => {
 });
 
 describe("memory expectations stripping", () => {
-  it("manager preset includes memory_search expectation by default", async () => {
+  it("manager preset does not include memory_search expectation by default", async () => {
     const { BUILTIN_AGENT_PRESETS } = await import("../../src/presets.js");
     const managerExpectations = BUILTIN_AGENT_PRESETS.manager.expectations as Array<{ tool: string }>;
-    expect(managerExpectations.some((e) => e.tool === "memory_search")).toBe(true);
+    // memory_search was removed from manager preset to simplify expectations (only clawforce_log:write required)
+    expect(managerExpectations.some((e) => e.tool === "memory_search")).toBe(false);
   });
 
   it("memory_search expectation is stripped when memory.expectations=false", async () => {
@@ -183,7 +184,7 @@ describe("memory expectations stripping", () => {
     }
   });
 
-  it("memory_search expectation is preserved when memory.expectations=true", async () => {
+  it("memory_search expectation is not added when memory.expectations=true (no longer in preset)", async () => {
     const YAML = (await import("yaml")).default;
     const { loadWorkforceConfig } = await import("../../src/project.js");
 
@@ -211,7 +212,8 @@ describe("memory expectations stripping", () => {
       expect(config).not.toBeNull();
       const agent = config!.agents.lead;
       const hasMemoryExpectation = agent.expectations.some((e) => e.tool === "memory_search");
-      expect(hasMemoryExpectation).toBe(true);
+      // memory_search is no longer in the manager preset, so even with memory.expectations=true it won't appear
+      expect(hasMemoryExpectation).toBe(false);
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
