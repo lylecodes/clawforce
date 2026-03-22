@@ -26,52 +26,19 @@ describe("DEFAULT_ACTION_SCOPES", () => {
     }
   });
 
-  it("employee has limited tools with action restrictions", () => {
+  it("employee has no clawforce tools (auto-lifecycle)", () => {
     const scope = DEFAULT_ACTION_SCOPES.employee!;
     const toolNames = getToolNamesFromScope(scope);
-    expect(toolNames).toContain("clawforce_task");
-    expect(toolNames).toContain("clawforce_log");
-    expect(toolNames).toContain("clawforce_verify");
-    expect(toolNames).toContain("clawforce_compact");
-    expect(toolNames).toContain("clawforce_setup");
-    expect(toolNames).toContain("clawforce_goal");
+    expect(toolNames).not.toContain("clawforce_task");
+    expect(toolNames).not.toContain("clawforce_log");
+    expect(toolNames).not.toContain("clawforce_verify");
+    expect(toolNames).not.toContain("clawforce_compact");
+    expect(toolNames).not.toContain("clawforce_setup");
+    expect(toolNames).not.toContain("clawforce_goal");
     expect(toolNames).not.toContain("clawforce_ops");
     expect(toolNames).not.toContain("clawforce_workflow");
-  });
-
-  it("employee clawforce_goal has read-only actions", () => {
-    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee!, "clawforce_goal");
-    expect(Array.isArray(actions)).toBe(true);
-    expect(actions).toContain("get");
-    expect(actions).toContain("list");
-    expect(actions).toContain("status");
-    expect(actions).not.toContain("create");
-    expect(actions).not.toContain("decompose");
-    expect(actions).not.toContain("achieve");
-    expect(actions).not.toContain("abandon");
-  });
-
-  it("employee clawforce_task excludes manager-only actions", () => {
-    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee!, "clawforce_task");
-    expect(Array.isArray(actions)).toBe(true);
-    expect(actions).toContain("get");
-    expect(actions).toContain("transition");
-    expect(actions).not.toContain("create");
-    expect(actions).not.toContain("bulk_create");
-    expect(actions).not.toContain("bulk_transition");
-    expect(actions).not.toContain("metrics");
-  });
-
-  it("employee clawforce_log excludes verify_audit", () => {
-    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee!, "clawforce_log");
-    expect(Array.isArray(actions)).toBe(true);
-    expect(actions).toContain("write");
-    expect(actions).not.toContain("verify_audit");
-  });
-
-  it("employee clawforce_setup only has explain and status", () => {
-    const actions = getAllowedActionsForTool(DEFAULT_ACTION_SCOPES.employee!, "clawforce_setup");
-    expect(actions).toEqual(["explain", "status"]);
+    expect(toolNames).toContain("memory_search");
+    expect(toolNames).toContain("memory_get");
   });
 });
 
@@ -92,7 +59,7 @@ describe("generateDefaultScopePolicies", () => {
     const allowedTools = coderPolicy.config.allowed_tools as Record<string, unknown>;
     expect(typeof allowedTools).toBe("object");
     expect(Array.isArray(allowedTools)).toBe(false);
-    expect(allowedTools.clawforce_task).toEqual(DEFAULT_ACTION_SCOPES.employee!.clawforce_task);
+    expect(allowedTools.memory_search).toEqual(DEFAULT_ACTION_SCOPES.employee!.memory_search);
   });
 
   it("defaults to employee scope when extends is not specified", () => {
@@ -103,7 +70,7 @@ describe("generateDefaultScopePolicies", () => {
     const policies = generateDefaultScopePolicies(agents);
     expect(policies).toHaveLength(1);
     const allowedTools = policies[0]!.config.allowed_tools as Record<string, unknown>;
-    expect(allowedTools.clawforce_task).toEqual(DEFAULT_ACTION_SCOPES.employee!.clawforce_task);
+    expect(allowedTools.memory_search).toEqual(DEFAULT_ACTION_SCOPES.employee!.memory_search);
   });
 
   it("does not override explicit action_scope policies", () => {

@@ -33,11 +33,14 @@ describe("agent-docs resolvers", () => {
 
       expect(content).not.toBeNull();
       expect(content).toContain("Your Tools");
-      expect(content).toContain("clawforce_task");
-      expect(content).toContain("clawforce_log");
-      // Employee should not see manager-only tools
+      // Employee has no clawforce tools (auto-lifecycle)
+      expect(content).not.toContain("clawforce_task");
+      expect(content).not.toContain("clawforce_log");
       expect(content).not.toContain("clawforce_ops");
       expect(content).not.toContain("clawforce_workflow");
+      // But has memory tools
+      expect(content).toContain("memory_search");
+      expect(content).toContain("memory_get");
     });
 
     it("loads from disk when TOOLS.md exists", () => {
@@ -101,12 +104,12 @@ describe("agent-docs resolvers", () => {
       // Without projectId, falls back to role defaults (same as before)
       const content = resolveToolsDocs("agent1", makeConfig("employee"), tmpDir);
       expect(content).not.toBeNull();
-      expect(content).toContain("clawforce_task");
+      expect(content).toContain("memory_search");
 
       // With projectId but no policies registered, should still use role defaults
       const contentWithProjectId = resolveToolsDocs("agent1", makeConfig("employee"), tmpDir, "proj1");
       expect(contentWithProjectId).not.toBeNull();
-      expect(contentWithProjectId).toContain("clawforce_task");
+      expect(contentWithProjectId).toContain("memory_search");
     });
   });
 

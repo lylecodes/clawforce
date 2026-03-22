@@ -538,9 +538,10 @@ policies:
 
       expect(result.ok).toBe(true);
       expect(result.topic).toBe("tools");
-      // Employee scope — should have task and log but not ops/workflow
-      expect(result.reference).toContain("clawforce_task");
-      expect(result.reference).toContain("clawforce_log");
+      // Employee scope — no clawforce tools (auto-lifecycle), only memory tools
+      expect(result.reference).toContain("memory_search");
+      expect(result.reference).toContain("memory_get");
+      expect(result.reference).not.toContain("clawforce_task");
       expect(result.reference).not.toContain("clawforce_ops");
       expect(result.reference).not.toContain("clawforce_workflow");
     });

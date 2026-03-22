@@ -17,48 +17,21 @@ describe("generateScoped", () => {
     expect(content).toContain("memory_get");
   });
 
-  it("employee scope excludes manager-only tools", () => {
+  it("employee scope has no clawforce tools (auto-lifecycle)", () => {
     const content = generateScoped(DEFAULT_ACTION_SCOPES.employee);
 
-    expect(content).toContain("clawforce_task");
-    expect(content).toContain("clawforce_log");
-    expect(content).toContain("clawforce_verify");
-    expect(content).toContain("clawforce_compact");
-    expect(content).toContain("clawforce_setup");
+    // Employee has only memory tools (no clawforce tools)
     expect(content).toContain("memory_search");
     expect(content).toContain("memory_get");
 
-    // Manager-only tools should NOT appear
+    // No clawforce tools at all
+    expect(content).not.toContain("clawforce_task");
+    expect(content).not.toContain("clawforce_log");
+    expect(content).not.toContain("clawforce_verify");
+    expect(content).not.toContain("clawforce_compact");
+    expect(content).not.toContain("clawforce_setup");
     expect(content).not.toContain("clawforce_workflow");
     expect(content).not.toContain("clawforce_ops");
-  });
-
-  it("employee scope restricts clawforce_task actions", () => {
-    const content = generateScoped(DEFAULT_ACTION_SCOPES.employee);
-
-    // Allowed actions
-    expect(content).toContain("`get`");
-    expect(content).toContain("`list`");
-    expect(content).toContain("`transition`");
-    expect(content).toContain("`fail`");
-    expect(content).toContain("`attach_evidence`");
-    expect(content).toContain("`history`");
-
-    // Disallowed actions for employee
-    expect(content).not.toContain("`create`");
-    expect(content).not.toContain("`bulk_create`");
-    expect(content).not.toContain("`bulk_transition`");
-    expect(content).not.toContain("`metrics`");
-  });
-
-  it("employee scope restricts clawforce_log actions", () => {
-    const content = generateScoped(DEFAULT_ACTION_SCOPES.employee);
-
-    expect(content).toContain("`write`");
-    expect(content).toContain("`outcome`");
-    expect(content).toContain("`search`");
-    // verify_audit is manager-only
-    expect(content).not.toContain("`verify_audit`");
   });
 
   it("minimal custom scope shows only specified tools", () => {
