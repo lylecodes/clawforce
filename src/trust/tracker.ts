@@ -129,6 +129,21 @@ export function recordTrustDecision(
     `).run(now, params.projectId, params.category);
   } catch { /* trust_overrides table may not exist yet */ }
 
+  // Telemetry: snapshot trust score after this decision
+  try {
+    const { snapshotTrustScore } = require("../telemetry/trust-history.js") as typeof import("../telemetry/trust-history.js");
+    const tier = trustAfter > 0.8 ? "high" : trustAfter > 0.5 ? "medium" : "low";
+    snapshotTrustScore({
+      projectId: params.projectId,
+      agentId: params.agentId,
+      score: trustAfter,
+      tier,
+      triggerType: "decision",
+      triggerId: id,
+      categoryScores: Object.fromEntries(statsAfter.map((s) => [s.category, s.approvalRate])),
+    }, db);
+  } catch { /* telemetry must never break the main flow */ }
+
   return {
     id,
     projectId: params.projectId,
