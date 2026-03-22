@@ -17,16 +17,11 @@ vi.mock("../../src/identity.js", () => ({
 }));
 
 // Mock cron service
-const mockCronAdd = vi.fn(async () => {});
-vi.mock("../../src/manager-cron.js", async (importOriginal) => {
-  const orig = await importOriginal() as Record<string, unknown>;
-  return {
-    ...orig,
-    getCronService: vi.fn(() => ({
-      add: mockCronAdd,
-    })),
-  };
-});
+const mockInjector = vi.fn(async () => ({ runId: "mock-run" }));
+vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
+  getDispatchInjector: vi.fn(() => mockInjector),
+  setDispatchInjector: vi.fn(),
+}));
 
 const { getMemoryDb } = await import("../../src/db.js");
 const { createChannel, getChannel } = await import("../../src/channels/store.js");
@@ -39,7 +34,7 @@ describe("channels/meeting", () => {
 
   beforeEach(() => {
     db = getMemoryDb();
-    mockCronAdd.mockClear();
+    mockInjector.mockClear();
   });
 
   afterEach(() => {
@@ -60,7 +55,7 @@ describe("channels/meeting", () => {
     expect(result.channel.type).toBe("meeting");
     expect(result.channel.status).toBe("active");
     expect(result.dispatched).toBe(true);
-    expect(mockCronAdd).toHaveBeenCalledTimes(1);
+    expect(mockInjector).toHaveBeenCalledTimes(1);
   });
 
   it("sets meeting config in channel metadata", () => {
@@ -136,15 +131,15 @@ describe("channels/meeting", () => {
       initiator: "mgr",
     }, db);
 
-    mockCronAdd.mockClear();
+    mockInjector.mockClear();
 
     const turn1 = advanceMeetingTurn(PROJECT, result.channel.id, db);
     expect(turn1.nextAgent).toBe("worker2");
     expect(turn1.turnIndex).toBe(1);
     expect(turn1.done).toBe(false);
-    expect(mockCronAdd).toHaveBeenCalledTimes(1);
+    expect(mockInjector).toHaveBeenCalledTimes(1);
 
-    mockCronAdd.mockClear();
+    mockInjector.mockClear();
 
     const turn2 = advanceMeetingTurn(PROJECT, result.channel.id, db);
     expect(turn2.nextAgent).toBe("worker3");

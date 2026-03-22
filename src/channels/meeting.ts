@@ -14,9 +14,7 @@ import { checkMeetingConcurrency } from "../safety.js";
 import type { Channel, MeetingConfig } from "../types.js";
 import { buildChannelTranscript, sendChannelMessage } from "./messages.js";
 import { createChannel, getChannel, getChannelByName, concludeChannel, updateChannelMetadata } from "./store.js";
-import { getCronService } from "../manager-cron.js";
-import { toCronJobCreate } from "../manager-cron.js";
-import type { ManagerCronJob } from "../manager-cron.js";
+import { getDispatchInjector } from "../dispatch/inject-dispatch.js";
 
 /**
  * Start a meeting: create/reuse a meeting channel and dispatch the first participant.
@@ -176,8 +174,8 @@ export function getMeetingStatus(
 }
 
 /**
- * Dispatch a meeting turn via the cron service.
- * Creates a one-shot cron job with a [clawforce:meeting=...] tag.
+ * Dispatch a meeting turn via direct injection.
+ * Injects a message with a [clawforce:meeting=...] tag into an isolated session.
  */
 function dispatchMeetingTurn(
   projectId: string,
@@ -186,16 +184,16 @@ function dispatchMeetingTurn(
   turnIndex: number,
   config: MeetingConfig,
 ): boolean {
-  const cronService = getCronService();
-  if (!cronService) {
-    safeLog("meeting.dispatch", "Cron service not available — cannot dispatch meeting turn");
+  const injector = getDispatchInjector();
+  if (!injector) {
+    safeLog("meeting.dispatch", "Dispatch injector not available — cannot dispatch meeting turn");
     return false;
   }
 
   const transcript = buildChannelTranscript(projectId, channel.id);
   const meetingPrompt = config.prompt ?? "Report your current status, raise any blockers, and note key updates.";
 
-  const payload = [
+  const message = [
     `[clawforce:meeting=${channel.id}:${turnIndex}]`,
     "",
     `You are in a meeting on channel "#${channel.name}".`,
@@ -208,19 +206,9 @@ function dispatchMeetingTurn(
     `Use \`clawforce_channel send\` with channel_id="${channel.id}" to add your response.`,
   ].join("\n");
 
-  const job: ManagerCronJob = {
-    name: `meeting:${channel.id}:${turnIndex}`,
-    schedule: `at:${new Date().toISOString()}`,
-    agentId,
-    payload,
-    sessionTarget: "isolated",
-    wakeMode: "now",
-    deleteAfterRun: true,
-  };
-
-  const input = toCronJobCreate(job);
-  cronService.add(input).catch(err => {
-    safeLog("meeting.dispatch.cron", err);
+  const sessionKey = `agent:${agentId}:meeting:${channel.id}:${turnIndex}`;
+  injector({ sessionKey, message }).catch(err => {
+    safeLog("meeting.dispatch.inject", err);
   });
 
   return true;

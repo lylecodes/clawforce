@@ -89,8 +89,6 @@ export { buildOnboardingContext, buildExplainContent } from "./context/onboardin
 
 // --- Jobs (Scoped Sessions) ---
 export { resolveJobName, resolveEffectiveConfig, canManageJobs, listJobs, upsertJob, deleteJob } from "./jobs.js";
-export { setCronService, getCronService } from "./manager-cron.js";
-export type { CronServiceLike } from "./manager-cron.js";
 
 // --- Skills ---
 export { resolveSkillSource, getTopicList, registerCustomSkills, SKILL_TOPICS } from "./skills/registry.js";

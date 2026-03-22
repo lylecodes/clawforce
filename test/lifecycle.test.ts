@@ -8,9 +8,6 @@ vi.mock("../src/diagnostics.js", () => ({
   safeLog: vi.fn(),
   emitDiagnosticEvent: vi.fn(),
 }));
-vi.mock("../src/manager-cron.js", () => ({
-  setManagerCronRegistrar: vi.fn(),
-}));
 vi.mock("../src/sweep/actions.js", () => ({
   sweep: vi.fn(() =>
     Promise.resolve({
@@ -26,7 +23,6 @@ vi.mock("../src/sweep/actions.js", () => ({
 }));
 
 const { setProjectsDir, closeAllDbs } = await import("../src/db.js");
-const { setManagerCronRegistrar } = await import("../src/manager-cron.js");
 const { sweep } = await import("../src/sweep/actions.js");
 const {
   initClawforce,
@@ -67,13 +63,6 @@ describe("lifecycle", () => {
       expect(setProjectsDir).toHaveBeenCalledWith("/tmp/test-projects");
     });
 
-    it("calls setManagerCronRegistrar with the provided registrar", () => {
-      const registrar = vi.fn();
-      initClawforce({ ...BASE_CONFIG, cronRegistrar: registrar });
-      expect(setManagerCronRegistrar).toHaveBeenCalledOnce();
-      expect(setManagerCronRegistrar).toHaveBeenCalledWith(registrar);
-    });
-
     it("does not double-init when called a second time", () => {
       initClawforce(BASE_CONFIG);
       initClawforce({ ...BASE_CONFIG, projectsDir: "/tmp/other" });
@@ -85,7 +74,6 @@ describe("lifecycle", () => {
       initClawforce({ ...BASE_CONFIG, enabled: false });
       expect(isClawforceInitialized()).toBe(false);
       expect(setProjectsDir).not.toHaveBeenCalled();
-      expect(setManagerCronRegistrar).not.toHaveBeenCalled();
     });
 
     it("starts the sweep timer when sweepIntervalMs > 0", () => {

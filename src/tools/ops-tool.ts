@@ -35,7 +35,6 @@ import { enqueue, getQueueStatus } from "../dispatch/queue.js";
 import { processAndDispatch, getConcurrencyInfo } from "../dispatch/dispatcher.js";
 import { aggregateMetrics, queryMetrics } from "../metrics.js";
 import { canManageJobs, listJobs, upsertJob, deleteJob } from "../jobs.js";
-import { getCronService, buildJobCronJob, toCronJobCreate } from "../manager-cron.js";
 import { checkBudget } from "../budget.js";
 import { safeLog } from "../diagnostics.js";
 import type { ToolResult } from "./common.js";
@@ -68,8 +67,8 @@ const OPS_ACTIONS = [
   "reassign", "query_audit", "trigger_sweep", "dispatch_worker",
   "refresh_context", "emit_event", "list_events", "enqueue_work",
   "queue_status", "process_events", "dispatch_metrics",
-  "list_jobs", "create_job", "update_job", "delete_job", "toggle_job_cron",
-  "cron_status", "introspect", "allocate_budget",
+  "list_jobs", "create_job", "update_job", "delete_job",
+  "introspect", "allocate_budget",
   "plan_create", "plan_start", "plan_complete", "plan_abandon", "plan_list",
   "flag_knowledge", "approve_promotion", "dismiss_promotion", "resolve_flag", "dismiss_flag", "list_candidates", "list_flags",
   "init_questions", "init_apply", "route",
@@ -117,11 +116,9 @@ const ClawforceOpsSchema = Type.Object({
   enqueue_priority: Type.Optional(Type.Number({ description: "Priority 0-3 (for enqueue_work, default 2)." })),
   enqueue_payload: Type.Optional(Type.String({ description: "JSON payload with dispatch params: prompt, projectDir, profile, model, timeoutMs (for enqueue_work)." })),
   // job management params
-  target_agent_id: Type.Optional(Type.String({ description: "Target agent ID (for list_jobs, create_job, update_job, delete_job, toggle_job_cron)." })),
-  job_name: Type.Optional(Type.String({ description: "Job name (for create_job, update_job, delete_job, toggle_job_cron)." })),
+  target_agent_id: Type.Optional(Type.String({ description: "Target agent ID (for list_jobs, create_job, update_job, delete_job)." })),
+  job_name: Type.Optional(Type.String({ description: "Job name (for create_job, update_job, delete_job)." })),
   job_config: Type.Optional(Type.String({ description: "JSON object with job fields: cron, cronTimezone, briefing, exclude_briefing, expectations, performance_policy, compaction, nudge, sessionTarget, wakeMode, delivery, failureAlert, model, timeoutSeconds, lightContext, deleteAfterRun (for create_job, update_job)." })),
-  job_enabled: Type.Optional(Type.Boolean({ description: "Enable (true) or disable (false) the job cron (for toggle_job_cron)." })),
-  cron_job_name: Type.Optional(Type.String({ description: "Cron job name filter (for cron_status). If omitted, returns all project crons." })),
   filter_job_name: Type.Optional(Type.String({ description: "Filter audit_runs by job name (for query_audit with audit_table=audit_runs)." })),
   // allocate_budget params
   parent_agent_id: Type.Optional(Type.String({ description: "Parent agent for budget allocation." })),
@@ -168,9 +165,9 @@ export function createClawforceOpsTool(options?: {
     name: "clawforce_ops",
     description:
       "Team observability and control. " +
-      "Read: agent_status, query_audit, refresh_context, list_events, queue_status, dispatch_metrics, list_jobs, cron_status, introspect. " +
-      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, toggle_job_cron, allocate_budget, emergency_stop, emergency_resume. " +
-      "Job management: list_jobs (view agent jobs), create_job/update_job/delete_job (manage scoped sessions), toggle_job_cron (enable/disable job cron), cron_status (view cron run state). " +
+      "Read: agent_status, query_audit, refresh_context, list_events, queue_status, dispatch_metrics, list_jobs, introspect. " +
+      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, allocate_budget, emergency_stop, emergency_resume. " +
+      "Job management: list_jobs (view agent jobs), create_job/update_job/delete_job (manage scoped sessions). " +
       "introspect: view your own config, expectations, budget, and SLO status. " +
       "Use emit_event to ingest external events (CI failures, PR opens, etc). " +
       "Use enqueue_work to add tasks to the dispatch queue with priority. " +
@@ -707,34 +704,7 @@ export function createClawforceOpsTool(options?: {
               return jsonResult({ ok: false, reason: `Agent not found: ${targetAgentId}` });
             }
 
-            // Enrich with cron status if service available
-            const cronSvc = getCronService();
-            let cronStatuses: Record<string, Record<string, unknown>> = {};
-            if (cronSvc) {
-              try {
-                const allCrons = await cronSvc.list({ includeDisabled: true });
-                for (const [jobName] of Object.entries(jobs)) {
-                  const cronName = `job-${projectId}-${targetAgentId}-${jobName}`;
-                  const found = allCrons.find((c) => c.name === cronName);
-                  if (found) {
-                    cronStatuses[jobName] = {
-                      enabled: found.enabled,
-                      cronId: found.id,
-                      schedule: found.schedule,
-                      lastRunStatus: found.state?.lastRunStatus,
-                      lastRunAtMs: found.state?.lastRunAtMs,
-                      nextRunAtMs: found.state?.nextRunAtMs,
-                      consecutiveErrors: found.state?.consecutiveErrors,
-                      lastDeliveryStatus: found.state?.lastDeliveryStatus,
-                    };
-                  }
-                }
-              } catch (err) {
-                safeLog("ops.listJobs.cronStatus", err);
-              }
-            }
-
-            return jsonResult({ ok: true, agentId: targetAgentId, jobs, cronStatuses });
+            return jsonResult({ ok: true, agentId: targetAgentId, jobs });
           }
 
           case "create_job": {
@@ -773,28 +743,13 @@ export function createClawforceOpsTool(options?: {
               return jsonResult({ ok: false, reason: `Agent not found: ${targetAgentId}` });
             }
 
-            // Register cron if specified
-            let cronRegistered = false;
-            if (job.cron) {
-              const cronSvc = getCronService();
-              if (cronSvc) {
-                try {
-                  const cronJob = buildJobCronJob(projectId, targetAgentId, jobName, job, job.cron);
-                  await cronSvc.add(toCronJobCreate(cronJob));
-                  cronRegistered = true;
-                } catch (err) {
-                  safeLog("ops.createJob.cronRegister", err);
-                }
-              }
-            }
-
             writeAuditEntry({
               projectId,
               actor: caller,
               action: "create_job",
               targetType: "agent",
               targetId: targetAgentId,
-              detail: JSON.stringify({ jobName, cron: job.cron, cronRegistered }),
+              detail: JSON.stringify({ jobName, cron: job.cron }),
             });
 
             return jsonResult({
@@ -802,7 +757,6 @@ export function createClawforceOpsTool(options?: {
               agentId: targetAgentId,
               jobName,
               job,
-              cronRegistered,
               note: "Runtime change — will reset on restart. Update project YAML for persistence.",
             });
           }
@@ -847,28 +801,13 @@ export function createClawforceOpsTool(options?: {
 
             upsertJob(targetAgentId, jobName, merged);
 
-            // Re-register cron if schedule changed
-            let cronUpdated = false;
-            if (updates.cron !== undefined && merged.cron) {
-              const cronSvc = getCronService();
-              if (cronSvc) {
-                try {
-                  const cronJob = buildJobCronJob(projectId, targetAgentId, jobName, merged, merged.cron);
-                  await cronSvc.add(toCronJobCreate(cronJob));
-                  cronUpdated = true;
-                } catch (err) {
-                  safeLog("ops.updateJob.cronUpdate", err);
-                }
-              }
-            }
-
             writeAuditEntry({
               projectId,
               actor: caller,
               action: "update_job",
               targetType: "agent",
               targetId: targetAgentId,
-              detail: JSON.stringify({ jobName, updatedFields: Object.keys(updates), cronUpdated }),
+              detail: JSON.stringify({ jobName, updatedFields: Object.keys(updates) }),
             });
 
             return jsonResult({
@@ -876,7 +815,6 @@ export function createClawforceOpsTool(options?: {
               agentId: targetAgentId,
               jobName,
               job: merged,
-              cronUpdated,
               note: "Runtime change — will reset on restart. Update project YAML for persistence.",
             });
           }
@@ -896,30 +834,13 @@ export function createClawforceOpsTool(options?: {
               return jsonResult({ ok: false, reason: `Job "${jobName}" not found on agent ${targetAgentId}` });
             }
 
-            // Disable the cron if it exists
-            let cronDisabled = false;
-            const cronSvc = getCronService();
-            if (cronSvc) {
-              try {
-                const cronName = `job-${projectId}-${targetAgentId}-${jobName}`;
-                const allCrons = await cronSvc.list({ includeDisabled: true });
-                const found = allCrons.find((c) => c.name === cronName);
-                if (found) {
-                  await cronSvc.update(found.id, { enabled: false });
-                  cronDisabled = true;
-                }
-              } catch (err) {
-                safeLog("ops.deleteJob.cronDisable", err);
-              }
-            }
-
             writeAuditEntry({
               projectId,
               actor: caller,
               action: "delete_job",
               targetType: "agent",
               targetId: targetAgentId,
-              detail: JSON.stringify({ jobName, cronDisabled }),
+              detail: JSON.stringify({ jobName }),
             });
 
             return jsonResult({
@@ -927,106 +848,8 @@ export function createClawforceOpsTool(options?: {
               agentId: targetAgentId,
               jobName,
               deleted: true,
-              cronDisabled,
               note: "Runtime change — will reset on restart. Update project YAML for persistence.",
             });
-          }
-
-          case "toggle_job_cron": {
-            const targetAgentId = readStringParam(params, "target_agent_id", { required: true })!;
-            const jobName = readStringParam(params, "job_name", { required: true })!;
-            const enabled = readBooleanParam(params, "job_enabled");
-
-            if (enabled === undefined || enabled === null) {
-              return jsonResult({ ok: false, reason: "Missing required parameter: job_enabled (true or false)" });
-            }
-
-            const callerSession = getSession(caller);
-            const callerAgentId = callerSession?.agentId ?? caller;
-
-            if (!canManageJobs(projectId, callerAgentId, targetAgentId)) {
-              return jsonResult({ ok: false, reason: `Not authorized to manage jobs for agent ${targetAgentId}` });
-            }
-
-            const cronSvc = getCronService();
-            if (!cronSvc) {
-              return jsonResult({ ok: false, reason: "Cron service not available" });
-            }
-
-            const cronName = `job-${projectId}-${targetAgentId}-${jobName}`;
-            try {
-              const allCrons = await cronSvc.list({ includeDisabled: true });
-              const found = allCrons.find((c) => c.name === cronName);
-              if (!found) {
-                return jsonResult({ ok: false, reason: `No cron found for job "${jobName}" on agent ${targetAgentId}` });
-              }
-
-              await cronSvc.update(found.id, { enabled });
-
-              writeAuditEntry({
-                projectId,
-                actor: caller,
-                action: "toggle_job_cron",
-                targetType: "agent",
-                targetId: targetAgentId,
-                detail: JSON.stringify({ jobName, enabled }),
-              });
-
-              return jsonResult({ ok: true, agentId: targetAgentId, jobName, cronEnabled: enabled });
-            } catch (err) {
-              return jsonResult({ ok: false, reason: `Failed to toggle cron: ${err instanceof Error ? err.message : String(err)}` });
-            }
-          }
-
-          case "cron_status": {
-            const cronSvc = getCronService();
-            if (!cronSvc) {
-              return jsonResult({ ok: false, reason: "Cron service not available" });
-            }
-
-            const targetJobName = readStringParam(params, "cron_job_name");
-
-            try {
-              const allCrons = await cronSvc.list({ includeDisabled: true });
-              const projectPrefix = `manager-${projectId}`;
-              const jobPrefix = `job-${projectId}-`;
-              const projectCrons = allCrons.filter(
-                (c) => c.name === projectPrefix || c.name.startsWith(jobPrefix),
-              );
-
-              if (targetJobName) {
-                const found = projectCrons.find((c) => c.name === targetJobName || c.name.endsWith(`-${targetJobName}`));
-                if (!found) {
-                  return jsonResult({ ok: false, reason: `Cron job not found: ${targetJobName}` });
-                }
-                return jsonResult({
-                  ok: true,
-                  job: {
-                    id: found.id,
-                    name: found.name,
-                    enabled: found.enabled,
-                    schedule: found.schedule,
-                    state: found.state,
-                  },
-                });
-              }
-
-              const summary = projectCrons.map((c) => ({
-                id: c.id,
-                name: c.name,
-                enabled: c.enabled,
-                schedule: c.schedule,
-                lastRunStatus: c.state?.lastRunStatus,
-                lastRunAtMs: c.state?.lastRunAtMs,
-                nextRunAtMs: c.state?.nextRunAtMs,
-                consecutiveErrors: c.state?.consecutiveErrors,
-                lastDeliveryStatus: c.state?.lastDeliveryStatus,
-              }));
-
-              return jsonResult({ ok: true, crons: summary, count: summary.length });
-            } catch (err) {
-              return jsonResult({ ok: false, reason: `Failed to query cron status: ${err instanceof Error ? err.message : String(err)}` });
-            }
           }
 
           case "introspect": {

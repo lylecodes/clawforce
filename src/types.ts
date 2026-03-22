@@ -159,7 +159,6 @@ export type ClawforceConfig = {
   sweepIntervalMs: number;
   defaultMaxRetries: number;
   verificationRequired: boolean;
-  cronRegistrar?: CronRegistrar;
 };
 
 // --- Dispatch throttle types ---

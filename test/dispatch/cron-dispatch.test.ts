@@ -5,30 +5,23 @@ vi.mock("../../src/diagnostics.js", () => ({
   safeLog: vi.fn(),
 }));
 
-const mockAdd = vi.fn();
-const mockCronService = {
-  list: vi.fn(async () => []),
-  add: mockAdd,
-  update: vi.fn(),
-  remove: vi.fn(),
-};
+const mockInjector = vi.fn();
 
-const { setCronService } = await import("../../src/manager-cron.js");
-const { dispatchViaCron } = await import("../../src/dispatch/cron-dispatch.js");
+const { setDispatchInjector, dispatchViaInject } = await import("../../src/dispatch/inject-dispatch.js");
 
-describe("dispatchViaCron", () => {
+describe("dispatchViaInject", () => {
   beforeEach(() => {
-    mockAdd.mockReset();
-    mockAdd.mockResolvedValue(undefined);
-    setCronService(mockCronService);
+    mockInjector.mockReset();
+    mockInjector.mockResolvedValue({ runId: "run-123" });
+    setDispatchInjector(mockInjector);
   });
 
   afterEach(() => {
-    setCronService(null);
+    setDispatchInjector(null as never);
   });
 
-  it("creates a one-shot cron job with dispatch tag in payload", async () => {
-    const result = await dispatchViaCron({
+  it("injects a message with dispatch tag in prompt", async () => {
+    const result = await dispatchViaInject({
       queueItemId: "qi-123",
       taskId: "task-456",
       projectId: "proj-1",
@@ -37,40 +30,19 @@ describe("dispatchViaCron", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.cronJobName).toBe("dispatch:qi-123");
+    expect(result.sessionKey).toBe("agent:agent:worker:dispatch:qi-123");
 
-    expect(mockAdd).toHaveBeenCalledTimes(1);
-    const input = mockAdd.mock.calls[0]![0];
-    expect(input.name).toBe("dispatch:qi-123");
-    expect(input.agentId).toBe("agent:worker");
-    expect(input.sessionTarget).toBe("isolated");
-    expect(input.wakeMode).toBe("now");
-    expect(input.deleteAfterRun).toBe(true);
-    expect(input.schedule.kind).toBe("at");
-    expect(input.payload.message).toContain("[clawforce:dispatch=qi-123:task-456]");
-    expect(input.payload.message).toContain("Execute the task");
+    expect(mockInjector).toHaveBeenCalledTimes(1);
+    const call = mockInjector.mock.calls[0]![0];
+    expect(call.sessionKey).toBe("agent:agent:worker:dispatch:qi-123");
+    expect(call.message).toContain("[clawforce:dispatch=qi-123:task-456]");
+    expect(call.message).toContain("Execute the task");
   });
 
-  it("passes model and timeoutSeconds when provided", async () => {
-    await dispatchViaCron({
-      queueItemId: "qi-789",
-      taskId: "task-abc",
-      projectId: "proj-1",
-      prompt: "Do work",
-      agentId: "agent:worker",
-      model: "claude-sonnet-4-20250514",
-      timeoutSeconds: 600,
-    });
+  it("returns error when injector is not set", async () => {
+    setDispatchInjector(null as never);
 
-    const input = mockAdd.mock.calls[0]![0];
-    expect(input.payload.model).toBe("claude-sonnet-4-20250514");
-    expect(input.payload.timeoutSeconds).toBe(600);
-  });
-
-  it("returns error when cron service is null", async () => {
-    setCronService(null);
-
-    const result = await dispatchViaCron({
+    const result = await dispatchViaInject({
       queueItemId: "qi-1",
       taskId: "task-1",
       projectId: "proj-1",
@@ -79,14 +51,14 @@ describe("dispatchViaCron", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toBe("Cron service not available");
-    expect(mockAdd).not.toHaveBeenCalled();
+    expect(result.error).toBe("Dispatch injector not set");
+    expect(mockInjector).not.toHaveBeenCalled();
   });
 
-  it("returns error when cronService.add() throws", async () => {
-    mockAdd.mockRejectedValue(new Error("Network timeout"));
+  it("returns error when injector throws", async () => {
+    mockInjector.mockRejectedValue(new Error("Network timeout"));
 
-    const result = await dispatchViaCron({
+    const result = await dispatchViaInject({
       queueItemId: "qi-2",
       taskId: "task-2",
       projectId: "proj-1",

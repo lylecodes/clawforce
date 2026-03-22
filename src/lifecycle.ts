@@ -8,7 +8,6 @@
 import type { ClawforceConfig } from "./types.js";
 import { closeAllDbs, setProjectsDir } from "./db.js";
 import { safeLog } from "./diagnostics.js";
-import { setManagerCronRegistrar } from "./manager-cron.js";
 import { sweep } from "./sweep/actions.js";
 
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -21,9 +20,6 @@ export function initClawforce(config: ClawforceConfig): void {
   if (initialized) return;
 
   setProjectsDir(config.projectsDir);
-
-  // Store cron registrar so initProject() can auto-register manager cron jobs
-  setManagerCronRegistrar(config.cronRegistrar);
 
   if (config.sweepIntervalMs > 0) {
     sweepTimer = setInterval(() => {

@@ -1,17 +1,19 @@
 /**
- * Clawforce — Manager cron job builder + auto-registration
+ * Clawforce — Manager cron job builder
  *
- * Builds a cron job definition that periodically nudges the manager.
- * The real context comes from bootstrap injection — the cron just triggers
- * the session so the manager wakes up and reviews its state.
+ * Builds cron job definitions for managers and agent jobs.
+ * The payload builders are still used by agent-sync and ops tooling.
+ * Schedule parsing is used throughout the system.
+ *
+ * Registration via cron service has been removed — dispatch now uses
+ * direct injection via api.injectAgentMessage().
  */
 
-import { safeLog } from "./diagnostics.js";
 import { getDb } from "./db.js";
 import { getExtendedProjectConfig } from "./project.js";
 import { buildOodaPrompt } from "./planning/ooda.js";
 import { computeVelocity, analyzeBlockerImpact, computeCostTrajectory } from "./planning/velocity.js";
-import type { CronDelivery, CronFailureAlert, CronRegistrar, CronRegistrarInput, CronSchedule, JobDefinition } from "./types.js";
+import type { CronDelivery, CronFailureAlert, CronRegistrarInput, CronSchedule, JobDefinition } from "./types.js";
 
 export type ManagerCronJob = {
   name: string;
@@ -27,74 +29,6 @@ export type ManagerCronJob = {
   lightContext?: boolean;
   deleteAfterRun?: boolean;
 };
-
-// Module-level registrar callback, set during initClawforce
-let cronRegistrar: CronRegistrar | null = null;
-
-/**
- * Store the cron registrar callback provided by the gateway.
- * Called once during initClawforce().
- */
-export function setManagerCronRegistrar(registrar: CronRegistrar | undefined): void {
-  cronRegistrar = registrar ?? null;
-}
-
-// --- Runtime cron service (for job management tooling) ---
-
-/**
- * Cron job state as reported by OpenClaw.
- * Mirrors openclaw/dist/plugin-sdk/cron/types.d.ts CronJobState —
- * kept as a local subset to avoid deep import path coupling.
- */
-export type CronJobState = {
-  nextRunAtMs?: number;
-  runningAtMs?: number;
-  lastRunAtMs?: number;
-  lastRunStatus?: "ok" | "error" | "skipped";
-  lastError?: string;
-  lastDurationMs?: number;
-  consecutiveErrors?: number;
-  lastDeliveryStatus?: "delivered" | "not-delivered" | "unknown" | "not-requested";
-  lastDeliveryError?: string;
-};
-
-/**
- * Full cron job record returned by list/getJob.
- * Mirrors a subset of OpenClaw's CronJob type (openclaw/dist/plugin-sdk/cron/types.d.ts).
- */
-export type CronJobRecord = {
-  id: string;
-  name: string;
-  agentId?: string;
-  enabled: boolean;
-  description?: string;
-  schedule: CronSchedule;
-  state: CronJobState;
-};
-
-/**
- * Cron service interface for runtime job management.
- * Mirrors OpenClaw's CronService (openclaw/dist/plugin-sdk/cron/service.d.ts).
- */
-export type CronServiceLike = {
-  list(opts?: { includeDisabled?: boolean }): Promise<CronJobRecord[]>;
-  add(input: CronRegistrarInput): Promise<unknown>;
-  update(id: string, patch: Record<string, unknown>): Promise<unknown>;
-  remove?(id: string): Promise<unknown>;
-  run?(id: string): Promise<unknown>;
-};
-
-let cronService: CronServiceLike | null = null;
-
-/** Store the cron service for runtime management (called during init). */
-export function setCronService(service: CronServiceLike | null): void {
-  cronService = service;
-}
-
-/** Get the cron service for runtime cron management. */
-export function getCronService(): CronServiceLike | null {
-  return cronService;
-}
 
 /**
  * Parse a schedule string into milliseconds.
@@ -205,27 +139,6 @@ export function toCronJobCreate(job: ManagerCronJob): CronRegistrarInput {
     input.deleteAfterRun = true;
   }
   return input;
-}
-
-/**
- * Register a manager cron job via the gateway's cron service.
- * Idempotent — logs a warning and returns if no registrar is available.
- */
-export async function registerManagerCron(
-  projectId: string,
-  agentId: string,
-  schedule: string,
-): Promise<void> {
-  if (!cronRegistrar) return;
-
-  const job = buildManagerCronJob(projectId, agentId, schedule);
-  const input = toCronJobCreate(job);
-
-  try {
-    await cronRegistrar(input);
-  } catch (err) {
-    safeLog("manager-cron.register", err);
-  }
 }
 
 /**
@@ -342,7 +255,7 @@ export function buildManagerCronJob(
   };
 }
 
-// --- Per-job cron registration ---
+// --- Per-job cron job builder ---
 
 /**
  * Build a cron job for a specific agent job.
@@ -385,27 +298,4 @@ export function buildJobCronJob(
     lightContext: job.lightContext,
     deleteAfterRun: job.deleteAfterRun,
   };
-}
-
-/**
- * Register cron jobs for all jobs defined on an agent.
- * Each job with a `cron` field gets its own isolated cron.
- */
-export async function registerJobCrons(
-  projectId: string,
-  agentId: string,
-  jobs: Record<string, JobDefinition>,
-): Promise<void> {
-  if (!cronRegistrar) return;
-
-  for (const [jobName, job] of Object.entries(jobs)) {
-    if (!job.cron) continue;
-    const cronJob = buildJobCronJob(projectId, agentId, jobName, job, job.cron);
-    const input = toCronJobCreate(cronJob);
-    try {
-      await cronRegistrar(input);
-    } catch (err) {
-      safeLog("manager-cron.registerJob", err);
-    }
-  }
 }

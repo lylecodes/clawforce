@@ -26,8 +26,8 @@ vi.mock("../../src/audit/stuck-detector.js", () => ({
 vi.mock("../../src/dispatch/spawn.js", () => ({
   buildTaskPrompt: vi.fn(() => "mock prompt"),
 }));
-vi.mock("../../src/dispatch/cron-dispatch.js", () => ({
-  dispatchViaCron: vi.fn(async () => ({ ok: false, error: "mock" })),
+vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
+  dispatchViaInject: vi.fn(async () => ({ ok: false, error: "mock" })),
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");

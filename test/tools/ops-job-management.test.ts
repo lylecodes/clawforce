@@ -16,7 +16,6 @@ const { getMemoryDb } = await import("../../src/db.js");
 const dbModule = await import("../../src/db.js");
 const projectModule = await import("../../src/project.js");
 const trackerModule = await import("../../src/enforcement/tracker.js");
-const cronModule = await import("../../src/manager-cron.js");
 const { createClawforceOpsTool } = await import("../../src/tools/ops-tool.js");
 
 function makeMockAgentConfig(overrides?: Partial<import("../../src/types.js").AgentConfig>) {
@@ -272,61 +271,6 @@ describe("ops tool — job management actions", () => {
 
       const parsed = JSON.parse(result.content[0]!.text!);
       expect(parsed.ok).toBe(false);
-    });
-  });
-
-  describe("toggle_job_cron", () => {
-    it("toggles cron via cron service", async () => {
-      vi.spyOn(projectModule, "getAgentConfig").mockReturnValue({
-        projectId: "test-project",
-        config: makeMockAgentConfig(),
-        projectDir: "/tmp/test",
-      });
-
-      const mockCronService = {
-        list: vi.fn().mockResolvedValue([
-          { id: "cron-1", name: "job-test-project-manager-session-triage", enabled: true, agentId: "manager-session" },
-        ]),
-        update: vi.fn().mockResolvedValue(undefined),
-        add: vi.fn().mockResolvedValue(undefined),
-      };
-      cronModule.setCronService(mockCronService);
-
-      const result = await tool.execute("call-11", {
-        action: "toggle_job_cron",
-        project_id: "test-project",
-        target_agent_id: "manager-session",
-        job_name: "triage",
-        job_enabled: false,
-      });
-
-      const parsed = JSON.parse(result.content[0]!.text!);
-      expect(parsed.ok).toBe(true);
-      expect(parsed.cronEnabled).toBe(false);
-      expect(mockCronService.update).toHaveBeenCalledWith("cron-1", { enabled: false });
-
-      cronModule.setCronService(null);
-    });
-
-    it("returns error when cron service unavailable", async () => {
-      vi.spyOn(projectModule, "getAgentConfig").mockReturnValue({
-        projectId: "test-project",
-        config: makeMockAgentConfig(),
-        projectDir: "/tmp/test",
-      });
-      cronModule.setCronService(null);
-
-      const result = await tool.execute("call-12", {
-        action: "toggle_job_cron",
-        project_id: "test-project",
-        target_agent_id: "manager-session",
-        job_name: "triage",
-        job_enabled: true,
-      });
-
-      const parsed = JSON.parse(result.content[0]!.text!);
-      expect(parsed.ok).toBe(false);
-      expect(parsed.reason).toContain("Cron service not available");
     });
   });
 

@@ -13,7 +13,6 @@ import { emitDiagnosticEvent, safeLog } from "./diagnostics.js";
 import { registerProject } from "./lifecycle.js";
 import type { ManagerSettings } from "./manager-config.js";
 import { registerManagerProject } from "./manager-config.js";
-import { registerManagerCron } from "./manager-cron.js";
 import { resolveEscalationChain } from "./org.js";
 import { applyProfile } from "./profiles.js";
 import { BUILTIN_AGENT_PRESETS } from "./presets.js";
@@ -303,14 +302,6 @@ export function initProject(config: ProjectConfig): void {
     mgrConfig.projectDir = resolveProjectDir(config.dir);
     registerManagerProject(config.id, mgrConfig);
 
-    // Auto-register cron job if schedule is specified
-    if (mgrConfig.cronSchedule) {
-      void registerManagerCron(
-        config.id,
-        mgrConfig.agentId,
-        mgrConfig.cronSchedule,
-      );
-    }
   }
 }
 
@@ -1386,13 +1377,6 @@ export function registerWorkforceConfig(
       ...mgrConfig,
       directives: (mgrConfig as Record<string, unknown>).directives as string[] ?? [],
     });
-    if (mgrConfig.cronSchedule) {
-      void registerManagerCron(
-        projectId,
-        mgrConfig.agentId,
-        mgrConfig.cronSchedule,
-      );
-    }
   }
 
   // Register custom skill topics

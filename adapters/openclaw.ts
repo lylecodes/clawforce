@@ -53,7 +53,7 @@ import { getRiskConfig } from "../src/risk/config.js";
 import { getDb } from "../src/db.js";
 import { completeItem, failItem } from "../src/dispatch/queue.js";
 import { attachEvidence, getTask, releaseTaskLease, transitionTask } from "../src/tasks/ops.js";
-import { setCronService } from "../src/manager-cron.js";
+import { setDispatchInjector } from "../src/dispatch/inject-dispatch.js";
 import { registerKillFunction } from "../src/audit/auto-kill.js";
 import { disableAgent, isAgentDisabled } from "../src/enforcement/disabled-store.js";
 import { handleWorkerSessionEnd } from "../src/tasks/session-end.js";
@@ -91,7 +91,6 @@ import { recordCostFromLlmOutput } from "../src/cost.js";
 import { registerBulkPricing } from "../src/pricing.js";
 import { updateProviderUsage } from "../src/rate-limits.js";
 import { initializeAllDomains } from "../src/config/init.js";
-import type { CronRegistrar, CronRegistrarInput } from "../src/types.js";
 // Dashboard
 import { createDashboardHandler } from "../src/dashboard/gateway-routes.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
@@ -224,9 +223,10 @@ const clawforcePlugin = {
       return;
     }
 
-    // --- Disabled agent tracking (persistent) ---
-    let capturedCronService: import("../src/manager-cron.js").CronServiceLike | null = null;
+    // --- Wire dispatch injector early (before any hooks) ---
+    setDispatchInjector(api.injectAgentMessage.bind(api));
 
+    // --- Disabled agent tracking (persistent) ---
     async function handleDisable(agentId: string): Promise<void> {
       // Persist to SQLite via the agent's project
       const entry = getAgentConfig(agentId);
@@ -234,19 +234,6 @@ const clawforcePlugin = {
         disableAgent(entry.projectId, agentId, "Underperforming or unresponsive");
       }
       emitDiagnosticEvent({ type: "agent_disabled", agentId });
-      if (capturedCronService) {
-        try {
-          const jobs = await capturedCronService.list({ includeDisabled: false });
-          for (const job of jobs) {
-            if (job.agentId === agentId && job.enabled) {
-              await capturedCronService.update(job.id, { enabled: false });
-              api.logger.info(`Clawforce: disabled cron job "${job.name}" for ${agentId}`);
-            }
-          }
-        } catch (err) {
-          api.logger.warn(`Clawforce: failed to disable cron for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
     }
 
     // --- Memory mode toggle (per-session) ---
@@ -1386,39 +1373,9 @@ const clawforcePlugin = {
       { name: "memory_get" },
     );
 
-    // --- Gateway methods: cron + kill ---
-    // Lazy cron registrar: captures context.cron on first gateway method call
-    let capturedCronAdd: ((input: CronRegistrarInput) => Promise<void>) | null = null;
-    const pendingCronJobs: CronRegistrarInput[] = [];
-    const cronRegistrar: CronRegistrar = async (job) => {
-      if (capturedCronAdd) {
-        await capturedCronAdd(job);
-      } else {
-        // Buffer until cron service is captured
-        pendingCronJobs.push(job);
-      }
-    };
-
-    // Gateway method to bootstrap cron + kill — invoked lazily on first gateway call
+    // --- Gateway methods: kill + channel ---
+    // Gateway method to bootstrap kill + channel APIs — invoked lazily on first gateway call
     api.registerGatewayMethod("clawforce.init", async ({ context, respond }) => {
-      // Capture cron service (full service for disable support, add function for job registration)
-      if (!capturedCronAdd && context.cron) {
-        capturedCronService = context.cron;
-        setCronService(context.cron);
-        capturedCronAdd = async (input) => {
-          await context.cron.add(input);
-        };
-        // Flush buffered cron jobs
-        for (const job of pendingCronJobs) {
-          try {
-            await capturedCronAdd(job);
-          } catch (err) {
-            api.logger.warn(`Clawforce: failed to flush buffered cron job: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-        pendingCronJobs.length = 0;
-      }
-
       // Capture kill function from abort controllers
       if (context.chatAbortControllers) {
         registerKillFunction(async (sessionKey, reason) => {
@@ -1780,68 +1737,8 @@ const clawforcePlugin = {
         if (domainResult.domains.length > 0) {
           api.logger.info(`Clawforce auto-init: ${domainResult.domains.length} domain(s): ${domainResult.domains.join(", ")}`);
         }
-        api.logger.info(`Clawforce: pendingCronJobs=${pendingCronJobs.length}, capturedCronAdd=${!!capturedCronAdd}`);
         for (const err of domainResult.errors) {
           api.logger.warn(`Clawforce domain error: ${err}`);
-        }
-
-        // Set up file-based cron service fallback for dispatch system.
-        // The live cron service is only available via gateway method context,
-        // but dispatch needs it immediately. This writes jobs to the cron store
-        // JSON file, which OpenClaw's cron runtime re-reads every tick.
-        if (!capturedCronService) {
-          const cronStorePath = path.join(process.env.HOME ?? "/tmp", ".openclaw", "cron", "jobs.json");
-          const fileCronService: import("../src/manager-cron.js").CronServiceLike = {
-            async list() {
-              try {
-                if (!fs.existsSync(cronStorePath)) return [];
-                const store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
-                return store.jobs ?? [];
-              } catch { return []; }
-            },
-            async add(input: CronRegistrarInput) {
-              try {
-                let store = { version: 1, jobs: [] as Record<string, unknown>[] };
-                if (fs.existsSync(cronStorePath)) {
-                  store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
-                } else {
-                  fs.mkdirSync(path.dirname(cronStorePath), { recursive: true });
-                }
-                const names = new Set(store.jobs.map((j) => j.name as string));
-                if (names.has(input.name)) return;
-                store.jobs.push({
-                  id: crypto.randomUUID(),
-                  ...input,
-                  createdAtMs: Date.now(),
-                  updatedAtMs: Date.now(),
-                  state: {},
-                });
-                const tmp = `${cronStorePath}.tmp.${process.pid}`;
-                fs.writeFileSync(tmp, JSON.stringify(store, null, 2), "utf-8");
-                fs.renameSync(tmp, cronStorePath);
-              } catch (err) {
-                api.logger.warn(`File cron add failed: ${err instanceof Error ? err.message : String(err)}`);
-              }
-            },
-            async update(id: string, patch: Record<string, unknown>) {
-              try {
-                const store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
-                const job = store.jobs.find((j: Record<string, unknown>) => j.id === id);
-                if (job) Object.assign(job, patch, { updatedAtMs: Date.now() });
-                fs.writeFileSync(cronStorePath, JSON.stringify(store, null, 2), "utf-8");
-              } catch { /* ignore */ }
-            },
-            async remove(id: string) {
-              try {
-                const store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
-                store.jobs = store.jobs.filter((j: Record<string, unknown>) => j.id !== id);
-                fs.writeFileSync(cronStorePath, JSON.stringify(store, null, 2), "utf-8");
-              } catch { /* ignore */ }
-            },
-          };
-          capturedCronService = fileCronService;
-          setCronService(fileCronService);
-          api.logger.info("Clawforce: file-based cron service fallback active");
         }
 
         // Sync agents to OpenClaw's agents.list so they're addressable
@@ -1902,124 +1799,11 @@ const clawforcePlugin = {
       }
     });
 
-    /**
-     * Flush buffered cron jobs by writing them directly to the cron store file.
-     *
-     * The clawforce.init gateway method is the intended way to capture the cron
-     * service, but it requires operator.admin scope which in turn requires device
-     * pairing — something that can't be done from within a plugin service.
-     *
-     * As a workaround, we write pending jobs directly to the cron store JSON file.
-     * The cron service re-reads the file on its next timer tick (every 60s) and
-     * picks up the new jobs.
-     */
-    function flushPendingCronJobsViaFile(): { flushed: number; errors: string[] } {
-      if (pendingCronJobs.length === 0) return { flushed: 0, errors: [] };
-
-      const cronStorePath = path.join(process.env.HOME ?? "/tmp", ".openclaw", "cron", "jobs.json");
-      const errors: string[] = [];
-      let flushed = 0;
-
-      try {
-        // Read existing store
-        let store: { version: number; jobs: Record<string, unknown>[] } = { version: 1, jobs: [] };
-        if (fs.existsSync(cronStorePath)) {
-          store = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
-        } else {
-          // Create directory if needed
-          fs.mkdirSync(path.dirname(cronStorePath), { recursive: true });
-        }
-
-        const existingNames = new Set(store.jobs.map((j) => j.name as string));
-
-        for (const job of pendingCronJobs) {
-          try {
-            // Skip if a job with the same name already exists (idempotent)
-            if (existingNames.has(job.name)) {
-              flushed++; // Count as "handled"
-              continue;
-            }
-
-            const cronJob = {
-              id: crypto.randomUUID(),
-              name: job.name,
-              agentId: job.agentId,
-              enabled: job.enabled,
-              description: job.description,
-              schedule: job.schedule,
-              sessionTarget: job.sessionTarget ?? "isolated",
-              wakeMode: job.wakeMode ?? "now",
-              payload: job.payload,
-              delivery: job.delivery,
-              failureAlert: job.failureAlert,
-              deleteAfterRun: job.deleteAfterRun,
-              createdAtMs: Date.now(),
-              updatedAtMs: Date.now(),
-              state: {},
-            };
-
-            store.jobs.push(cronJob);
-            existingNames.add(job.name);
-            flushed++;
-          } catch (err) {
-            errors.push(err instanceof Error ? err.message : String(err));
-          }
-        }
-
-        // Write back atomically
-        const tmpPath = `${cronStorePath}.tmp.${process.pid}`;
-        fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), "utf-8");
-        fs.renameSync(tmpPath, cronStorePath);
-
-        // Mark cron add as captured (stop buffering)
-        capturedCronAdd = async (input) => {
-          // For any future jobs, also write to the file
-          const currentStore = JSON.parse(fs.readFileSync(cronStorePath, "utf-8"));
-          const currentNames = new Set(currentStore.jobs.map((j: Record<string, unknown>) => j.name as string));
-          if (currentNames.has(input.name)) return;
-          currentStore.jobs.push({
-            id: crypto.randomUUID(),
-            ...input,
-            createdAtMs: Date.now(),
-            updatedAtMs: Date.now(),
-            state: {},
-          });
-          const tmp = `${cronStorePath}.tmp.${process.pid}`;
-          fs.writeFileSync(tmp, JSON.stringify(currentStore, null, 2), "utf-8");
-          fs.renameSync(tmp, cronStorePath);
-        };
-
-        pendingCronJobs.length = 0;
-      } catch (err) {
-        errors.push(`Failed to write cron store: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      return { flushed, errors };
-    }
-
     api.registerService({
       id: "clawforce-dashboard",
       start: async () => {
         await dashboardServer.start();
         api.logger.info("Clawforce dashboard at http://localhost:3117");
-
-        // Delayed self-init: flush buffered cron jobs directly to the cron store file.
-        // The clawforce.init gateway method requires operator.admin scope (which needs
-        // device pairing), so we bypass the gateway and write jobs to the JSON file
-        // directly. The cron service re-reads on its next tick.
-        setTimeout(() => {
-          if (pendingCronJobs.length > 0) {
-            const result = flushPendingCronJobsViaFile();
-            if (result.flushed > 0) {
-              api.logger.info(`Clawforce: flushed ${result.flushed} cron job(s) to store file`);
-            }
-            for (const err of result.errors) {
-              api.logger.warn(`Clawforce: cron flush error: ${err}`);
-            }
-          } else {
-            api.logger.info("Clawforce: no pending cron jobs to flush");
-          }
-        }, 5000);
       },
       stop: async () => {
         await dashboardServer.stop();
@@ -2028,8 +1812,6 @@ const clawforcePlugin = {
     });
 
     // --- Sweep service ---
-    let cronCheckTimer: ReturnType<typeof setTimeout> | null = null;
-
     api.registerService({
       id: "clawforce-sweep",
       start: async () => {
@@ -2053,7 +1835,6 @@ const clawforcePlugin = {
           sweepIntervalMs: cfg.sweepIntervalMs,
           defaultMaxRetries: cfg.defaultMaxRetries,
           verificationRequired: true,
-          cronRegistrar,
         });
         // Initialize domain-based configs (Phase 9)
         try {
@@ -2122,30 +1903,9 @@ const clawforcePlugin = {
           api.logger.warn(`Clawforce: failed to load model pricing from config: ${err instanceof Error ? err.message : String(err)}`);
         }
 
-        // Warn if cron jobs are buffered but service isn't captured yet
-        if (pendingCronJobs.length > 0 && !capturedCronAdd) {
-          api.logger.warn(
-            `Clawforce: ${pendingCronJobs.length} cron job(s) buffered but cron service not captured. ` +
-            `Ensure the gateway calls clawforce.init.`,
-          );
-        }
-
-        cronCheckTimer = setTimeout(() => {
-          if (!capturedCronAdd && pendingCronJobs.length > 0) {
-            api.logger.warn(
-              `Clawforce: cron still not captured after 30s. ${pendingCronJobs.length} job(s) pending.`,
-            );
-          }
-        }, 30_000);
-        cronCheckTimer.unref();
-
         api.logger.info(`Clawforce initialized (sweep every ${cfg.sweepIntervalMs}ms)`);
       },
       stop: async () => {
-        if (cronCheckTimer) {
-          clearTimeout(cronCheckTimer);
-          cronCheckTimer = null;
-        }
         await shutdownClawforce();
         api.logger.info("Clawforce shut down");
       },

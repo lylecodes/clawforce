@@ -16,8 +16,12 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
-// Mock cron service for meeting dispatch
-const mockCronAdd = vi.fn(async () => {});
+// Mock dispatch injector for meeting dispatch
+const mockInjector = vi.fn(async () => ({ runId: "mock-run" }));
+vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
+  getDispatchInjector: vi.fn(() => mockInjector),
+  setDispatchInjector: vi.fn(),
+}));
 
 // Mock channel notification
 vi.mock("../../src/channels/notify.js", () => ({
@@ -30,7 +34,6 @@ vi.mock("../../src/channels/notify.js", () => ({
 
 const { getMemoryDb } = await import("../../src/db.js");
 const dbModule = await import("../../src/db.js");
-const cronModule = await import("../../src/manager-cron.js");
 const { createClawforceChannelTool } = await import("../../src/tools/channel-tool.js");
 const { createChannel, getChannel, getChannelByName } = await import("../../src/channels/store.js");
 
@@ -46,13 +49,7 @@ describe("tools/channel-tool", () => {
   beforeEach(() => {
     db = getMemoryDb();
     vi.spyOn(dbModule, "getDb").mockReturnValue(db);
-    vi.spyOn(cronModule, "getCronService").mockReturnValue({
-      add: mockCronAdd,
-      list: vi.fn().mockResolvedValue([]),
-      update: vi.fn().mockResolvedValue(undefined),
-      remove: vi.fn().mockResolvedValue(undefined),
-    } as any);
-    mockCronAdd.mockClear();
+    mockInjector.mockClear();
     tool = createClawforceChannelTool({
       agentSessionKey: "mgr-session",
       projectId: PROJECT,
@@ -251,7 +248,7 @@ describe("tools/channel-tool", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.channelName).toBe("standup");
     expect(parsed.dispatched).toBe(true);
-    expect(mockCronAdd).toHaveBeenCalled();
+    expect(mockInjector).toHaveBeenCalled();
   });
 
   it("returns error for start_meeting without participants", async () => {
