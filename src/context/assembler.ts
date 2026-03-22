@@ -49,6 +49,7 @@ import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
 import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
 import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
 import { buildReviewContext } from "../memory/review-context.js";
+import { getTaskCreationStandards, getExecutionStandards, getReviewStandards, getRejectionStandards } from "./standards.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -314,6 +315,18 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
       // In briefing context, show the stream description as a reference.
       return `## ${source.streamName}\n\n${streamDef.description}`;
     }
+
+    case "task_creation_standards":
+      return getTaskCreationStandards();
+
+    case "execution_standards":
+      return getExecutionStandards();
+
+    case "review_standards":
+      return getReviewStandards();
+
+    case "rejection_standards":
+      return getRejectionStandards();
 
     default:
       return null;
