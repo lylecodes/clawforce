@@ -1,178 +1,279 @@
-# Auto Lifecycle — Design Spec
+# Auto Lifecycle — Design Spec (v2)
 
 ## Problem
 
-ClawForce currently relies on agents calling governance tools (clawforce_task, clawforce_log) to transition tasks and log work. This is:
-- **Expensive** — non-compliance triggers retries, each a full LLM session
-- **Unreliable** — agents forget/ignore tool calls despite expectations
-- **Wasteful** — tool descriptions consume context tokens for tools the agent shouldn't use
+ClawForce currently relies on agents calling governance tools (clawforce_task, clawforce_log) to manage task lifecycle. This is expensive (retries cost full LLM sessions), unreliable (agents forget tool calls), and wasteful (tool descriptions consume context for tools agents shouldn't use).
 
-## Solution
+## Core Principle
 
-Automate the mandatory lifecycle. ClawForce handles governance plumbing. Agents just do work.
+**Governance is structural, not LLM-dependent.** ClawForce automates the mandatory lifecycle. Agents just do work. The manager is the verification layer.
 
-## New Flow: Employee Dispatch
+## The Paradigm
+
+ClawForce ships with opinionated defaults — the "paradigm" — that define how teams operate. Everything is configurable, but the defaults work out of the box.
 
 ```
-BEFORE (current):
-  Agent dispatched → agent must call clawforce_task transition →
-  agent does work → agent must call clawforce_log →
-  agent must call clawforce_task attach_evidence →
-  agent must call clawforce_task transition to REVIEW →
-  compliance check → retry if any missed → repeat
-
-AFTER (auto lifecycle):
-  1. ClawForce auto-transitions task → IN_PROGRESS
-  2. Agent context says: "Do the work. We handle task tracking."
-  3. Agent does the actual work (uses project tools only)
-  4. Session ends → ClawForce at agent_end:
-     a. Auto-captures agent's last substantive output as evidence
-     b. Injects follow-up: "Summarize what you did in 2-3 sentences"
-     c. Agent responds with summary → auto-logged via clawforce_log
-     d. Auto-transitions task → REVIEW
-  5. Done. No retries needed for governance plumbing.
+ClawForce paradigm (presets) — opinionated defaults
+  ↓ overridden by
+Domain config (domain.yaml) — project-specific
+  ↓ overridden by
+Agent config (per-agent) — individual overrides
 ```
 
-## Tool Scoping Changes
+---
 
-### Employee agents (qs-ops, qs-dev)
-**Before:** 10 ClawForce tools (50 actions) in context
-**After:**
-- `clawforce_message` — communicate with manager (blocked, need help, found something)
-- That's it. Zero task/log/ops tools.
+## Auto Lifecycle Flow
 
-### Manager agents (qs-lead)
-**No change.** Managers still need:
-- `clawforce_task` — create, assign, review, transition
-- `clawforce_ops` — dispatch, agent management
-- `clawforce_log` — log decisions
-- `clawforce_message` — communicate with team
-- `clawforce_goal` — goal management
+```
+1. Manager creates task with explicit output requirements
+2. ClawForce dispatches employee → auto-transitions ASSIGNED → IN_PROGRESS
+3. Employee does work (project tools only, zero ClawForce tools)
+4. Session ends → ClawForce auto-captures evidence (tool outputs + last message)
+5. ClawForce auto-transitions → REVIEW
+6. Manager dispatched to review evidence
+7. Manager reviews:
+   a. Sufficient → approves → DONE
+   b. Insufficient → rejects with specific questions → follow-up task to same employee
+   c. Failed → marks FAILED, reassigns or creates new task
+8. Loop if rejected
+```
+
+---
 
 ## Implementation
 
-### 1. Auto-transition on dispatch (before_prompt_build)
+### 1. Auto-transition on dispatch
 
-In the OpenClaw adapter's `before_prompt_build` hook, when a dispatch context is detected:
+**Where:** `before_prompt_build` hook in `adapters/openclaw.ts`
 
+When dispatch context is detected and task is ASSIGNED:
 ```typescript
-// After detecting dispatch context:
-if (dispatchCtx) {
-  const task = getTask(session.projectId, dispatchCtx.taskId);
-  if (task && task.state === "ASSIGNED") {
-    transitionTask(session.projectId, dispatchCtx.taskId, "IN_PROGRESS", {
-      actor: agentId,
-      reason: "auto-transition on dispatch",
-    });
-  }
-}
+transitionTask(projectId, taskId, "IN_PROGRESS", {
+  actor: agentId,
+  reason: "auto-transition on dispatch",
+});
 ```
 
-### 2. Auto-capture evidence + summary at agent_end
+Pure database update. No LLM call.
 
-In the OpenClaw adapter's `agent_end` hook, when a dispatch context is present:
+### 2. Auto-capture evidence
 
+**Where:** `after_tool_call` hook + `agent_end` hook in `adapters/openclaw.ts`
+
+**During session (`after_tool_call`):**
+- Buffer significant tool outputs (Bash, Write, Edit results) in session tracker
+- New field on SessionMetrics: `significantResults: Array<{ toolName, action, resultPreview }>`
+- Capped at 5 entries, each truncated to 2000 chars
+- "Significant" tools: Bash, Write, Edit, and any tool producing output > 100 chars
+
+**At session end (`agent_end`):**
+- Extract last assistant message from `event.messages` transcript
+- Combine buffered tool outputs + last assistant message
+- Auto-attach as evidence to the task:
 ```typescript
-if (session.dispatchContext) {
-  const { taskId } = session.dispatchContext;
+attachEvidence(projectId, taskId, {
+  type: "output",
+  content: formatEvidence(significantResults, lastAssistantMessage),
+  actor: agentId,
+});
+```
 
-  // a. Capture last tool output as evidence
-  const lastOutput = session.metrics.toolCalls
-    .filter(tc => tc.success)
-    .pop();
-  if (lastOutput) {
-    attachEvidence(session.projectId, taskId, {
-      type: "output",
-      content: lastOutput.result ?? "Task completed",
-      actor: session.agentId,
-    });
-  }
+Pure data extraction + database write. No LLM call.
 
-  // b. Inject summary prompt
-  const summaryResponse = await api.injectAgentMessage({
-    sessionKey: ctx.sessionKey,
-    message: "Summarize what you accomplished in 2-3 sentences. Be specific about what changed.",
+### 3. Auto-transition to REVIEW
+
+**Where:** `agent_end` hook in `adapters/openclaw.ts`
+
+After evidence is attached:
+```typescript
+// Determine outcome from session metrics
+if (session.metrics.errorCount > session.metrics.toolCalls.length * 0.5) {
+  // High error rate — probable failure
+  transitionTask(projectId, taskId, "FAILED", {
+    actor: agentId,
+    reason: "session had high error rate",
   });
-
-  // c. Auto-log the summary
-  writeLog({
-    projectId: session.projectId,
-    agentId: session.agentId,
-    category: "outcome",
-    content: summaryResponse ?? "Session completed",
+} else if (session.metrics.toolCalls.length === 0) {
+  // Zero tool calls — agent never started
+  transitionTask(projectId, taskId, "FAILED", {
+    actor: agentId,
+    reason: "session completed without action",
   });
-
-  // d. Auto-transition to REVIEW
-  transitionTask(session.projectId, taskId, "REVIEW", {
-    actor: session.agentId,
+} else {
+  // Normal completion — send to review
+  transitionTask(projectId, taskId, "REVIEW", {
+    actor: agentId,
     reason: "auto-transition on session completion",
   });
 }
 ```
 
-### 3. Employee tool scope
-
-In `src/profiles.ts`, update the employee preset:
-
+Then trigger immediate manager dispatch:
 ```typescript
-employee: {
-  // ... existing config ...
-  // Remove all ClawForce tools except messaging
-  tools: ["clawforce_message"],
-  // Remove compliance expectations (lifecycle is automated)
-  expectations: [],
-  performance_policy: { action: "alert" },  // No retry needed
-}
+processEvents(projectId);
 ```
 
-Or better: create a new scope in `DEFAULT_ACTION_SCOPES`:
+This fires `task_review_ready` → manager gets dispatched for review.
 
-```typescript
-employee: {
-  clawforce_message: ["send", "list", "read", "reply"],
-  // Nothing else — task/log/ops/verify/workflow all removed
-}
+### 4. Manager-as-verifier
+
+When qs-lead is dispatched to review a task, it sees:
+- The task with its description and acceptance criteria
+- The auto-captured evidence (tool outputs + agent's last message)
+- Trust score history for the employee
+
+The manager then:
+- Verifies evidence against acceptance criteria
+- Approves (→ DONE) if satisfied
+- Rejects with specific follow-up questions (creates new task to same employee)
+
+If the manager needs more information, it creates a follow-up task:
+```
+Task: "Re: System health check — clarification needed"
+Description: "Your health check output didn't include RDS connection status. Run: python -c 'import psycopg2; ...' and paste the output."
+Assigned to: qs-ops
 ```
 
-### 4. Context update
+The employee gets dispatched again in a fresh session with its own identity and memory intact.
 
-Employee SOUL.md and briefing should say:
+---
+
+## Employee Tool Scoping
+
+### Before (current)
+10 ClawForce tools, 50 actions in context (~3KB of tool descriptions)
+
+### After
+**Zero ClawForce tools.** Employee only has project tools (Bash, Read, Write, Grep, etc.)
+
+The employee's context says:
+```
+You have been assigned a task. Read the description carefully.
+Do exactly what it says. Show your work — paste raw command output.
+Your output will be reviewed by your manager.
+ClawForce handles task tracking automatically.
+```
+
+No governance ceremony. No tool confusion. Pure execution.
+
+### Manager tools (unchanged)
+- `clawforce_task` — create, assign, review, transition, attach evidence
+- `clawforce_ops` — dispatch, agent management, queue status
+- `clawforce_log` — log decisions and outcomes
+- `clawforce_message` — communicate with team
+- `clawforce_goal` — goal management
+
+---
+
+## Paradigm Standards (preset defaults)
+
+### Task Creation Standards (manager preset)
+Injected into manager context. Overridable via config.
 
 ```
-ClawForce handles task tracking automatically:
-- Your task is transitioned to IN_PROGRESS when you start
-- Your output is captured as evidence when you finish
-- You'll be asked for a brief summary at the end
-- The task moves to REVIEW automatically
+## Task Creation Standards
 
-Focus on the work. Use clawforce_message if you're blocked or need help.
+When creating tasks:
+- Title: actionable verb + noun ("Run health check", "Fix login bug")
+- Description: what to do + why + acceptance criteria
+- Output format: specify EXACTLY what output you need for verification
+- Priority: justified by impact (P0=system down, P1=blocking work, P2=important, P3=nice to have)
+- Assignment: match the task domain to the agent's expertise
+
+Example:
+  Title: "Check IB Gateway connectivity"
+  Description: "Verify IB Gateway is connected and accepting orders.
+
+  Acceptance criteria:
+  - Show socat tunnel status (port 4002→4004)
+  - Show IB connection state from gateway logs
+  - Confirm client ID is not in use
+
+  Output format:
+  - Paste raw command output for each check
+  - End with: CONNECTED or DISCONNECTED"
 ```
 
-### 5. Manager stays the same
+### Execution Standards (employee preset)
+Injected into employee context via dispatch prompt. Overridable via config.
 
-Manager still has full tools. The manager creates tasks, assigns them, reviews completed work, dispatches agents. This is intentional — the manager IS the governance interface. Employees are the workers.
+```
+## Execution Standards
 
-## What this eliminates
+- Follow the task description exactly
+- Show raw output — paste actual command results, not summaries
+- If something fails, show the full error output
+- If the task says "run X", paste the output of X
+- Do not add unrequested work
+- Do not skip steps in the task description
+```
 
-- Employee compliance expectations (no more checking if they called tools)
-- Employee retries (no more re-running sessions for missed tool calls)
-- ClawForce tool descriptions in employee context (~3KB saved per session)
-- "Use clawforce_task to transition" instructions in prompts
-- The entire retry→re-inject→re-run cycle for employees
+### Review Standards (manager preset)
+Injected into manager context when reviewing. Overridable via config.
 
-## What this keeps
+```
+## Review Standards
+
+When reviewing a completed task:
+- Check every acceptance criterion in the original task description
+- Verify raw evidence matches the agent's claims
+- If output format doesn't match the spec, reject immediately
+- If evidence is missing for any criterion, reject with specific ask
+- Approval means "I verified this is correct" — not "looks fine"
+- Rejection must cite the specific criterion not met and what you need
+```
+
+### Rejection Standards (manager preset)
+```
+## Rejection Standards
+
+When rejecting a task:
+- Create a follow-up task to the SAME employee
+- Title: "Re: [original task title] — [what's needed]"
+- Description: cite the specific criterion not met, ask for exactly what you need
+- Do not reject with "try again" — reject with "show me X"
+```
+
+---
+
+## Configuration
+
+All paradigm standards live in presets as default briefing content. They're injected as context sources that can be overridden at domain or agent level.
+
+New context sources:
+- `task_creation_standards` — injected for managers when no job context (general session)
+- `execution_standards` — injected for employees via dispatch prompt
+- `review_standards` — injected for managers when reviewing tasks
+- `rejection_standards` — injected for managers when reviewing tasks
+
+These are STATIC sources (cacheable per session) since they don't change between turns.
+
+---
+
+## What This Eliminates
+
+- Employee compliance expectations (no tool usage to check)
+- Employee retries (no re-running sessions for missed tool calls)
+- ClawForce tool descriptions in employee context (~3KB saved)
+- "Use clawforce_task to transition" instructions
+- Generic debrief templates
+- Automated summary prompts (manager handles this through review)
+- `clawforce_signal` tool (not needed — manager reviews evidence directly)
+
+## What This Keeps
 
 - Manager tool usage (managers still call tools directly)
 - Manager compliance (managers should log decisions)
-- Task state machine (states still enforced, just transitioned automatically)
-- Evidence capture (automated instead of manual)
+- Task state machine (transitions automated for employees, manual for managers)
+- Evidence capture (automated via tool output buffering)
 - Audit trail (all auto-transitions logged with actor + reason)
 - Cost tracking (unchanged)
+- Trust scoring (based on manager approval/rejection patterns)
 
-## Edge cases
+## Edge Cases
 
-- **Agent wants to create a sub-task**: Can't — only managers can. Agent messages manager instead.
-- **Agent finds a blocker**: Uses `clawforce_message` to tell manager. Manager decides what to do.
-- **Agent needs to fail the task**: Agent says "this can't be done because X" in its summary. Manager reviews and decides.
-- **Agent's work is incomplete**: Auto-transitions to REVIEW anyway. Manager rejects and reassigns.
-- **Session crashes/times out**: agent_end still fires, auto-transitions to REVIEW with evidence "session timed out." Manager sees it.
+- **Employee can't complete the task**: employee's output shows errors/failures → evidence captures it → manager reviews and sees the failure → creates appropriate follow-up or marks FAILED
+- **Employee does extra work**: fine — evidence shows what was done. Manager reviews and decides if it's relevant
+- **Session crashes/times out**: `agent_end` still fires → auto-transitions to REVIEW with whatever evidence was captured → manager reviews "session timed out" evidence
+- **Manager rejects multiple times**: each rejection creates a follow-up task → trust score for that employee decreases → eventually manager might reassign to different agent
+- **No evidence captured**: (zero tool calls) → auto-transitions to FAILED → manager investigates
