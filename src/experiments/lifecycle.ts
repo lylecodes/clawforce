@@ -336,12 +336,13 @@ export function checkExperimentCompletion(
     let shouldComplete = false;
 
     if (exp.completionCriteria.type === "sessions") {
+      const criteria = exp.completionCriteria;
       const variants = d.prepare(
         "SELECT session_count FROM experiment_variants WHERE experiment_id = ?",
       ).all(exp.id) as { session_count: number }[];
 
       shouldComplete = variants.length > 0 && variants.every(
-        v => v.session_count >= exp.completionCriteria!.perVariant,
+        v => v.session_count >= criteria.perVariant,
       );
     } else if (exp.completionCriteria.type === "time") {
       if (exp.startedAt) {

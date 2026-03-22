@@ -77,7 +77,7 @@ export { generateDefaultScopePolicies } from "./profiles.js";
 export { resolveConfig, mergeArrayWithOperators, detectCycle, BUILTIN_AGENT_PRESETS, BUILTIN_JOB_PRESETS } from "./presets.js";
 
 // --- Enforcement ---
-export { startTracking, recordToolCall, endSession, getSession, recoverOrphanedSessions } from "./enforcement/tracker.js";
+export { startTracking, recordToolCall, recordToolCallDetail, endSession, getSession, recoverOrphanedSessions } from "./enforcement/tracker.js";
 export { checkCompliance } from "./enforcement/check.js";
 export { executeFailureAction, executeCrashAction, recordCompliantRun } from "./enforcement/actions.js";
 export { resolveEscalationTarget, routeEscalation } from "./enforcement/escalation-router.js";
@@ -260,6 +260,31 @@ export type { TemplateDefinition } from "./templates/startup.js";
 // Context: observed events
 export { renderObservedEvents } from "./context/observed-events.js";
 
+// --- Telemetry ---
+export { archiveSession, getSessionArchive, listSessionArchives } from "./telemetry/session-archive.js";
+export type { SessionArchive, SessionArchiveParams, SessionArchiveFilters } from "./telemetry/session-archive.js";
+export { flushToolCallDetails, getToolCallDetails } from "./telemetry/tool-capture.js";
+export type { ToolCallDetail, ToolCallDetailRow } from "./telemetry/tool-capture.js";
+export { detectConfigChange, getConfigVersion, getConfigHistory } from "./telemetry/config-tracker.js";
+export type { ConfigVersion } from "./telemetry/config-tracker.js";
+export { recordReview, getReviewsForTask, getReviewStats } from "./telemetry/review-store.js";
+export type { ReviewParams, ManagerReview, ReviewStats } from "./telemetry/review-store.js";
+export { snapshotTrustScore, getTrustTimeline } from "./telemetry/trust-history.js";
+export type { TrustSnapshotParams, TrustSnapshot } from "./telemetry/trust-history.js";
+
+// --- Experiments ---
+export { createExperiment, startExperiment, pauseExperiment, completeExperiment, killExperiment, getExperiment, listExperiments } from "./experiments/lifecycle.js";
+export type { CreateExperimentParams } from "./experiments/lifecycle.js";
+export { mergeVariantConfig } from "./experiments/config.js";
+export { assignVariant, getActiveExperimentForProject } from "./experiments/assignment.js";
+export type { AssignmentContext } from "./experiments/assignment.js";
+export { recordExperimentOutcome, getExperimentResults } from "./experiments/results.js";
+export type { VariantResult, ExperimentResults } from "./experiments/results.js";
+export { checkCanaryHealth } from "./experiments/canary.js";
+export type { CanaryAction } from "./experiments/canary.js";
+export { validateExperimentConfig } from "./experiments/validation.js";
+export type { ValidationError, ExperimentConfigInput } from "./experiments/validation.js";
+
 // --- Dispatch Gate ---
 export { shouldDispatch } from "./dispatch/dispatcher.js";
 
@@ -338,4 +363,12 @@ export type {
   TriggerAfterProcess,
   TriggerSeverity,
   TriggerDefinition,
+  ExperimentState,
+  ExperimentAssignmentStrategy,
+  CompletionCriteria,
+  VariantConfig,
+  ExperimentOutcome,
+  Experiment,
+  ExperimentVariant,
+  ExperimentSession,
 } from "./types.js";

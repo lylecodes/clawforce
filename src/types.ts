@@ -1264,3 +1264,84 @@ export type TriggerDefinition = {
   /** Tags to attach to created tasks. */
   tags?: string[];
 };
+
+// --- Experiment framework types ---
+
+export type ExperimentState = "draft" | "running" | "paused" | "completed" | "cancelled";
+
+export const EXPERIMENT_STATES: readonly ExperimentState[] = ["draft", "running", "paused", "completed", "cancelled"] as const;
+
+export type ExperimentAssignmentStrategy =
+  | { type: "random"; seed?: number }
+  | { type: "round_robin" }
+  | { type: "per_agent"; agentVariantMap: Record<string, string> }
+  | { type: "weighted"; weights: Record<string, number> }
+  | { type: "manual" };
+
+export type CompletionCriteria =
+  | { type: "sessions"; perVariant: number }
+  | { type: "time"; durationMs: number }
+  | { type: "manual" };
+
+export type VariantConfig = {
+  persona?: string;
+  briefing?: ContextSource[];
+  exclude_briefing?: string[];
+  expectations?: Expectation[];
+  performance_policy?: PerformancePolicy;
+  model?: string;
+  context_overrides?: Record<string, string>;
+};
+
+export type ExperimentOutcome = {
+  compliant: boolean | null;
+  toolCalls: number;
+  errorCount: number;
+  durationMs: number;
+  costCents: number;
+};
+
+export type Experiment = {
+  id: string;
+  projectId: string;
+  name: string;
+  description?: string;
+  hypothesis?: string;
+  state: ExperimentState;
+  assignmentStrategy: ExperimentAssignmentStrategy;
+  completionCriteria?: CompletionCriteria;
+  autoApplyWinner: boolean;
+  createdBy: string;
+  winnerVariantId?: string;
+  metadata?: Record<string, unknown>;
+  startedAt?: number;
+  completedAt?: number;
+  createdAt: number;
+};
+
+export type ExperimentVariant = {
+  id: string;
+  experimentId: string;
+  name: string;
+  isControl: boolean;
+  config: VariantConfig;
+  sessionCount: number;
+  compliantCount: number;
+  totalCostCents: number;
+  totalDurationMs: number;
+  createdAt: number;
+};
+
+export type ExperimentSession = {
+  id: string;
+  experimentId: string;
+  variantId: string;
+  sessionKey: string;
+  agentId: string;
+  projectId: string;
+  jobName?: string;
+  taskId?: string;
+  assignedAt: number;
+  completedAt?: number;
+  outcome?: ExperimentOutcome;
+};

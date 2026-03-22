@@ -78,7 +78,7 @@ export function getTrustTimeline(
   const sinceMs = since ?? 0;
 
   let sql: string;
-  let params: unknown[];
+  let params: (string | number | null)[];
 
   if (agentId) {
     sql = `

@@ -27,6 +27,17 @@ export type SessionMetrics = {
   requiredCallTimings: number[];
   errorCount: number;
   significantResults: Array<{ toolName: string; action: string | null; resultPreview: string }>;
+  toolCallBuffer: Array<{
+    toolName: string;
+    action: string | null;
+    input: string;
+    output: string;
+    durationMs: number;
+    success: boolean;
+    errorMessage?: string;
+    sequenceNumber: number;
+    timestamp: number;
+  }>;
 };
 
 /** Per-session compliance state. */
@@ -79,6 +90,7 @@ export function startTracking(
       requiredCallTimings: [],
       errorCount: 0,
       significantResults: [],
+      toolCallBuffer: [],
     },
   };
 
@@ -162,6 +174,28 @@ export function recordSignificantResult(
     toolName,
     action,
     resultPreview: result.length > MAX_CHARS ? result.slice(0, MAX_CHARS) + "..." : result,
+  });
+}
+
+/**
+ * Record a full tool call detail into the session buffer for telemetry flush.
+ */
+export function recordToolCallDetail(
+  sessionKey: string,
+  toolName: string,
+  action: string | null,
+  input: string,
+  output: string,
+  durationMs: number,
+  success: boolean,
+  errorMessage?: string,
+): void {
+  const session = sessions.get(sessionKey);
+  if (!session) return;
+  session.metrics.toolCallBuffer.push({
+    toolName, action, input, output, durationMs, success, errorMessage,
+    sequenceNumber: session.metrics.toolCallBuffer.length,
+    timestamp: Date.now(),
   });
 }
 

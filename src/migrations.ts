@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 30;
+export const SCHEMA_VERSION = 36;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -44,6 +44,12 @@ const migrations: Record<number, Migration> = {
   28: migrateV28,
   29: migrateV29,
   30: migrateV30,
+  31: migrateV31,
+  32: migrateV32,
+  33: migrateV33,
+  34: migrateV34,
+  35: migrateV35,
+  36: migrateV36,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1007,6 +1013,200 @@ function migrateV30(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_cost_records_job_name
     ON cost_records(project_id, job_name) WHERE job_name IS NOT NULL
   `).run();
+}
+
+// --- Migration V31: Session archives table ---
+
+function migrateV31(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE session_archives (
+      id TEXT PRIMARY KEY,
+      session_key TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      context_hash TEXT,
+      context_content TEXT,
+      transcript TEXT,
+      agent_config_snapshot TEXT,
+      task_id TEXT,
+      queue_item_id TEXT,
+      job_name TEXT,
+      outcome TEXT NOT NULL,
+      exit_signal TEXT,
+      compliance_detail TEXT,
+      total_cost_cents INTEGER NOT NULL DEFAULT 0,
+      total_input_tokens INTEGER NOT NULL DEFAULT 0,
+      total_output_tokens INTEGER NOT NULL DEFAULT 0,
+      model TEXT,
+      provider TEXT,
+      config_version_id TEXT,
+      experiment_variant_id TEXT,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      duration_ms INTEGER,
+      tool_call_count INTEGER NOT NULL DEFAULT 0,
+      error_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX idx_session_archives_key ON session_archives(session_key);
+    CREATE INDEX idx_session_archives_agent ON session_archives(project_id, agent_id, started_at DESC);
+    CREATE INDEX idx_session_archives_task ON session_archives(task_id);
+  `);
+}
+
+// --- Migration V32: Tool call details table ---
+
+function migrateV32(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE tool_call_details (
+      id TEXT PRIMARY KEY,
+      session_key TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      action TEXT,
+      input TEXT,
+      output TEXT,
+      sequence_number INTEGER NOT NULL,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      success INTEGER NOT NULL DEFAULT 1,
+      error_message TEXT,
+      estimated_cost_cents INTEGER,
+      task_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX idx_tool_calls_session ON tool_call_details(session_key, sequence_number);
+    CREATE INDEX idx_tool_calls_tool ON tool_call_details(project_id, tool_name, created_at DESC);
+  `);
+}
+
+// --- Migration V33: Config versions table ---
+
+function migrateV33(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE config_versions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      files TEXT NOT NULL,
+      content TEXT NOT NULL,
+      detected_at INTEGER NOT NULL,
+      detected_by TEXT,
+      previous_version_id TEXT,
+      change_summary TEXT
+    );
+
+    CREATE UNIQUE INDEX idx_config_versions_hash ON config_versions(project_id, content_hash);
+    CREATE INDEX idx_config_versions_project ON config_versions(project_id, detected_at DESC);
+  `);
+}
+
+// --- Migration V34: Manager reviews table ---
+
+function migrateV34(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE manager_reviews (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      reviewer_agent_id TEXT NOT NULL,
+      session_key TEXT,
+      verdict TEXT NOT NULL,
+      reasoning TEXT,
+      criteria_checked TEXT,
+      follow_up_task_id TEXT,
+      revision_notes TEXT,
+      review_duration_ms INTEGER,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX idx_reviews_task ON manager_reviews(project_id, task_id);
+    CREATE INDEX idx_reviews_verdict ON manager_reviews(project_id, verdict, created_at DESC);
+  `);
+}
+
+// --- Migration V35: Trust score history table ---
+
+function migrateV35(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE trust_score_history (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      agent_id TEXT,
+      score REAL NOT NULL,
+      tier TEXT NOT NULL,
+      trigger_type TEXT NOT NULL,
+      trigger_id TEXT,
+      category_scores TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX idx_trust_history_agent ON trust_score_history(project_id, agent_id, created_at DESC);
+  `);
+}
+
+// --- Migration V36: Experiments tables ---
+
+function migrateV36(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE experiments (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      hypothesis TEXT,
+      state TEXT NOT NULL DEFAULT 'draft',
+      assignment_strategy TEXT NOT NULL DEFAULT '{"type":"random"}',
+      completion_criteria TEXT,
+      auto_apply_winner INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      winner_variant_id TEXT,
+      metadata TEXT,
+      started_at INTEGER,
+      completed_at INTEGER,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX idx_experiments_project ON experiments(project_id, state);
+    CREATE UNIQUE INDEX idx_experiments_name ON experiments(project_id, name);
+
+    CREATE TABLE experiment_variants (
+      id TEXT PRIMARY KEY,
+      experiment_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      is_control INTEGER NOT NULL DEFAULT 0,
+      config TEXT NOT NULL,
+      session_count INTEGER NOT NULL DEFAULT 0,
+      compliant_count INTEGER NOT NULL DEFAULT 0,
+      total_cost_cents INTEGER NOT NULL DEFAULT 0,
+      total_duration_ms INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (experiment_id) REFERENCES experiments(id)
+    );
+
+    CREATE INDEX idx_variants_experiment ON experiment_variants(experiment_id);
+
+    CREATE TABLE experiment_sessions (
+      id TEXT PRIMARY KEY,
+      experiment_id TEXT NOT NULL,
+      variant_id TEXT NOT NULL,
+      session_key TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      job_name TEXT,
+      task_id TEXT,
+      assigned_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      outcome TEXT,
+      FOREIGN KEY (experiment_id) REFERENCES experiments(id),
+      FOREIGN KEY (variant_id) REFERENCES experiment_variants(id)
+    );
+
+    CREATE INDEX idx_experiment_sessions_experiment ON experiment_sessions(experiment_id, variant_id);
+    CREATE INDEX idx_experiment_sessions_session ON experiment_sessions(session_key);
+  `);
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */

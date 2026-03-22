@@ -157,7 +157,7 @@ export function listSessionArchives(
 ): SessionArchive[] {
   const db = dbOverride ?? getDb(projectId);
   const conditions = ["project_id = ?"];
-  const params: unknown[] = [projectId];
+  const params: (string | number | null)[] = [projectId];
 
   if (filters?.agentId) {
     conditions.push("agent_id = ?");
