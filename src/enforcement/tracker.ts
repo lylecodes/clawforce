@@ -26,6 +26,7 @@ export type SessionMetrics = {
   lastToolCallAt: number | null;
   requiredCallTimings: number[];
   errorCount: number;
+  significantResults: Array<{ toolName: string; action: string | null; resultPreview: string }>;
 };
 
 /** Per-session compliance state. */
@@ -77,6 +78,7 @@ export function startTracking(
       lastToolCallAt: null,
       requiredCallTimings: [],
       errorCount: 0,
+      significantResults: [],
     },
   };
 
@@ -139,6 +141,28 @@ export function recordToolCall(
   if (satisfiedChanged || session.metrics.toolCalls.length % PERSIST_EVERY_N_CALLS === 0) {
     persistSession(sessionKey);
   }
+}
+
+/**
+ * Record a significant tool output for auto-lifecycle evidence.
+ * Buffers up to MAX_RESULTS results, each truncated to MAX_CHARS.
+ */
+export function recordSignificantResult(
+  sessionKey: string,
+  toolName: string,
+  action: string | null,
+  result: string,
+): void {
+  const session = sessions.get(sessionKey);
+  if (!session) return;
+  const MAX_RESULTS = 5;
+  const MAX_CHARS = 2000;
+  if (session.metrics.significantResults.length >= MAX_RESULTS) return;
+  session.metrics.significantResults.push({
+    toolName,
+    action,
+    resultPreview: result.length > MAX_CHARS ? result.slice(0, MAX_CHARS) + "..." : result,
+  });
 }
 
 /**

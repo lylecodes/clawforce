@@ -337,7 +337,7 @@ describe("clawforce plugin", () => {
       mockGetAgentConfig.mockReturnValue(null);
     });
 
-    it("employee tool factory filters action enum in schema", async () => {
+    it("employee tool factory returns null for clawforce_task (auto-lifecycle)", async () => {
       const { getAgentConfig } = await import("../../src/project.js");
       const mockGetAgentConfig = getAgentConfig as ReturnType<typeof vi.fn>;
 
@@ -356,18 +356,9 @@ describe("clawforce plugin", () => {
       const taskFactory = registerCalls.find((c: any[]) => c[1]?.name === "clawforce_task")?.[0];
       expect(taskFactory).toBeDefined();
 
+      // Employee has no clawforce tools — auto-lifecycle handles task management
       const tool = taskFactory({ agentId: "emp-1", sessionKey: "s1" });
-      expect(tool).not.toBeNull();
-
-      // If the tool has parameters with action enum, it should be filtered
-      if (tool?.parameters?.properties?.action?.enum) {
-        const actions = tool.parameters.properties.action.enum as string[];
-        expect(actions).toContain("get");
-        expect(actions).toContain("transition");
-        expect(actions).not.toContain("create");
-        expect(actions).not.toContain("bulk_create");
-        expect(actions).not.toContain("metrics");
-      }
+      expect(tool).toBeNull();
 
       // Cleanup
       mockGetAgentConfig.mockReturnValue(null);

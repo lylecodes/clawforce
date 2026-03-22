@@ -52,6 +52,7 @@ import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
 import { buildReviewContext } from "../memory/review-context.js";
 import { renderDomainContext } from "./domain-context.js";
 import { getProjectsDir } from "../db.js";
+import { getTaskCreationStandards, getExecutionStandards, getReviewStandards, getRejectionStandards } from "./standards.js";
 
 export type AssemblerContext = {
   agentId: string;
@@ -322,7 +323,7 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
       return `## ${source.streamName}\n\n${streamDef.description}`;
     }
 
-    case "observed_events": {
+case "observed_events": {
       if (!ctx.projectId) return null;
       const observe = ctx.config.observe ?? [];
       return renderObservedEvents(ctx.projectId, observe, source.since ?? 0);
@@ -335,6 +336,18 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
       if (!ctx.projectId) return null;
       return renderDomainContext(getProjectsDir(), ctx.projectId, source.source);
     }
+
+    case "task_creation_standards":
+      return getTaskCreationStandards();
+
+    case "execution_standards":
+      return getExecutionStandards();
+
+    case "review_standards":
+      return getReviewStandards();
+
+    case "rejection_standards":
+      return getRejectionStandards();
 
     default:
       return null;

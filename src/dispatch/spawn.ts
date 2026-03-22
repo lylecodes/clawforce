@@ -3,9 +3,11 @@
  *
  * Builds structured prompts for dispatched agent sessions.
  * Wraps task metadata in XML delimiters for injection resistance.
+ * Includes execution standards for auto-lifecycle compliance.
  */
 
 import type { Task } from "../types.js";
+import { getExecutionStandards } from "../context/standards.js";
 
 function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -26,19 +28,8 @@ export function buildTaskPrompt(task: Task, userPrompt: string): string {
   }
 
   parts.push(`</task-metadata>`);
+  parts.push(`\n${getExecutionStandards()}`);
   parts.push(`\n## Instructions\n${userPrompt}`);
-
-  // ClawForce tool lifecycle — agents must follow this
-  parts.push(`\n## Required: ClawForce Task Lifecycle
-
-IMPORTANT: You have ClawForce MCP tools. Follow this lifecycle:
-
-1. FIRST: Call clawforce_task with action=transition, task_id=${task.id}, project_id=${task.projectId}, new_state=IN_PROGRESS
-2. Execute the task instructions above
-3. Call clawforce_log with action=write, project_id=${task.projectId}, category=outcome, content=(brief summary of what you did)
-4. Call clawforce_task with action=transition, task_id=${task.id}, project_id=${task.projectId}, new_state=REVIEW
-
-Do not skip these steps.`);
 
   return parts.join("\n");
 }

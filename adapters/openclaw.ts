@@ -25,7 +25,7 @@ import { resolveJobName, resolveDispatchContext, resolveEffectiveConfig } from "
 import { checkCompliance } from "../src/enforcement/check.js";
 import { executeFailureAction, executeCrashAction, recordCompliantRun } from "../src/enforcement/actions.js";
 import { resolveEscalationTarget, routeEscalation } from "../src/enforcement/escalation-router.js";
-import { endSession, getSession, recordToolCall, recoverOrphanedSessions, setDispatchContext, startTracking } from "../src/enforcement/tracker.js";
+import { endSession, getSession, recordToolCall, recordSignificantResult, recoverOrphanedSessions, setDispatchContext, startTracking } from "../src/enforcement/tracker.js";
 import { emitDiagnosticEvent, setDiagnosticEmitter } from "../src/diagnostics.js";
 import { getActiveProjectIds, initClawforce, shutdownClawforce } from "../src/lifecycle.js";
 import {
@@ -51,7 +51,7 @@ import { recordToolGateHit, getEffectiveTier } from "../src/risk/bulk-detector.j
 import { getRiskConfig } from "../src/risk/config.js";
 import { getDb } from "../src/db.js";
 import { completeItem, failItem } from "../src/dispatch/queue.js";
-import { getTask, releaseTaskLease } from "../src/tasks/ops.js";
+import { attachEvidence, getTask, releaseTaskLease, transitionTask } from "../src/tasks/ops.js";
 import { setCronService } from "../src/manager-cron.js";
 import { registerKillFunction } from "../src/audit/auto-kill.js";
 import { disableAgent, isAgentDisabled } from "../src/enforcement/disabled-store.js";
@@ -320,6 +320,15 @@ const clawforcePlugin = {
         const dispatchCtx = resolveDispatchContext((event as { prompt?: string }).prompt);
         if (dispatchCtx) {
           setDispatchContext(sessionKey, dispatchCtx);
+
+          // Auto-transition ASSIGNED → IN_PROGRESS on dispatch start
+          try {
+            const db = getDb(entry.projectId);
+            const task = getTask(entry.projectId, dispatchCtx.taskId, db);
+            if (task && task.state === "ASSIGNED") {
+              transitionTask({ projectId: entry.projectId, taskId: dispatchCtx.taskId, toState: "IN_PROGRESS", actor: agentId }, db);
+            }
+          } catch { /* non-fatal */ }
         }
 
         // Detect meeting tag [clawforce:meeting=<channelId>:<turnIndex>]
@@ -527,6 +536,15 @@ const clawforcePlugin = {
         !event.error,
       );
 
+      // Buffer significant tool outputs for auto-lifecycle evidence
+      const SIGNIFICANT_TOOLS = new Set(["Bash", "Write", "Edit", "Read"]);
+      if (event.result && SIGNIFICANT_TOOLS.has(toolName)) {
+        const resultStr = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
+        if (resultStr.length > 100) {
+          recordSignificantResult(ctx.sessionKey, toolName, action ?? null, resultStr);
+        }
+      }
+
       // Memory write detection (informational — flush timing delegated to OpenClaw)
       if (cfg.memoryFlush.enabled && isMemoryWriteCall(toolName, event.params)) {
         emitDiagnosticEvent({ type: "memory_write_detected", sessionKey: ctx.sessionKey, toolName });
@@ -713,26 +731,75 @@ const clawforcePlugin = {
 
       if (!session) return; // Not an enforced agent
 
-      // --- Dispatch completion handling ---
+      // --- Auto-lifecycle: evidence capture + transition for dispatched sessions ---
       if (session.dispatchContext) {
         const { queueItemId, taskId } = session.dispatchContext;
-        try {
-          const db = getDb(session.projectId);
-          const task = getTask(session.projectId, taskId, db);
+        const db = getDb(session.projectId);
+        const task = getTask(session.projectId, taskId, db);
 
-          if (task && task.state !== "ASSIGNED" && task.state !== "IN_PROGRESS") {
+        // Auto-capture evidence and transition for tasks still in work states
+        if (task && (task.state === "IN_PROGRESS" || task.state === "ASSIGNED")) {
+          // Extract last assistant message from transcript
+          const messages = (event as Record<string, unknown>).messages as Array<{ role: string; content: unknown }> | undefined ?? [];
+          const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+          const lastText = lastAssistant?.content ?? "";
+          const lastMessage = typeof lastText === "string" ? lastText : JSON.stringify(lastText);
+
+          // Build evidence from buffered tool outputs + last message
+          const parts: string[] = [];
+          if (session.metrics.significantResults.length > 0) {
+            parts.push("## Tool Outputs\n");
+            for (const r of session.metrics.significantResults) {
+              parts.push(`### ${r.toolName}${r.action ? ` (${r.action})` : ""}\n\`\`\`\n${r.resultPreview}\n\`\`\``);
+            }
+          }
+          if (lastMessage.trim()) {
+            parts.push(`\n## Agent Summary\n${lastMessage.slice(0, 3000)}`);
+          }
+
+          const evidence = parts.join("\n") || "Session completed with no captured output.";
+
+          // Auto-attach evidence
+          try {
+            attachEvidence({ projectId: session.projectId, taskId, type: "output", content: evidence, attachedBy: session.agentId }, db);
+          } catch { /* non-fatal */ }
+
+          // Auto-transition based on session outcome
+          try {
+            if (session.metrics.toolCalls.length === 0) {
+              transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
+            } else if (session.metrics.errorCount > session.metrics.toolCalls.length * 0.5) {
+              transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
+            } else {
+              transitionTask({ projectId: session.projectId, taskId, toState: "REVIEW", actor: session.agentId }, db);
+            }
+          } catch { /* non-fatal */ }
+
+          // Immediate event processing for manager dispatch
+          try {
+            const { processEvents } = await import("../src/events/router.js");
+            processEvents(session.projectId, db);
+          } catch { /* non-fatal */ }
+        }
+
+        // Dispatch queue completion handling
+        try {
+          const queueDb = getDb(session.projectId);
+          const updatedTask = getTask(session.projectId, taskId, queueDb);
+
+          if (updatedTask && updatedTask.state !== "ASSIGNED" && updatedTask.state !== "IN_PROGRESS") {
             // Task advanced — dispatch succeeded
-            completeItem(queueItemId, db, session.projectId);
-            emitDiagnosticEvent({ type: "dispatch_session_succeeded", sessionKey: ctx.sessionKey, queueItemId, taskId, finalState: task.state });
+            completeItem(queueItemId, queueDb, session.projectId);
+            emitDiagnosticEvent({ type: "dispatch_session_succeeded", sessionKey: ctx.sessionKey, queueItemId, taskId, finalState: updatedTask.state });
           } else {
             // Task stuck — dispatch failed
-            const reason = `Task remained in ${task?.state ?? "unknown"} after dispatch session`;
-            failItem(queueItemId, reason, db, session.projectId);
+            const reason = `Task remained in ${updatedTask?.state ?? "unknown"} after dispatch session`;
+            failItem(queueItemId, reason, queueDb, session.projectId);
             emitDiagnosticEvent({ type: "dispatch_session_failed", sessionKey: ctx.sessionKey, queueItemId, taskId, reason });
           }
 
           // Release the task lease acquired by the dispatcher
-          releaseTaskLease(session.projectId, taskId, `dispatch:${queueItemId}`, db);
+          releaseTaskLease(session.projectId, taskId, `dispatch:${queueItemId}`, queueDb);
         } catch (err) {
           api.logger.warn(`Clawforce: dispatch completion handling failed: ${err instanceof Error ? err.message : String(err)}`);
         }
