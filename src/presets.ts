@@ -150,10 +150,8 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
       "soul", "tools_reference", "assigned_task", "pending_messages",
       "channel_messages", "memory_instructions", "skill",
     ],
-    expectations: [
-      { tool: "clawforce_task", action: "transition", min_calls: 1 },
-      { tool: "clawforce_log", action: "write", min_calls: 1 },
-    ],
+    // Employees have zero ClawForce tools — expectations must be empty (auto-lifecycle handles transitions)
+    expectations: [],
     performance_policy: { action: "retry", max_retries: 3, then: "alert" },
     compaction: false,
     coordination: { enabled: false },
