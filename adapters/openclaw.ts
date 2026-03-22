@@ -923,22 +923,14 @@ const clawforcePlugin = {
               if (!gateCheck.ok) {
                 api.logger.warn(`Clawforce: continuous job "${session.jobName}" blocked — ${gateCheck.reason}`);
               } else {
+                // Direct dispatch via injectAgentMessage — no cron middleman
                 try {
-                  const { buildJobCronJob, toCronJobCreate, getCronService } = await import("../src/manager-cron.js");
-                  const cronJob = buildJobCronJob(
-                    session.projectId,
-                    session.agentId,
-                    session.jobName,
-                    jobDef,
-                    `at:${new Date().toISOString()}`,
-                  );
-                  cronJob.deleteAfterRun = true;
-                  const cronInput = toCronJobCreate(cronJob);
-                  const cronSvc = getCronService();
-                  if (cronSvc) {
-                    await cronSvc.add(cronInput);
-                    api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
-                  }
+                  const nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job. Pick up where you left off.`;
+                  await api.injectAgentMessage({
+                    sessionKey: ctx.sessionKey,
+                    message: nudge,
+                  });
+                  api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
                 } catch (err) {
                   api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
                 }
@@ -1780,29 +1772,27 @@ const clawforcePlugin = {
         }
 
         // --- Auto-start continuous jobs on gateway init ---
-        // Find any agents with continuous jobs and dispatch them immediately.
-        // This replaces cron as the initial trigger — no schedule needed.
+        // Find any agents with continuous jobs and dispatch them immediately
+        // via injectAgentMessage — no cron middleman.
         for (const agentId of getRegisteredAgentIds()) {
           const entry = getAgentConfig(agentId);
           if (!entry?.config.jobs) continue;
           for (const [jobName, jobDef] of Object.entries(entry.config.jobs)) {
             if (!jobDef.continuous) continue;
             try {
-              const { buildJobCronJob, toCronJobCreate, getCronService } = await import("../src/manager-cron.js");
-              const cronJob = buildJobCronJob(
-                entry.projectId,
-                agentId,
-                jobName,
-                jobDef,
-                `at:${new Date().toISOString()}`,
-              );
-              cronJob.deleteAfterRun = true;
-              const cronInput = toCronJobCreate(cronJob);
-              const svc = getCronService();
-              if (svc) {
-                await svc.add(cronInput);
-                api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agentId}`);
-              }
+              const nudge = jobDef.nudge ?? `Start your "${jobName}" job.`;
+              // Small delay to let gateway finish starting
+              setTimeout(async () => {
+                try {
+                  await api.injectAgentMessage({
+                    sessionKey: `agent:${agentId}:continuous:${jobName}`,
+                    message: `[clawforce:job=${jobName}]\n\n${nudge}`,
+                  });
+                  api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agentId}`);
+                } catch (err) {
+                  api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }, 5000);
             } catch (err) {
               api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
             }
