@@ -71,7 +71,10 @@ export async function routeEscalation(params: EscalationParams): Promise<void> {
 
   // Try each level in the chain until one succeeds
   for (const targetAgentId of targets) {
-    // Persist as message for delivery tracking
+    const sessionKey = `agent:${targetAgentId}`;
+
+    // Step 1: Persist as message for delivery tracking (requires projectId)
+    let persisted = false;
     if (params.projectId) {
       try {
         const msg = createMessage({
@@ -82,10 +85,10 @@ export async function routeEscalation(params: EscalationParams): Promise<void> {
           priority: "urgent",
           content: message,
         });
+        persisted = true;
         emitDiagnosticEvent({ type: "escalation_queued_as_message", targetAgentId, sourceAgentId, messageId: msg.id });
 
         // Attempt immediate delivery for active sessions
-        const sessionKey = `agent:${targetAgentId}`;
         try {
           await params.injectAgentMessage({ sessionKey, message });
           markDelivered(msg.id);
@@ -101,27 +104,28 @@ export async function routeEscalation(params: EscalationParams): Promise<void> {
         return; // Message persisted — stop escalating up the chain
       } catch (err) {
         logger.warn(`Clawforce: failed to persist escalation as message: ${err instanceof Error ? err.message : String(err)}`);
-        // Fall through to legacy injection path
       }
     }
 
-    // Legacy fallback: direct injection without persistence
-    const sessionKey = `agent:${targetAgentId}`;
-    try {
-      await params.injectAgentMessage({ sessionKey, message });
-      emitDiagnosticEvent({ type: "escalation_delivered", targetAgentId, sourceAgentId });
-      return; // Success — stop escalating
-    } catch (err) {
-      emitDiagnosticEvent({
-        type: "escalation_failed",
-        targetAgentId,
-        sourceAgentId,
-        reason: err instanceof Error ? err.message : String(err),
-      });
-      logger.warn(
-        `Clawforce: failed to escalate from ${sourceAgentId} to ${targetAgentId}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      // Continue to next level in the chain
+    // Step 2: Direct injection without persistence — used when projectId is
+    // unavailable (no message store) or when createMessage failed above.
+    if (!persisted) {
+      try {
+        await params.injectAgentMessage({ sessionKey, message });
+        emitDiagnosticEvent({ type: "escalation_delivered", targetAgentId, sourceAgentId });
+        return; // Delivered — stop escalating
+      } catch (err) {
+        emitDiagnosticEvent({
+          type: "escalation_failed",
+          targetAgentId,
+          sourceAgentId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        logger.warn(
+          `Clawforce: failed to escalate from ${sourceAgentId} to ${targetAgentId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        // Continue to next level in the chain
+      }
     }
   }
 
