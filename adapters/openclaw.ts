@@ -878,6 +878,39 @@ const clawforcePlugin = {
           api.logger.warn(`Clawforce: escalation failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+
+      // --- Continuous job re-dispatch ---
+      // If the agent's current job is marked continuous, immediately re-dispatch
+      // via the cron API. This creates a tight loop: agent finishes → starts again.
+      if (session.jobName) {
+        const cfAgentEntry = getAgentConfig(session.agentId);
+        if (cfAgentEntry) {
+          const jobDef = cfAgentEntry.config.jobs?.[session.jobName];
+          if (jobDef?.continuous) {
+            try {
+              const { buildJobCronJob, toCronJobCreate } = await import("../src/manager-cron.js");
+              const cronJob = buildJobCronJob(
+                session.projectId,
+                session.agentId,
+                session.jobName,
+                jobDef,
+                `at:${new Date().toISOString()}`,
+              );
+              cronJob.deleteAfterRun = true;
+              const cronInput = toCronJobCreate(cronJob);
+              // Use the setCronService'd service for dispatch
+              const { getCronService } = await import("../src/manager-cron.js");
+              const cronSvc = getCronService();
+              if (cronSvc) {
+                await cronSvc.add(cronInput);
+                api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
+              }
+            } catch (err) {
+              api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        }
+      }
     });
 
     // --- Auto-capture costs via llm_output ---

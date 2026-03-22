@@ -368,6 +368,8 @@ export type JobDefinition = {
   nudge?: string;
   /** Tool scope for this job. Intersects with agent's tool list — only these tools are available during this job. If omitted, all agent tools are available. */
   tools?: string[];
+  /** Continuous mode: immediately re-dispatch this job when the current session ends. No cron needed — the agent runs in a tight loop. */
+  continuous?: boolean;
 };
 
 /** Top-level approval policy configuration. */
