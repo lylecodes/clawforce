@@ -369,6 +369,10 @@ export type JobDefinition = {
   tools?: string[];
   /** Continuous mode: immediately re-dispatch this job when the current session ends. No cron needed — the agent runs in a tight loop. */
   continuous?: boolean;
+  /** Frequency target — alternative to cron. ClawForce picks optimal times.
+   * Format: "N/period" where period is "hour", "day", "week".
+   * Example: "3/day" means run 3 times per day at optimal times. */
+  frequency?: string;
 };
 
 /** Top-level approval policy configuration. */

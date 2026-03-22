@@ -54,6 +54,7 @@ export type SweepResult = {
   anomaliesDetected: number;
   reviewEscalated: number;
   meetingsStale: number;
+  frequencyDispatched: number;
 };
 
 export type SweepOptions = {
@@ -531,6 +532,24 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     safeLog("sweep.staleMeetings", err);
   }
 
+  // 13. Check frequency-based jobs and enqueue dispatches
+  let frequencyDispatched = 0;
+  try {
+    const { checkFrequencyJobs } = await import("../scheduling/scheduler.js");
+    const frequencyJobs = checkFrequencyJobs(projectId, db);
+    for (const job of frequencyJobs) {
+      ingestEvent(projectId, "sweep_finding", "cron", {
+        finding: "frequency_job_due",
+        agentId: job.agentId,
+        jobName: job.jobName,
+        reason: job.reason,
+      }, sweepDedupKey("freq-job", `${job.agentId}:${job.jobName}`, now), db);
+      frequencyDispatched++;
+    }
+  } catch (err) {
+    safeLog("sweep.frequencyJobs", err);
+  }
+
   return {
     stale, autoBlocked, deadlineExpired, workflowsAdvanced, escalated,
     complianceBlocked, stuckKilled, proposalsExpired, protocolsExpired,
@@ -538,6 +557,6 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     leasesReclaimed,
     eventsProcessed, dispatched, budgetsReset, autoAssigned,
     sloChecked, sloBreach, alertsFired, anomaliesDetected,
-    reviewEscalated, meetingsStale,
+    reviewEscalated, meetingsStale, frequencyDispatched,
   };
 }

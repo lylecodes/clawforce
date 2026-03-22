@@ -228,6 +228,10 @@ export type { CreatePlanParams, CompletePlanParams } from "./scheduling/plans.js
 export { computeAvailableSlots } from "./scheduling/slots.js";
 export type { SlotAvailability, SlotCalcInput, ModelConfig } from "./scheduling/slots.js";
 export { clampCronToWakeBounds } from "./scheduling/wake-bounds.js";
+export { parseFrequency, shouldRunNow } from "./scheduling/frequency.js";
+export type { FrequencyTarget, ShouldRunResult } from "./scheduling/frequency.js";
+export { checkFrequencyJobs } from "./scheduling/scheduler.js";
+export type { FrequencyDispatch } from "./scheduling/scheduler.js";
 
 // --- Knowledge Lifecycle ---
 export { trackRetrieval, getRetrievalStats, getStatsAboveThreshold } from "./memory/retrieval-tracker.js";

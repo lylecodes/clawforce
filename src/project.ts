@@ -792,6 +792,9 @@ function normalizeJobs(raw: unknown): Record<string, JobDefinition> | undefined 
     if (typeof (j.max_turns ?? j.maxTurns) === "number" && ((j.max_turns ?? j.maxTurns) as number) > 0) {
       job.maxTurns = (j.max_turns ?? j.maxTurns) as number;
     }
+    if (typeof j.frequency === "string" && j.frequency.trim()) {
+      job.frequency = j.frequency.trim();
+    }
 
     result[jobName] = job;
   }
