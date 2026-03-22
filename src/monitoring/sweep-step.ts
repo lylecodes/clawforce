@@ -9,7 +9,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "../db.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { recordMetric } from "../metrics.js";
-import { getExtendedProjectConfig } from "../project.js";
+import type { ExtendedProjectConfig } from "../project.js";
 import type { AlertRuleDefinition, AnomalyConfig, SloDefinition } from "../types.js";
 import { evaluateAlertRules } from "./alerts.js";
 import { detectAnomalies } from "./anomaly.js";
@@ -29,10 +29,10 @@ export type MonitoringSweepResult = {
  */
 export function runMonitoringSweep(
   projectId: string,
+  config: ExtendedProjectConfig | null,
   dbOverride?: DatabaseSync,
 ): MonitoringSweepResult {
   const db = dbOverride ?? getDb(projectId);
-  const config = getExtendedProjectConfig(projectId);
 
   let sloChecked = 0;
   let sloBreach = 0;

@@ -451,7 +451,8 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
   try {
     // Lazy import to avoid circular deps
     const { runMonitoringSweep } = await import("../monitoring/sweep-step.js");
-    const monResult = runMonitoringSweep(projectId, db);
+    const extConfig = getExtendedProjectConfig(projectId);
+    const monResult = runMonitoringSweep(projectId, extConfig, db);
     sloChecked = monResult.sloChecked;
     sloBreach = monResult.sloBreach;
     alertsFired = monResult.alertsFired;

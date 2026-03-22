@@ -1290,7 +1290,7 @@ const agentConfigRegistry = new Map<string, AgentConfigEntry>();
 const approvalPolicies = new Map<string, ApprovalPolicy>();
 
 /** Extended project config keyed by projectId. */
-type ExtendedProjectConfig = {
+export type ExtendedProjectConfig = {
   policies?: WorkforceConfig["policies"];
   monitoring?: WorkforceConfig["monitoring"];
   riskTiers?: RiskTierConfig;
