@@ -395,6 +395,25 @@ async function dispatchItem(
     return;
   }
 
+  // Task description validation gate — ensure task has acceptance criteria
+  if (task.description) {
+    const desc = task.description.toLowerCase();
+    const hasAcceptanceCriteria = desc.includes("acceptance criteria") ||
+      desc.includes("output format") ||
+      desc.includes("expected output") ||
+      desc.includes("done when") ||
+      desc.includes("success criteria") ||
+      desc.includes("verify that") ||
+      desc.includes("must include") ||
+      desc.includes("required output");
+    if (!hasAcceptanceCriteria) {
+      failItem(item.id, "Task description missing acceptance criteria — manager must define what 'done' looks like", db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: "missing_acceptance_criteria", safetyLimit: "task_validation" }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "missing_acceptance_criteria" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      return;
+    }
+  }
+
   // Acquire task lease (long lease — released in agent_end hook)
   const holder = `dispatch:${item.id}`;
   const leaseOk = acquireTaskLease(projectId, item.taskId, holder, TASK_LEASE_MS, db);
