@@ -76,6 +76,10 @@ export function buildOpenClawAgentEntry(
     entry.subagents = { allowAgents: ["*"] };
   }
 
+  if (config.model) {
+    entry.model = { primary: config.model };
+  }
+
   return entry;
 }
 
@@ -89,9 +93,15 @@ export function mergeAgentEntry(
 ): OpenClawAgentEntry {
   const merged = { ...existing };
 
+  // Fields where ClawForce config wins over existing OpenClaw config
+  const CLAWFORCE_WINS = new Set(["model"]);
+
   for (const key of Object.keys(incoming) as (keyof OpenClawAgentEntry)[]) {
     if (key === "id") continue; // id is always from existing
-    if (merged[key] === undefined) {
+    if (CLAWFORCE_WINS.has(key) && incoming[key] !== undefined) {
+      // ClawForce is the source of truth for these fields
+      merged[key] = incoming[key];
+    } else if (merged[key] === undefined) {
       merged[key] = incoming[key];
     }
   }
