@@ -36,18 +36,20 @@ export type ToolCallDetailRow = ToolCallDetail & {
 
 // --- Truncation ---
 
-const MAX_FIELD_SIZE = 10 * 1024; // 10KB
+const DEFAULT_MAX_FIELD_SIZE = 10 * 1024; // 10KB
 
 /**
  * Truncate a string to fit within the max field size.
  * Returns a JSON envelope with truncation metadata if truncated.
+ * @param truncationLimit Optional override for the max field size (in characters).
  */
-export function truncateField(value: string): string {
-  if (value.length <= MAX_FIELD_SIZE) return value;
+export function truncateField(value: string, truncationLimit?: number): string {
+  const maxSize = truncationLimit ?? DEFAULT_MAX_FIELD_SIZE;
+  if (value.length <= maxSize) return value;
   return JSON.stringify({
     truncated: true,
     originalSize: value.length,
-    content: value.slice(0, MAX_FIELD_SIZE - 100), // leave room for envelope
+    content: value.slice(0, maxSize - 100), // leave room for envelope
   });
 }
 

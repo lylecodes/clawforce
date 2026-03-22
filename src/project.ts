@@ -30,6 +30,7 @@ import type {
   ChannelConfig,
   ChannelType,
   CompactionConfig,
+  ContextOwnershipConfig,
   ContextSource,
   DispatchConfig,
   Expectation,
@@ -37,6 +38,8 @@ import type {
   EventActionConfig,
   EventHandlerConfig,
   GoalConfigEntry,
+  LifecycleConfig,
+  ManagerBehaviorConfig,
   MemoryGovernanceConfig,
   ReviewConfig,
   SchedulingConfig,
@@ -47,6 +50,7 @@ import type {
   SkillPack,
   SloDefinition,
   TaskPriority,
+  TelemetryConfig,
   ToolGatesConfig,
   TriggerAfterProcess,
   TriggerAuth,
@@ -242,6 +246,26 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
         minSessions: typeof pt.min_sessions === "number" ? pt.min_sessions : undefined,
       } : undefined,
     };
+  }
+
+  // Parse lifecycle config
+  if (raw.lifecycle && typeof raw.lifecycle === "object") {
+    result.lifecycle = normalizeLifecycleConfig(raw.lifecycle as Record<string, unknown>);
+  }
+
+  // Parse manager_behavior config
+  if ((raw.manager_behavior ?? raw.managerBehavior) && typeof (raw.manager_behavior ?? raw.managerBehavior) === "object") {
+    result.managerBehavior = normalizeManagerBehaviorConfig((raw.manager_behavior ?? raw.managerBehavior) as Record<string, unknown>);
+  }
+
+  // Parse telemetry config
+  if (raw.telemetry && typeof raw.telemetry === "object") {
+    result.telemetry = normalizeTelemetryConfig(raw.telemetry as Record<string, unknown>);
+  }
+
+  // Parse context_ownership config
+  if ((raw.context_ownership ?? raw.contextOwnership) && typeof (raw.context_ownership ?? raw.contextOwnership) === "object") {
+    result.contextOwnership = normalizeContextOwnershipConfig((raw.context_ownership ?? raw.contextOwnership) as Record<string, unknown>);
   }
 
   return result;
@@ -500,6 +524,14 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
 
   const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;
 
+  const contextBudgetChars = typeof (raw.context_budget_chars ?? raw.contextBudgetChars) === "number"
+    ? (raw.context_budget_chars ?? raw.contextBudgetChars) as number
+    : undefined;
+  const maxTurnsPerSession = typeof (raw.max_turns_per_session ?? raw.maxTurnsPerSession) === "number"
+    ? (raw.max_turns_per_session ?? raw.maxTurnsPerSession) as number
+    : undefined;
+  const agentModel = typeof raw.model === "string" && raw.model.trim() ? raw.model.trim() : undefined;
+
   let scheduling: SchedulingConfig | undefined;
   if (raw.scheduling && typeof raw.scheduling === "object") {
     const s = raw.scheduling as Record<string, unknown>;
@@ -531,6 +563,9 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     scheduling,
     skillCap,
     memory,
+    contextBudgetChars,
+    maxTurnsPerSession,
+    model: agentModel,
   };
 }
 
@@ -753,6 +788,9 @@ function normalizeJobs(raw: unknown): Record<string, JobDefinition> | undefined 
     }
     if (typeof j.deleteAfterRun === "boolean") {
       job.deleteAfterRun = j.deleteAfterRun;
+    }
+    if (typeof (j.max_turns ?? j.maxTurns) === "number" && ((j.max_turns ?? j.maxTurns) as number) > 0) {
+      job.maxTurns = (j.max_turns ?? j.maxTurns) as number;
     }
 
     result[jobName] = job;
@@ -1100,6 +1138,78 @@ export function normalizeTriggerConfig(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+function normalizeLifecycleConfig(raw: Record<string, unknown>): LifecycleConfig {
+  const result: LifecycleConfig = {};
+  if (typeof raw.auto_transition_on_dispatch === "boolean" || typeof raw.autoTransitionOnDispatch === "boolean") {
+    result.autoTransitionOnDispatch = (raw.auto_transition_on_dispatch ?? raw.autoTransitionOnDispatch) as boolean;
+  }
+  if (typeof raw.auto_transition_on_complete === "boolean" || typeof raw.autoTransitionOnComplete === "boolean") {
+    result.autoTransitionOnComplete = (raw.auto_transition_on_complete ?? raw.autoTransitionOnComplete) as boolean;
+  }
+  if (typeof raw.auto_capture_evidence === "boolean" || typeof raw.autoCaptureEvidence === "boolean") {
+    result.autoCaptureEvidence = (raw.auto_capture_evidence ?? raw.autoCaptureEvidence) as boolean;
+  }
+  if (Array.isArray(raw.significant_tools ?? raw.significantTools)) {
+    const tools = ((raw.significant_tools ?? raw.significantTools) as unknown[])
+      .filter((t): t is string => typeof t === "string");
+    if (tools.length > 0) result.significantTools = tools;
+  }
+  if (typeof (raw.evidence_truncation_limit ?? raw.evidenceTruncationLimit) === "number") {
+    result.evidenceTruncationLimit = (raw.evidence_truncation_limit ?? raw.evidenceTruncationLimit) as number;
+  }
+  if (typeof raw.immediate_review_dispatch === "boolean" || typeof raw.immediateReviewDispatch === "boolean") {
+    result.immediateReviewDispatch = (raw.immediate_review_dispatch ?? raw.immediateReviewDispatch) as boolean;
+  }
+  return result;
+}
+
+function normalizeManagerBehaviorConfig(raw: Record<string, unknown>): ManagerBehaviorConfig {
+  const result: ManagerBehaviorConfig = {};
+  if (typeof (raw.max_tasks_per_planning_session ?? raw.maxTasksPerPlanningSession) === "number") {
+    result.maxTasksPerPlanningSession = (raw.max_tasks_per_planning_session ?? raw.maxTasksPerPlanningSession) as number;
+  }
+  if (typeof (raw.planning_horizon_days ?? raw.planningHorizonDays) === "number") {
+    result.planningHorizonDays = (raw.planning_horizon_days ?? raw.planningHorizonDays) as number;
+  }
+  if (typeof (raw.escalation_trust_threshold ?? raw.escalationTrustThreshold) === "number") {
+    result.escalationTrustThreshold = (raw.escalation_trust_threshold ?? raw.escalationTrustThreshold) as number;
+  }
+  return result;
+}
+
+function normalizeTelemetryConfig(raw: Record<string, unknown>): TelemetryConfig {
+  const result: TelemetryConfig = {};
+  if (typeof (raw.archive_transcripts ?? raw.archiveTranscripts) === "boolean") {
+    result.archiveTranscripts = (raw.archive_transcripts ?? raw.archiveTranscripts) as boolean;
+  }
+  if (typeof (raw.capture_tool_io ?? raw.captureToolIO) === "boolean") {
+    result.captureToolIO = (raw.capture_tool_io ?? raw.captureToolIO) as boolean;
+  }
+  if (typeof (raw.tool_io_truncation_limit ?? raw.toolIOTruncationLimit) === "number") {
+    result.toolIOTruncationLimit = (raw.tool_io_truncation_limit ?? raw.toolIOTruncationLimit) as number;
+  }
+  if (typeof (raw.retention_days ?? raw.retentionDays) === "number") {
+    result.retentionDays = (raw.retention_days ?? raw.retentionDays) as number;
+  }
+  if (typeof (raw.track_config_changes ?? raw.trackConfigChanges) === "boolean") {
+    result.trackConfigChanges = (raw.track_config_changes ?? raw.trackConfigChanges) as boolean;
+  }
+  return result;
+}
+
+const VALID_OWNERSHIP_VALUES = ["any", "manager", "human"] as const;
+
+function normalizeContextOwnershipConfig(raw: Record<string, unknown>): ContextOwnershipConfig {
+  const result: ContextOwnershipConfig = {};
+  for (const key of ["architecture", "standards", "direction", "policies"] as const) {
+    const val = raw[key];
+    if (typeof val === "string" && (VALID_OWNERSHIP_VALUES as readonly string[]).includes(val)) {
+      result[key] = val as "any" | "manager" | "human";
+    }
+  }
+  return result;
+}
+
 function normalizeReviewConfig(raw: Record<string, unknown>): ReviewConfig {
   const result: ReviewConfig = {};
 
@@ -1192,6 +1302,10 @@ type ExtendedProjectConfig = {
   review?: ReviewConfig;
   channels?: ChannelConfig[];
   safety?: WorkforceConfig["safety"];
+  lifecycle?: LifecycleConfig;
+  managerBehavior?: ManagerBehaviorConfig;
+  telemetry?: TelemetryConfig;
+  contextOwnership?: ContextOwnershipConfig;
 };
 const projectExtendedConfig = new Map<string, ExtendedProjectConfig>();
 
@@ -1275,7 +1389,7 @@ export function registerWorkforceConfig(
   }
 
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety) {
+  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership) {
     projectExtendedConfig.set(projectId, {
       policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
@@ -1289,6 +1403,10 @@ export function registerWorkforceConfig(
       review: wfConfig.review,
       channels: wfConfig.channels,
       safety: wfConfig.safety,
+      lifecycle: wfConfig.lifecycle,
+      managerBehavior: wfConfig.managerBehavior,
+      telemetry: wfConfig.telemetry,
+      contextOwnership: wfConfig.contextOwnership,
     });
   }
 }

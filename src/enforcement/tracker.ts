@@ -157,23 +157,24 @@ export function recordToolCall(
 
 /**
  * Record a significant tool output for auto-lifecycle evidence.
- * Buffers up to MAX_RESULTS results, each truncated to MAX_CHARS.
+ * Buffers up to MAX_RESULTS results, each truncated to the given limit (default 2000 chars).
  */
 export function recordSignificantResult(
   sessionKey: string,
   toolName: string,
   action: string | null,
   result: string,
+  truncationLimit?: number,
 ): void {
   const session = sessions.get(sessionKey);
   if (!session) return;
   const MAX_RESULTS = 5;
-  const MAX_CHARS = 2000;
+  const maxChars = truncationLimit ?? 2000;
   if (session.metrics.significantResults.length >= MAX_RESULTS) return;
   session.metrics.significantResults.push({
     toolName,
     action,
-    resultPreview: result.length > MAX_CHARS ? result.slice(0, MAX_CHARS) + "..." : result,
+    resultPreview: result.length > maxChars ? result.slice(0, maxChars) + "..." : result,
   });
 }
 

@@ -371,4 +371,8 @@ export type {
   Experiment,
   ExperimentVariant,
   ExperimentSession,
+  LifecycleConfig,
+  ManagerBehaviorConfig,
+  TelemetryConfig,
+  ContextOwnershipConfig,
 } from "./types.js";

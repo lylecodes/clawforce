@@ -34,6 +34,7 @@ import {
   getRegisteredAgentIds,
   resolveProjectDir,
 } from "../src/project.js";
+import { getEffectiveLifecycleConfig } from "../src/safety.js";
 import { syncAgentsToOpenClaw } from "../src/agent-sync.js";
 import { approveProposal, listPendingProposals, rejectProposal } from "../src/approval/resolve.js";
 import { resolveApprovalChannel } from "../src/approval/channel-router.js";
@@ -322,13 +323,16 @@ const clawforcePlugin = {
           setDispatchContext(sessionKey, dispatchCtx);
 
           // Auto-transition ASSIGNED → IN_PROGRESS on dispatch start
-          try {
-            const db = getDb(entry.projectId);
-            const task = getTask(entry.projectId, dispatchCtx.taskId, db);
-            if (task && task.state === "ASSIGNED") {
-              transitionTask({ projectId: entry.projectId, taskId: dispatchCtx.taskId, toState: "IN_PROGRESS", actor: agentId }, db);
-            }
-          } catch { /* non-fatal */ }
+          const lifecycleCfg = getEffectiveLifecycleConfig(entry.projectId);
+          if (lifecycleCfg.autoTransitionOnDispatch) {
+            try {
+              const db = getDb(entry.projectId);
+              const task = getTask(entry.projectId, dispatchCtx.taskId, db);
+              if (task && task.state === "ASSIGNED") {
+                transitionTask({ projectId: entry.projectId, taskId: dispatchCtx.taskId, toState: "IN_PROGRESS", actor: agentId }, db);
+              }
+            } catch { /* non-fatal */ }
+          }
         }
 
         // Detect meeting tag [clawforce:meeting=<channelId>:<turnIndex>]
@@ -537,11 +541,16 @@ const clawforcePlugin = {
       );
 
       // Buffer significant tool outputs for auto-lifecycle evidence
-      const SIGNIFICANT_TOOLS = new Set(["Bash", "Write", "Edit", "Read"]);
-      if (event.result && SIGNIFICANT_TOOLS.has(toolName)) {
-        const resultStr = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
-        if (resultStr.length > 100) {
-          recordSignificantResult(ctx.sessionKey, toolName, action ?? null, resultStr);
+      // Resolve lifecycle config for this agent's project
+      const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+      const lcConfig = agentEntry ? getEffectiveLifecycleConfig(agentEntry.projectId) : null;
+      if (lcConfig?.autoCaptureEvidence !== false) {
+        const significantTools = new Set(lcConfig?.significantTools ?? ["Bash", "Write", "Edit", "Read"]);
+        if (event.result && significantTools.has(toolName)) {
+          const resultStr = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
+          if (resultStr.length > 100) {
+            recordSignificantResult(ctx.sessionKey, toolName, action ?? null, resultStr, lcConfig?.evidenceTruncationLimit);
+          }
         }
       }
 
@@ -736,6 +745,7 @@ const clawforcePlugin = {
         const { queueItemId, taskId } = session.dispatchContext;
         const db = getDb(session.projectId);
         const task = getTask(session.projectId, taskId, db);
+        const endLifecycleCfg = getEffectiveLifecycleConfig(session.projectId);
 
         // Auto-capture evidence and transition for tasks still in work states
         if (task && (task.state === "IN_PROGRESS" || task.state === "ASSIGNED")) {
@@ -746,40 +756,46 @@ const clawforcePlugin = {
           const lastMessage = typeof lastText === "string" ? lastText : JSON.stringify(lastText);
 
           // Build evidence from buffered tool outputs + last message
-          const parts: string[] = [];
-          if (session.metrics.significantResults.length > 0) {
-            parts.push("## Tool Outputs\n");
-            for (const r of session.metrics.significantResults) {
-              parts.push(`### ${r.toolName}${r.action ? ` (${r.action})` : ""}\n\`\`\`\n${r.resultPreview}\n\`\`\``);
+          if (endLifecycleCfg.autoCaptureEvidence) {
+            const parts: string[] = [];
+            if (session.metrics.significantResults.length > 0) {
+              parts.push("## Tool Outputs\n");
+              for (const r of session.metrics.significantResults) {
+                parts.push(`### ${r.toolName}${r.action ? ` (${r.action})` : ""}\n\`\`\`\n${r.resultPreview}\n\`\`\``);
+              }
             }
-          }
-          if (lastMessage.trim()) {
-            parts.push(`\n## Agent Summary\n${lastMessage.slice(0, 3000)}`);
-          }
+            if (lastMessage.trim()) {
+              parts.push(`\n## Agent Summary\n${lastMessage.slice(0, 3000)}`);
+            }
 
-          const evidence = parts.join("\n") || "Session completed with no captured output.";
+            const evidence = parts.join("\n") || "Session completed with no captured output.";
 
-          // Auto-attach evidence
-          try {
-            attachEvidence({ projectId: session.projectId, taskId, type: "output", content: evidence, attachedBy: session.agentId }, db);
-          } catch { /* non-fatal */ }
+            // Auto-attach evidence
+            try {
+              attachEvidence({ projectId: session.projectId, taskId, type: "output", content: evidence, attachedBy: session.agentId }, db);
+            } catch { /* non-fatal */ }
+          }
 
           // Auto-transition based on session outcome
-          try {
-            if (session.metrics.toolCalls.length === 0) {
-              transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
-            } else if (session.metrics.errorCount > session.metrics.toolCalls.length * 0.5) {
-              transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
-            } else {
-              transitionTask({ projectId: session.projectId, taskId, toState: "REVIEW", actor: session.agentId }, db);
-            }
-          } catch { /* non-fatal */ }
+          if (endLifecycleCfg.autoTransitionOnComplete) {
+            try {
+              if (session.metrics.toolCalls.length === 0) {
+                transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
+              } else if (session.metrics.errorCount > session.metrics.toolCalls.length * 0.5) {
+                transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
+              } else {
+                transitionTask({ projectId: session.projectId, taskId, toState: "REVIEW", actor: session.agentId }, db);
+              }
+            } catch { /* non-fatal */ }
+          }
 
           // Immediate event processing for manager dispatch
-          try {
-            const { processEvents } = await import("../src/events/router.js");
-            processEvents(session.projectId, db);
-          } catch { /* non-fatal */ }
+          if (endLifecycleCfg.immediateReviewDispatch) {
+            try {
+              const { processEvents } = await import("../src/events/router.js");
+              processEvents(session.projectId, db);
+            } catch { /* non-fatal */ }
+          }
         }
 
         // Dispatch queue completion handling

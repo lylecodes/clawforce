@@ -320,6 +320,12 @@ export type AgentConfig = {
   memory?: MemoryGovernanceConfig;
   /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. */
   observe?: string[];
+  /** Context window budget in characters. Default: 15000. */
+  contextBudgetChars?: number;
+  /** Max turns per session. Default: 50. */
+  maxTurnsPerSession?: number;
+  /** Model override for this agent. */
+  model?: string;
 };
 
 /** A scoped session definition for an agent. */
@@ -342,6 +348,8 @@ export type JobDefinition = {
   model?: string;
   /** Timeout in seconds for this job's cron session. */
   timeoutSeconds?: number;
+  /** Max turns for this job's session. */
+  maxTurns?: number;
   /** Use light context for this job's cron session. */
   lightContext?: boolean;
   /** Mark as one-shot: auto-delete after single run. Default true for "at" schedules. */
@@ -375,6 +383,58 @@ export type SkillPack = {
   performance_policy?: PerformancePolicy;
 };
 
+/** Auto-lifecycle configuration. */
+export type LifecycleConfig = {
+  /** Auto-transition ASSIGNED→IN_PROGRESS on dispatch. Default: true. */
+  autoTransitionOnDispatch?: boolean;
+  /** Auto-transition IN_PROGRESS→REVIEW on completion. Default: true. */
+  autoTransitionOnComplete?: boolean;
+  /** Auto-capture evidence from tool outputs. Default: true. */
+  autoCaptureEvidence?: boolean;
+  /** Tools considered "significant" for evidence capture. Default: ["Bash", "Write", "Edit", "Read"]. */
+  significantTools?: string[];
+  /** Max chars per evidence capture. Default: 2000. */
+  evidenceTruncationLimit?: number;
+  /** Trigger manager review immediately on REVIEW transition. Default: true. */
+  immediateReviewDispatch?: boolean;
+};
+
+/** Manager behavior configuration. */
+export type ManagerBehaviorConfig = {
+  /** Max tasks to create per planning session. Default: 10. */
+  maxTasksPerPlanningSession?: number;
+  /** Planning horizon — how many days ahead to plan. Default: 7. */
+  planningHorizonDays?: number;
+  /** Escalation threshold — what trust score triggers human escalation. Default: 0.3. */
+  escalationTrustThreshold?: number;
+};
+
+/** Telemetry configuration. */
+export type TelemetryConfig = {
+  /** Archive session transcripts. Default: true. */
+  archiveTranscripts?: boolean;
+  /** Capture tool call I/O. Default: true. */
+  captureToolIO?: boolean;
+  /** Max chars per tool I/O capture. Default: 10000. */
+  toolIOTruncationLimit?: number;
+  /** Session archive retention in days. Default: 90. */
+  retentionDays?: number;
+  /** Track config changes. Default: true. */
+  trackConfigChanges?: boolean;
+};
+
+/** Context file ownership rules. */
+export type ContextOwnershipConfig = {
+  /** Who can update ARCHITECTURE.md. Default: "any". */
+  architecture?: "any" | "manager" | "human";
+  /** Who can update STANDARDS.md. Default: "manager". */
+  standards?: "any" | "manager" | "human";
+  /** Who can update DIRECTION.md. Default: "human". */
+  direction?: "any" | "manager" | "human";
+  /** Who can update POLICIES.md. Default: "human". */
+  policies?: "any" | "manager" | "human";
+};
+
 /** Full project config with workforce management. */
 export type WorkforceConfig = {
   name: string;
@@ -384,6 +444,14 @@ export type WorkforceConfig = {
   dir?: string;
   approval?: ApprovalPolicy;
   agents: Record<string, AgentConfig>;
+  /** Auto-lifecycle configuration. */
+  lifecycle?: LifecycleConfig;
+  /** Manager behavior configuration. */
+  managerBehavior?: ManagerBehaviorConfig;
+  /** Telemetry configuration. */
+  telemetry?: TelemetryConfig;
+  /** Context file ownership rules. */
+  contextOwnership?: ContextOwnershipConfig;
   budgets?: {
     project?: BudgetConfig;
     agents?: Record<string, BudgetConfig>;

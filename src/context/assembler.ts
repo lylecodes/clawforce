@@ -98,7 +98,7 @@ export function assembleContext(
   opts?: { projectId?: string; projectDir?: string; budgetChars?: number; sessionKey?: string },
 ): string {
   const ctx: AssemblerContext = { agentId, config, projectId: opts?.projectId, projectDir: opts?.projectDir };
-  const budgetChars = opts?.budgetChars ?? 15_000;
+  const budgetChars = opts?.budgetChars ?? config.contextBudgetChars ?? 15_000;
   const sessionKey = opts?.sessionKey;
   const sections: string[] = [];
 
