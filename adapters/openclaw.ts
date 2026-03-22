@@ -1772,30 +1772,36 @@ const clawforcePlugin = {
         }
 
         // --- Auto-start continuous jobs on gateway init ---
-        // Find any agents with continuous jobs and dispatch them immediately
-        // via injectAgentMessage — no cron middleman.
+        // Find any agents with continuous jobs and dispatch them.
+        // At gateway_start, injectAgentMessage isn't available yet.
+        // Use child_process to call the openclaw CLI after a delay.
         for (const agentId of getRegisteredAgentIds()) {
           const entry = getAgentConfig(agentId);
           if (!entry?.config.jobs) continue;
           for (const [jobName, jobDef] of Object.entries(entry.config.jobs)) {
             if (!jobDef.continuous) continue;
-            try {
-              const nudge = jobDef.nudge ?? `Start your "${jobName}" job.`;
-              // Small delay to let gateway finish starting
-              setTimeout(async () => {
-                try {
-                  await api.injectAgentMessage({
-                    sessionKey: `agent:${agentId}:continuous:${jobName}`,
-                    message: `[clawforce:job=${jobName}]\n\n${nudge}`,
-                  });
-                  api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agentId}`);
-                } catch (err) {
-                  api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
-                }
-              }, 5000);
-            } catch (err) {
-              api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
-            }
+            const nudge = jobDef.nudge ?? `Start your "${jobName}" job.`;
+            const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
+            // Delay to let gateway fully start before dispatching
+            setTimeout(() => {
+              try {
+                const { execFile } = require("node:child_process");
+                execFile("openclaw", [
+                  "agent",
+                  "--agent", agentId,
+                  "--message", taggedMessage,
+                ], { timeout: 600_000 }, (err: Error | null) => {
+                  if (err) {
+                    api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err.message}`);
+                  } else {
+                    api.logger.info(`Clawforce: continuous job "${jobName}" completed for ${agentId}`);
+                  }
+                });
+                api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agentId}`);
+              } catch (err) {
+                api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }, 10_000); // 10s delay for gateway to be fully ready
           }
         }
       } catch (err) {
