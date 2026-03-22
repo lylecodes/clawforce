@@ -98,7 +98,7 @@ export function mergeAgentEntry(
 
   for (const key of Object.keys(incoming) as (keyof OpenClawAgentEntry)[]) {
     if (key === "id") continue; // id is always from existing
-    if (CLAWFORCE_WINS.has(key) && incoming[key] !== undefined) {
+    if (CLAWFORCE_WINS.has(key as string) && incoming[key] !== undefined) {
       // ClawForce is the source of truth for these fields
       merged[key] = incoming[key];
     } else if (merged[key] === undefined) {

@@ -94,7 +94,8 @@ describe("mergeAgentEntry", () => {
     const merged = mergeAgentEntry(existing, incoming);
 
     expect(merged.name).toBe("Custom Name");
-    expect(merged.model).toBe("my-custom-model");
+    // model is in CLAWFORCE_WINS — incoming (ClawForce) wins over existing user config
+    expect(merged.model).toEqual({ primary: "claude-opus-4-6" });
     expect(merged.workspace).toBe("/custom/path");
     // identity was missing in existing, so it gets filled
     expect(merged.identity).toEqual({ name: "Auto Name" });
