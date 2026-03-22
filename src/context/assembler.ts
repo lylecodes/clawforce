@@ -29,6 +29,7 @@ import { listPendingProposals } from "../approval/resolve.js";
 import { getPendingMessages, markBulkDelivered } from "../messaging/store.js";
 import { buildCompactionInstructions, isCompactionEnabled } from "./sources/compaction.js";
 import { buildCostSummary } from "./sources/cost-summary.js";
+import { buildClawforceHealthReport } from "./sources/clawforce-health-report.js";
 import { buildHealthStatus } from "./sources/health-status.js";
 import { buildInstructions } from "./sources/instructions.js";
 import { buildPolicyStatus } from "./sources/policy-status.js";
@@ -209,6 +210,9 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
 
     case "health_status":
       return resolveHealthStatusSource(ctx);
+
+    case "clawforce_health_report":
+      return resolveClawforceHealthReportSource(ctx);
 
     case "team_status":
       return resolveTeamStatusSource(ctx);
@@ -571,6 +575,15 @@ function resolveHealthStatusSource(ctx: AssemblerContext): string | null {
   if (!ctx.projectId) return null;
   try {
     return buildHealthStatus(ctx.projectId);
+  } catch {
+    return null;
+  }
+}
+
+function resolveClawforceHealthReportSource(ctx: AssemblerContext): string | null {
+  if (!ctx.projectId) return null;
+  try {
+    return buildClawforceHealthReport(ctx.projectId, ctx.projectDir);
   } catch {
     return null;
   }

@@ -396,6 +396,7 @@ const VALID_SOURCES: ContextSource["source"][] = [
 "custom_stream", "observed_events",
   "direction", "policies", "standards", "architecture",
   "task_creation_standards", "execution_standards", "review_standards", "rejection_standards",
+  "clawforce_health_report",
 ];
 
 function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
