@@ -29,6 +29,7 @@ import { reclaimExpiredLeases } from "../dispatch/queue.js";
 import { createMessage } from "../messaging/store.js";
 import { findManagerAgent } from "../events/actions.js";
 import { processAndDispatch } from "../dispatch/dispatcher.js";
+import { checkSpendRateWarning } from "../safety.js";
 
 export type SweepResult = {
   stale: number;
@@ -486,6 +487,20 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     }
   } catch (err) {
     safeLog("sweep.autoAssign", err);
+  }
+
+  // 5b. Spend rate warning check
+  try {
+    const spendWarning = checkSpendRateWarning(projectId, undefined, db);
+    if (spendWarning.warning && spendWarning.reason) {
+      ingestEvent(projectId, "sweep_finding", "cron", {
+        finding: "spend_rate_warning",
+        pct: spendWarning.pct,
+        reason: spendWarning.reason,
+      }, sweepDedupKey("spend-warning", projectId, now), db);
+    }
+  } catch (err) {
+    safeLog("sweep.spendRateWarning", err);
   }
 
   // 6. Detect stale meetings (no activity for >2h)

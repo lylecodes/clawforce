@@ -50,6 +50,7 @@ import {
 } from "./common.js";
 import { EVENT_STATUSES } from "../types.js";
 import type { EventStatus } from "../types.js";
+import { activateEmergencyStop, deactivateEmergencyStop, isEmergencyStopActive } from "../safety.js";
 
 const OPS_ACTIONS = [
   "agent_status", "kill_agent", "disable_agent", "enable_agent",
@@ -61,6 +62,7 @@ const OPS_ACTIONS = [
   "plan_create", "plan_start", "plan_complete", "plan_abandon", "plan_list",
   "flag_knowledge", "approve_promotion", "dismiss_promotion", "resolve_flag", "dismiss_flag", "list_candidates", "list_flags",
   "init_questions", "init_apply", "route",
+  "emergency_stop", "emergency_resume",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -144,7 +146,7 @@ export function createClawforceOpsTool(options?: {
     description:
       "Team observability and control. " +
       "Read: agent_status, query_audit, refresh_context, list_events, queue_status, dispatch_metrics, list_jobs, cron_status, introspect. " +
-      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, toggle_job_cron, allocate_budget. " +
+      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, toggle_job_cron, allocate_budget, emergency_stop, emergency_resume. " +
       "Job management: list_jobs (view agent jobs), create_job/update_job/delete_job (manage scoped sessions), toggle_job_cron (enable/disable job cron), cron_status (view cron run state). " +
       "introspect: view your own config, expectations, budget, and SLO status. " +
       "Use emit_event to ingest external events (CI failures, PR opens, etc). " +
@@ -1230,6 +1232,40 @@ export function createClawforceOpsTool(options?: {
             const { executeRoute } = await import("../streams/router.js");
             const results = await executeRoute(routeConfig, streamData, JSON.stringify(streamData), projectId);
             return jsonResult(results);
+          }
+
+          case "emergency_stop": {
+            const reason = readStringParam(params, "reason") ?? "Activated by manager";
+            activateEmergencyStop(projectId);
+
+            writeAuditEntry({
+              projectId,
+              actor: caller,
+              action: "emergency_stop",
+              targetType: "project",
+              targetId: projectId,
+              detail: reason,
+            });
+
+            return jsonResult({ ok: true, emergencyStop: true, reason });
+          }
+
+          case "emergency_resume": {
+            if (!isEmergencyStopActive(projectId)) {
+              return jsonResult({ ok: false, reason: "Emergency stop is not active for this project." });
+            }
+
+            deactivateEmergencyStop(projectId);
+
+            writeAuditEntry({
+              projectId,
+              actor: caller,
+              action: "emergency_resume",
+              targetType: "project",
+              targetId: projectId,
+            });
+
+            return jsonResult({ ok: true, emergencyStop: false, message: "Emergency stop deactivated — dispatches resumed." });
           }
 
           case "init_apply": {

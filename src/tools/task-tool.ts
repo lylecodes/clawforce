@@ -22,12 +22,43 @@ import { getApprovalPolicy } from "../project.js";
 import { getProposal } from "../approval/resolve.js";
 import { queryMetrics } from "../metrics.js";
 import type { MetricType } from "../metrics.js";
+import { getSafetyConfig } from "../safety.js";
 import { EVIDENCE_TYPES, TASK_PRIORITIES, TASK_STATES } from "../types.js";
 import type { EvidenceType, TaskPriority, TaskState } from "../types.js";
 import { getAgentConfig } from "../project.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
+
+// --- Per-session task creation counter for maxTasksPerSession ---
+const sessionTaskCreationCounts = new Map<string, number>();
+
+/** Increment and check task creation count for a session. Returns null if OK, or error message. */
+function checkSessionTaskLimit(sessionKey: string | undefined, projectId: string): string | null {
+  if (!sessionKey) return null;
+  try {
+    const config = getSafetyConfig(projectId);
+    const maxTasks = config.maxTasksPerSession;
+    const current = sessionTaskCreationCounts.get(sessionKey) ?? 0;
+    if (current >= maxTasks) {
+      return `Session task creation limit reached (${current}/${maxTasks}). Cannot create more tasks in this session.`;
+    }
+  } catch {
+    // Non-fatal
+  }
+  return null;
+}
+
+/** Record a task creation in a session. */
+function recordSessionTaskCreation(sessionKey: string | undefined): void {
+  if (!sessionKey) return;
+  sessionTaskCreationCounts.set(sessionKey, (sessionTaskCreationCounts.get(sessionKey) ?? 0) + 1);
+}
+
+/** Reset session task creation tracking (for tests). */
+export function resetSessionTaskCounts(): void {
+  sessionTaskCreationCounts.clear();
+}
 
 const TASK_ACTIONS = [
   "create", "transition", "attach_evidence", "get", "list", "history", "fail",
@@ -115,6 +146,12 @@ export function createClawforceTaskTool(options?: {
 
       switch (action) {
         case "create": {
+          // Max tasks per session safety check
+          const sessionLimitError = checkSessionTaskLimit(options?.agentSessionKey, projectId);
+          if (sessionLimitError) {
+            return jsonResult({ ok: false, reason: sessionLimitError });
+          }
+
           const title = readStringParam(params, "title", { required: true })!;
           const description = readStringParam(params, "description");
           const priorityRaw = readStringParam(params, "priority");
@@ -142,6 +179,7 @@ export function createClawforceTaskTool(options?: {
             workflowId: workflowId ?? undefined,
             goalId: goalId ?? undefined,
           });
+          recordSessionTaskCreation(options?.agentSessionKey);
           const dupWarning = (task as Record<string, unknown>).duplicateWarning as string | undefined;
           const result: Record<string, unknown> = { ok: true, task };
           if (dupWarning) result.warning = dupWarning;
@@ -365,6 +403,12 @@ export function createClawforceTaskTool(options?: {
             return jsonResult({ ok: false, reason: "bulk_create supports a maximum of 50 tasks per call." });
           }
 
+          // Check session task limit before bulk create
+          const bulkLimitError = checkSessionTaskLimit(options?.agentSessionKey, projectId);
+          if (bulkLimitError) {
+            return jsonResult({ ok: false, reason: bulkLimitError });
+          }
+
           const results: Array<{ ok: boolean; task?: unknown; reason?: string }> = [];
           for (const t of tasksRaw) {
             const title = typeof t.title === "string" ? t.title : "";
@@ -375,6 +419,12 @@ export function createClawforceTaskTool(options?: {
             const priority = t.priority as TaskPriority | undefined;
             if (priority && !TASK_PRIORITIES.includes(priority)) {
               results.push({ ok: false, reason: `Invalid priority: ${priority}` });
+              continue;
+            }
+            // Per-task session limit check in bulk
+            const perTaskLimit = checkSessionTaskLimit(options?.agentSessionKey, projectId);
+            if (perTaskLimit) {
+              results.push({ ok: false, reason: perTaskLimit });
               continue;
             }
             const task = createTask({
@@ -390,6 +440,7 @@ export function createClawforceTaskTool(options?: {
               workflowId: (t.workflow_id as string) ?? undefined,
               goalId: (t.goal_id as string) ?? undefined,
             });
+            recordSessionTaskCreation(options?.agentSessionKey);
             results.push({ ok: true, task });
           }
           const successCount = results.filter((r) => r.ok).length;

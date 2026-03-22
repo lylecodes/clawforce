@@ -11,6 +11,8 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
+import { getConsecutiveFailures, getSafetyConfig } from "../safety.js";
+import { disableAgent } from "./disabled-store.js";
 import type { PerformancePolicy } from "../types.js";
 import type { ComplianceResult } from "./check.js";
 import { buildRetryPrompt } from "./check.js";
@@ -34,6 +36,23 @@ export function executeFailureAction(
 ): FailureActionResult {
   // Record the audit run regardless of action
   recordAuditRun(result, "non_compliant");
+
+  // After recording failure, check if agent should be auto-disabled
+  try {
+    const consecutiveFailures = getConsecutiveFailures(result.projectId, result.agentId);
+    const safetyConfig = getSafetyConfig(result.projectId);
+    const maxConsecutive = safetyConfig.maxConsecutiveFailures;
+    if (consecutiveFailures >= maxConsecutive) {
+      disableAgent(result.projectId, result.agentId, `Auto-disabled: ${consecutiveFailures} consecutive failures`);
+      return {
+        action: "terminate_and_alert",
+        alertMessage: `Clawforce: ${result.agentId} auto-disabled after ${consecutiveFailures} consecutive failures (threshold: ${maxConsecutive})`,
+        disabled: true,
+      };
+    }
+  } catch (err) {
+    safeLog("actions.consecutiveFailureCheck", err);
+  }
 
   switch (policyConfig.action) {
     case "retry": {
@@ -92,6 +111,23 @@ export function executeCrashAction(
 ): FailureActionResult {
   // Record crash in audit log
   recordCrashAuditRun(projectId, agentId, sessionKey, error, metrics, jobName);
+
+  // After recording failure, check if agent should be auto-disabled
+  try {
+    const consecutiveFailures = getConsecutiveFailures(projectId, agentId);
+    const safetyConfig = getSafetyConfig(projectId);
+    const maxConsecutive = safetyConfig.maxConsecutiveFailures;
+    if (consecutiveFailures >= maxConsecutive) {
+      disableAgent(projectId, agentId, `Auto-disabled: ${consecutiveFailures} consecutive failures (crashed)`);
+      return {
+        action: "terminate_and_alert",
+        alertMessage: `Clawforce: ${agentId} auto-disabled after ${consecutiveFailures} consecutive failures (threshold: ${maxConsecutive})`,
+        disabled: true,
+      };
+    }
+  } catch (err) {
+    safeLog("actions.crashConsecutiveFailureCheck", err);
+  }
 
   if (policyConfig.action === "retry") {
     const maxRetries = resolveMaxRetries(policyConfig.max_retries);

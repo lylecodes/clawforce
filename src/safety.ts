@@ -18,6 +18,12 @@ const DEFAULTS: Required<SafetyConfig> = {
   loopDetectionThreshold: 3,
   maxConcurrentMeetings: 2,
   maxMessageRate: 60,
+  maxTasksPerSession: 10,
+  maxSessionDurationMs: 600_000,
+  spendRateWarningThreshold: 0.8,
+  maxConsecutiveFailures: 5,
+  emergencyStop: false,
+  maxQueueDepth: 50,
 };
 
 export type SafetyCheckResult = { ok: true } | { ok: false; reason: string };
@@ -36,6 +42,12 @@ export function getSafetyConfig(projectId: string): Required<SafetyConfig> {
     loopDetectionThreshold: userConfig.loopDetectionThreshold ?? DEFAULTS.loopDetectionThreshold,
     maxConcurrentMeetings: userConfig.maxConcurrentMeetings ?? DEFAULTS.maxConcurrentMeetings,
     maxMessageRate: userConfig.maxMessageRate ?? DEFAULTS.maxMessageRate,
+    maxTasksPerSession: userConfig.maxTasksPerSession ?? DEFAULTS.maxTasksPerSession,
+    maxSessionDurationMs: userConfig.maxSessionDurationMs ?? DEFAULTS.maxSessionDurationMs,
+    spendRateWarningThreshold: userConfig.spendRateWarningThreshold ?? DEFAULTS.spendRateWarningThreshold,
+    maxConsecutiveFailures: userConfig.maxConsecutiveFailures ?? DEFAULTS.maxConsecutiveFailures,
+    emergencyStop: userConfig.emergencyStop ?? DEFAULTS.emergencyStop,
+    maxQueueDepth: userConfig.maxQueueDepth ?? DEFAULTS.maxQueueDepth,
   };
 }
 
@@ -263,4 +275,166 @@ export function checkMessageRate(
 /** Reset message rate tracking (for tests). */
 export function resetMessageRateTracking(): void {
   channelMessageTimestamps.clear();
+}
+
+// --- Emergency stop ---
+
+/**
+ * Check if emergency stop is active for a project.
+ * When active, ALL dispatches are blocked immediately.
+ */
+export function checkEmergencyStop(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): SafetyCheckResult {
+  if (isEmergencyStopActive(projectId, dbOverride)) {
+    return { ok: false, reason: "Emergency stop active — all dispatches blocked" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Activate emergency stop for a project.
+ * Persists to the project_metadata table.
+ */
+export function activateEmergencyStop(projectId: string, dbOverride?: DatabaseSync): void {
+  const db = dbOverride ?? getDb(projectId);
+  db.prepare(
+    "INSERT OR REPLACE INTO project_metadata (project_id, key, value) VALUES (?, 'emergency_stop', 'true')",
+  ).run(projectId);
+}
+
+/**
+ * Deactivate emergency stop for a project.
+ */
+export function deactivateEmergencyStop(projectId: string, dbOverride?: DatabaseSync): void {
+  const db = dbOverride ?? getDb(projectId);
+  db.prepare(
+    "DELETE FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+  ).run(projectId);
+}
+
+/**
+ * Check if emergency stop is currently active for a project.
+ */
+export function isEmergencyStopActive(projectId: string, dbOverride?: DatabaseSync): boolean {
+  try {
+    const db = dbOverride ?? getDb(projectId);
+    const row = db.prepare(
+      "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+    ).get(projectId) as { value: string } | undefined;
+    return row?.value === "true";
+  } catch {
+    return false;
+  }
+}
+
+// --- Spend rate warning ---
+
+export type SpendRateWarningResult = { warning: boolean; pct: number; reason?: string };
+
+/**
+ * Check if daily spend has exceeded the warning threshold.
+ * Returns a warning (but does not block) when spend crosses the threshold.
+ */
+export function checkSpendRateWarning(
+  projectId: string,
+  agentId?: string,
+  dbOverride?: DatabaseSync,
+): SpendRateWarningResult {
+  const config = getSafetyConfig(projectId);
+  const db = dbOverride ?? getDb(projectId);
+
+  try {
+    const query = agentId
+      ? `SELECT daily_limit_cents, daily_spent_cents FROM budgets WHERE project_id = ? AND agent_id = ?`
+      : `SELECT daily_limit_cents, daily_spent_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL`;
+    const args = agentId ? [projectId, agentId] : [projectId];
+    const budget = db.prepare(query).get(...args) as Record<string, unknown> | undefined;
+
+    if (!budget) return { warning: false, pct: 0 };
+
+    const limit = budget.daily_limit_cents as number | null;
+    const spent = budget.daily_spent_cents as number;
+
+    if (!limit || limit <= 0) return { warning: false, pct: 0 };
+
+    const pct = spent / limit;
+    const threshold = config.spendRateWarningThreshold;
+
+    if (pct >= threshold) {
+      const scope = agentId ? `agent "${agentId}"` : "project";
+      return {
+        warning: true,
+        pct: Math.round(pct * 100),
+        reason: `Spend rate warning: ${scope} at ${Math.round(pct * 100)}% of daily budget (${spent}/${limit} cents, threshold ${Math.round(threshold * 100)}%)`,
+      };
+    }
+
+    return { warning: false, pct: Math.round(pct * 100) };
+  } catch {
+    return { warning: false, pct: 0 };
+  }
+}
+
+// --- Consecutive failure tracking ---
+
+/**
+ * Count consecutive non-compliant audit runs for an agent.
+ * Looks at the most recent audit_runs and counts how many consecutive
+ * ones have a non-success status.
+ */
+export function getConsecutiveFailures(
+  projectId: string,
+  agentId: string,
+  dbOverride?: DatabaseSync,
+): number {
+  try {
+    const db = dbOverride ?? getDb(projectId);
+    const rows = db.prepare(
+      `SELECT status FROM audit_runs
+       WHERE project_id = ? AND agent_id = ?
+       ORDER BY ended_at DESC LIMIT 20`,
+    ).all(projectId, agentId) as Array<{ status: string }>;
+
+    let count = 0;
+    for (const row of rows) {
+      if (row.status === "success" || row.status === "compliant") break;
+      count++;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
+// --- Queue depth check ---
+
+/**
+ * Check if the dispatch queue depth has exceeded the limit for a project.
+ */
+export function checkQueueDepth(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): SafetyCheckResult {
+  const config = getSafetyConfig(projectId);
+  const db = dbOverride ?? getDb(projectId);
+
+  try {
+    const row = db.prepare(
+      "SELECT COUNT(*) as c FROM dispatch_queue WHERE project_id = ? AND status IN ('queued', 'leased')",
+    ).get(projectId) as { c: number };
+
+    const maxDepth = config.maxQueueDepth;
+    if (row.c >= maxDepth) {
+      return {
+        ok: false,
+        reason: `Queue depth limit reached (${row.c}/${maxDepth})`,
+      };
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  return { ok: true };
 }

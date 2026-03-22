@@ -10,7 +10,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { checkBudget } from "../budget.js";
 import { checkBudgetV2 } from "../budget/check-v2.js";
 import { isProviderThrottled } from "../rate-limits.js";
-import { checkSpawnDepth, checkCostCircuitBreaker, checkLoopDetection } from "../safety.js";
+import { checkSpawnDepth, checkCostCircuitBreaker, checkLoopDetection, isEmergencyStopActive, getSafetyConfig } from "../safety.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { getExtendedProjectConfig } from "../project.js";
@@ -247,6 +247,14 @@ async function dispatchItem(
   db: DatabaseSync,
   resolvedAgentId: string,
 ): Promise<void> {
+  // Emergency stop — blocks everything
+  if (isEmergencyStopActive(projectId, db)) {
+    failItem(item.id, "Emergency stop active — all dispatches blocked", db, projectId);
+    emitDispatchEvent(projectId, "dispatch_failed", item, { error: "Emergency stop active", safetyLimit: "emergency_stop" }, db);
+    try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "emergency_stop" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+    return;
+  }
+
   // Pre-dispatch budget check: single v2 call covers all windows + dimensions + reservations
   try {
     const budgetResult = checkBudgetV2({ projectId, agentId: resolvedAgentId }, db);
@@ -411,6 +419,17 @@ async function dispatchItem(
     const extras = [retryContext, preApprovalContext].filter(Boolean).join("\n\n");
     const fullPrompt = extras ? `${prompt}\n\n${extras}` : prompt;
 
+    // Apply maxSessionDurationMs as default timeout if none specified
+    let effectiveTimeoutSeconds = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
+    if (!effectiveTimeoutSeconds) {
+      try {
+        const safetyConfig = getSafetyConfig(projectId);
+        if (safetyConfig.maxSessionDurationMs) {
+          effectiveTimeoutSeconds = Math.ceil(safetyConfig.maxSessionDurationMs / 1000);
+        }
+      } catch { /* non-fatal */ }
+    }
+
     const result = await dispatchViaCron({
       queueItemId: item.id,
       taskId: item.taskId,
@@ -418,7 +437,7 @@ async function dispatchItem(
       prompt: fullPrompt,
       agentId: resolvedAgentId,
       model,
-      timeoutSeconds: timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined,
+      timeoutSeconds: effectiveTimeoutSeconds,
     });
 
     if (result.ok) {
@@ -588,6 +607,11 @@ export function shouldDispatch(
   provider: string = "anthropic",
   options?: { taskId?: string },
 ): { ok: true } | { ok: false; reason: string } {
+  // Emergency stop — blocks everything
+  if (isEmergencyStopActive(projectId)) {
+    return { ok: false, reason: "Emergency stop active — all dispatches blocked" };
+  }
+
   // Check multi-window budget via v2 (hourly / daily / monthly + all dimensions)
   const budgetDb = getDb(projectId);
   const budgetResult = checkBudgetV2({ projectId, agentId }, budgetDb);

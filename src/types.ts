@@ -471,6 +471,18 @@ export type SafetyConfig = {
   maxConcurrentMeetings?: number;
   /** Max messages per minute per channel. Default: 60. */
   maxMessageRate?: number;
+  /** Max tasks a manager can create per session. Default: 10. */
+  maxTasksPerSession?: number;
+  /** Max session duration in milliseconds. Default: 600000 (10 minutes). */
+  maxSessionDurationMs?: number;
+  /** Budget spend rate warning threshold (0-1). Emits warning event when daily spend exceeds this fraction of budget. Default: 0.8. */
+  spendRateWarningThreshold?: number;
+  /** Max consecutive failures for an agent before auto-disable. Default: 5. */
+  maxConsecutiveFailures?: number;
+  /** Global emergency stop — when true, all dispatches are blocked. Default: false. */
+  emergencyStop?: boolean;
+  /** Max queued items per project. Prevents runaway task creation from flooding the queue. Default: 50. */
+  maxQueueDepth?: number;
 };
 
 /** @deprecated Use WorkforceConfig instead. */

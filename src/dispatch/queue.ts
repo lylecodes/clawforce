@@ -12,6 +12,7 @@ import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { ingestEvent } from "../events/store.js";
 import { recordMetric } from "../metrics.js";
 import { writeAuditEntry } from "../audit.js";
+import { checkQueueDepth } from "../safety.js";
 import type { DispatchQueueItem, DispatchQueueStatus } from "../types.js";
 
 function rowToQueueItem(row: Record<string, unknown>): DispatchQueueItem {
@@ -50,6 +51,12 @@ export function enqueue(
   skipStateCheck?: boolean,
 ): DispatchQueueItem | null {
   const db = dbOverride ?? getDb(projectId);
+
+  // Queue depth safety check — prevent runaway task creation from flooding the queue
+  const depthCheck = checkQueueDepth(projectId, db);
+  if (!depthCheck.ok) {
+    return null;
+  }
 
   // Skip tasks in non-dispatchable states — unless caller explicitly opts out
   if (!skipStateCheck) {
