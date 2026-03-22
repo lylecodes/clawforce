@@ -258,6 +258,9 @@ const clawforcePlugin = {
     // --- Meeting session tracking (per-session) ---
     const meetingSessionStore = new Map<string, { channelId: string; turnIndex: number; projectId: string }>();
 
+    // --- Experiment variant tracking (per-session) ---
+    const experimentSessionStore = new Map<string, { experimentId: string; variantId: string }>();
+
     // --- Context injection via before_prompt_build ---
     api.on("before_prompt_build", async (event, ctx) => {
       const agentId = ctx.agentId;
@@ -286,6 +289,34 @@ const clawforcePlugin = {
           }
         }
 
+        // Experiment variant resolution — assign session to active experiment variant
+        // before context assembly so the variant config overrides take effect.
+        const dispatchCtxForExperiment = resolveDispatchContext((event as { prompt?: string }).prompt);
+        try {
+          const { getActiveExperimentForProject, assignVariant, getVariantConfig } = await import("../src/experiments/assignment.js");
+          const { mergeVariantConfig } = await import("../src/experiments/config.js");
+
+          const db = getDb(entry.projectId);
+          const activeExperiment = getActiveExperimentForProject(entry.projectId, db);
+          if (activeExperiment) {
+            const assignment = assignVariant(activeExperiment.experimentId, sessionKey, {
+              agentId,
+              jobName: jobName ?? undefined,
+              taskId: dispatchCtxForExperiment?.taskId,
+            }, db);
+            if (assignment.variantId) {
+              const variantConfig = getVariantConfig(activeExperiment.experimentId, assignment.variantId, db);
+              if (variantConfig) {
+                config = mergeVariantConfig(config, variantConfig);
+              }
+              experimentSessionStore.set(sessionKey, {
+                experimentId: activeExperiment.experimentId,
+                variantId: assignment.variantId,
+              });
+            }
+          }
+        } catch { /* experiment assignment is non-fatal */ }
+
         // Refresh provider rate limits (non-blocking, best-effort)
         // TODO: OpenClaw has loadProviderUsageSummary() which fetches live rate
         // limit data, but it's not exported from the plugin-sdk public API.
@@ -306,6 +337,12 @@ const clawforcePlugin = {
           api.logger.warn(`Clawforce: context assembly failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
           return;
         }
+
+        // Telemetry: detect config changes and store context hash
+        try {
+          const { detectConfigChange } = await import("../src/telemetry/config-tracker.js");
+          detectConfigChange(entry.projectId, content, agentId, getDb(entry.projectId));
+        } catch { /* telemetry must never break the main flow */ }
 
         // Start compliance tracking after confirmed context success
         startTracking(sessionKey, agentId, entry.projectId, config, jobName ?? undefined);
@@ -554,6 +591,25 @@ const clawforcePlugin = {
         }
       }
 
+      // Telemetry: capture tool call detail with I/O into session buffer
+      try {
+        const { recordToolCallDetail } = await import("../src/enforcement/tracker.js");
+        const inputStr = event.params ? JSON.stringify(event.params).slice(0, 10000) : "";
+        const outputStr = event.result
+          ? (typeof event.result === "string" ? event.result : JSON.stringify(event.result)).slice(0, 10000)
+          : "";
+        recordToolCallDetail(
+          ctx.sessionKey,
+          toolName,
+          action ?? null,
+          inputStr,
+          outputStr,
+          event.durationMs ?? 0,
+          !event.error,
+          event.error ? (typeof event.error === "string" ? event.error : String(event.error)) : undefined,
+        );
+      } catch { /* telemetry must never break the main flow */ }
+
       // Memory write detection (informational — flush timing delegated to OpenClaw)
       if (cfg.memoryFlush.enabled && isMemoryWriteCall(toolName, event.params)) {
         emitDiagnosticEvent({ type: "memory_write_detected", sessionKey: ctx.sessionKey, toolName });
@@ -720,6 +776,7 @@ const clawforcePlugin = {
       clearAssemblerCache(ctx.sessionKey);
       memoryModeStore.delete(ctx.sessionKey);
       sessionTurnCountStore.delete(ctx.sessionKey);
+      experimentSessionStore.delete(ctx.sessionKey);
 
       // --- Meeting turn advancement ---
       const meetingCtx = meetingSessionStore.get(ctx.sessionKey);
@@ -847,6 +904,42 @@ const clawforcePlugin = {
       }
 
       const result = checkCompliance(session);
+
+      // Telemetry: flush tool call details and archive session
+      try {
+        const { flushToolCallDetails } = await import("../src/telemetry/tool-capture.js");
+        const { archiveSession } = await import("../src/telemetry/session-archive.js");
+        const db = getDb(session.projectId);
+        const taskId = session.dispatchContext?.taskId;
+
+        // Flush buffered tool call details to persistent storage
+        flushToolCallDetails(
+          ctx.sessionKey,
+          session.projectId,
+          session.agentId,
+          session.metrics.toolCallBuffer,
+          taskId,
+          db,
+        );
+
+        // Archive the completed session
+        const messages = (event as Record<string, unknown>).messages as unknown[] | undefined;
+        archiveSession({
+          sessionKey: ctx.sessionKey,
+          agentId: session.agentId,
+          projectId: session.projectId,
+          transcript: messages ? JSON.stringify(messages) : undefined,
+          outcome: result.compliant ? "compliant" : "non_compliant",
+          exitSignal: (event as Record<string, unknown>).success ? "success" : "error",
+          complianceDetail: JSON.stringify(result),
+          toolCallCount: session.metrics.toolCalls.length,
+          errorCount: session.metrics.errorCount,
+          startedAt: session.metrics.startedAt,
+          endedAt: Date.now(),
+          taskId,
+          jobName: session.jobName,
+        }, db);
+      } catch { /* telemetry must never break the main flow */ }
 
       if (result.compliant) {
         recordCompliantRun(result);
