@@ -35,16 +35,19 @@ export function writeAuditEntry(
     targetType: string;
     targetId: string;
     detail?: string;
+    withinTransaction?: boolean;
   },
   dbOverride?: DatabaseSync,
 ): AuditEntry {
   const db = dbOverride ?? getDb(params.projectId);
   const id = crypto.randomUUID();
   const now = Date.now();
+  const ownTx = !params.withinTransaction;
 
   // Use BEGIN IMMEDIATE to acquire a write lock upfront, preventing
   // concurrent writes from getting the same prevHash (fork in the chain).
-  db.prepare("BEGIN IMMEDIATE").run();
+  // Skip when already inside a caller-managed transaction.
+  if (ownTx) db.prepare("BEGIN IMMEDIATE").run();
   try {
     // Get previous entry hash for chain (ROWID guarantees deterministic order
     // even when two entries share the same created_at timestamp)
@@ -82,7 +85,7 @@ export function writeAuditEntry(
       now,
     );
 
-    db.prepare("COMMIT").run();
+    if (ownTx) db.prepare("COMMIT").run();
 
     return {
       id,
@@ -98,7 +101,7 @@ export function writeAuditEntry(
       createdAt: now,
     };
   } catch (err) {
-    try { db.prepare("ROLLBACK").run(); } catch { /* ROLLBACK may fail if already rolled back */ }
+    if (ownTx) { try { db.prepare("ROLLBACK").run(); } catch { /* ROLLBACK may fail if already rolled back */ } }
     throw err;
   }
 }

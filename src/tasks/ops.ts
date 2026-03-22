@@ -455,7 +455,8 @@ export function transitionTask(
     throw err;
   }
 
-  // Audit log entry — called AFTER commit (writeAuditEntry manages its own BEGIN IMMEDIATE)
+  // Audit log entry — called AFTER commit (writeAuditEntry manages its own BEGIN IMMEDIATE
+  // unless we're inside a caller-managed transaction, in which case it joins it).
   try {
     writeAuditEntry({
       projectId: params.projectId,
@@ -464,6 +465,7 @@ export function transitionTask(
       targetType: "task",
       targetId: params.taskId,
       detail: JSON.stringify({ from: task.state, to: params.toState, reason: params.reason }),
+      withinTransaction: params.withinTransaction,
     }, db);
   } catch (err) {
     safeLog("transition.audit", err);
