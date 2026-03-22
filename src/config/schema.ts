@@ -59,6 +59,7 @@ export type DomainConfig = {
   channels?: unknown[];
   event_handlers?: Record<string, unknown>;
   triggers?: Record<string, unknown>;
+  verification?: Record<string, unknown>;
   dashboard_assistant?: {
     enabled?: boolean;
     model?: string;

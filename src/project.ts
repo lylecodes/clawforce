@@ -60,6 +60,9 @@ import type {
   TriggerDefinition,
   TriggerSeverity,
   TriggerSource,
+  VerificationConfig,
+  VerificationGate,
+  GitIsolationConfig,
   WorkforceConfig,
 } from "./types.js";
 import { EVENT_ACTION_TYPES, TRIGGER_SOURCES } from "./types.js";
@@ -266,6 +269,11 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   // Parse context_ownership config
   if ((raw.context_ownership ?? raw.contextOwnership) && typeof (raw.context_ownership ?? raw.contextOwnership) === "object") {
     result.contextOwnership = normalizeContextOwnershipConfig((raw.context_ownership ?? raw.contextOwnership) as Record<string, unknown>);
+  }
+
+  // Parse verification config
+  if (raw.verification && typeof raw.verification === "object") {
+    result.verification = normalizeVerificationConfig(raw.verification);
   }
 
   return result;
@@ -1232,6 +1240,42 @@ function normalizeReviewConfig(raw: Record<string, unknown>): ReviewConfig {
   return result;
 }
 
+function normalizeVerificationConfig(raw: unknown): VerificationConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const config: VerificationConfig = {};
+  if (typeof r.enabled === "boolean") config.enabled = r.enabled;
+  if (Array.isArray(r.gates)) {
+    config.gates = r.gates
+      .filter((g: unknown): g is Record<string, unknown> => typeof g === "object" && g !== null)
+      .map((g) => {
+        const gate: VerificationGate = {
+          name: String(g.name ?? ""),
+          command: String(g.command ?? ""),
+        };
+        if (typeof g.timeout_seconds === "number") gate.timeout_seconds = g.timeout_seconds;
+        if (typeof g.required === "boolean") gate.required = g.required;
+        if (typeof g.file_pattern === "string") gate.file_pattern = g.file_pattern;
+        return gate;
+      });
+  }
+  if (typeof r.total_timeout_seconds === "number") config.total_timeout_seconds = r.total_timeout_seconds;
+  if (typeof r.parallel === "boolean") config.parallel = r.parallel;
+  if (r.git && typeof r.git === "object") {
+    const git = r.git as Record<string, unknown>;
+    config.git = {} as GitIsolationConfig;
+    if (typeof git.enabled === "boolean") config.git.enabled = git.enabled;
+    if (typeof git.branch_pattern === "string") config.git.branch_pattern = git.branch_pattern;
+    if (typeof git.base_branch === "string") config.git.base_branch = git.base_branch;
+    if (typeof git.auto_merge === "boolean") config.git.auto_merge = git.auto_merge;
+    if (typeof git.delete_after_merge === "boolean") config.git.delete_after_merge = git.delete_after_merge;
+    if (typeof git.mode === "string" && (git.mode === "branch" || git.mode === "worktree")) {
+      config.git.mode = git.mode;
+    }
+  }
+  return config;
+}
+
 const VALID_CHANNEL_TYPES: ChannelType[] = ["topic", "meeting"];
 
 function normalizeChannelsConfig(raw: unknown[]): ChannelConfig[] {
@@ -1307,6 +1351,7 @@ export type ExtendedProjectConfig = {
   managerBehavior?: ManagerBehaviorConfig;
   telemetry?: TelemetryConfig;
   contextOwnership?: ContextOwnershipConfig;
+  verification?: VerificationConfig;
 };
 const projectExtendedConfig = new Map<string, ExtendedProjectConfig>();
 
@@ -1390,7 +1435,7 @@ export function registerWorkforceConfig(
   }
 
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership) {
+  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification) {
     projectExtendedConfig.set(projectId, {
       policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
@@ -1408,6 +1453,7 @@ export function registerWorkforceConfig(
       managerBehavior: wfConfig.managerBehavior,
       telemetry: wfConfig.telemetry,
       contextOwnership: wfConfig.contextOwnership,
+      verification: wfConfig.verification,
     });
   }
 }

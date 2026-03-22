@@ -202,6 +202,8 @@ function buildWorkforceConfig(
     wfConfig.goals = domain.goals as WorkforceConfig["goals"];
   if (domain.monitoring)
     wfConfig.monitoring = domain.monitoring as WorkforceConfig["monitoring"];
+  if (domain.verification)
+    wfConfig.verification = domain.verification as WorkforceConfig["verification"];
 
   // Build manager config from orchestrator or first manager agent with coordination
   if (domain.orchestrator || domain.manager) {

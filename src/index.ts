@@ -285,6 +285,13 @@ export type { CanaryAction } from "./experiments/canary.js";
 export { validateExperimentConfig } from "./experiments/validation.js";
 export type { ValidationError, ExperimentConfigInput } from "./experiments/validation.js";
 
+// --- Verification Gates ---
+export { runVerificationGates, formatGateResults } from "./verification/runner.js";
+export type { GateResult, VerificationRunResult } from "./verification/runner.js";
+export { generateBranchName, createTaskBranch, mergeTaskBranch, deleteTaskBranch, discardTaskBranch } from "./verification/git.js";
+export { getEffectiveVerificationConfig, runVerificationIfConfigured } from "./verification/lifecycle.js";
+export type { VerificationConfig, VerificationGate, GitIsolationConfig } from "./types.js";
+
 // --- Dispatch Gate ---
 export { shouldDispatch } from "./dispatch/dispatcher.js";
 

@@ -437,6 +437,33 @@ export type ContextOwnershipConfig = {
   policies?: "any" | "manager" | "human";
 };
 
+// --- Verification Gate types ---
+
+export type VerificationGate = {
+  name: string;
+  command: string;
+  timeout_seconds?: number;
+  required?: boolean;
+  file_pattern?: string;
+};
+
+export type GitIsolationConfig = {
+  enabled?: boolean;
+  branch_pattern?: string;
+  base_branch?: string;
+  auto_merge?: boolean;
+  delete_after_merge?: boolean;
+  mode?: "branch" | "worktree";
+};
+
+export type VerificationConfig = {
+  enabled?: boolean;
+  gates?: VerificationGate[];
+  total_timeout_seconds?: number;
+  parallel?: boolean;
+  git?: GitIsolationConfig;
+};
+
 /** Full project config with workforce management. */
 export type WorkforceConfig = {
   name: string;
@@ -501,6 +528,8 @@ export type WorkforceConfig = {
   triggers?: Record<string, TriggerDefinition>;
   /** Knowledge lifecycle configuration (promotion thresholds, etc.). */
   knowledge?: KnowledgeConfig;
+  /** Verification gates and git isolation configuration. */
+  verification?: VerificationConfig;
   /** Manager/orchestrator cron configuration. */
   manager?: {
     enabled: boolean;

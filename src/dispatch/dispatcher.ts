@@ -405,6 +405,36 @@ async function dispatchItem(
     return;
   }
 
+  // Git isolation: create branch for this task
+  try {
+    const { getEffectiveVerificationConfig } = require("../verification/lifecycle.js") as typeof import("../verification/lifecycle.js");
+    const verConfig = getEffectiveVerificationConfig(projectId);
+    if (verConfig.git?.enabled) {
+      const { getAgentConfig: getAgentCfg } = require("../project.js") as typeof import("../project.js");
+      const cfEntry = getAgentCfg(resolvedAgentId);
+      const projectDir = cfEntry?.projectDir;
+      if (projectDir) {
+        const { createTaskBranch } = require("../verification/git.js") as typeof import("../verification/git.js");
+        const branchResult = createTaskBranch(
+          projectDir,
+          item.taskId,
+          verConfig.git.base_branch,
+          verConfig.git.branch_pattern,
+        );
+        if (branchResult.ok && branchResult.branchName) {
+          // Store branch name in task metadata for later merge
+          try {
+            db.prepare(
+              "UPDATE tasks SET metadata = json_set(COALESCE(metadata, '{}'), '$.branchName', ?) WHERE id = ? AND project_id = ?",
+            ).run(branchResult.branchName, item.taskId, projectId);
+          } catch { /* non-fatal */ }
+        }
+      }
+    }
+  } catch (err) {
+    safeLog("dispatcher.gitBranch", err);
+  }
+
   try {
     // Extract dispatch params from queue item payload
     const payload = item.payload ?? {};

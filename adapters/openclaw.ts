@@ -776,12 +776,37 @@ const clawforcePlugin = {
             } catch { /* non-fatal */ }
           }
 
-          // Auto-transition based on session outcome
+          // Run verification gates if configured
+          const verificationResult = (() => {
+            try {
+              const { runVerificationIfConfigured } = require("../src/verification/lifecycle.js") as typeof import("../src/verification/lifecycle.js");
+              const cfAgentEntry = getAgentConfig(session.agentId);
+              const projectDir = cfAgentEntry?.projectDir ?? resolveProjectDir(session.projectId);
+              return runVerificationIfConfigured(session.projectId, projectDir);
+            } catch { return null; }
+          })();
+
+          // Attach gate results as evidence
+          if (verificationResult) {
+            try {
+              attachEvidence({
+                projectId: session.projectId,
+                taskId,
+                type: "test_result",
+                content: verificationResult.formatted,
+                attachedBy: "system:verification",
+              }, db);
+            } catch { /* non-fatal */ }
+          }
+
+          // Auto-transition based on session outcome + verification gates
           if (endLifecycleCfg.autoTransitionOnComplete) {
             try {
               if (session.metrics.toolCalls.length === 0) {
                 transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
               } else if (session.metrics.errorCount > session.metrics.toolCalls.length * 0.5) {
+                transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
+              } else if (verificationResult && !verificationResult.result.allRequiredPassed) {
                 transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
               } else {
                 transitionTask({ projectId: session.projectId, taskId, toState: "REVIEW", actor: session.agentId }, db);

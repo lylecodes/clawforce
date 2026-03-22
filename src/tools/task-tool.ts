@@ -212,6 +212,30 @@ export function createClawforceTaskTool(options?: {
             markWorkerCompliant(options.agentSessionKey);
           }
 
+          // Git merge on task completion (DONE state)
+          if (result.ok && toState === "DONE") {
+            try {
+              const completedTask = getTask(projectId, taskId);
+              const branchName = (completedTask?.metadata as Record<string, unknown> | undefined)?.branchName as string | undefined;
+              if (branchName) {
+                const { getEffectiveVerificationConfig } = require("../verification/lifecycle.js") as typeof import("../verification/lifecycle.js");
+                const verConfig = getEffectiveVerificationConfig(projectId);
+                if (verConfig.git?.auto_merge) {
+                  const { getAgentConfig: getAgentCfg } = require("../project.js") as typeof import("../project.js");
+                  const cfEntry = getAgentCfg(actor);
+                  const projectDir = cfEntry?.projectDir;
+                  if (projectDir) {
+                    const { mergeTaskBranch, deleteTaskBranch } = require("../verification/git.js") as typeof import("../verification/git.js");
+                    const mergeResult = mergeTaskBranch(projectDir, branchName, verConfig.git.base_branch);
+                    if (mergeResult.ok && verConfig.git.delete_after_merge) {
+                      deleteTaskBranch(projectDir, branchName);
+                    }
+                  }
+                }
+              }
+            } catch { /* non-fatal: git merge failure doesn't block the transition */ }
+          }
+
           return jsonResult(result);
         }
 
