@@ -1742,6 +1742,36 @@ const clawforcePlugin = {
           });
           api.logger.info(`Clawforce: synced ${agentsToSync.length} agent(s) to OpenClaw`);
         }
+
+        // --- Auto-start continuous jobs on gateway init ---
+        // Find any agents with continuous jobs and dispatch them immediately.
+        // This replaces cron as the initial trigger — no schedule needed.
+        for (const agentId of getRegisteredAgentIds()) {
+          const entry = getAgentConfig(agentId);
+          if (!entry?.config.jobs) continue;
+          for (const [jobName, jobDef] of Object.entries(entry.config.jobs)) {
+            if (!jobDef.continuous) continue;
+            try {
+              const { buildJobCronJob, toCronJobCreate, getCronService } = await import("../src/manager-cron.js");
+              const cronJob = buildJobCronJob(
+                entry.projectId,
+                agentId,
+                jobName,
+                jobDef,
+                `at:${new Date().toISOString()}`,
+              );
+              cronJob.deleteAfterRun = true;
+              const cronInput = toCronJobCreate(cronJob);
+              const svc = getCronService();
+              if (svc) {
+                await svc.add(cronInput);
+                api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agentId}`);
+              }
+            } catch (err) {
+              api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        }
       } catch (err) {
         api.logger.warn(`Clawforce auto-init failed: ${err instanceof Error ? err.message : String(err)}`);
       }
