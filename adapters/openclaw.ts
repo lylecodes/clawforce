@@ -223,8 +223,11 @@ const clawforcePlugin = {
       return;
     }
 
-    // --- Wire dispatch injector early (before any hooks) ---
-    setDispatchInjector(api.injectAgentMessage.bind(api));
+    // --- Wire dispatch injector ---
+    // Defer until first use — api.injectAgentMessage may not exist at registration time
+    setDispatchInjector(async (params) => {
+      return api.injectAgentMessage(params);
+    });
 
     // --- Disabled agent tracking (persistent) ---
     async function handleDisable(agentId: string): Promise<void> {
