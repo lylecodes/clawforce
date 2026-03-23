@@ -1007,6 +1007,36 @@ const clawforcePlugin = {
       if (result.compliant) {
         recordCompliantRun(result);
         api.logger.info(`Clawforce: ${session.agentId} session compliant`);
+
+        // Continuous job re-dispatch: if this was a continuous job, start the next cycle
+        if (session.jobName) {
+          const agentEntryForRedispatch = getAgentConfig(session.agentId);
+          if (agentEntryForRedispatch) {
+            const jobDef = agentEntryForRedispatch.config.jobs?.[session.jobName];
+            if (jobDef?.continuous) {
+              const nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job.`;
+              const taggedMessage = `[clawforce:job=${session.jobName}]\n\n${nudge}`;
+              // Re-dispatch via clawforce.dispatch gateway method (uses cron API internally)
+              import("../src/dispatch/inject-dispatch.js").then((mod) => {
+                // callGatewayRpc is not exported — use the module's internal mechanism
+                // by going through dispatchViaInject with a synthetic queue ID
+                mod.dispatchViaInject({
+                  queueItemId: `cont-${session.agentId}-${Date.now()}`,
+                  taskId: "continuous-redispatch",
+                  projectId: session.projectId,
+                  prompt: taggedMessage,
+                  agentId: session.agentId,
+                }).then((r) => {
+                  if (r.ok) api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
+                  else api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}/${session.jobName}: ${r.error}`);
+                });
+              }).catch((err) => {
+                api.logger.warn(`Clawforce: continuous re-dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
+              });
+            }
+          }
+        }
+
         return;
       }
 
@@ -1601,6 +1631,42 @@ const clawforcePlugin = {
       respond(true);
     });
 
+    // --- Dispatch gateway method ---
+    // Creates a one-shot cron job to dispatch an agent session.
+    // Called via HTTP from the dispatch pipeline — no CLI, no file writes.
+    api.registerGatewayMethod("clawforce.dispatch", async ({ params, context, respond }) => {
+      const { agentId, message, sessionTarget, deleteAfterRun } = params as {
+        agentId: string;
+        message: string;
+        sessionTarget?: string;
+        deleteAfterRun?: boolean;
+      };
+      if (!agentId || !message) {
+        respond(false, undefined, { code: "INVALID_REQUEST", message: "agentId and message required" });
+        return;
+      }
+      if (!context.cron) {
+        respond(false, undefined, { code: "UNAVAILABLE", message: "cron service not available" });
+        return;
+      }
+      try {
+        const jobName = `clawforce-dispatch:${Date.now()}`;
+        await context.cron.add({
+          name: jobName,
+          agentId,
+          enabled: true,
+          schedule: { kind: "at", at: new Date().toISOString() },
+          sessionTarget: (sessionTarget ?? "isolated") as "isolated" | "main",
+          wakeMode: "now",
+          payload: { kind: "agentTurn", message },
+          deleteAfterRun: deleteAfterRun !== false,
+        });
+        respond(true, { ok: true, jobName });
+      } catch (err) {
+        respond(false, undefined, { code: "DISPATCH_FAILED", message: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
     // --- Approval callback gateway method ---
     api.registerGatewayMethod("clawforce.approval_callback", async ({ params, respond }) => {
       const { action, projectId, proposalId, feedback } = params as {
@@ -1811,6 +1877,7 @@ const clawforcePlugin = {
 
     // --- Auto-init domains on gateway start (no external clawforce.init call needed) ---
     api.on("gateway_start", async () => {
+      api.logger.info("Clawforce: gateway_start hook fired");
       // Simulate what clawforce.init does — initialize domains from config
       const defaultConfigDir = path.join(process.env.HOME ?? "/tmp", ".clawforce");
       try {
@@ -1822,11 +1889,12 @@ const clawforcePlugin = {
           verificationRequired: true,
         });
         const domainResult = initializeAllDomains(defaultConfigDir);
+        api.logger.info(`Clawforce auto-init result: ${domainResult.domains.length} domain(s), ${domainResult.errors.length} error(s), ${domainResult.warnings.length} warning(s)`);
         if (domainResult.domains.length > 0) {
           api.logger.info(`Clawforce auto-init: ${domainResult.domains.length} domain(s): ${domainResult.domains.join(", ")}`);
         }
         for (const err of domainResult.errors) {
-          api.logger.warn(`Clawforce domain error: ${err}`);
+          api.logger.info(`Clawforce DOMAIN-ERROR: ${err}`);
         }
 
         // Sync agents to OpenClaw's agents.list so they're addressable
