@@ -268,10 +268,6 @@ const clawforcePlugin = {
       const sessionKey = ctx.sessionKey;
       if (!agentId) return;
 
-      // Debug: log hook invocation for all agents
-      const eventKeys = Object.keys(event as Record<string, unknown>);
-      api.logger.info(`Clawforce: before_prompt_build agent=${agentId} session=${sessionKey} eventKeys=[${eventKeys.join(",")}]`);
-
       // Try enforcement config first (new system)
       const entry = getAgentConfig(agentId);
 
@@ -360,17 +356,23 @@ const clawforcePlugin = {
         });
 
         // Detect dispatch context (links session to dispatch queue item)
-        // Check event.prompt first (cron/job path), then check the LAST user message (CLI spawn path).
-        // Workers connect to their main session, so the dispatch tag is in the latest message, not the first.
+        // Check event.prompt first (cron/job path), then fall back to user messages (CLI spawn path)
         const rawPrompt = (event as { prompt?: string }).prompt;
         let dispatchCtx = resolveDispatchContext(rawPrompt);
         if (!dispatchCtx) {
           const msgs = (event as { messages?: Array<{ role: string; content: unknown }> }).messages;
+          // Debug: log last user message for worker sessions
+          if (msgs && msgs.length > 0) {
+            const lastUser = [...msgs].reverse().find(m => m.role === "user");
+            if (lastUser) {
+              const preview = typeof lastUser.content === "string" ? lastUser.content.slice(0, 100) : JSON.stringify(lastUser.content)?.slice(0, 100);
+              api.logger.info(`Clawforce: dispatch-detect-msg agent=${agentId} lastUser=${preview}`);
+            }
+          }
           if (msgs) {
-            // Check last user message first — that's the dispatch message
-            for (let i = msgs.length - 1; i >= 0; i--) {
-              const m = msgs[i]!;
+            for (const m of msgs) {
               if (m.role !== "user") continue;
+              // content can be string or structured [{type:"text",text:"..."}]
               let text: string | undefined;
               if (typeof m.content === "string") {
                 text = m.content;
@@ -384,8 +386,6 @@ const clawforcePlugin = {
                 dispatchCtx = resolveDispatchContext(text);
                 if (dispatchCtx) break;
               }
-              // Only check the last user message — don't scan entire history
-              break;
             }
           }
         }
@@ -831,6 +831,31 @@ const clawforcePlugin = {
       if (!session) return; // Not an enforced agent
 
       // --- Auto-lifecycle: evidence capture + transition for dispatched sessions ---
+      // Fallback: if before_prompt_build didn't detect the dispatch tag (e.g. CLI spawn
+      // where event.messages was empty on first turn), try detecting it from messages now.
+      if (!session.dispatchContext) {
+        const endMsgs = (event as { messages?: Array<{ role: string; content: unknown }> }).messages;
+        if (endMsgs) {
+          for (const m of endMsgs) {
+            if (m.role !== "user") continue;
+            let text: string | undefined;
+            if (typeof m.content === "string") text = m.content;
+            else if (Array.isArray(m.content)) {
+              text = (m.content as Array<{ type?: string; text?: string }>)
+                .filter(p => p.type === "text" && typeof p.text === "string")
+                .map(p => p.text).join("\n");
+            }
+            if (text) {
+              const ctx2 = resolveDispatchContext(text);
+              if (ctx2) {
+                setDispatchContext(ctx.sessionKey, ctx2);
+                session.dispatchContext = ctx2;
+                break;
+              }
+            }
+          }
+        }
+      }
       if (session.dispatchContext) {
         const { queueItemId, taskId } = session.dispatchContext;
         const db = getDb(session.projectId);
@@ -892,15 +917,20 @@ const clawforcePlugin = {
           // Auto-transition based on session outcome + verification gates
           if (endLifecycleCfg.autoTransitionOnComplete) {
             try {
-              if (session.metrics.toolCalls.length === 0) {
-                transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
-              } else if (session.metrics.errorCount > session.metrics.toolCalls.length * 0.5) {
-                transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
-              } else if (verificationResult && !verificationResult.result.allRequiredPassed) {
-                transitionTask({ projectId: session.projectId, taskId, toState: "FAILED", actor: session.agentId }, db);
-              } else {
-                transitionTask({ projectId: session.projectId, taskId, toState: "REVIEW", actor: session.agentId }, db);
+              // If still ASSIGNED (before_prompt_build didn't transition), step through IN_PROGRESS first
+              const currentTask = getTask(session.projectId, taskId, db);
+              if (currentTask?.state === "ASSIGNED") {
+                transitionTask({ projectId: session.projectId, taskId, toState: "IN_PROGRESS", actor: session.agentId }, db);
               }
+
+              const targetState = (session.metrics.toolCalls.length === 0)
+                ? "FAILED" as const
+                : (session.metrics.errorCount > session.metrics.toolCalls.length * 0.5)
+                  ? "FAILED" as const
+                  : (verificationResult && !verificationResult.result.allRequiredPassed)
+                    ? "FAILED" as const
+                    : "REVIEW" as const;
+              transitionTask({ projectId: session.projectId, taskId, toState: targetState, actor: session.agentId }, db);
             } catch { /* non-fatal */ }
           }
 
