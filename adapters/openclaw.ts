@@ -363,8 +363,19 @@ const clawforcePlugin = {
           const msgs = (event as { messages?: Array<{ role: string; content: unknown }> }).messages;
           if (msgs) {
             for (const m of msgs) {
-              if (m.role === "user" && typeof m.content === "string") {
-                dispatchCtx = resolveDispatchContext(m.content);
+              if (m.role !== "user") continue;
+              // content can be string or structured [{type:"text",text:"..."}]
+              let text: string | undefined;
+              if (typeof m.content === "string") {
+                text = m.content;
+              } else if (Array.isArray(m.content)) {
+                text = (m.content as Array<{ type?: string; text?: string }>)
+                  .filter(p => p.type === "text" && typeof p.text === "string")
+                  .map(p => p.text)
+                  .join("\n");
+              }
+              if (text) {
+                dispatchCtx = resolveDispatchContext(text);
                 if (dispatchCtx) break;
               }
             }
