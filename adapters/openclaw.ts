@@ -356,7 +356,20 @@ const clawforcePlugin = {
         });
 
         // Detect dispatch context (links session to dispatch queue item)
-        const dispatchCtx = resolveDispatchContext((event as { prompt?: string }).prompt);
+        // Check event.prompt first (cron/job path), then fall back to user messages (CLI spawn path)
+        const rawPrompt = (event as { prompt?: string }).prompt;
+        let dispatchCtx = resolveDispatchContext(rawPrompt);
+        if (!dispatchCtx) {
+          const msgs = (event as { messages?: Array<{ role: string; content: unknown }> }).messages;
+          if (msgs) {
+            for (const m of msgs) {
+              if (m.role === "user" && typeof m.content === "string") {
+                dispatchCtx = resolveDispatchContext(m.content);
+                if (dispatchCtx) break;
+              }
+            }
+          }
+        }
         if (dispatchCtx) {
           setDispatchContext(sessionKey, dispatchCtx);
 
