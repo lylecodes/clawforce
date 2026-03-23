@@ -5,8 +5,11 @@
  * Enforces different-actor requirement for the verifier gate.
  */
 
+import type { DatabaseSync } from "node:sqlite";
 import { getTask, getTaskEvidence, transitionTask } from "./ops.js";
 import { enqueue } from "../dispatch/queue.js";
+import { recordReview } from "../telemetry/review-store.js";
+import { safeLog } from "../diagnostics.js";
 import type { TransitionResult } from "../types.js";
 
 export type VerificationRequest = {
@@ -73,8 +76,23 @@ export function submitVerdict(params: {
   verifier: string;
   passed: boolean;
   reason?: string;
-}): TransitionResult {
-  const { projectId, taskId, verifier, passed, reason } = params;
+  sessionKey?: string;
+}, dbOverride?: DatabaseSync): TransitionResult {
+  const { projectId, taskId, verifier, passed, reason, sessionKey } = params;
+
+  // Record the manager review for telemetry (P2 data flow)
+  try {
+    recordReview({
+      projectId,
+      taskId,
+      reviewerAgentId: verifier,
+      sessionKey,
+      verdict: passed ? "approved" : "rejected",
+      reasoning: reason,
+    }, dbOverride);
+  } catch (err) {
+    safeLog("verify.recordReview", err);
+  }
 
   if (passed) {
     return transitionTask({
@@ -83,7 +101,7 @@ export function submitVerdict(params: {
       toState: "DONE",
       actor: verifier,
       reason: reason ?? "Verification passed",
-    });
+    }, dbOverride);
   }
 
   // Failed — send back to IN_PROGRESS for rework
@@ -93,7 +111,7 @@ export function submitVerdict(params: {
     toState: "IN_PROGRESS",
     actor: verifier,
     reason: reason ?? "Verification failed — rework needed",
-  });
+  }, dbOverride);
 }
 
 function buildVerificationPrompt(title: string, description: string | undefined, evidenceSummary: string): string {

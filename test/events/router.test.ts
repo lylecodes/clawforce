@@ -25,6 +25,7 @@ const { getQueueStatus, enqueue } = await import("../../src/dispatch/queue.js");
 const { registerEnforcementConfig, resetEnforcementConfigForTest } = await import("../../src/project.js");
 const { queryMetrics } = await import("../../src/metrics.js");
 const { queryAuditLog } = await import("../../src/audit.js");
+const { getAllCategoryStats } = await import("../../src/trust/tracker.js");
 
 describe("events/router", () => {
   let db: DatabaseSync;
@@ -322,5 +323,52 @@ describe("events/router", () => {
     expect(audits[0]!.targetId).toBe(task.id);
     const detail = JSON.parse(audits[0]!.detail!);
     expect(detail.queueItemId).toBe("q-dead-audit");
+  });
+
+  it("records positive trust signal on task_completed for assigned agent", () => {
+    const task = createTask({
+      projectId: PROJECT,
+      title: "Trust signal test",
+      createdBy: "agent:pm",
+      assignedTo: "agent:worker",
+    }, db);
+    processEvents(PROJECT, db); // drain task_created event
+
+    // Manually ingest a task_completed event
+    ingestEvent(PROJECT, "task_completed", "internal", {
+      taskId: task.id,
+      actor: "agent:worker",
+    }, undefined, db);
+
+    processEvents(PROJECT, db);
+
+    // Verify trust decision was recorded
+    const stats = getAllCategoryStats(PROJECT, db);
+    const taskCompletionStats = stats.find((s) => s.category === "task_completion");
+    expect(taskCompletionStats).toBeDefined();
+    expect(taskCompletionStats!.approved).toBeGreaterThanOrEqual(1);
+  });
+
+  it("records negative trust signal on task_failed for assigned agent", () => {
+    const task = createTask({
+      projectId: PROJECT,
+      title: "Trust fail test",
+      createdBy: "agent:pm",
+      assignedTo: "agent:worker",
+    }, db);
+    processEvents(PROJECT, db); // drain task_created event
+
+    ingestEvent(PROJECT, "task_failed", "internal", {
+      taskId: task.id,
+      actor: "agent:worker",
+    }, undefined, db);
+
+    processEvents(PROJECT, db);
+
+    // Verify negative trust decision was recorded
+    const stats = getAllCategoryStats(PROJECT, db);
+    const taskCompletionStats = stats.find((s) => s.category === "task_completion");
+    expect(taskCompletionStats).toBeDefined();
+    expect(taskCompletionStats!.rejected).toBeGreaterThanOrEqual(1);
   });
 });

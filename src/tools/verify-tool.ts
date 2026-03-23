@@ -71,6 +71,7 @@ export function createClawforceVerifyTool(options?: {
               verifier: actor,
               passed,
               reason,
+              sessionKey: options?.agentSessionKey,
             });
             return jsonResult(result);
           }

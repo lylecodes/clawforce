@@ -159,6 +159,25 @@ function handleTaskCompleted(event: ClawforceEvent, db: DatabaseSync): EventHand
     }
   } catch (err) { safeLog("event.router.depCascade", err); }
 
+  // Record trust signal for the assigned agent (P2 data flow)
+  // Only for task_completed events — task_failed has its own signal in handleTaskFailed
+  if (event.type === "task_completed") {
+    try {
+      const completedTask = getTask(event.projectId, taskId, db);
+      if (completedTask?.assignedTo) {
+        recordTrustDecision({
+          projectId: event.projectId,
+          category: "task_completion",
+          decision: "approved",
+          agentId: completedTask.assignedTo,
+          toolName: undefined,
+          riskTier: "low",
+          severity: 0.5,
+        }, db);
+      }
+    } catch (err) { safeLog("event.router.trustSignal", err); }
+  }
+
   const task = getTask(event.projectId, taskId, db);
   if (!task?.workflowId) return { action: "handled", taskId };
 
@@ -188,6 +207,26 @@ function handleTaskCompleted(event: ClawforceEvent, db: DatabaseSync): EventHand
 }
 
 function handleTaskFailed(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const taskId = event.payload.taskId as string | undefined;
+
+  // Record negative trust signal for the assigned agent (P2 data flow)
+  if (taskId) {
+    try {
+      const failedTask = getTask(event.projectId, taskId, db);
+      if (failedTask?.assignedTo) {
+        recordTrustDecision({
+          projectId: event.projectId,
+          category: "task_completion",
+          decision: "rejected",
+          agentId: failedTask.assignedTo,
+          toolName: undefined,
+          riskTier: "low",
+          severity: 0.5,
+        }, db);
+      }
+    } catch (err) { safeLog("event.router.trustSignalFailed", err); }
+  }
+
   // Same workflow check as task_completed — a failed task may still
   // satisfy an "all_resolved" or "any_resolved" gate
   return handleTaskCompleted(event, db);
