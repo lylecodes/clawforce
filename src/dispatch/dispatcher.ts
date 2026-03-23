@@ -23,7 +23,7 @@ import { acquireTaskLease, releaseTaskLease } from "../tasks/ops.js";
 import { ingestEvent } from "../events/store.js";
 import { processEvents } from "../events/router.js";
 import { claimNext, failItem, markDispatched, reclaimExpiredLeases } from "./queue.js";
-import { dispatchViaInject } from "./inject-dispatch.js";
+import { dispatchViaCron } from "./cron-dispatch.js";
 import { buildTaskPrompt } from "./spawn.js";
 import { getApprovedIntentsForTask } from "../approval/intent-store.js";
 import { recordMetric } from "../metrics.js";
@@ -479,25 +479,27 @@ async function dispatchItem(
       } catch { /* non-fatal */ }
     }
 
-    const result = await dispatchViaInject({
+    const result = await dispatchViaCron({
       queueItemId: item.id,
       taskId: item.taskId,
       projectId,
       prompt: fullPrompt,
       agentId: resolvedAgentId,
+      model,
+      timeoutSeconds: effectiveTimeoutSeconds,
     });
 
     if (result.ok) {
-      // Message injected — mark as dispatched (completion handled in agent_end hook)
+      // Cron job created — mark as dispatched (completion handled in agent_end hook)
       markDispatched(item.id, db, projectId);
-      emitDispatchEvent(projectId, "dispatch_succeeded", item, { sessionKey: result.sessionKey }, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_injected", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      emitDispatchEvent(projectId, "dispatch_succeeded", item, { cronJobName: result.cronJobName }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_cron", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
     } else {
       const error = result.error ?? "Unknown dispatch error";
       failItem(item.id, error, db, projectId);
       emitDispatchEvent(projectId, "dispatch_failed", item, { error }, db);
       maybeEmitDeadLetter(projectId, item, error, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "inject_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "cron_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
       // Release lease on failure — no session will run
       try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (err) { safeLog("dispatcher.releaseLease", err); }
     }

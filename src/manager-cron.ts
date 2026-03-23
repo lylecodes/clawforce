@@ -30,6 +30,51 @@ export type ManagerCronJob = {
   deleteAfterRun?: boolean;
 };
 
+/** Cron job state as reported by OpenClaw. */
+export type CronJobState = {
+  nextRunAtMs?: number;
+  runningAtMs?: number;
+  lastRunAtMs?: number;
+  lastRunStatus?: "ok" | "error" | "skipped";
+  lastError?: string;
+  lastDurationMs?: number;
+  consecutiveErrors?: number;
+  lastDeliveryStatus?: "delivered" | "not-delivered" | "unknown" | "not-requested";
+  lastDeliveryError?: string;
+};
+
+/** Full cron job record returned by list/getJob. */
+export type CronJobRecord = {
+  id: string;
+  name: string;
+  agentId?: string;
+  enabled: boolean;
+  description?: string;
+  schedule: CronSchedule;
+  state: CronJobState;
+};
+
+/** Cron service interface for runtime job management. */
+export type CronServiceLike = {
+  list(opts?: { includeDisabled?: boolean }): Promise<CronJobRecord[]>;
+  add(input: CronRegistrarInput): Promise<unknown>;
+  update(id: string, patch: Record<string, unknown>): Promise<unknown>;
+  remove?(id: string): Promise<unknown>;
+  run?(id: string): Promise<unknown>;
+};
+
+let cronService: CronServiceLike | null = null;
+
+/** Store the cron service for runtime management (called during init). */
+export function setCronService(service: CronServiceLike | null): void {
+  cronService = service;
+}
+
+/** Get the cron service for runtime cron management. */
+export function getCronService(): CronServiceLike | null {
+  return cronService;
+}
+
 /**
  * Parse a schedule string into milliseconds.
  * Supported formats:

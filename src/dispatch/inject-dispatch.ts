@@ -4,6 +4,9 @@
  * Dispatches agents via api.injectAgentMessage() — direct session injection
  * without any cron service dependency. The injector function is captured
  * from the OpenClaw plugin API during adapter registration.
+ *
+ * NOTE: api.injectAgentMessage is not available in the current OpenClaw SDK.
+ * This module is kept as a fallback. Primary dispatch uses dispatchViaCron.
  */
 
 import { safeLog } from "../diagnostics.js";
