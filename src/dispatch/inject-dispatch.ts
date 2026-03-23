@@ -1,14 +1,12 @@
 /**
- * Clawforce — Inject-based dispatch
+ * Clawforce — CLI-based dispatch
  *
- * Dispatches agents via api.injectAgentMessage() — direct session injection
- * without any cron service dependency. The injector function is captured
- * from the OpenClaw plugin API during adapter registration.
- *
- * NOTE: api.injectAgentMessage is not available in the current OpenClaw SDK.
- * This module is kept as a fallback. Primary dispatch uses dispatchViaCron.
+ * Dispatches agents by spawning `openclaw agent` as a detached child process.
+ * Fire-and-forget: the spawned process connects to the gateway independently
+ * via WebSocket, so this works from sweep, cron, or any non-request context.
  */
 
+import { spawn } from "node:child_process";
 import { safeLog } from "../diagnostics.js";
 
 type InjectFn = (params: { sessionKey: string; message: string }) => Promise<{ runId?: string }>;
@@ -41,15 +39,21 @@ export async function dispatchViaInject(options: {
   prompt: string;
   agentId: string;
 }): Promise<InjectDispatchResult> {
-  if (!injector) {
-    return { ok: false, error: "Dispatch injector not set" };
-  }
-
   const sessionKey = `agent:${options.agentId}:dispatch:${options.queueItemId}`;
   const taggedPrompt = `[clawforce:dispatch=${options.queueItemId}:${options.taskId}]\n\n${options.prompt}`;
 
   try {
-    await injector({ sessionKey, message: taggedPrompt });
+    const child = spawn("openclaw", [
+      "agent",
+      "--agent", options.agentId,
+      "--session-id", sessionKey,
+      "--message", taggedPrompt,
+    ], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+    });
+    child.unref();
     return { ok: true, sessionKey };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

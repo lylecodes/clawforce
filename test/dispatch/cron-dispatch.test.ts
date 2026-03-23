@@ -1,72 +1,65 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Mock child_process.spawn to avoid actually spawning processes
+const mockChildProcess = { unref: vi.fn() };
+vi.mock("node:child_process", () => ({
+  spawn: vi.fn(() => mockChildProcess),
+}));
 
 vi.mock("../../src/diagnostics.js", () => ({
   emitDiagnosticEvent: vi.fn(),
   safeLog: vi.fn(),
 }));
 
-const mockInjector = vi.fn();
-
-const { setDispatchInjector, dispatchViaInject } = await import("../../src/dispatch/inject-dispatch.js");
+const { spawn } = await import("node:child_process");
+const { dispatchViaInject } = await import("../../src/dispatch/inject-dispatch.js");
 
 describe("dispatchViaInject", () => {
-  beforeEach(() => {
-    mockInjector.mockReset();
-    mockInjector.mockResolvedValue({ runId: "run-123" });
-    setDispatchInjector(mockInjector);
-  });
-
-  afterEach(() => {
-    setDispatchInjector(null as never);
-  });
-
-  it("injects a message with dispatch tag in prompt", async () => {
+  it("spawns openclaw agent with correct args and session-id", async () => {
     const result = await dispatchViaInject({
       queueItemId: "qi-123",
       taskId: "task-456",
       projectId: "proj-1",
       prompt: "Execute the task",
-      agentId: "agent:worker",
+      agentId: "worker",
     });
 
     expect(result.ok).toBe(true);
-    expect(result.sessionKey).toBe("agent:agent:worker:dispatch:qi-123");
+    expect(result.sessionKey).toBe("agent:worker:dispatch:qi-123");
 
-    expect(mockInjector).toHaveBeenCalledTimes(1);
-    const call = mockInjector.mock.calls[0]![0];
-    expect(call.sessionKey).toBe("agent:agent:worker:dispatch:qi-123");
-    expect(call.message).toContain("[clawforce:dispatch=qi-123:task-456]");
-    expect(call.message).toContain("Execute the task");
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const [cmd, args, opts] = (spawn as unknown as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(cmd).toBe("openclaw");
+    expect(args).toContain("--agent");
+    expect(args).toContain("worker");
+    expect(args).toContain("--session-id");
+    expect(args).toContain("agent:worker:dispatch:qi-123");
+    expect(args).toContain("--message");
+    // The message arg should contain the dispatch tag
+    const msgIdx = args.indexOf("--message");
+    const msg = args[msgIdx + 1];
+    expect(msg).toContain("[clawforce:dispatch=qi-123:task-456]");
+    expect(msg).toContain("Execute the task");
+    // Fire and forget
+    expect(opts.detached).toBe(true);
+    expect(opts.stdio).toBe("ignore");
+    expect(mockChildProcess.unref).toHaveBeenCalled();
   });
 
-  it("returns error when injector is not set", async () => {
-    setDispatchInjector(null as never);
-
-    const result = await dispatchViaInject({
-      queueItemId: "qi-1",
-      taskId: "task-1",
-      projectId: "proj-1",
-      prompt: "Do work",
-      agentId: "agent:worker",
+  it("returns error when spawn throws", async () => {
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error("spawn ENOENT");
     });
-
-    expect(result.ok).toBe(false);
-    expect(result.error).toBe("Dispatch injector not set");
-    expect(mockInjector).not.toHaveBeenCalled();
-  });
-
-  it("returns error when injector throws", async () => {
-    mockInjector.mockRejectedValue(new Error("Network timeout"));
 
     const result = await dispatchViaInject({
       queueItemId: "qi-2",
       taskId: "task-2",
       projectId: "proj-1",
       prompt: "Do work",
-      agentId: "agent:worker",
+      agentId: "worker",
     });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toBe("Network timeout");
+    expect(result.error).toBe("spawn ENOENT");
   });
 });
