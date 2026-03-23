@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-// Mock child_process.spawn to avoid actually spawning processes
-const mockChildProcess = { unref: vi.fn() };
-vi.mock("node:child_process", () => ({
-  spawn: vi.fn(() => mockChildProcess),
+// Mock the openclaw plugin-sdk callGatewayTool
+const mockCallGatewayTool = vi.fn(async () => ({ ok: true }));
+vi.mock("openclaw/plugin-sdk", () => ({
+  callGatewayTool: mockCallGatewayTool,
 }));
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -11,11 +11,10 @@ vi.mock("../../src/diagnostics.js", () => ({
   safeLog: vi.fn(),
 }));
 
-const { spawn } = await import("node:child_process");
 const { dispatchViaInject } = await import("../../src/dispatch/inject-dispatch.js");
 
 describe("dispatchViaInject", () => {
-  it("spawns openclaw agent with correct args and session-id", async () => {
+  it("calls chat.send with correct session key and tagged prompt", async () => {
     const result = await dispatchViaInject({
       queueItemId: "qi-123",
       taskId: "task-456",
@@ -27,29 +26,17 @@ describe("dispatchViaInject", () => {
     expect(result.ok).toBe(true);
     expect(result.sessionKey).toBe("agent:worker:dispatch:qi-123");
 
-    expect(spawn).toHaveBeenCalledTimes(1);
-    const [cmd, args, opts] = (spawn as unknown as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    expect(cmd).toBe("openclaw");
-    expect(args).toContain("--agent");
-    expect(args).toContain("worker");
-    expect(args).toContain("--session-id");
-    expect(args).toContain("agent:worker:dispatch:qi-123");
-    expect(args).toContain("--message");
-    // The message arg should contain the dispatch tag
-    const msgIdx = args.indexOf("--message");
-    const msg = args[msgIdx + 1];
-    expect(msg).toContain("[clawforce:dispatch=qi-123:task-456]");
-    expect(msg).toContain("Execute the task");
-    // Fire and forget
-    expect(opts.detached).toBe(true);
-    expect(opts.stdio).toBe("ignore");
-    expect(mockChildProcess.unref).toHaveBeenCalled();
+    expect(mockCallGatewayTool).toHaveBeenCalledTimes(1);
+    const [method, opts, params] = mockCallGatewayTool.mock.calls[0]!;
+    expect(method).toBe("chat.send");
+    expect(opts.timeoutMs).toBe(600_000);
+    expect((params as { sessionKey: string }).sessionKey).toBe("agent:worker:dispatch:qi-123");
+    expect((params as { message: string }).message).toContain("[clawforce:dispatch=qi-123:task-456]");
+    expect((params as { message: string }).message).toContain("Execute the task");
   });
 
-  it("returns error when spawn throws", async () => {
-    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
-      throw new Error("spawn ENOENT");
-    });
+  it("returns error when callGatewayTool throws", async () => {
+    mockCallGatewayTool.mockRejectedValueOnce(new Error("gateway unavailable"));
 
     const result = await dispatchViaInject({
       queueItemId: "qi-2",
@@ -60,6 +47,6 @@ describe("dispatchViaInject", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toBe("spawn ENOENT");
+    expect(result.error).toBe("gateway unavailable");
   });
 });
