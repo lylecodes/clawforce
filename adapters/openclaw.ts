@@ -1937,9 +1937,12 @@ const clawforcePlugin = {
         }
 
         // --- Auto-start continuous jobs on gateway init ---
-        // First cycle uses CLI (cron not yet wired). Once clawforce.init fires
-        // from any session, setCronService captures context.cron and all
-        // subsequent dispatch/re-dispatch uses cron API in-process.
+        // Read configurable stagger from domain dispatch config.
+        // Default 30s between agents to avoid API rate limits.
+        const dispatchConfig = domainResult.domains.length > 0
+          ? (getExtendedProjectConfig(domainResult.domains[0]!) as { dispatch?: { stagger_seconds?: number } } | null)?.dispatch
+          : undefined;
+        const staggerSec = dispatchConfig?.stagger_seconds ?? 30;
         let staggerIndex = 0;
         for (const agId of getRegisteredAgentIds()) {
           const ent = getAgentConfig(agId);
@@ -1948,7 +1951,7 @@ const clawforcePlugin = {
             if (!jobDef.continuous) continue;
             const nudge = jobDef.nudge ?? `Start your "${jobName}" job.`;
             const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
-            const delayMs = 10_000 + (staggerIndex * 10_000);
+            const delayMs = 10_000 + (staggerIndex * staggerSec * 1000);
             staggerIndex++;
             setTimeout(() => {
               execFile("openclaw", [
