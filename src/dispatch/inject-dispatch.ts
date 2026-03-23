@@ -1,15 +1,14 @@
 /**
- * Clawforce — Gateway RPC dispatch
+ * Clawforce — Gateway RPC + Cron dispatch
  *
- * Dispatches agents by calling the `clawforce.dispatch` gateway method
- * via WebSocket RPC. This creates a one-shot cron job that triggers a
- * full agent session through the gateway with all plugin hooks.
+ * `callGatewayRpc` — used ONCE at bootstrap to capture the cron service.
+ * `dispatchViaInject` — delegates to `dispatchViaCron` for actual dispatch.
  *
- * No CLI subprocess. No file writes. No shared state pollution.
  * DO NOT CHANGE THIS MECHANISM without Lyle's approval. See POLICIES.md.
  */
 
 import { safeLog } from "../diagnostics.js";
+import { dispatchViaCron } from "./cron-dispatch.js";
 
 // Keep injector for meeting dispatch and tests
 type InjectFn = (params: { sessionKey: string; message: string }) => Promise<{ runId?: string }>;
@@ -24,12 +23,17 @@ export type InjectDispatchResult = {
 };
 
 /**
- * Call a gateway RPC method via WebSocket.
- * Connects, completes challenge handshake, sends request, waits for response.
+ * Call a gateway RPC method via WebSocket. Used for ONE-TIME bootstrap only.
+ * All runtime dispatch uses getCronService().add() in-process after bootstrap.
  */
-async function callGatewayRpc(method: string, params: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
-  const gatewayPort = process.env.OPENCLAW_GATEWAY_PORT ?? "18789";
-  const url = `ws://127.0.0.1:${gatewayPort}`;
+export async function callGatewayRpc(
+  method: string,
+  params: Record<string, unknown>,
+  timeoutMs = 15_000,
+  port = 18789,
+  token = "",
+): Promise<unknown> {
+  const url = `ws://127.0.0.1:${port}`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let WS: any;
@@ -52,22 +56,33 @@ async function callGatewayRpc(method: string, params: Record<string, unknown>, t
       try {
         const frame = JSON.parse(typeof data === "string" ? data : data.toString());
 
-        // Handle connect challenge — respond with handshake
-        if (frame.method === "connect.challenge" || (frame.type === "event" && frame.event === "connect.challenge")) {
-          const nonce = frame.params?.nonce ?? frame.data?.nonce;
+        // Handle connect challenge
+        if (frame.event === "connect.challenge") {
+          const nonce = frame.payload?.nonce;
           ws.send(JSON.stringify({
-            type: "request",
+            type: "req",
             id: "connect",
             method: "connect",
-            params: { nonce, version: 1, client: "clawforce-dispatch" },
+            params: {
+              minProtocol: 3,
+              maxProtocol: 3,
+              client: { id: "cli", version: "1.0.0", platform: process.platform, mode: "cli" },
+              ...(token ? { auth: { token } } : {}),
+            },
           }));
           return;
         }
 
-        // Handle connect response — now send our RPC
-        if (frame.id === "connect" && frame.ok !== false) {
+        // Handle connect response — send our RPC
+        if (frame.id === "connect") {
+          if (frame.ok === false) {
+            clearTimeout(timer);
+            try { ws.close(); } catch { /* ignore */ }
+            reject(new Error(`Gateway connect failed: ${frame.error?.message ?? "unknown"}`));
+            return;
+          }
           ws.send(JSON.stringify({
-            type: "request",
+            type: "req",
             id: requestId,
             method,
             params,
@@ -80,7 +95,7 @@ async function callGatewayRpc(method: string, params: Record<string, unknown>, t
           clearTimeout(timer);
           try { ws.close(); } catch { /* ignore */ }
           if (frame.ok !== false) {
-            resolve(frame.result);
+            resolve(frame.result ?? frame.payload);
           } else {
             reject(new Error(frame.error?.message ?? "RPC failed"));
           }
@@ -100,8 +115,7 @@ async function callGatewayRpc(method: string, params: Record<string, unknown>, t
 }
 
 /**
- * Dispatch a task by calling the clawforce.dispatch gateway method.
- * Creates a one-shot cron job that triggers a full agent session.
+ * Dispatch a task via the cron API (in-process after bootstrap).
  */
 export async function dispatchViaInject(options: {
   queueItemId: string;
@@ -113,15 +127,13 @@ export async function dispatchViaInject(options: {
   const sessionKey = `agent:${options.agentId}:dispatch:${options.queueItemId}`;
   const taggedPrompt = `[clawforce:dispatch=${options.queueItemId}:${options.taskId}]\n\n${options.prompt}`;
 
-  try {
-    await callGatewayRpc("clawforce.dispatch", {
-      agentId: options.agentId,
-      message: taggedPrompt,
-    });
+  const result = await dispatchViaCron({
+    ...options,
+    prompt: taggedPrompt,
+  });
+
+  if (result.ok) {
     return { ok: true, sessionKey };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    safeLog("inject-dispatch.dispatchViaInject", err);
-    return { ok: false, error: msg };
   }
+  return { ok: false, error: result.error };
 }

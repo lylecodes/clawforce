@@ -104,7 +104,7 @@ import { initializeAllDomains } from "../src/config/init.js";
 import { createDashboardHandler } from "../src/dashboard/gateway-routes.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { emitSSE } from "../src/dashboard/sse.js";
-import { setCronService } from "../src/manager-cron.js";
+import { setCronService, getCronService } from "../src/manager-cron.js";
 
 type GhostRecallConfig = {
   enabled?: boolean;
@@ -1628,10 +1628,37 @@ const clawforcePlugin = {
       respond(true);
     });
 
+    // --- Bootstrap gateway method ---
+    // Eagerly captures context.cron so getCronService() works everywhere in-process.
+    // Called once at gateway_start via WebSocket RPC.
+    api.registerGatewayMethod("clawforce.bootstrap", async ({ context, respond }) => {
+      if (context.cron && !getCronService()) {
+        setCronService({
+          add: async (input) => context.cron.add(input),
+          list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
+          update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
+          remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
+          run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
+        });
+        api.logger.info("Clawforce: cron service bootstrapped");
+      }
+      respond(true);
+    });
+
     // --- Dispatch gateway method ---
     // Creates a one-shot cron job to dispatch an agent session.
-    // Called via HTTP from the dispatch pipeline — no CLI, no file writes.
+    // Also defensively captures cron if bootstrap hasn't run yet.
     api.registerGatewayMethod("clawforce.dispatch", async ({ params, context, respond }) => {
+      // Defensive: capture cron if bootstrap hasn't fired
+      if (context.cron && !getCronService()) {
+        setCronService({
+          add: async (input) => context.cron.add(input),
+          list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
+          update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
+          remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
+          run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
+        });
+      }
       const { agentId, message, sessionTarget, deleteAfterRun } = params as {
         agentId: string;
         message: string;
@@ -1914,39 +1941,53 @@ const clawforcePlugin = {
           api.logger.info(`Clawforce: synced ${agentsToSync.length} agent(s) to OpenClaw`);
         }
 
-        // --- Auto-start continuous jobs on gateway init ---
-        // Find any agents with continuous jobs and dispatch them.
-        // Stagger starts by 10s each to avoid overwhelming the gateway handshake.
-        let staggerIndex = 0;
-        for (const agentId of getRegisteredAgentIds()) {
-          const entry = getAgentConfig(agentId);
-          if (!entry?.config.jobs) continue;
-          for (const [jobName, jobDef] of Object.entries(entry.config.jobs)) {
-            if (!jobDef.continuous) continue;
-            const nudge = jobDef.nudge ?? `Start your "${jobName}" job.`;
-            const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
-            const delayMs = 10_000 + (staggerIndex * 10_000); // 10s, 20s, 30s, ...
-            staggerIndex++;
-            setTimeout(() => {
-              try {
-                execFile("openclaw", [
-                  "agent",
-                  "--agent", agentId,
-                  "--message", taggedMessage,
-                ], { timeout: 600_000 }, (err: Error | null) => {
-                  if (err) {
-                    api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err.message}`);
-                  } else {
-                    api.logger.info(`Clawforce: continuous job "${jobName}" completed for ${agentId}`);
-                  }
-                });
-                api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agentId}`);
-              } catch (err) {
-                api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
-              }
-            }, delayMs);
+        // --- Bootstrap cron service ---
+        // Self-invoke clawforce.bootstrap via WebSocket RPC to capture context.cron.
+        // After this, getCronService() works everywhere in-process.
+        const gatewayPort = process.env.OPENCLAW_GATEWAY_PORT ?? "18789";
+        const gatewayToken = (api.runtime.config.loadConfig()?.gateway as Record<string, unknown> | undefined)?.token as string ?? "";
+        setTimeout(async () => {
+          try {
+            const { callGatewayRpc } = await import("../src/dispatch/inject-dispatch.js");
+            await callGatewayRpc("clawforce.bootstrap", {}, 15_000, Number(gatewayPort), gatewayToken);
+            api.logger.info("Clawforce: cron bootstrap complete");
+          } catch (err) {
+            api.logger.warn(`Clawforce: cron bootstrap failed: ${err instanceof Error ? err.message : String(err)}`);
           }
-        }
+
+          // --- Auto-start continuous jobs AFTER bootstrap ---
+          const { dispatchViaCron } = await import("../src/dispatch/cron-dispatch.js");
+          let staggerIndex = 0;
+          for (const agId of getRegisteredAgentIds()) {
+            const ent = getAgentConfig(agId);
+            if (!ent?.config.jobs) continue;
+            for (const [jobName, jobDef] of Object.entries(ent.config.jobs)) {
+              if (!jobDef.continuous) continue;
+              const nudge = jobDef.nudge ?? `Start your "${jobName}" job.`;
+              const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
+              const staggerMs = staggerIndex * 5_000; // 0s, 5s, 10s stagger
+              staggerIndex++;
+              setTimeout(async () => {
+                try {
+                  const result = await dispatchViaCron({
+                    queueItemId: `cont-init-${agId}-${Date.now()}`,
+                    taskId: `continuous-${jobName}`,
+                    projectId: ent.projectId,
+                    prompt: taggedMessage,
+                    agentId: agId,
+                  });
+                  if (result.ok) {
+                    api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agId} via cron`);
+                  } else {
+                    api.logger.warn(`Clawforce: continuous job auto-start failed for ${agId}/${jobName}: ${result.error}`);
+                  }
+                } catch (err) {
+                  api.logger.warn(`Clawforce: continuous job auto-start failed for ${agId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }, staggerMs);
+            }
+          }
+        }, 5_000); // 5s delay for gateway WS to be ready
       } catch (err) {
         api.logger.warn(`Clawforce auto-init failed: ${err instanceof Error ? err.message : String(err)}`);
       }

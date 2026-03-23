@@ -29,9 +29,14 @@ export async function dispatchViaCron(options: {
   model?: string;
   timeoutSeconds?: number;
 }): Promise<CronDispatchResult> {
-  const cronService = getCronService();
+  let cronService = getCronService();
+  // Brief wait if cron bootstrap hasn't completed yet
   if (!cronService) {
-    return { ok: false, error: "Cron service not available" };
+    await new Promise(resolve => setTimeout(resolve, 5_000));
+    cronService = getCronService();
+  }
+  if (!cronService) {
+    return { ok: false, error: "Cron service not available (bootstrap may still be in progress)" };
   }
 
   const cronJobName = `dispatch:${options.queueItemId}`;
