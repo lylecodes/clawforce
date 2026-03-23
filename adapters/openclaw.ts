@@ -1017,22 +1017,19 @@ const clawforcePlugin = {
               const nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job.`;
               const taggedMessage = `[clawforce:job=${session.jobName}]\n\n${nudge}`;
               // Re-dispatch via clawforce.dispatch gateway method (uses cron API internally)
-              import("../src/dispatch/inject-dispatch.js").then((mod) => {
-                // callGatewayRpc is not exported — use the module's internal mechanism
-                // by going through dispatchViaInject with a synthetic queue ID
-                mod.dispatchViaInject({
+              const { dispatchViaInject: redispatch } = require("../src/dispatch/inject-dispatch.js") as typeof import("../src/dispatch/inject-dispatch.js");
+              redispatch({
                   queueItemId: `cont-${session.agentId}-${Date.now()}`,
                   taskId: "continuous-redispatch",
                   projectId: session.projectId,
                   prompt: taggedMessage,
                   agentId: session.agentId,
-                }).then((r) => {
+                }).then((r: { ok: boolean; error?: string }) => {
                   if (r.ok) api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
                   else api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}/${session.jobName}: ${r.error}`);
+                }).catch((err: unknown) => {
+                  api.logger.warn(`Clawforce: continuous re-dispatch error for ${session.agentId}/${session.jobName}: ${err instanceof Error ? err.message : String(err)}`);
                 });
-              }).catch((err) => {
-                api.logger.warn(`Clawforce: continuous re-dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
-              });
             }
           }
         }

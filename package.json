@@ -71,11 +71,13 @@
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
     "filtrex": "3.1.0",
+    "ws": "^8.20.0",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@types/node": "^25.3.2",
-    "openclaw": "^2026.3.2",
+    "@types/ws": "^8.18.1",
+    "openclaw": "^2026.3.13",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
   }
