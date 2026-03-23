@@ -16,9 +16,9 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
-const mockDispatchViaCron = vi.fn();
-vi.mock("../../src/dispatch/cron-dispatch.js", () => ({
-  dispatchViaCron: mockDispatchViaCron,
+const mockDispatchViaInject = vi.fn();
+vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
+  dispatchViaInject: mockDispatchViaInject,
 }));
 
 vi.mock("../../src/dispatch/spawn.js", () => ({
@@ -39,8 +39,8 @@ describe("dispatch concurrency + rate limiting", () => {
     db = getMemoryDb();
     resetDispatcherForTest();
     resetEnforcementConfigForTest();
-    mockDispatchViaCron.mockReset();
-    mockDispatchViaCron.mockResolvedValue({ ok: true, cronJobName: "dispatch:test" });
+    mockDispatchViaInject.mockReset();
+    mockDispatchViaInject.mockResolvedValue({ ok: true, sessionKey: "agent:test:dispatch:test" });
   });
 
   afterEach(() => {

@@ -233,8 +233,12 @@ const clawforcePlugin = {
       return;
     }
 
-    // --- Wire dispatch injector via CLI ---
-    setDispatchInjector(cliInjectMessage);
+    // --- Wire dispatch injector via api.runtime.subagent.run() ---
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const subagentRuntime = (api.runtime as any)?.subagent;
+    setDispatchInjector(async (params) => {
+      return subagentRuntime.run(params);
+    });
 
     // --- Disabled agent tracking (persistent) ---
     async function handleDisable(agentId: string): Promise<void> {
