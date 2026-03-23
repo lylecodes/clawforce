@@ -840,7 +840,7 @@ const clawforcePlugin = {
               const { runVerificationIfConfigured } = require("../src/verification/lifecycle.js") as typeof import("../src/verification/lifecycle.js");
               const cfAgentEntry = getAgentConfig(session.agentId);
               const projectDir = cfAgentEntry?.projectDir ?? resolveProjectDir(session.projectId);
-              return runVerificationIfConfigured(session.projectId, projectDir, session.agentId);
+              return runVerificationIfConfigured(session.projectId, projectDir);
             } catch { return null; }
           })();
 
