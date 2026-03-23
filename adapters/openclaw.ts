@@ -268,6 +268,10 @@ const clawforcePlugin = {
       const sessionKey = ctx.sessionKey;
       if (!agentId) return;
 
+      // Debug: log hook invocation for all agents
+      const eventKeys = Object.keys(event as Record<string, unknown>);
+      api.logger.info(`Clawforce: before_prompt_build agent=${agentId} session=${sessionKey} eventKeys=[${eventKeys.join(",")}]`);
+
       // Try enforcement config first (new system)
       const entry = getAgentConfig(agentId);
 
@@ -356,15 +360,17 @@ const clawforcePlugin = {
         });
 
         // Detect dispatch context (links session to dispatch queue item)
-        // Check event.prompt first (cron/job path), then fall back to user messages (CLI spawn path)
+        // Check event.prompt first (cron/job path), then check the LAST user message (CLI spawn path).
+        // Workers connect to their main session, so the dispatch tag is in the latest message, not the first.
         const rawPrompt = (event as { prompt?: string }).prompt;
         let dispatchCtx = resolveDispatchContext(rawPrompt);
         if (!dispatchCtx) {
           const msgs = (event as { messages?: Array<{ role: string; content: unknown }> }).messages;
           if (msgs) {
-            for (const m of msgs) {
+            // Check last user message first — that's the dispatch message
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              const m = msgs[i]!;
               if (m.role !== "user") continue;
-              // content can be string or structured [{type:"text",text:"..."}]
               let text: string | undefined;
               if (typeof m.content === "string") {
                 text = m.content;
@@ -378,6 +384,8 @@ const clawforcePlugin = {
                 dispatchCtx = resolveDispatchContext(text);
                 if (dispatchCtx) break;
               }
+              // Only check the last user message — don't scan entire history
+              break;
             }
           }
         }

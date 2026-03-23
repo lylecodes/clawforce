@@ -16,10 +16,10 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
-// Mock the inject-dispatch module to avoid actually starting agent sessions
-const mockDispatchViaInject = vi.fn();
-vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
-  dispatchViaInject: mockDispatchViaInject,
+// Mock the cron-dispatch module to avoid actually starting agent sessions
+const mockDispatchViaCron = vi.fn();
+vi.mock("../../src/dispatch/cron-dispatch.js", () => ({
+  dispatchViaCron: mockDispatchViaCron,
 }));
 
 // Mock spawn module — only buildTaskPrompt is used now
@@ -42,9 +42,9 @@ describe("dispatch/dispatcher", () => {
   beforeEach(() => {
     db = getMemoryDb();
     resetDispatcherForTest();
-    mockDispatchViaInject.mockReset();
+    mockDispatchViaCron.mockReset();
     // Default: successful cron job creation
-    mockDispatchViaInject.mockResolvedValue({ ok: true, sessionKey: "agent:test:dispatch:test" });
+    mockDispatchViaCron.mockResolvedValue({ ok: true, cronJobName: "dispatch:test" });
   });
 
   afterEach(() => {
@@ -108,7 +108,7 @@ describe("dispatch/dispatcher", () => {
     const events = listEvents(PROJECT, { type: "dispatch_succeeded" }, db);
     expect(events).toHaveLength(1);
     expect(events[0]!.payload.taskId).toBe(task.id);
-    expect(events[0]!.payload.sessionKey).toBe("agent:test:dispatch:test");
+    expect(events[0]!.payload.cronJobName).toBe("dispatch:test");
   });
 
   it("emits dispatch_failed event when task is in non-dispatchable state", async () => {
@@ -124,7 +124,7 @@ describe("dispatch/dispatcher", () => {
   });
 
   it("emits dispatch_failed event when cron creation fails", async () => {
-    mockDispatchViaInject.mockResolvedValue({
+    mockDispatchViaCron.mockResolvedValue({
       ok: false, error: "Cron service not available",
     });
 
@@ -143,7 +143,7 @@ describe("dispatch/dispatcher", () => {
   // --- Dead letter emission from dispatcher ---
 
   it("emits dispatch_dead_letter when item exhausts max attempts", async () => {
-    mockDispatchViaInject.mockResolvedValue({ ok: false, error: "cron error" });
+    mockDispatchViaCron.mockResolvedValue({ ok: false, error: "cron error" });
 
     const task = createTask({
       projectId: PROJECT, title: "Doomed task", createdBy: "agent:pm", assignedTo: "agent:worker",
@@ -194,14 +194,14 @@ describe("dispatch/dispatcher", () => {
 
   // --- Dispatch outcome metrics ---
 
-  it("records dispatch_injected metric on successful dispatch", async () => {
+  it("records dispatch_cron_created metric on successful dispatch", async () => {
     const task = createTask({
       projectId: PROJECT, title: "Success metric", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
     enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
-    const metrics = queryMetrics({ projectId: PROJECT, key: "dispatch_injected" }, db);
+    const metrics = queryMetrics({ projectId: PROJECT, key: "dispatch_cron_created" }, db);
     expect(metrics).toHaveLength(1);
     expect(metrics[0]!.subject).toBe(task.id);
   });
@@ -217,7 +217,7 @@ describe("dispatch/dispatcher", () => {
   });
 
   it("records dispatch_dead_letter metric and audit on dead letter", async () => {
-    mockDispatchViaInject.mockResolvedValue({ ok: false, error: "fatal error" });
+    mockDispatchViaCron.mockResolvedValue({ ok: false, error: "fatal error" });
 
     // Use a single-attempt queue item to trigger dead letter on first failure
     const task = createTask({
@@ -321,7 +321,7 @@ describe("dispatch/dispatcher", () => {
 
     // Capture the prompt passed to dispatchViaCron
     let capturedPrompt = "";
-    mockDispatchViaInject.mockImplementation(async (opts: { prompt: string }) => {
+    mockDispatchViaCron.mockImplementation(async (opts: { prompt: string }) => {
       capturedPrompt = opts.prompt;
       return { ok: true, sessionKey: "agent:test:dispatch:retry" };
     });
@@ -334,7 +334,7 @@ describe("dispatch/dispatcher", () => {
   });
 
   it("releases task lease when cron creation fails", async () => {
-    mockDispatchViaInject.mockResolvedValue({ ok: false, error: "service down" });
+    mockDispatchViaCron.mockResolvedValue({ ok: false, error: "service down" });
 
     const task = createTask({
       projectId: PROJECT, title: "Lease release", createdBy: "agent:pm", assignedTo: "agent:worker",

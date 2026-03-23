@@ -16,9 +16,9 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
-const mockDispatchViaInject = vi.fn();
-vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
-  dispatchViaInject: mockDispatchViaInject,
+const mockDispatchViaCron = vi.fn();
+vi.mock("../../src/dispatch/cron-dispatch.js", () => ({
+  dispatchViaCron: mockDispatchViaCron,
 }));
 
 vi.mock("../../src/dispatch/spawn.js", () => ({
@@ -39,8 +39,8 @@ describe("dispatch concurrency + rate limiting", () => {
     db = getMemoryDb();
     resetDispatcherForTest();
     resetEnforcementConfigForTest();
-    mockDispatchViaInject.mockReset();
-    mockDispatchViaInject.mockResolvedValue({ ok: true, sessionKey: "agent:test:dispatch:test" });
+    mockDispatchViaCron.mockReset();
+    mockDispatchViaCron.mockResolvedValue({ ok: true, cronJobName: "dispatch:test" });
   });
 
   afterEach(() => {
@@ -72,7 +72,7 @@ describe("dispatch concurrency + rate limiting", () => {
     enqueue(PROJECT, t1.id, { prompt: "do it" }, undefined, db);
     enqueue(PROJECT, t2.id, { prompt: "do it" }, undefined, db);
 
-    // dispatchViaInject is async, so the concurrency check happens at claim time
+    // dispatchViaCron is async, so the concurrency check happens at claim time
     // With maxConcurrentDispatches=1, only 1 should dispatch per loop pass
     const dispatched = await dispatchLoop(PROJECT, db);
     expect(dispatched).toBe(1);
