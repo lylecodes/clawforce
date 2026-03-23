@@ -6,19 +6,28 @@
  */
 
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { OpenClawPluginApi as _OpenClawPluginApi } from "openclaw/plugin-sdk";
 
+type OpenClawPluginApi = _OpenClawPluginApi;
+
 /**
- * Extended plugin API type — adds runtime methods not yet in the public SDK type definitions.
+ * Inject a message into an agent session via the OpenClaw CLI.
+ * Replaces api.injectAgentMessage which doesn't exist in the plugin SDK.
  */
-type OpenClawPluginApi = _OpenClawPluginApi & {
-  injectAgentMessage(params: {
-    sessionKey: string;
-    message: string;
-  }): Promise<{ runId?: string }>;
-};
+function cliInjectMessage(params: { sessionKey: string; message: string }): Promise<{ runId?: string }> {
+  // Extract agentId from sessionKey pattern "agent:<agentId>:..."
+  const agentMatch = params.sessionKey.match(/^agent:([^:]+):/);
+  const agentId = agentMatch?.[1] ?? params.sessionKey;
+  return new Promise((resolve, reject) => {
+    execFile("openclaw", ["agent", "--agent", agentId, "--message", params.message], { timeout: 600_000 }, (err) => {
+      if (err) reject(err);
+      else resolve({});
+    });
+  });
+}
 
 import { assembleContext, clearAssemblerCache } from "../src/context/assembler.js";
 import { resolveJobName, resolveDispatchContext, resolveEffectiveConfig } from "../src/jobs.js";
@@ -95,6 +104,7 @@ import { initializeAllDomains } from "../src/config/init.js";
 import { createDashboardHandler } from "../src/dashboard/gateway-routes.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { emitSSE } from "../src/dashboard/sse.js";
+import { setCronService } from "../src/manager-cron.js";
 
 type GhostRecallConfig = {
   enabled?: boolean;
@@ -223,11 +233,8 @@ const clawforcePlugin = {
       return;
     }
 
-    // --- Wire dispatch injector ---
-    // Defer until first use — api.injectAgentMessage may not exist at registration time
-    setDispatchInjector(async (params) => {
-      return api.injectAgentMessage(params);
-    });
+    // --- Wire dispatch injector via CLI ---
+    setDispatchInjector(cliInjectMessage);
 
     // --- Disabled agent tracking (persistent) ---
     async function handleDisable(agentId: string): Promise<void> {
@@ -507,7 +514,7 @@ const clawforcePlugin = {
           // Retry: re-inject into the crashed agent's session
           if (actionResult.action === "retry" && actionResult.retryPrompt) {
             try {
-              await api.injectAgentMessage({
+              await cliInjectMessage({
                 sessionKey: event.targetSessionKey,
                 message: actionResult.retryPrompt,
               });
@@ -529,7 +536,7 @@ const clawforcePlugin = {
             try {
               const target = resolveEscalationTarget(agentEntry.config);
               await routeEscalation({
-                injectAgentMessage: api.injectAgentMessage.bind(api),
+                injectAgentMessage: cliInjectMessage,
                 target,
                 message: actionResult.alertMessage,
                 sourceAgentId: session.agentId,
@@ -829,7 +836,7 @@ const clawforcePlugin = {
               const { runVerificationIfConfigured } = require("../src/verification/lifecycle.js") as typeof import("../src/verification/lifecycle.js");
               const cfAgentEntry = getAgentConfig(session.agentId);
               const projectDir = cfAgentEntry?.projectDir ?? resolveProjectDir(session.projectId);
-              return runVerificationIfConfigured(session.projectId, projectDir);
+              return runVerificationIfConfigured(session.projectId, projectDir, session.agentId);
             } catch { return null; }
           })();
 
@@ -953,7 +960,7 @@ const clawforcePlugin = {
       // Retry: re-inject the compliance prompt into this agent's session
       if (actionResult.action === "retry" && actionResult.retryPrompt) {
         try {
-          await api.injectAgentMessage({
+          await cliInjectMessage({
             sessionKey: ctx.sessionKey,
             message: actionResult.retryPrompt,
           });
@@ -975,7 +982,7 @@ const clawforcePlugin = {
         try {
           const target = resolveEscalationTarget(agentEntry.config);
           await routeEscalation({
-            injectAgentMessage: api.injectAgentMessage.bind(api),
+            injectAgentMessage: cliInjectMessage,
             target,
             message: actionResult.alertMessage,
             sourceAgentId: session.agentId,
@@ -1009,7 +1016,7 @@ const clawforcePlugin = {
                 // Direct dispatch via injectAgentMessage — no cron middleman
                 try {
                   const nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job. Pick up where you left off.`;
-                  await api.injectAgentMessage({
+                  await cliInjectMessage({
                     sessionKey: ctx.sessionKey,
                     message: nudge,
                   });
@@ -1513,6 +1520,18 @@ const clawforcePlugin = {
         api.logger.info("Clawforce: channel notifier configured (Telegram)");
       }
 
+      // Wire cron service for dispatch
+      if (context.cron) {
+        setCronService({
+          add: async (input) => context.cron.add(input),
+          list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
+          update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
+          remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
+          run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
+        });
+        api.logger.info("Clawforce: cron service wired for dispatch");
+      }
+
       respond(true);
     });
 
@@ -1706,7 +1725,7 @@ const clawforcePlugin = {
     // --- Dashboard HTTP handler ---
     const dashboardHandler = createDashboardHandler({
       staticDir: path.resolve(import.meta.dirname, "../dashboard/dist"),
-      injectAgentMessage: (params) => api.injectAgentMessage(params),
+      injectAgentMessage: (params) => cliInjectMessage(params),
     });
 
     api.registerHttpRoute({
@@ -1721,7 +1740,7 @@ const clawforcePlugin = {
     // gateway's Control UI SPA catch-all that intercepts /clawforce/ paths.
     const dashboardServer = createDashboardServer({
       port: 3117,
-      injectAgentMessage: (params) => api.injectAgentMessage(params),
+      injectAgentMessage: (params) => cliInjectMessage(params),
     });
 
     // --- Auto-init domains on gateway start (no external clawforce.init call needed) ---
@@ -1766,8 +1785,8 @@ const clawforcePlugin = {
 
         // --- Auto-start continuous jobs on gateway init ---
         // Find any agents with continuous jobs and dispatch them.
-        // At gateway_start, injectAgentMessage isn't available yet.
-        // Use child_process to call the openclaw CLI after a delay.
+        // Stagger starts by 10s each to avoid overwhelming the gateway handshake.
+        let staggerIndex = 0;
         for (const agentId of getRegisteredAgentIds()) {
           const entry = getAgentConfig(agentId);
           if (!entry?.config.jobs) continue;
@@ -1775,10 +1794,10 @@ const clawforcePlugin = {
             if (!jobDef.continuous) continue;
             const nudge = jobDef.nudge ?? `Start your "${jobName}" job.`;
             const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
-            // Delay to let gateway fully start before dispatching
+            const delayMs = 10_000 + (staggerIndex * 10_000); // 10s, 20s, 30s, ...
+            staggerIndex++;
             setTimeout(() => {
               try {
-                const { execFile } = require("node:child_process");
                 execFile("openclaw", [
                   "agent",
                   "--agent", agentId,
@@ -1794,7 +1813,7 @@ const clawforcePlugin = {
               } catch (err) {
                 api.logger.warn(`Clawforce: continuous job auto-start failed for ${agentId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
               }
-            }, 10_000); // 10s delay for gateway to be fully ready
+            }, delayMs);
           }
         }
       } catch (err) {
