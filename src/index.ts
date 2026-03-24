@@ -84,6 +84,7 @@ export { checkCompliance } from "./enforcement/check.js";
 export { executeFailureAction, executeCrashAction, recordCompliantRun } from "./enforcement/actions.js";
 export { resolveEscalationTarget, routeEscalation } from "./enforcement/escalation-router.js";
 export { disableAgent, enableAgent, isAgentDisabled } from "./enforcement/disabled-store.js";
+export { checkAutoRecovery } from "./enforcement/auto-recovery.js";
 
 // --- Context Assembly ---
 export { assembleContext } from "./context/assembler.js";

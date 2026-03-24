@@ -39,7 +39,9 @@ const KNOWN_AGENT_KEYS = new Set([
   "extends", "role", "title", "description", "department", "team",
   "group", "subgroup", "reports_to", "briefing", "expectations",
   "performance_policy", "tools", "verification", "jobs", "scheduling",
-  "memory", "auto_recovery", "channel",
+  "memory", "auto_recovery", "channel", "observe", "compaction",
+  "skill_pack", "coordination", "skillCap", "contextBudgetChars",
+  "maxTurnsPerSession", "model", "exclude_briefing",
 ]);
 
 const KNOWN_DOMAIN_KEYS = new Set([

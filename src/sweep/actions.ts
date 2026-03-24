@@ -55,6 +55,8 @@ export type SweepResult = {
   reviewEscalated: number;
   meetingsStale: number;
   frequencyDispatched: number;
+  agentsRecovered: number;
+  agentsEscalated: number;
 };
 
 export type SweepOptions = {
@@ -550,6 +552,18 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     safeLog("sweep.frequencyJobs", err);
   }
 
+  // 14. Auto-recovery for disabled agents
+  let agentsRecovered = 0;
+  let agentsEscalated = 0;
+  try {
+    const { checkAutoRecovery } = await import("../enforcement/auto-recovery.js");
+    const recovery = checkAutoRecovery(projectId, db);
+    agentsRecovered = recovery.recovered;
+    agentsEscalated = recovery.escalated;
+  } catch (err) {
+    safeLog("sweep.autoRecovery", err);
+  }
+
   return {
     stale, autoBlocked, deadlineExpired, workflowsAdvanced, escalated,
     complianceBlocked, stuckKilled, proposalsExpired, protocolsExpired,
@@ -558,5 +572,6 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     eventsProcessed, dispatched, budgetsReset, autoAssigned,
     sloChecked, sloBreach, alertsFired, anomaliesDetected,
     reviewEscalated, meetingsStale, frequencyDispatched,
+    agentsRecovered, agentsEscalated,
   };
 }

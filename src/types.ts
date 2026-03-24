@@ -325,6 +325,12 @@ export type AgentConfig = {
   maxTurnsPerSession?: number;
   /** Model override for this agent. */
   model?: string;
+  /** Auto-recovery config — re-enable disabled agents after cooldown. */
+  auto_recovery?: {
+    enabled: boolean;
+    /** Minutes to wait before auto-re-enabling. Default: 10. */
+    cooldown_minutes: number;
+  };
 };
 
 /** A scoped session definition for an agent. */

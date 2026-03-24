@@ -864,6 +864,12 @@ const clawforcePlugin = {
         const task = getTask(session.projectId, taskId, db);
         const endLifecycleCfg = getEffectiveLifecycleConfig(session.projectId);
 
+        // Release task lease BEFORE transitions — the lease holder (dispatch:<id>)
+        // differs from the worker's actor identity, causing lease conflict rejections.
+        try {
+          releaseTaskLease(session.projectId, taskId, `dispatch:${queueItemId}`, db);
+        } catch { /* non-fatal */ }
+
         // Auto-capture evidence and transition for tasks still in work states
         if (task && (task.state === "IN_PROGRESS" || task.state === "ASSIGNED")) {
           // Extract last assistant message from transcript
@@ -933,7 +939,9 @@ const clawforcePlugin = {
                     ? "FAILED" as const
                     : "REVIEW" as const;
               transitionTask({ projectId: session.projectId, taskId, toState: targetState, actor: session.agentId }, db);
-            } catch { /* non-fatal */ }
+            } catch (err) {
+              api.logger.warn(`Clawforce: auto-transition failed for ${taskId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
 
           // Immediate event processing for manager dispatch
