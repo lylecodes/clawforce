@@ -266,7 +266,11 @@ async function dispatchItem(
     }
   } catch (err) {
     safeLog("dispatcher.budgetCheck", err);
-    // Budget check failure is non-fatal — proceed with dispatch
+    // Budget check failure is fatal — fail-closed to prevent unmetered dispatch
+    failItem(item.id, `Budget check error: ${err instanceof Error ? err.message : String(err)}`, db, projectId);
+    emitDispatchEvent(projectId, "dispatch_failed", item, { error: "Budget check failed (fail-closed)", budgetExceeded: true }, db);
+    try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_check_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+    return;
   }
 
   // Session/task per-record budget checks (bounded O(n) scope)

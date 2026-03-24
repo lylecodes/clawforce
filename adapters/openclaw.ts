@@ -63,7 +63,9 @@ import { getDb } from "../src/db.js";
 import { completeItem, failItem } from "../src/dispatch/queue.js";
 import { attachEvidence, getTask, releaseTaskLease, transitionTask } from "../src/tasks/ops.js";
 import { setDispatchInjector } from "../src/dispatch/inject-dispatch.js";
-import { registerKillFunction } from "../src/audit/auto-kill.js";
+import { recoverProject } from "../src/dispatch/restart-recovery.js";
+import { registerKillFunction, killStuckAgent } from "../src/audit/auto-kill.js";
+import { checkBudget } from "../src/budget.js";
 import { disableAgent, isAgentDisabled } from "../src/enforcement/disabled-store.js";
 import { handleWorkerSessionEnd } from "../src/tasks/session-end.js";
 import { buildOnboardingContext } from "../src/context/onboarding.js";
@@ -1119,7 +1121,7 @@ const clawforcePlugin = {
       }
     });
 
-    // --- Auto-capture costs via llm_output ---
+    // --- Auto-capture costs via llm_output + hard budget enforcement ---
     api.on("llm_output", async (event, ctx) => {
       if (!ctx.agentId || !ctx.sessionKey) return;
 
@@ -1149,6 +1151,32 @@ const clawforcePlugin = {
         });
       } catch (err) {
         api.logger.warn(`Clawforce: cost capture failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // Hard budget enforcement: kill session immediately if over budget.
+      // This is a stopgap — ideally a before_llm hook would prevent the call entirely.
+      try {
+        const budgetResult = checkBudget({
+          projectId: entry.projectId,
+          agentId: ctx.agentId,
+          taskId,
+          sessionKey: ctx.sessionKey,
+        });
+        if (!budgetResult.ok) {
+          api.logger.warn(`Clawforce: budget exceeded for ${ctx.agentId} (${ctx.sessionKey}) — killing session. Reason: ${budgetResult.reason}`);
+          await killStuckAgent({
+            sessionKey: ctx.sessionKey,
+            agentId: ctx.agentId,
+            projectId: entry.projectId,
+            runtimeMs: 0,
+            lastToolCallMs: null,
+            requiredCallsMade: 0,
+            requiredCallsTotal: 0,
+            reason: `Budget exceeded: ${budgetResult.reason}`,
+          });
+        }
+      } catch (err) {
+        api.logger.warn(`Clawforce: budget enforcement check failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
 
@@ -1914,6 +1942,22 @@ const clawforcePlugin = {
         }
         for (const err of domainResult.errors) {
           api.logger.info(`Clawforce DOMAIN-ERROR: ${err}`);
+        }
+
+        // --- Restart recovery: clean up orphaned state from before restart ---
+        for (const domainId of domainResult.domains) {
+          try {
+            const recovery = recoverProject(domainId);
+            const total = recovery.staleTasks + recovery.failedDispatches + recovery.releasedLeases;
+            if (total > 0) {
+              api.logger.info(
+                `Clawforce restart recovery [${domainId}]: ${recovery.staleTasks} stale tasks released, ` +
+                `${recovery.failedDispatches} dispatch items failed, ${recovery.releasedLeases} expired leases released`,
+              );
+            }
+          } catch (err) {
+            api.logger.warn(`Clawforce restart recovery failed for ${domainId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
 
         // Sync agents to OpenClaw's agents.list so they're addressable

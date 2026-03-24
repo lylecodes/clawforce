@@ -296,6 +296,7 @@ export type { VerificationConfig, VerificationGate, GitIsolationConfig } from ".
 
 // --- Dispatch Gate ---
 export { shouldDispatch } from "./dispatch/dispatcher.js";
+export { recoverProject, releaseStaleInProgressTasks, failStaleDispatchItems, releaseExpiredAssignedLeases } from "./dispatch/restart-recovery.js";
 
 // --- Dashboard ---
 export { createDashboardServer, handleRequest } from "./dashboard/index.js";
