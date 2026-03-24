@@ -37,6 +37,24 @@ export type InitResult = {
 export function initializeAllDomains(baseDir: string): InitResult {
   const result: InitResult = { domains: [], errors: [], warnings: [] };
 
+  // Run config validation first — non-blocking, but log all issues
+  try {
+    const { validateAllConfigs } = require("./validate.js") as typeof import("./validate.js");
+    const report = validateAllConfigs(baseDir);
+    for (const issue of report.issues) {
+      const prefix = issue.severity === "error" ? "ERROR" : issue.severity === "warn" ? "WARN" : "INFO";
+      const msg = `[${prefix}] ${issue.code}: ${issue.message}${issue.path ? ` (${issue.path})` : ""}`;
+      if (issue.severity === "error") {
+        result.errors.push(msg);
+      } else {
+        result.warnings.push(msg);
+      }
+    }
+  } catch (err) {
+    // Validation failure is non-blocking — domains still load
+    result.warnings.push(`Config validation skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Load global config
   let globalConfig: GlobalConfig;
   try {
@@ -169,7 +187,10 @@ function buildWorkforceConfig(
     }
 
     // Apply domain defaults (briefing prepended, expectations appended, performance_policy fallback)
-    const withDomainDefaults = mergeDomainDefaults(resolved as AgentConfig, domain.defaults);
+    // Pass whether the user explicitly set expectations in their config — if so, domain defaults
+    // should not override their choice (e.g., `expectations: []` means "I want none").
+    const userExplicitlySetExpectations = "expectations" in globalDef;
+    const withDomainDefaults = mergeDomainDefaults(resolved as AgentConfig, domain.defaults, userExplicitlySetExpectations);
     agents[agentId] = withDomainDefaults;
   }
 
@@ -281,6 +302,7 @@ function seedGoals(projectId: string, goals: Record<string, GoalConfigEntry>): v
 export function mergeDomainDefaults(
   agentConfig: AgentConfig,
   domainDefaults: DomainConfig["defaults"],
+  userExplicitlySetExpectations = false,
 ): AgentConfig {
   if (!domainDefaults) return agentConfig;
 
@@ -296,8 +318,11 @@ export function mergeDomainDefaults(
     result.briefing = [...newSources, ...result.briefing];
   }
 
-  // Append domain default expectations
-  if (domainDefaults.expectations && Array.isArray(domainDefaults.expectations) && domainDefaults.expectations.length > 0) {
+  // Append domain default expectations — BUT respect explicit user overrides.
+  // If user set `expectations: []` in their agent config, they explicitly want none.
+  // Don't re-add defaults they intentionally removed.
+  if (!userExplicitlySetExpectations &&
+      domainDefaults.expectations && Array.isArray(domainDefaults.expectations) && domainDefaults.expectations.length > 0) {
     const defaultExpectations = domainDefaults.expectations as Expectation[];
     result.expectations = [...result.expectations, ...defaultExpectations];
   }

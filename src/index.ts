@@ -30,6 +30,8 @@ export type { InitResult } from "./config/init.js";
 export { scaffoldConfigDir, initDomain } from "./config/wizard.js";
 export type { InitDomainOpts } from "./config/wizard.js";
 export { startConfigWatcher, stopConfigWatcher, diffConfigs, diffDomainConfigs } from "./config/watcher.js";
+export { validateAllConfigs } from "./config/validate.js";
+export type { ValidationReport, ValidationIssue, ValidationSeverity } from "./config/validate.js";
 export type { GlobalConfigDiff, DomainConfigDiff, ReloadCallback } from "./config/watcher.js";
 
 // --- Config: OpenClaw Reader ---
