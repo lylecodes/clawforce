@@ -120,12 +120,14 @@ export function startConfigWatcher(baseDir: string, onReload: ReloadCallback): v
   };
 
   try {
-    // Watch config.yaml
-    const configPath = path.join(baseDir, "config.yaml");
-    if (fs.existsSync(configPath)) {
-      const w = fs.watch(configPath, (_, filename) => handleChange(filename ?? "config.yaml"));
-      w.unref();
-      watchers.push(w);
+    // Watch config files: config.yaml, project.yaml, and any *.yaml in config dir
+    for (const configFile of ["config.yaml", "project.yaml"]) {
+      const configPath = path.join(baseDir, configFile);
+      if (fs.existsSync(configPath)) {
+        const w = fs.watch(configPath, (_, filename) => handleChange(filename ?? configFile));
+        w.unref();
+        watchers.push(w);
+      }
     }
 
     // Watch domains directory

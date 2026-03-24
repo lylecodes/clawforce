@@ -102,6 +102,7 @@ import { recordCostFromLlmOutput } from "../src/cost.js";
 import { registerBulkPricing } from "../src/pricing.js";
 import { updateProviderUsage } from "../src/rate-limits.js";
 import { initializeAllDomains } from "../src/config/init.js";
+import { startConfigWatcher, stopConfigWatcher } from "../src/config/watcher.js";
 // Dashboard
 import { createDashboardHandler } from "../src/dashboard/gateway-routes.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
@@ -1988,6 +1989,43 @@ const clawforcePlugin = {
           api.logger.info(`Clawforce: synced ${agentsToSync.length} agent(s) to OpenClaw`);
         }
 
+        // --- Config hot-reload: watch for config file changes ---
+        try {
+          startConfigWatcher(defaultConfigDir, (change) => {
+            api.logger.info(`Clawforce: config change detected (${change.file}) — reloading...`);
+            try {
+              const reloadResult = initializeAllDomains(defaultConfigDir);
+              api.logger.info(
+                `Clawforce: config reloaded — ${reloadResult.domains.length} domain(s), ` +
+                `${reloadResult.errors.length} error(s), ${reloadResult.warnings.length} warning(s)`,
+              );
+              // Re-sync agents after reload
+              const reloadedAgentIds = getRegisteredAgentIds();
+              const reloadedAgents = reloadedAgentIds
+                .map((id) => {
+                  const entry = getAgentConfig(id);
+                  if (!entry) return null;
+                  return { agentId: id, config: entry.config, projectDir: entry.projectDir };
+                })
+                .filter((e): e is NonNullable<typeof e> => e !== null);
+              if (reloadedAgents.length > 0) {
+                void syncAgentsToOpenClaw({
+                  agents: reloadedAgents,
+                  loadConfig: () => api.runtime.config.loadConfig(),
+                  writeConfigFile: (c) => api.runtime.config.writeConfigFile(c as never),
+                  logger: api.logger,
+                });
+                api.logger.info(`Clawforce: re-synced ${reloadedAgents.length} agent(s) after config reload`);
+              }
+            } catch (err) {
+              api.logger.warn(`Clawforce: config reload failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          });
+          api.logger.info("Clawforce: config watcher started");
+        } catch (err) {
+          api.logger.warn(`Clawforce: config watcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
         // --- Auto-start continuous jobs on gateway init ---
         // Read configurable stagger from domain dispatch config.
         // Default 30s between agents to avoid API rate limits.
@@ -2131,8 +2169,9 @@ const clawforcePlugin = {
         api.logger.info(`Clawforce initialized (sweep every ${cfg.sweepIntervalMs}ms)`);
       },
       stop: async () => {
+        stopConfigWatcher();
         await shutdownClawforce();
-        api.logger.info("Clawforce shut down");
+        api.logger.info("Clawforce shut down (config watcher stopped)");
       },
     });
   },
