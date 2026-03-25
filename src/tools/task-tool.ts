@@ -298,6 +298,7 @@ export function createClawforceTaskTool(options?: {
             }
           }
 
+          const detail = readStringParam(params, "detail") ?? "compact";
           const tasks = listTasks(projectId, {
             states: statesRaw && statesRaw.length > 0 ? statesRaw as TaskState[] : undefined,
             assignedTo: assignedTo ?? undefined,
@@ -308,7 +309,11 @@ export function createClawforceTaskTool(options?: {
             team,
             limit: limit ?? undefined,
           });
-          return jsonResult({ ok: true, tasks, count: tasks.length });
+          // Compact mode: strip descriptions and evidence to reduce context bloat
+          const result = detail === "compact"
+            ? tasks.map(t => ({ id: t.id, title: t.title, state: t.state, assignedTo: t.assignedTo, priority: t.priority }))
+            : tasks;
+          return jsonResult({ ok: true, tasks: result, count: tasks.length });
         }
 
         case "history": {

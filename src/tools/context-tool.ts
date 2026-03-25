@@ -2,7 +2,7 @@
  * Clawforce — Context tool
  *
  * Mid-session context retrieval for agents.
- * Actions: get_file, list_skills, get_skill, get_knowledge.
+ * Actions: expand, get_file, list_skills, get_skill, get_knowledge.
  */
 
 import fs from "node:fs";
@@ -12,14 +12,17 @@ import { getDb } from "../db.js";
 import { getAgentConfig } from "../project.js";
 import { getTopicList, resolveSkillSource } from "../skills/registry.js";
 import { stringEnum } from "../schema-helpers.js";
+import { resolveSourceForTool } from "../context/assembler.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readStringParam, readStringArrayParam, readNumberParam, resolveProjectId, safeExecute } from "./common.js";
 
-const CONTEXT_ACTIONS = ["get_file", "list_skills", "get_skill", "get_knowledge"] as const;
+const CONTEXT_ACTIONS = ["expand", "get_file", "list_skills", "get_skill", "get_knowledge"] as const;
 
 const ClawforceContextSchema = Type.Object({
   action: stringEnum(CONTEXT_ACTIONS, { description: "Action to perform." }),
   project_id: Type.Optional(Type.String({ description: "Project identifier." })),
+  source: Type.Optional(Type.String({ description: "Briefing source name to expand (for expand). e.g. task_board, direction, cost_summary, activity, worker_findings." })),
+  detail: Type.Optional(Type.String({ description: "Detail level: 'full' (default) or 'summary' (for expand)." })),
   path: Type.Optional(Type.String({ description: "File path relative to project directory (for get_file)." })),
   topic: Type.Optional(Type.String({ description: "Skill topic ID (for get_skill)." })),
   category: Type.Optional(Type.Array(Type.String(), { description: "Knowledge category filter (for get_knowledge)." })),
@@ -29,6 +32,7 @@ const ClawforceContextSchema = Type.Object({
 
 export function createClawforceContextTool(options?: {
   agentSessionKey?: string;
+  agentId?: string;
   projectId?: string;
   projectDir?: string;
 }) {
@@ -37,6 +41,7 @@ export function createClawforceContextTool(options?: {
     name: "clawforce_context",
     description:
       "Retrieve context mid-session. " +
+      "expand: Get full content for a briefing source (use when compact preview is insufficient). " +
       "get_file: Read a project file. " +
       "list_skills: List available skill topics. " +
       "get_skill: Get full content for a skill topic. " +
@@ -49,11 +54,36 @@ export function createClawforceContextTool(options?: {
         if (resolved.error) return jsonResult({ ok: false, reason: resolved.error });
         const projectId = resolved.projectId!;
         const actor = options?.agentSessionKey ?? "unknown";
-        const agentEntry = getAgentConfig(actor);
+        const agentIdResolved = options?.agentId ?? actor;
+        const agentEntry = getAgentConfig(agentIdResolved);
         const role = agentEntry?.config.extends ?? "employee";
         const projectDir = options?.projectDir ?? agentEntry?.projectDir;
 
         switch (action) {
+          case "expand": {
+            const sourceName = readStringParam(params, "source", { required: true })!;
+            const detail = readStringParam(params, "detail") ?? "full";
+
+            const content = resolveSourceForTool(projectId, agentIdResolved, sourceName);
+            if (content === null) {
+              return jsonResult({ ok: false, reason: `Source "${sourceName}" returned no content. It may not be available for this project or agent.` });
+            }
+
+            if (detail === "summary") {
+              // Return a truncated version (first 1000 chars)
+              const truncated = content.length > 1000
+                ? content.slice(0, 1000) + "\n\n...(truncated — use detail=full for complete content)"
+                : content;
+              return jsonResult({ ok: true, source: sourceName, content: truncated, truncated: content.length > 1000 });
+            }
+
+            // Cap at 15KB to prevent massive context injection
+            const capped = content.length > 15_360
+              ? content.slice(0, 15_360) + "\n\n...(truncated at 15KB)"
+              : content;
+            return jsonResult({ ok: true, source: sourceName, content: capped, truncated: content.length > 15_360 });
+          }
+
           case "get_file": {
             const filePath = readStringParam(params, "path", { required: true })!;
             if (!projectDir) {

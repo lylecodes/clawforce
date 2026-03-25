@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 36;
+export const SCHEMA_VERSION = 37;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -50,6 +50,7 @@ const migrations: Record<number, Migration> = {
   34: migrateV34,
   35: migrateV35,
   36: migrateV36,
+  37: migrateV37,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1206,6 +1207,24 @@ function migrateV36(db: DatabaseSync): void {
 
     CREATE INDEX idx_experiment_sessions_experiment ON experiment_sessions(experiment_id, variant_id);
     CREATE INDEX idx_experiment_sessions_session ON experiment_sessions(session_key);
+  `);
+}
+
+// --- Migration V37: Hierarchical disabled scopes ---
+
+function migrateV37(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS disabled_scopes (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      scope_type TEXT NOT NULL,
+      scope_value TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      disabled_at INTEGER NOT NULL,
+      disabled_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_disabled_scopes_project ON disabled_scopes(project_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_disabled_scopes_lookup ON disabled_scopes(project_id, scope_type, scope_value);
   `);
 }
 

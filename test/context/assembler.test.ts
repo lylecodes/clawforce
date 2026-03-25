@@ -364,12 +364,12 @@ describe("assembleContext — orchestrator sources", () => {
     expect(result).toContain("[...truncated]");
   });
 
-  it("budgetChars defaults to 15K (no truncation for small context)", () => {
+  it("budgetChars defaults to 30K (no truncation for small context)", () => {
     createTask({ projectId: PROJECT, title: "Small task", createdBy: "orch" }, db);
 
     const result = assembleContext("orch", makeConfig([{ source: "task_board" }]), { projectId: PROJECT });
 
     expect(result).not.toContain("[...truncated]");
-    expect(result.length).toBeLessThan(15_000);
+    expect(result.length).toBeLessThan(30_000);
   });
 });

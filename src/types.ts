@@ -199,7 +199,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "clawforce_health_report";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "worker_findings" | "recent_decisions" | "clawforce_health_report";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
@@ -319,7 +319,13 @@ export type AgentConfig = {
   memory?: MemoryGovernanceConfig;
   /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. */
   observe?: string[];
-  /** Context window budget in characters. Default: 15000. */
+  /**
+   * Render briefing sources as compact previews instead of full content.
+   * Agents can expand any source via `clawforce_context expand`.
+   * Defaults to true for managers.
+   */
+  compactBriefing?: boolean;
+  /** Context window budget in characters. Default: 30000. */
   contextBudgetChars?: number;
   /** Max turns per session. Default: 50. */
   maxTurnsPerSession?: number;

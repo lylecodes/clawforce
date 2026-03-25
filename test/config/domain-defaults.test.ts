@@ -45,7 +45,7 @@ describe("domain defaults config inheritance", () => {
   });
 
   describe("mergeDomainDefaults", () => {
-    it("prepends domain default briefing to agent briefing", async () => {
+    it("prepends domain default briefing to manager agent briefing", async () => {
       const { mergeDomainDefaults } = await import("../../src/config/init.js");
 
       const domainDefaults: DomainConfig["defaults"] = {
@@ -56,7 +56,8 @@ describe("domain defaults config inheritance", () => {
       };
 
       const agentConfig = {
-        extends: "employee",
+        extends: "manager" as const,
+        coordination: { enabled: true },
         briefing: [
           { source: "instructions" },
           { source: "assigned_task" },
@@ -69,12 +70,42 @@ describe("domain defaults config inheritance", () => {
 
       const merged = mergeDomainDefaults(agentConfig, domainDefaults);
 
-      // Domain defaults are prepended
+      // Domain defaults are prepended for managers
       expect(merged.briefing[0].source).toBe("direction");
       expect(merged.briefing[1].source).toBe("policies");
       // Agent briefing follows
       expect(merged.briefing[2].source).toBe("instructions");
       expect(merged.briefing[3].source).toBe("assigned_task");
+    });
+
+    it("does not prepend domain default briefing to non-manager agents", async () => {
+      const { mergeDomainDefaults } = await import("../../src/config/init.js");
+
+      const domainDefaults: DomainConfig["defaults"] = {
+        briefing: [
+          { source: "direction" },
+          { source: "policies" },
+        ],
+      };
+
+      const agentConfig = {
+        extends: "employee" as const,
+        briefing: [
+          { source: "instructions" },
+          { source: "assigned_task" },
+        ],
+        expectations: [
+          { tool: "clawforce_task", action: "transition", min_calls: 1 },
+        ],
+        performance_policy: { action: "retry" as const, max_retries: 3 },
+      };
+
+      const merged = mergeDomainDefaults(agentConfig, domainDefaults);
+
+      // Non-managers don't get domain default briefing prepended
+      expect(merged.briefing).toHaveLength(2);
+      expect(merged.briefing[0].source).toBe("instructions");
+      expect(merged.briefing[1].source).toBe("assigned_task");
     });
 
     it("appends domain default expectations to agent expectations", async () => {
@@ -124,7 +155,7 @@ describe("domain defaults config inheritance", () => {
       expect(merged.performance_policy).toEqual({ action: "retry", max_retries: 5 });
     });
 
-    it("does not duplicate briefing sources already present in agent config", async () => {
+    it("does not duplicate briefing sources already present in manager config", async () => {
       const { mergeDomainDefaults } = await import("../../src/config/init.js");
 
       const domainDefaults: DomainConfig["defaults"] = {
@@ -135,7 +166,8 @@ describe("domain defaults config inheritance", () => {
       };
 
       const agentConfig = {
-        extends: "employee",
+        extends: "manager" as const,
+        coordination: { enabled: true },
         briefing: [
           { source: "instructions" },
           { source: "assigned_task" },

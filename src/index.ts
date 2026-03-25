@@ -83,7 +83,8 @@ export { startTracking, recordToolCall, recordToolCallDetail, endSession, getSes
 export { checkCompliance } from "./enforcement/check.js";
 export { executeFailureAction, executeCrashAction, recordCompliantRun } from "./enforcement/actions.js";
 export { resolveEscalationTarget, routeEscalation } from "./enforcement/escalation-router.js";
-export { disableAgent, enableAgent, isAgentDisabled } from "./enforcement/disabled-store.js";
+export { disableAgent, enableAgent, isAgentDisabled, disableScope, enableScope, isAgentEffectivelyDisabled, listDisabledScopes } from "./enforcement/disabled-store.js";
+export type { DisableScope, DisabledScopeEntry } from "./enforcement/disabled-store.js";
 export { checkAutoRecovery } from "./enforcement/auto-recovery.js";
 
 // --- Context Assembly ---

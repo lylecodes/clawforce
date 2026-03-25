@@ -13,7 +13,8 @@ import { Type } from "@sinclair/typebox";
 import { getInitQuestions, buildConfigFromAnswers, getBudgetGuidance } from "../config/init-flow.js";
 import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
 import { getActiveSessions, getSession } from "../enforcement/tracker.js";
-import { listDisabledAgents, disableAgent, enableAgent, isAgentDisabled } from "../enforcement/disabled-store.js";
+import { listDisabledAgents, disableAgent, enableAgent, isAgentDisabled, disableScope, enableScope, isAgentEffectivelyDisabled, listDisabledScopes } from "../enforcement/disabled-store.js";
+import type { DisableScope } from "../enforcement/disabled-store.js";
 import { countRecentRetries } from "../enforcement/retry-store.js";
 import { detectStuckAgents } from "../audit/stuck-detector.js";
 import { killStuckAgent } from "../audit/auto-kill.js";
@@ -83,6 +84,8 @@ const ClawforceOpsSchema = Type.Object({
   session_key: Type.Optional(Type.String({ description: "Session key (for kill_agent)." })),
   agent_id: Type.Optional(Type.String({ description: "Agent identifier (for disable_agent/enable_agent)." })),
   reason: Type.Optional(Type.String({ description: "Reason (for disable_agent)." })),
+  scope_type: Type.Optional(Type.String({ description: "Disable scope: 'agent' (default), 'team', or 'department' (for disable_agent/enable_agent)." })),
+  scope_value: Type.Optional(Type.String({ description: "Scope target value: agent_id, team name, or department name (for disable_agent/enable_agent when scope_type is set)." })),
   force: Type.Optional(Type.Boolean({ description: "Force kill even if agent is not stuck (for kill_agent)." })),
   task_id: Type.Optional(Type.String({ description: "Task ID (for reassign)." })),
   new_assignee: Type.Optional(Type.String({ description: "New assignee agent ID (for reassign)." })),
@@ -330,41 +333,76 @@ export function createClawforceOpsTool(options?: {
           }
 
           case "disable_agent": {
-            const agentId = readStringParam(params, "agent_id", { required: true })!;
+            const scopeType = (readStringParam(params, "scope_type") ?? "agent") as DisableScope;
             const reason = readStringParam(params, "reason") ?? "Terminated by manager";
 
-            disableAgent(projectId, agentId, reason);
+            if (scopeType === "agent") {
+              const agentId = readStringParam(params, "agent_id") ?? readStringParam(params, "scope_value");
+              if (!agentId) return jsonResult({ ok: false, reason: "Missing required parameter: agent_id or scope_value" });
 
+              disableAgent(projectId, agentId, reason);
+              writeAuditEntry({
+                projectId,
+                actor: caller,
+                action: "disable_agent",
+                targetType: "agent",
+                targetId: agentId,
+                detail: reason,
+              });
+              return jsonResult({ ok: true, scopeType, agentId, disabled: true, reason });
+            }
+
+            // Team or department scope
+            const scopeValue = readStringParam(params, "scope_value");
+            if (!scopeValue) return jsonResult({ ok: false, reason: `Missing required parameter: scope_value (${scopeType} name)` });
+
+            disableScope(projectId, scopeType, scopeValue, reason, caller);
             writeAuditEntry({
               projectId,
               actor: caller,
               action: "disable_agent",
-              targetType: "agent",
-              targetId: agentId,
+              targetType: scopeType,
+              targetId: scopeValue,
               detail: reason,
             });
-
-            return jsonResult({ ok: true, agentId, disabled: true, reason });
+            return jsonResult({ ok: true, scopeType, scopeValue, disabled: true, reason });
           }
 
           case "enable_agent": {
-            const agentId = readStringParam(params, "agent_id", { required: true })!;
+            const scopeType = (readStringParam(params, "scope_type") ?? "agent") as DisableScope;
 
-            if (!isAgentDisabled(projectId, agentId)) {
-              return jsonResult({ ok: false, reason: `Agent ${agentId} is not disabled.` });
+            if (scopeType === "agent") {
+              const agentId = readStringParam(params, "agent_id") ?? readStringParam(params, "scope_value");
+              if (!agentId) return jsonResult({ ok: false, reason: "Missing required parameter: agent_id or scope_value" });
+
+              if (!isAgentEffectivelyDisabled(projectId, agentId)) {
+                return jsonResult({ ok: false, reason: `Agent ${agentId} is not disabled.` });
+              }
+
+              enableAgent(projectId, agentId);
+              writeAuditEntry({
+                projectId,
+                actor: caller,
+                action: "enable_agent",
+                targetType: "agent",
+                targetId: agentId,
+              });
+              return jsonResult({ ok: true, scopeType, agentId, disabled: false });
             }
 
-            enableAgent(projectId, agentId);
+            // Team or department scope
+            const scopeValue = readStringParam(params, "scope_value");
+            if (!scopeValue) return jsonResult({ ok: false, reason: `Missing required parameter: scope_value (${scopeType} name)` });
 
+            enableScope(projectId, scopeType, scopeValue);
             writeAuditEntry({
               projectId,
               actor: caller,
               action: "enable_agent",
-              targetType: "agent",
-              targetId: agentId,
+              targetType: scopeType,
+              targetId: scopeValue,
             });
-
-            return jsonResult({ ok: true, agentId, disabled: false });
+            return jsonResult({ ok: true, scopeType, scopeValue, disabled: false });
           }
 
           case "reassign": {
@@ -614,6 +652,7 @@ export function createClawforceOpsTool(options?: {
           case "queue_status": {
             const status = getQueueStatus(projectId);
             const concurrency = getConcurrencyInfo();
+            const detail = readStringParam(params, "detail") ?? "compact";
 
             // Alert indicators: dead letters and state-stuck in the last hour
             const oneHourAgo = Date.now() - 60 * 60 * 1000;
@@ -628,12 +667,21 @@ export function createClawforceOpsTool(options?: {
               stateStuckLast1h = ssAgg[0]?.count ?? 0;
             } catch (err) { safeLog("ops.queueStatus.stateStuck", err); }
 
-            return jsonResult({
+            const result: Record<string, unknown> = {
               ok: true,
-              ...status,
+              queued: status.queued,
+              leased: status.leased,
+              completed: status.completed,
+              failed: status.failed,
+              cancelled: status.cancelled,
               concurrency,
               alerts: { deadLettersLast1h, stateStuckLast1h },
-            });
+            };
+            // Only include full recent items when explicitly requested
+            if (detail === "full") {
+              result.recentItems = status.recentItems;
+            }
+            return jsonResult(result);
           }
 
           case "dispatch_metrics": {

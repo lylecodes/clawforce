@@ -291,9 +291,10 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
   });
 }
 
-// TODO(phase9): Migrate activate to use domain-based initializeAllDomains
-// instead of loadWorkforceConfig + registerWorkforceConfig. For now, keep
-// the legacy path for backward compatibility with project.yaml workflows.
+// NOTE: activate currently uses loadWorkforceConfig + registerWorkforceConfig
+// to preserve backward compatibility with existing project.yaml workflows.
+// A future domain-based initializeAllDomains path is intentionally deferred
+// until project.yaml onboarding is fully migrated.
 async function handleActivate(params: Record<string, unknown>, projectsDir: string): Promise<ToolResult> {
   const projectId = readStringParam(params, "project_id", { required: true })!;
   const resolvedDir = resolveProjectDir(projectsDir);

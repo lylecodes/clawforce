@@ -21,7 +21,7 @@ import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, res
 
 const LOG_ACTIONS = ["write", "outcome", "search", "list", "verify_audit", "record_decision"] as const;
 
-const CATEGORIES = ["decision", "pattern", "issue", "outcome", "context"] as const;
+const CATEGORIES = ["decision", "pattern", "issue", "outcome", "context", "finding", "suggestion"] as const;
 
 const OUTCOME_STATUSES = ["success", "failure", "partial"] as const;
 
@@ -126,9 +126,10 @@ function handleWrite(
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(id, projectId, category, title, content, tags ? JSON.stringify(tags) : null, actor, sessionKey, taskId, now);
 
-  // Context at point of decision: return recent related entries
+  // Context at point of decision: return recent related entry titles (compact by default)
+  const detail = readStringParam(params, "detail") ?? "compact";
   const related = db.prepare(`
-    SELECT id, category, title, content, tags, created_at
+    SELECT id, category, title${detail === "full" ? ", content" : ""}, tags, created_at
     FROM knowledge
     WHERE project_id = ? AND category = ? AND id != ?
     ORDER BY created_at DESC
@@ -138,7 +139,9 @@ function handleWrite(
   return jsonResult({
     ok: true,
     entry: { id, category, title, tags, created_at: now },
-    related_entries: related.map(formatKnowledgeRow),
+    related_entries: detail === "full"
+      ? related.map(formatKnowledgeRow)
+      : related.map(r => ({ id: r.id, title: r.title, category: r.category })),
   });
 }
 

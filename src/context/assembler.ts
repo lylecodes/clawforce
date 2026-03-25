@@ -99,7 +99,7 @@ export function assembleContext(
   opts?: { projectId?: string; projectDir?: string; budgetChars?: number; sessionKey?: string },
 ): string {
   const ctx: AssemblerContext = { agentId, config, projectId: opts?.projectId, projectDir: opts?.projectDir };
-  const budgetChars = opts?.budgetChars ?? config.contextBudgetChars ?? 15_000;
+  const budgetChars = opts?.budgetChars ?? config.contextBudgetChars ?? 30_000;
   const sessionKey = opts?.sessionKey;
   const sections: string[] = [];
 
@@ -109,14 +109,39 @@ export function assembleContext(
     sections.push(profileHeader);
   }
 
+  // Determine if compact briefing mode is active.
+  // Defaults to true for managers (coordination enabled), can be overridden via config.
+  const useCompact = config.compactBriefing ?? config.coordination?.enabled ?? false;
+
+  // Sources that are structural / actionable — never compacted, always shown in full.
+  const FULL_SOURCES = new Set([
+    "soul", "instructions", "tools_reference", "project_md", "skill",
+    "memory_instructions", "pending_messages", "channel_messages",
+    "custom", "memory", "assigned_task",
+    "task_creation_standards", "execution_standards", "review_standards", "rejection_standards",
+    "onboarding_welcome", "weekly_digest", "intervention_suggestions",
+  ]);
+
   for (const rawSource of config.briefing) {
     // Normalize: presets store briefing as string[] but assembler expects ContextSource[]
     const source: ContextSource = typeof rawSource === "string"
       ? { source: rawSource as ContextSource["source"] }
       : rawSource;
+
+    // Skip "soul" source when buildProfileHeader already injected soul content,
+    // otherwise the soul/persona text appears twice in the assembled context.
+    if (source.source === "soul" && profileHeader) {
+      continue;
+    }
+
     const content = resolveSource(source, ctx, sessionKey);
     if (content) {
-      sections.push(content);
+      // In compact mode, render data sources as previews
+      if (useCompact && !FULL_SOURCES.has(source.source)) {
+        sections.push(renderCompactPreview(source.source, content));
+      } else {
+        sections.push(content);
+      }
     }
   }
 
@@ -318,6 +343,50 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
       } catch { return null; }
     }
 
+    case "worker_findings": {
+      if (!ctx.projectId) return null;
+      try {
+        const db = getDb(ctx.projectId);
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+        const rows = db.prepare(
+          `SELECT title, content, source_agent, created_at FROM knowledge
+           WHERE project_id = ? AND category IN ('finding', 'suggestion') AND created_at > ?
+           ORDER BY created_at DESC LIMIT 50`,
+        ).all(ctx.projectId, cutoff) as { title: string; content: string; source_agent: string | null; created_at: number }[];
+        if (rows.length === 0) return null;
+        let md = "## Worker Findings\n";
+        for (const r of rows) {
+          const agent = r.source_agent ?? "unknown";
+          const preview = r.content.length > 120 ? r.content.slice(0, 120) + "..." : r.content;
+          md += `\n- **[${agent}]** ${r.title}: ${preview}`;
+        }
+        if (md.length > 2000) md = md.slice(0, 2000);
+        return md;
+      } catch { return null; }
+    }
+
+    case "recent_decisions": {
+      if (!ctx.projectId) return null;
+      try {
+        const db = getDb(ctx.projectId);
+        const cutoff = Date.now() - 48 * 60 * 60 * 1000; // last 48 hours
+        const rows = db.prepare(
+          `SELECT title, content, category, created_at FROM knowledge
+           WHERE project_id = ? AND source_agent = ? AND created_at > ?
+           ORDER BY created_at DESC LIMIT 10`,
+        ).all(ctx.projectId, ctx.agentId, cutoff) as { title: string; content: string; category: string; created_at: number }[];
+        if (rows.length === 0) return null;
+        let md = "## Your Recent Decisions\n";
+        for (const r of rows) {
+          const ago = Math.round((Date.now() - r.created_at) / 60000);
+          const agoStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`;
+          md += `\n- ${agoStr}: **${r.title}** (${r.category})`;
+        }
+        md += "\n\n> clawforce_context expand source=recent_decisions for full details";
+        return md;
+      } catch { return null; }
+    }
+
     case "custom_stream": {
       if (!source.streamName || !ctx.projectId) return null;
       const streamDef = getStream(source.streamName);
@@ -390,7 +459,8 @@ function resolveTaskBoard(ctx: AssemblerContext): string | null {
     .get(ctx.projectId) as Record<string, unknown> | undefined;
   if (!countRow || (countRow.cnt as number) === 0) return null;
 
-  // For managers, scope the board by department/team/direct reports
+  // For managers, scope the board by department/team/direct reports.
+  // No fallback to full board — managers without scope see nothing (forces proper config).
   if (ctx.config.coordination?.enabled) {
     const directReports = getDirectReports(ctx.projectId, ctx.agentId);
     const hasScope = ctx.config.department || ctx.config.team || directReports.length > 0;
@@ -402,8 +472,10 @@ function resolveTaskBoard(ctx: AssemblerContext): string | null {
         directReports: directReports.length > 0 ? directReports : undefined,
       });
     }
+    return "## Task Board\n\nNo team or department configured — cannot scope task board. Set `team` or `department` in agent config.";
   }
 
+  // Non-managers (employees, assistants) get the full board
   return renderTaskBoard(db, ctx.projectId, 50);
 }
 
@@ -1338,4 +1410,194 @@ export function resolveKnowledgeCandidatesSource(
   }
 
   return lines.join("\n");
+}
+
+// --- Compact preview system ---
+
+/**
+ * Render a compact 2-4 line preview of a resolved context source.
+ * Used in compact briefing mode for managers to save context tokens.
+ * Agents can expand any source via `clawforce_context expand source=<name>`.
+ */
+export function renderCompactPreview(source: string, fullContent: string): string {
+  switch (source) {
+    case "task_board":
+      return renderTaskBoardPreview(fullContent);
+    case "direction":
+      return renderDirectionPreview(fullContent);
+    case "cost_summary":
+      return renderCostSummaryPreview(fullContent);
+    case "activity":
+      return renderActivityPreview(fullContent);
+    case "worker_findings":
+      return renderWorkerFindingsPreview(fullContent);
+    default:
+      return renderGenericPreview(source, fullContent);
+  }
+}
+
+function renderTaskBoardPreview(content: string): string {
+  const lines = content.split("\n").filter((l) => l.trim());
+  const stateCounts: Record<string, number> = {};
+  const taskTitles: string[] = [];
+  let total = 0;
+
+  for (const line of lines) {
+    // Match section headers like "### REVIEW (3)"
+    const sectionMatch = line.match(/^###\s+(\w+)\s*\((\d+)\)/);
+    if (sectionMatch) {
+      const state = sectionMatch[1]!;
+      const count = parseInt(sectionMatch[2]!, 10);
+      stateCounts[state] = count;
+      total += count;
+      continue;
+    }
+
+    // Match task lines: "- **Title** (`id`) — P1, assigned to agent"
+    const taskMatch = line.match(/^[-*]\s+\*\*(.+?)\*\*/);
+    if (taskMatch && taskTitles.length < 3) {
+      const stateInLine = line.match(/\b(OPEN|ASSIGNED|IN_PROGRESS|REVIEW|BLOCKED|FAILED)\b/);
+      const stateTag = stateInLine ? ` [${stateInLine[1]}]` : "";
+      taskTitles.push(`- "${taskMatch[1]}"${stateTag}`);
+    }
+  }
+
+  if (total === 0) {
+    total = lines.filter((l) => l.match(/^[-*]\s+\*\*/)).length;
+  }
+
+  const activeCount = total || "?";
+  const countSummary = Object.entries(stateCounts)
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => `${v} ${k}`)
+    .join(", ");
+
+  const parts = [`## Tasks (${activeCount} active)`];
+  if (countSummary) parts.push(`- ${countSummary}`);
+  if (taskTitles.length > 0) parts.push(...taskTitles);
+  parts.push("> clawforce_context expand source=task_board for full board");
+  return parts.join("\n");
+}
+
+function renderDirectionPreview(content: string): string {
+  const contentLines = content.split("\n");
+  let mission = "";
+  let currentPriority = "";
+
+  for (const line of contentLines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (!mission && trimmed.length > 10) {
+      mission = trimmed.length > 120 ? trimmed.slice(0, 120) + "..." : trimmed;
+    }
+
+    const priorityMatch = trimmed.match(/(?:P[0-3]|priority|current|focus)[:\s\u2014-]+(.+)/i);
+    if (priorityMatch && !currentPriority) {
+      currentPriority = priorityMatch[1]!.trim();
+      if (currentPriority.length > 80) currentPriority = currentPriority.slice(0, 80) + "...";
+    }
+  }
+
+  const parts = ["## Direction"];
+  if (mission) parts.push(`Mission: ${mission}`);
+  if (currentPriority) parts.push(`Current: ${currentPriority}`);
+  parts.push("> clawforce_context expand source=direction for full document");
+  return parts.join("\n");
+}
+
+function renderCostSummaryPreview(content: string): string {
+  const contentLines = content.split("\n");
+  let summaryLine = "";
+
+  for (const line of contentLines) {
+    const trimmed = line.trim();
+    if (trimmed.match(/\$[\d.]+/) && !summaryLine) {
+      summaryLine = trimmed.replace(/^\*\*|\*\*$/g, "").replace(/^[-*]\s*/, "");
+      if (summaryLine.length > 80) summaryLine = summaryLine.slice(0, 80) + "...";
+    }
+  }
+
+  const parts = ["## Budget"];
+  if (summaryLine) {
+    parts.push(summaryLine);
+  } else {
+    parts.push("Cost data available");
+  }
+  parts.push("> clawforce_context expand source=cost_summary for breakdown");
+  return parts.join("\n");
+}
+
+function renderActivityPreview(content: string): string {
+  const contentLines = content.split("\n").filter((l) => l.trim());
+  const transitions: string[] = [];
+
+  for (const line of contentLines) {
+    if (transitions.length >= 5) break;
+    const trimmed = line.trim();
+    if (trimmed.startsWith("-") && trimmed.length > 5) {
+      transitions.push(trimmed);
+    }
+  }
+
+  const parts = ["## Recent Activity"];
+  if (transitions.length > 0) {
+    parts.push(...transitions.slice(0, 5));
+    if (transitions.length >= 5) parts.push("...");
+  } else {
+    parts.push("No recent activity");
+  }
+  parts.push("> clawforce_context expand source=activity for full log");
+  return parts.join("\n");
+}
+
+function renderWorkerFindingsPreview(content: string): string {
+  const contentLines = content.split("\n").filter((l) => l.trim());
+  const findings: string[] = [];
+
+  for (const line of contentLines) {
+    const trimmed = line.trim();
+    const findingMatch = trimmed.match(/^[-*]\s+\*\*\[(.+?)]\*\*\s+(.+?)(?::|$)/);
+    if (findingMatch) {
+      findings.push(`- [${findingMatch[1]}] ${findingMatch[2]}`);
+    }
+  }
+
+  const count = findings.length;
+  const parts = [`## Worker Findings (${count} new)`];
+  if (findings.length > 0) {
+    parts.push(...findings.slice(0, 3));
+    if (findings.length > 3) parts.push(`...and ${findings.length - 3} more`);
+  }
+  parts.push("> clawforce_context expand source=worker_findings for details");
+  return parts.join("\n");
+}
+
+function renderGenericPreview(source: string, content: string): string {
+  const displayName = source.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const stripped = content.replace(/^#+\s+.*\n*/m, "").trim();
+  const preview = stripped.length > 200 ? stripped.slice(0, 200) + "..." : stripped;
+  const parts = [`## ${displayName}`];
+  parts.push(preview);
+  parts.push(`> clawforce_context expand source=${source} for full content`);
+  return parts.join("\n");
+}
+
+/**
+ * Resolve a single briefing source by name for tool-based expansion.
+ * Used by the `clawforce_context expand` action.
+ */
+export function resolveSourceForTool(projectId: string, agentId: string, sourceName: string): string | null {
+  const agentEntry = getAgentConfig(agentId);
+  if (!agentEntry) return null;
+
+  const source: ContextSource = { source: sourceName as ContextSource["source"] };
+  const ctx: AssemblerContext = {
+    agentId,
+    config: agentEntry.config,
+    projectId,
+    projectDir: agentEntry.projectDir,
+  };
+
+  return resolveSourceRaw(source, ctx);
 }

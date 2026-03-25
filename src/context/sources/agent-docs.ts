@@ -67,7 +67,39 @@ export function resolveToolsDocs(
     : DEFAULT_ACTION_SCOPES[config.extends ?? "employee"];
   if (!scope) return null;
 
+  // Compact mode: one-liner per tool instead of full action listing.
+  // The agent already knows its role from Soul and Standards — it doesn't
+  // need every action memorized. Full docs available via clawforce_context expand.
+  if (config.compactBriefing) {
+    return generateCompactToolsSummary(scope);
+  }
+
   return generateScoped(scope);
+}
+
+/** Generate a slim tools summary — tool name + one-liner description. */
+function generateCompactToolsSummary(scope: Record<string, unknown>): string {
+  const TOOL_SUMMARIES: Record<string, string> = {
+    clawforce_task: "create, list, get, transition, review tasks and manage proposals",
+    clawforce_log: "write journal entries, record outcomes, search history",
+    clawforce_verify: "request reviews and submit verdicts (approve/reject/rework)",
+    clawforce_workflow: "create and manage multi-phase workflows",
+    clawforce_setup: "system setup, status checks, config validation",
+    clawforce_compact: "update persistent context documents",
+    clawforce_ops: "dispatch workers, check queue, reassign, agent lifecycle, audit",
+    clawforce_context: "expand any briefing source for full detail",
+    memory_search: "semantic search across past sessions and decisions",
+    memory_get: "retrieve a specific memory entry by ID",
+  };
+
+  const lines = ["## Your Tools", ""];
+  for (const toolName of Object.keys(scope)) {
+    const summary = TOOL_SUMMARIES[toolName] ?? "available";
+    lines.push(`- **${toolName}** — ${summary}`);
+  }
+  lines.push("");
+  lines.push("> Use clawforce_context expand source=tools_reference for full action listing");
+  return lines.join("\n");
 }
 
 /**

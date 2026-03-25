@@ -28,11 +28,10 @@ describe("paradigm standards", () => {
     expect(result).toContain("Review Standards");
   });
 
-  it("getRejectionStandards returns non-empty string", () => {
+  it("getRejectionStandards returns empty string (deprecated)", () => {
     const result = getRejectionStandards();
     expect(typeof result).toBe("string");
-    expect(result.length).toBeGreaterThan(0);
-    expect(result).toContain("Rejection Standards");
+    expect(result).toBe("");
   });
 
   it("execution standards mention no lifecycle management", () => {
@@ -45,8 +44,8 @@ describe("paradigm standards", () => {
     expect(result).toContain("evidence");
   });
 
-  it("rejection standards mention actionable feedback", () => {
-    const result = getRejectionStandards();
-    expect(result).toContain("Actionable");
+  it("review standards mention rejection feedback", () => {
+    const result = getReviewStandards();
+    expect(result).toContain("specific feedback");
   });
 });

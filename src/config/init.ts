@@ -77,6 +77,11 @@ export function initializeAllDomains(baseDir: string): InitResult {
   }
 
   for (let domainConfig of domainConfigs) {
+    // Skip disabled domains
+    if (domainConfig.enabled === false) {
+      result.warnings.push(`Domain "${domainConfig.domain}" is disabled — skipping`);
+      continue;
+    }
     try {
       // Expand operational profile (pure config transform — no cron registration)
       domainConfig = normalizeDomainProfile(domainConfig, globalConfig);
@@ -308,8 +313,11 @@ export function mergeDomainDefaults(
 
   const result = { ...agentConfig };
 
-  // Prepend domain default briefing sources (deduped)
-  if (domainDefaults.briefing && Array.isArray(domainDefaults.briefing) && domainDefaults.briefing.length > 0) {
+  // Prepend domain default briefing sources (deduped) — managers only.
+  // Workers/verifiers get focused context (soul + assigned_task + standards).
+  // Domain defaults (direction, policies, architecture) are manager-level context.
+  const isManager = agentConfig.extends === "manager" || agentConfig.coordination?.enabled;
+  if (isManager && domainDefaults.briefing && Array.isArray(domainDefaults.briefing) && domainDefaults.briefing.length > 0) {
     const defaultSources = domainDefaults.briefing as ContextSource[];
     const existingSourceKeys = new Set(result.briefing.map(s => s.source));
 

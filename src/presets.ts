@@ -132,7 +132,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
       "policy_status", "preferences", "cost_forecast", "available_capacity",
       "knowledge_candidates", "budget_guidance",
       "onboarding_welcome", "weekly_digest", "intervention_suggestions",
-      "task_creation_standards", "review_standards", "rejection_standards",
+      "task_creation_standards",
     ],
     expectations: [
       { tool: "clawforce_log", action: "write", min_calls: 1 },
@@ -147,8 +147,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     title: "Employee",
     persona: "You are an employee agent responsible for executing assigned tasks and reporting results.",
     briefing: [
-      "soul", "tools_reference", "assigned_task", "pending_messages",
-      "channel_messages", "memory_instructions", "skill",
+      "soul", "assigned_task", "execution_standards",
     ],
     // Employees have zero ClawForce tools — expectations must be empty (auto-lifecycle handles transitions)
     expectations: [],
@@ -217,6 +216,23 @@ You have access to all Clawforce tools. Use clawforce_setup to create configs, c
     expectations: [],
     performance_policy: { action: "alert" },
     coordination: { enabled: false },
+  },
+  verifier: {
+    extends: "employee",
+    title: "Verifier",
+    persona: "You are a code reviewer. Your job is to verify completed work against acceptance criteria. Read the task, read the evidence, check the code, run tests, and submit a verdict. You cannot modify code — if something is wrong, reject with specific feedback.",
+    briefing: [
+      "soul", "tools_reference", "assigned_task",
+      "review_standards",
+    ],
+    expectations: [
+      { tool: "clawforce_verify", action: "verdict", min_calls: 1 },
+    ],
+    performance_policy: { action: "retry", max_retries: 2, then: "alert" },
+    compactBriefing: false,
+    compaction: false,
+    coordination: { enabled: false },
+    skillCap: 4,
   },
   /** @deprecated Use employee instead. */
   scheduled: {

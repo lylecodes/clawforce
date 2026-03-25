@@ -39,6 +39,8 @@ export type GlobalConfig = {
 
 export type DomainConfig = {
   domain: string;
+  /** Set to false to prevent this domain from loading on gateway start. */
+  enabled?: boolean;
   /** Path to DIRECTION.md file (relative to domain config or project root). */
   direction?: string;
   /** Template preset name (e.g. "startup"). */

@@ -67,10 +67,14 @@ describe("memory governance integration", () => {
     expect(briefing).not.toContain("memory");
   });
 
-  it("full employee preset has memory_instructions in briefing (not memory)", async () => {
+  it("full employee preset has focused briefing without memory_instructions", async () => {
     const { BUILTIN_AGENT_PRESETS } = await import("../../src/presets.js");
     const briefing = BUILTIN_AGENT_PRESETS.employee.briefing as string[];
-    expect(briefing).toContain("memory_instructions");
+    // Employee preset is now focused: soul, assigned_task, execution_standards
+    expect(briefing).toContain("soul");
+    expect(briefing).toContain("assigned_task");
+    expect(briefing).toContain("execution_standards");
+    expect(briefing).not.toContain("memory_instructions");
     expect(briefing).not.toContain("memory");
   });
 

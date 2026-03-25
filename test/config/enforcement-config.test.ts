@@ -612,10 +612,8 @@ agents:
     expect(worker.briefing[0]!.source).toBe("instructions");
     const sourceNames = worker.briefing.map((s) => s.source);
     expect(sourceNames).toContain("soul");
-    expect(sourceNames).toContain("tools_reference");
     expect(sourceNames).toContain("assigned_task");
-    expect(sourceNames).toContain("memory_instructions");
-    expect(sourceNames).toContain("skill");
+    expect(sourceNames).toContain("execution_standards");
     // Inherits employee profile expectations (empty — auto-lifecycle: zero ClawForce tools)
     expect(worker.expectations).toEqual([]);
     // Inherits employee profile performance_policy

@@ -10,7 +10,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { checkBudget } from "../budget.js";
 import { safeLog } from "../diagnostics.js";
-import { isAgentDisabled } from "../enforcement/disabled-store.js";
+import { isAgentEffectivelyDisabled } from "../enforcement/disabled-store.js";
 import { recordMetric } from "../metrics.js";
 import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 import { getTask, listTasks, transitionTask } from "../tasks/ops.js";
@@ -112,8 +112,11 @@ function getEligibleAgents(
     // Only employees can be auto-assigned (managers/coordinators are excluded)
     if (entry.config.extends === "manager" || entry.config.coordination?.enabled) continue;
 
-    // Check disabled
-    if (isAgentDisabled(projectId, agentId, db)) continue;
+    // Check disabled (includes team/department scope)
+    if (isAgentEffectivelyDisabled(projectId, agentId, db, {
+      team: entry.config.team,
+      department: entry.config.department,
+    })) continue;
 
     // Check budget
     try {

@@ -29,6 +29,68 @@ function cliInjectMessage(params: { sessionKey: string; message: string }): Prom
   });
 }
 
+/**
+ * Re-dispatch a continuous job with full safety gates, backoff, and enriched nudge.
+ * Extracted from the non-compliant completion path so both compliant and non-compliant
+ * paths share the same logic — preventing tight idle loops that burn money.
+ */
+async function redispatchContinuousJob(
+  session: { agentId: string; projectId: string; jobName?: string },
+  jobDef: { continuous?: boolean; nudge?: string },
+  api: { logger: { info: (msg: string) => void; warn: (msg: string) => void } },
+): Promise<void> {
+  if (!session.jobName || !jobDef.continuous) return;
+
+  const { shouldDispatch } = await import("../src/dispatch/dispatcher.js");
+  const { isEmergencyStopActive } = await import("../src/safety.js");
+
+  if (isEmergencyStopActive(session.projectId)) {
+    api.logger.warn(`Clawforce: continuous job "${session.jobName}" blocked — emergency stop active`);
+    return;
+  }
+
+  const gateCheck = shouldDispatch(session.projectId, session.agentId);
+  if (!gateCheck.ok) {
+    api.logger.warn(`Clawforce: continuous job "${session.jobName}" blocked — ${gateCheck.reason}`);
+    return;
+  }
+
+  // Check if the board has actionable work — if empty, back off to avoid tight idle loops
+  let backoffMs = 0;
+  let nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job. Pick up where you left off.`;
+  try {
+    const db = getDb(session.projectId);
+    const activeRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state IN ('ASSIGNED','IN_PROGRESS','REVIEW','OPEN')"
+    ).get(session.projectId) as Record<string, number>;
+    const activeTasks = activeRow?.cnt ?? 0;
+    if (activeTasks === 0) {
+      backoffMs = 5 * 60 * 1000; // 5 min backoff when board is empty
+      nudge += "\n\nThe task board is EMPTY. You MUST create new tasks. Read DIRECTION.md and MILESTONES.md in your project directory to identify what needs to be built next. Use clawforce_task create for each task — every task MUST include acceptance criteria in the description.";
+      api.logger.info(`Clawforce: continuous job "${session.jobName}" backing off 5min — board empty for ${session.agentId}`);
+    }
+  } catch { /* non-fatal — proceed without backoff */ }
+
+  const taggedNudge = `[clawforce:job=${session.jobName}]\n\n${nudge}`;
+  const dispatch = () => {
+    execFile("openclaw", [
+      "agent", "--agent", session.agentId, "--message", taggedNudge,
+    ], { timeout: 600_000 }, (err: Error | null) => {
+      if (err) {
+        api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err.message}`);
+      } else {
+        api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
+      }
+    });
+  };
+
+  if (backoffMs > 0) {
+    setTimeout(dispatch, backoffMs);
+  } else {
+    dispatch();
+  }
+}
+
 import { assembleContext, clearAssemblerCache } from "../src/context/assembler.js";
 import { resolveJobName, resolveDispatchContext, resolveEffectiveConfig } from "../src/jobs.js";
 import { checkCompliance } from "../src/enforcement/check.js";
@@ -66,7 +128,7 @@ import { setDispatchInjector } from "../src/dispatch/inject-dispatch.js";
 import { recoverProject } from "../src/dispatch/restart-recovery.js";
 import { registerKillFunction, killStuckAgent } from "../src/audit/auto-kill.js";
 import { checkBudget } from "../src/budget.js";
-import { disableAgent, isAgentDisabled } from "../src/enforcement/disabled-store.js";
+import { disableAgent, isAgentDisabled, isAgentEffectivelyDisabled } from "../src/enforcement/disabled-store.js";
 import { handleWorkerSessionEnd } from "../src/tasks/session-end.js";
 import { buildOnboardingContext } from "../src/context/onboarding.js";
 import { getAllowedActionsForTool } from "../src/profiles.js";
@@ -275,7 +337,7 @@ const clawforcePlugin = {
       const entry = getAgentConfig(agentId);
 
       // Block disabled agents from running (checks persistent store)
-      if (entry && isAgentDisabled(entry.projectId, agentId)) {
+      if (entry && isAgentEffectivelyDisabled(entry.projectId, agentId)) {
         api.logger.warn(`Clawforce: blocking disabled agent ${agentId}`);
         return { prependContext: "## Clawforce: Agent Disabled\n\nThis agent has been disabled due to repeated failures or non-compliance. Do not proceed with any tasks. Report this status if asked." };
       }
@@ -1025,17 +1087,7 @@ const clawforcePlugin = {
           if (agentEntryForRedispatch) {
             const jobDef = agentEntryForRedispatch.config.jobs?.[session.jobName];
             if (jobDef?.continuous) {
-              const nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job.`;
-              const taggedMessage = `[clawforce:job=${session.jobName}]\n\n${nudge}`;
-              // Re-dispatch via CLI (30s handshake timeout patched in gateway)
-              // Once clawforce.init fires and cron is wired, the sweep handles dispatch.
-              // CLI is the reliable path for continuous re-dispatch.
-              execFile("openclaw", [
-                "agent", "--agent", session.agentId, "--message", taggedMessage,
-              ], { timeout: 600_000 }, (err: Error | null) => {
-                if (err) api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}/${session.jobName}: ${err.message}`);
-                else api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
-              });
+              await redispatchContinuousJob(session, jobDef, api);
             }
           }
         }
@@ -1094,37 +1146,13 @@ const clawforcePlugin = {
       }
 
       // --- Continuous job re-dispatch ---
-      // If the agent's current job is marked continuous, immediately re-dispatch
-      // via the cron API. This creates a tight loop: agent finishes → starts again.
+      // If the agent's current job is marked continuous, immediately re-dispatch.
       if (session.jobName) {
         const cfAgentEntry = getAgentConfig(session.agentId);
         if (cfAgentEntry) {
           const jobDef = cfAgentEntry.config.jobs?.[session.jobName];
           if (jobDef?.continuous) {
-            // Check safety gates before re-dispatching
-            const { shouldDispatch } = await import("../src/dispatch/dispatcher.js");
-            const { isEmergencyStopActive } = await import("../src/safety.js");
-
-            if (isEmergencyStopActive(session.projectId)) {
-              api.logger.warn(`Clawforce: continuous job "${session.jobName}" blocked — emergency stop active`);
-            } else {
-              const gateCheck = shouldDispatch(session.projectId, session.agentId);
-              if (!gateCheck.ok) {
-                api.logger.warn(`Clawforce: continuous job "${session.jobName}" blocked — ${gateCheck.reason}`);
-              } else {
-                // Direct dispatch via injectAgentMessage — no cron middleman
-                try {
-                  const nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job. Pick up where you left off.`;
-                  await cliInjectMessage({
-                    sessionKey: ctx.sessionKey,
-                    message: nudge,
-                  });
-                  api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
-                } catch (err) {
-                  api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
-                }
-              }
-            }
+            await redispatchContinuousJob(session, jobDef, api);
           }
         }
       }
@@ -1293,7 +1321,7 @@ const clawforcePlugin = {
       const originalExecute = tool.execute.bind(tool) as (...args: unknown[]) => Promise<ToolResult>;
       const disabledCheckedExecute = async (...args: unknown[]): Promise<ToolResult> => {
         // Hard-block disabled agents from executing any tool
-        if (ctx.agentId && isAgentDisabled(agentEntry.projectId, ctx.agentId)) {
+        if (ctx.agentId && isAgentEffectivelyDisabled(agentEntry.projectId, ctx.agentId)) {
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: "Agent is disabled by Clawforce. No tool calls are permitted." }) }],
             details: null,
@@ -1410,6 +1438,7 @@ const clawforcePlugin = {
         const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
         return adaptTool(createClawforceContextTool({
           agentSessionKey: ctx.sessionKey,
+          agentId: ctx.agentId ?? undefined,
           projectId: agentEntry?.projectId,
           projectDir: agentEntry?.projectDir,
         }));

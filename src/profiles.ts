@@ -37,6 +37,13 @@ export const DEFAULT_ACTION_SCOPES: Record<string, ActionScope> = {
     memory_search: "*",
     memory_get: "*",
   },
+  verifier: {
+    clawforce_task: ["get"],
+    clawforce_verify: ["verdict"],
+    clawforce_log: ["write"],
+    memory_search: "*",
+    memory_get: "*",
+  },
   assistant: {
     clawforce_log: ["write", "outcome", "search", "list"],
     clawforce_setup: ["explain", "status"],

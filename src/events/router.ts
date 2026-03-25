@@ -392,13 +392,28 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   const task = getTask(event.projectId, taskId, db);
   if (!task || task.state !== "REVIEW") return { action: "handled", taskId };
 
-  // Look for a verifier: config-driven first, then regex fallback
+  // Resolve verifier agent: per-team naming convention first, then global config, then regex fallback
   const extCfg = getExtendedProjectConfig(event.projectId);
   let verifierAgentId: string | null = null;
   let verifierProjectDir: string | undefined;
 
-  // 1. Try explicit review.verifierAgent config
-  if (extCfg?.review?.verifierAgent) {
+  // 1. Per-team resolution: derive verifier from the assigned worker's name
+  //    Convention: worker "X-worker" → verifier "X-verifier"
+  if (task.assignedTo) {
+    const workerPrefix = task.assignedTo.replace(/-worker$/, "");
+    if (workerPrefix !== task.assignedTo) {
+      // Worker follows naming convention — look for matching verifier
+      const candidateId = `${workerPrefix}-verifier`;
+      const entry = getAgentConfig(candidateId);
+      if (entry && entry.projectId === event.projectId) {
+        verifierAgentId = candidateId;
+        verifierProjectDir = entry.projectDir;
+      }
+    }
+  }
+
+  // 2. Try explicit review.verifierAgent config (global fallback)
+  if (!verifierAgentId && extCfg?.review?.verifierAgent) {
     const entry = getAgentConfig(extCfg.review.verifierAgent);
     if (entry && entry.projectId === event.projectId) {
       verifierAgentId = extCfg.review.verifierAgent;
@@ -406,7 +421,7 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
     }
   }
 
-  // 2. Fallback: regex pattern matching (backward compat)
+  // 3. Fallback: regex pattern matching (backward compat)
   if (!verifierAgentId) {
     const agentIds = getRegisteredAgentIds();
     for (const agentId of agentIds) {
