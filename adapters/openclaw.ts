@@ -55,8 +55,9 @@ async function redispatchContinuousJob(
     return;
   }
 
-  // Check if the board has actionable work — if empty, back off to avoid tight idle loops
-  let backoffMs = 0;
+  // Always back off between continuous cycles — prevents tight loops.
+  // Longer backoff when board is empty (planning needed), shorter when work exists.
+  let backoffMs = 60_000; // 1 min minimum between cycles
   let nudge = jobDef.nudge ?? `Continue your "${session.jobName}" job. Pick up where you left off.`;
   try {
     const db = getDb(session.projectId);
@@ -66,22 +67,36 @@ async function redispatchContinuousJob(
     const activeTasks = activeRow?.cnt ?? 0;
     if (activeTasks === 0) {
       backoffMs = 5 * 60 * 1000; // 5 min backoff when board is empty
-      nudge += "\n\nThe task board is EMPTY. You MUST create new tasks. Read DIRECTION.md and MILESTONES.md in your project directory to identify what needs to be built next. Use clawforce_task create for each task — every task MUST include acceptance criteria in the description.";
+      nudge += "\n\nThe task board is EMPTY. Review the planning context in your briefing and create new tasks with acceptance criteria.";
       api.logger.info(`Clawforce: continuous job "${session.jobName}" backing off 5min — board empty for ${session.agentId}`);
     }
-  } catch { /* non-fatal — proceed without backoff */ }
+  } catch { /* non-fatal — proceed with default 1min backoff */ }
 
   const taggedNudge = `[clawforce:job=${session.jobName}]\n\n${nudge}`;
-  const dispatch = () => {
-    execFile("openclaw", [
-      "agent", "--agent", session.agentId, "--message", taggedNudge,
-    ], { timeout: 600_000 }, (err: Error | null) => {
-      if (err) {
-        api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err.message}`);
-      } else {
-        api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId}`);
-      }
-    });
+  // Use cron dispatch with sessionTarget: "isolated" for truly fresh sessions.
+  // The CLI path (execFile) always reuses the agent's main session and accumulates history.
+  const dispatch = async () => {
+    const cronService = getCronService();
+    if (!cronService) {
+      api.logger.warn(`Clawforce: continuous re-dispatch skipped — cron service not available for ${session.agentId}`);
+      return;
+    }
+    try {
+      const { toCronJobCreate } = await import("../src/manager-cron.js");
+      const input = toCronJobCreate({
+        name: `continuous:${session.agentId}:${session.jobName}:${Date.now()}`,
+        schedule: `at:${new Date().toISOString()}`,
+        agentId: session.agentId,
+        payload: taggedNudge,
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        deleteAfterRun: true,
+      });
+      await cronService.add(input);
+      api.logger.info(`Clawforce: continuous job "${session.jobName}" re-dispatched for ${session.agentId} (isolated session)`);
+    } catch (err) {
+      api.logger.warn(`Clawforce: continuous re-dispatch failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   if (backoffMs > 0) {
@@ -2072,17 +2087,28 @@ const clawforcePlugin = {
             const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
             const delayMs = 10_000 + (staggerIndex * staggerSec * 1000);
             staggerIndex++;
-            setTimeout(() => {
-              execFile("openclaw", [
-                "agent", "--agent", agId, "--message", taggedMessage,
-              ], { timeout: 600_000 }, (err: Error | null) => {
-                if (err) {
-                  api.logger.warn(`Clawforce: continuous job auto-start failed for ${agId}/${jobName}: ${err.message}`);
-                } else {
-                  api.logger.info(`Clawforce: continuous job "${jobName}" completed for ${agId}`);
-                }
-              });
-              api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agId}`);
+            setTimeout(async () => {
+              const cronService = getCronService();
+              if (!cronService) {
+                api.logger.warn(`Clawforce: continuous job auto-start skipped — cron not ready for ${agId}/${jobName}`);
+                return;
+              }
+              try {
+                const { toCronJobCreate: toCron } = await import("../src/manager-cron.js");
+                const input = toCron({
+                  name: `continuous:${agId}:${jobName}:${Date.now()}`,
+                  schedule: `at:${new Date().toISOString()}`,
+                  agentId: agId,
+                  payload: taggedMessage,
+                  sessionTarget: "isolated",
+                  wakeMode: "now",
+                  deleteAfterRun: true,
+                });
+                await cronService.add(input);
+                api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agId} (isolated session)`);
+              } catch (err) {
+                api.logger.warn(`Clawforce: continuous job auto-start failed for ${agId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
+              }
             }, delayMs);
           }
         }

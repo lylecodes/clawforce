@@ -458,9 +458,13 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   try {
     // skipStateCheck=true: REVIEW tasks are normally blocked from dispatch,
     // but verification dispatches are the intended consumer of REVIEW tasks.
+    // agentId overrides task.assignedTo so the verifier runs instead of the worker.
+    const agentModel = getAgentModel(verifierAgentId);
     const result = enqueue(event.projectId, taskId, {
       prompt: verifyPrompt,
       projectDir: verifierProjectDir ?? process.cwd(),
+      agentId: verifierAgentId,
+      ...(agentModel ? { model: agentModel } : {}),
     }, undefined, db, undefined, true);
 
     if (result) {

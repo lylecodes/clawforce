@@ -209,9 +209,10 @@ export async function dispatchLoop(
     if (!item) break;
 
     // Resolve agentId early for per-agent limit check
+    // Payload can override agent (e.g. verifier dispatch targets a different agent than the task assignee)
     const task = getTask(projectId, item.taskId, db);
     const payload = item.payload ?? {};
-    const agentId = task?.assignedTo ?? (payload.profile ? `claude-code:${payload.profile as string}` : "claude-code:worker");
+    const agentId = (payload.agentId as string | undefined) ?? task?.assignedTo ?? (payload.profile ? `claude-code:${payload.profile as string}` : "claude-code:worker");
 
     // Check per-agent limits
     const agentLimitReason = checkAgentLimits(agentId, dispatchConfig);
