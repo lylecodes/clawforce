@@ -1850,17 +1850,22 @@ const clawforcePlugin = {
     // Eagerly captures context.cron so getCronService() works everywhere in-process.
     // Called once at gateway_start via WebSocket RPC.
     api.registerGatewayMethod("clawforce.bootstrap", async ({ context, respond }) => {
-      if (context.cron && !getCronService()) {
-        setCronService({
-          add: async (input) => context.cron.add(input),
-          list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
-          update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
-          remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
-          run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
-        });
-        api.logger.info("Clawforce: cron service bootstrapped");
+      try {
+        if (context.cron && !getCronService()) {
+          setCronService({
+            add: async (input) => context.cron.add(input),
+            list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
+            update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
+            remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
+            run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
+          });
+          api.logger.info("Clawforce: cron service bootstrapped");
+        }
+        respond(true);
+      } catch (err) {
+        api.logger.warn(`Clawforce bootstrap error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+        respond(false, undefined, { code: "BOOTSTRAP_ERROR", message: String(err) });
       }
-      respond(true);
     });
 
     // --- Dispatch gateway method ---
@@ -2211,6 +2216,35 @@ const clawforcePlugin = {
           api.logger.info("Clawforce: config watcher started");
         } catch (err) {
           api.logger.warn(`Clawforce: config watcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // --- Capture cron service via self-dispatch ---
+        // gateway_start doesn't provide cron context, but clawforce.dispatch does.
+        // Schedule a CLI dispatch to the first lead agent — this routes through
+        // the gateway WS handler which provides context.cron to clawforce.dispatch.
+        if (domainResult.domains.length > 0) {
+          const firstDomain = domainResult.domains[0]!;
+          const leadIds = getRegisteredAgentIds().filter(id => {
+            const e = getAgentConfig(id);
+            return e?.projectId === firstDomain && (e?.config.extends === "manager" || e?.config.coordination?.enabled);
+          });
+          if (leadIds.length > 0) {
+            const leadId = leadIds[0]!;
+            const leadEntry = getAgentConfig(leadId);
+            const namespacedLead = leadEntry ? toNamespacedAgentId(leadEntry.projectId, leadId) : leadId;
+            setTimeout(() => {
+              try {
+                const { execSync: exec } = require("node:child_process") as typeof import("node:child_process");
+                exec(
+                  `openclaw gateway call clawforce.dispatch --params '${JSON.stringify({ agentId: namespacedLead, message: "[clawforce:job=dev_cycle] Check task board. Assign OPEN tasks. Review REVIEW tasks. Dispatch workers.", sessionTarget: "isolated", deleteAfterRun: true })}'`,
+                  { timeout: 15_000, stdio: "ignore" },
+                );
+                api.logger.info(`Clawforce: cron captured via auto-dispatch of ${leadId}`);
+              } catch (err) {
+                api.logger.warn(`Clawforce: auto-dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }, 5_000);
+          }
         }
 
         // --- Auto-start continuous jobs on gateway init ---

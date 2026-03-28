@@ -14,6 +14,9 @@
  *   agents          Agent session status and activity
  *   streams         List available data streams
  *   query           Raw SQL query against the project DB
+ *   disable         Disable all ClawForce domains and kill agent sessions
+ *   enable [domain] Enable ClawForce domains (optionally specific domain)
+ *   kill            Kill all ClawForce agent sessions and cancel queued dispatches
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -461,9 +464,123 @@ switch (command) {
     cmdQuery(db, sql);
     break;
   }
+  case "disable":
+    cmdDisable();
+    break;
+  case "enable":
+    cmdEnable();
+    break;
+  case "kill":
+    cmdKill();
+    break;
   default:
     console.error(`Unknown command: ${command}\nRun with --help for usage.`);
     process.exit(1);
 }
 
 db.close();
+
+// --- Lifecycle commands (don't need DB) ---
+
+function cmdDisable(): void {
+  const domainsDir = path.join(DB_DIR, "domains");
+  if (!fs.existsSync(domainsDir)) {
+    console.error("No domains directory found");
+    process.exit(1);
+  }
+  const files = fs.readdirSync(domainsDir).filter(f => f.endsWith(".yaml") && !f.endsWith(".disabled"));
+  let disabled = 0;
+  for (const file of files) {
+    const filePath = path.join(domainsDir, file);
+    let content = fs.readFileSync(filePath, "utf-8");
+    if (/^enabled:\s*true/m.test(content)) {
+      content = content.replace(/^enabled:\s*true/m, "enabled: false");
+      fs.writeFileSync(filePath, content, "utf-8");
+      console.log(`  Disabled: ${file}`);
+      disabled++;
+    } else if (!/^enabled:/m.test(content)) {
+      // No enabled field — add it at the top
+      content = `enabled: false\n${content}`;
+      fs.writeFileSync(filePath, content, "utf-8");
+      console.log(`  Disabled: ${file} (added enabled: false)`);
+      disabled++;
+    } else {
+      console.log(`  Already disabled: ${file}`);
+    }
+  }
+  // Kill ClawForce agent sessions
+  try {
+    const result = execSync(
+      `ps aux | grep -E "agent.*(cf-lead|cf-worker|cf-verifier|dash-lead|dash-worker|dash-verifier)" | grep -v grep | awk '{print $2}'`,
+      { encoding: "utf-8" },
+    ).trim();
+    if (result) {
+      const pids = result.split("\n");
+      for (const pid of pids) {
+        try { process.kill(Number(pid), "SIGTERM"); } catch {}
+      }
+      console.log(`  Killed ${pids.length} ClawForce agent process(es)`);
+    }
+  } catch {}
+  console.log(`\n## ClawForce Disabled\n\n${disabled} domain(s) disabled. Restart gateway to take effect: openclaw gateway restart`);
+}
+
+function cmdEnable(): void {
+  const domainsDir = path.join(DB_DIR, "domains");
+  if (!fs.existsSync(domainsDir)) {
+    console.error("No domains directory found");
+    process.exit(1);
+  }
+  const targetDomain = args[1];
+  const files = fs.readdirSync(domainsDir).filter(f => {
+    if (!f.endsWith(".yaml")) return false;
+    if (targetDomain) return f === `${targetDomain}.yaml`;
+    return true;
+  });
+  let enabled = 0;
+  for (const file of files) {
+    const filePath = path.join(domainsDir, file);
+    let content = fs.readFileSync(filePath, "utf-8");
+    if (/^enabled:\s*false/m.test(content)) {
+      content = content.replace(/^enabled:\s*false/m, "enabled: true");
+      fs.writeFileSync(filePath, content, "utf-8");
+      console.log(`  Enabled: ${file}`);
+      enabled++;
+    } else {
+      console.log(`  Already enabled: ${file}`);
+    }
+  }
+  console.log(`\n## ClawForce Enabled\n\n${enabled} domain(s) enabled. Restart gateway to take effect: openclaw gateway restart`);
+}
+
+function cmdKill(): void {
+  console.log("## Killing ClawForce agent sessions\n");
+  try {
+    const result = execSync(
+      `ps aux | grep -E "agent.*(cf-lead|cf-worker|cf-verifier|dash-lead|dash-worker|dash-verifier)" | grep -v grep | awk '{print $2}'`,
+      { encoding: "utf-8" },
+    ).trim();
+    if (result) {
+      const pids = result.split("\n");
+      for (const pid of pids) {
+        try { process.kill(Number(pid), "SIGTERM"); } catch {}
+      }
+      console.log(`Killed ${pids.length} ClawForce agent process(es)`);
+    } else {
+      console.log("No ClawForce agent processes found");
+    }
+  } catch {
+    console.log("No ClawForce agent processes found");
+  }
+  // Also cancel queued dispatch items
+  try {
+    const killDb = getDb(DEFAULT_PROJECT);
+    const cancelled = killDb.prepare(
+      "UPDATE dispatch_queue SET status = 'cancelled' WHERE status IN ('queued', 'leased')",
+    ).run();
+    if (cancelled.changes > 0) {
+      console.log(`Cancelled ${cancelled.changes} queued dispatch item(s)`);
+    }
+    killDb.close();
+  } catch {}
+}
