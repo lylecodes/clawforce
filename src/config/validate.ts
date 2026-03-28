@@ -33,7 +33,7 @@ export type ValidationReport = {
 const KNOWN_GLOBAL_KEYS = new Set([
   "version", "project_id", "name", "description", "project_dir",
   "agents", "domains", "defaults", "budget", "telemetry", "profiles",
-  "team_templates",
+  "team_templates", "mixins",
 ]);
 
 const KNOWN_AGENT_KEYS = new Set([
@@ -42,7 +42,7 @@ const KNOWN_AGENT_KEYS = new Set([
   "performance_policy", "tools", "verification", "jobs", "scheduling",
   "memory", "auto_recovery", "channel", "observe", "compaction",
   "skill_pack", "coordination", "skillCap", "contextBudgetChars",
-  "maxTurnsPerSession", "model", "exclude_briefing",
+  "maxTurnsPerSession", "model", "exclude_briefing", "mixins",
 ]);
 
 const KNOWN_DOMAIN_KEYS = new Set([
@@ -174,6 +174,115 @@ export function validateAllConfigs(baseDir: string): ValidationReport {
             code: "UNKNOWN_PRESET",
             message: `Agent ${agentId} extends unknown preset "${extendsVal}"`,
           });
+        }
+      }
+
+      // Check mixin references exist
+      const agentMixins = agentDef.mixins;
+      if (Array.isArray(agentMixins)) {
+        const definedMixins = parsed.mixins as Record<string, unknown> | undefined;
+        for (const mixinName of agentMixins) {
+          if (typeof mixinName !== "string") {
+            issues.push({
+              severity: "error",
+              file: "project.yaml",
+              path: `agents.${agentId}.mixins`,
+              agentId,
+              code: "INVALID_MIXIN_REF",
+              message: `Agent ${agentId} has non-string mixin reference`,
+            });
+          } else if (!definedMixins || !(mixinName in definedMixins)) {
+            issues.push({
+              severity: "error",
+              file: "project.yaml",
+              path: `agents.${agentId}.mixins`,
+              agentId,
+              code: "UNKNOWN_MIXIN",
+              message: `Agent ${agentId} references undefined mixin "${mixinName}"`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Validate mixins section
+  const mixins = parsed.mixins as Record<string, unknown> | undefined;
+  if (mixins !== undefined) {
+    if (typeof mixins !== "object" || mixins === null || Array.isArray(mixins)) {
+      issues.push({
+        severity: "error",
+        file: "project.yaml",
+        path: "mixins",
+        code: "INVALID_MIXINS",
+        message: "mixins must be an object mapping mixin names to config fragments",
+      });
+    }
+  }
+
+  // Validate job triggers — check trigger event types are known
+  if (agents && typeof agents === "object") {
+    const knownTriggerEvents = new Set([
+      "ci_failed", "pr_opened", "deploy_finished", "task_completed",
+      "task_failed", "task_assigned", "task_created", "sweep_finding",
+      "dispatch_succeeded", "dispatch_failed", "task_review_ready",
+      "dispatch_dead_letter", "proposal_approved", "proposal_created",
+      "proposal_rejected", "message_sent",
+      "protocol_started", "protocol_responded", "protocol_completed",
+      "protocol_expired", "protocol_escalated",
+      "goal_created", "goal_achieved", "goal_abandoned", "custom",
+    ]);
+    for (const [agentId, agentDef] of Object.entries(agents)) {
+      if (!agentDef || typeof agentDef !== "object") continue;
+      const agentJobs = agentDef.jobs as Record<string, Record<string, unknown>> | undefined;
+      if (!agentJobs || typeof agentJobs !== "object") continue;
+      for (const [jobName, jobDef] of Object.entries(agentJobs)) {
+        if (!jobDef || typeof jobDef !== "object") continue;
+        const triggers = jobDef.triggers;
+        if (!triggers) continue;
+        if (!Array.isArray(triggers)) {
+          issues.push({
+            severity: "error",
+            file: "project.yaml",
+            path: `agents.${agentId}.jobs.${jobName}.triggers`,
+            agentId,
+            code: "INVALID_TRIGGERS",
+            message: `Job ${jobName} on ${agentId}: triggers must be an array`,
+          });
+          continue;
+        }
+        for (let i = 0; i < triggers.length; i++) {
+          const trigger = triggers[i] as Record<string, unknown> | undefined;
+          if (!trigger || typeof trigger !== "object") {
+            issues.push({
+              severity: "error",
+              file: "project.yaml",
+              path: `agents.${agentId}.jobs.${jobName}.triggers[${i}]`,
+              agentId,
+              code: "INVALID_TRIGGER",
+              message: `Job ${jobName} on ${agentId}: trigger[${i}] must be an object with an "on" field`,
+            });
+            continue;
+          }
+          if (typeof trigger.on !== "string" || !trigger.on.trim()) {
+            issues.push({
+              severity: "error",
+              file: "project.yaml",
+              path: `agents.${agentId}.jobs.${jobName}.triggers[${i}].on`,
+              agentId,
+              code: "MISSING_TRIGGER_EVENT",
+              message: `Job ${jobName} on ${agentId}: trigger[${i}] missing required "on" event type`,
+            });
+          } else if (!knownTriggerEvents.has(trigger.on)) {
+            issues.push({
+              severity: "warn",
+              file: "project.yaml",
+              path: `agents.${agentId}.jobs.${jobName}.triggers[${i}].on`,
+              agentId,
+              code: "UNKNOWN_TRIGGER_EVENT",
+              message: `Job ${jobName} on ${agentId}: unknown trigger event "${trigger.on}"`,
+            });
+          }
         }
       }
     }

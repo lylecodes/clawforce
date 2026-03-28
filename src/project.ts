@@ -861,10 +861,30 @@ function normalizeJobs(raw: unknown): Record<string, JobDefinition> | undefined 
     if (typeof j.frequency === "string" && j.frequency.trim()) {
       job.frequency = j.frequency.trim();
     }
+    if (Array.isArray(j.triggers)) {
+      job.triggers = normalizeTriggers(j.triggers);
+    }
 
     result[jobName] = job;
   }
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeTriggers(
+  raw: unknown[],
+): Array<{ on: string; conditions?: Record<string, unknown> }> {
+  const triggers: Array<{ on: string; conditions?: Record<string, unknown> }> = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const t = item as Record<string, unknown>;
+    if (typeof t.on !== "string" || !t.on.trim()) continue;
+    const trigger: { on: string; conditions?: Record<string, unknown> } = { on: t.on.trim() };
+    if (typeof t.conditions === "object" && t.conditions !== null && !Array.isArray(t.conditions)) {
+      trigger.conditions = t.conditions as Record<string, unknown>;
+    }
+    triggers.push(trigger);
+  }
+  return triggers;
 }
 
 function normalizeBudgetsConfig(raw: Record<string, unknown>): WorkforceConfig["budgets"] {

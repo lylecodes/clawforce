@@ -1,0 +1,36 @@
+# Team Watcher — platform team observes product team
+# Demonstrates cross-team observation for dogfooding and platform improvement
+
+agents:
+  # --- Platform Team ---
+  # Builds and maintains the infrastructure that product uses
+  platform-lead:
+    title: Platform Lead
+    observe:
+      # Watch product team's full task lifecycle
+      - pattern: "task.*"
+        scope:
+          team: "product"
+      # Watch dispatch events to see session allocation
+      - pattern: "dispatch.*"
+        scope:
+          team: "product"
+      # Global budget alerts (unscoped — from any team)
+      - "budget.exceeded"
+
+  platform-worker:
+    title: Platform Developer
+    reports_to: platform-lead
+
+  # --- Product Team ---
+  # Uses the platform to build user-facing features
+  product-lead:
+    title: Product Lead
+
+  product-worker:
+    title: Product Developer
+    reports_to: product-lead
+
+  product-worker-2:
+    title: Product Developer
+    reports_to: product-lead

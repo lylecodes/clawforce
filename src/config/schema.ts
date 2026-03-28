@@ -14,6 +14,8 @@ export type GlobalAgentDef = {
   persona?: string;
   title?: string;
   skillCap?: number;
+  /** Named mixins to compose into this agent's config. Applied left-to-right after preset resolution. */
+  mixins?: string[];
   [key: string]: unknown;
 };
 
@@ -31,6 +33,8 @@ export type AdapterType = "openclaw" | "claude-code";
 export type GlobalConfig = {
   defaults?: GlobalDefaults;
   agents: Record<string, GlobalAgentDef>;
+  /** Reusable behavior bundles that agents can compose via `mixins: [name]`. */
+  mixins?: Record<string, Partial<GlobalAgentDef>>;
   /** Adapter backend to use for dispatch (default: "openclaw"). */
   adapter?: AdapterType;
   /** Claude Code adapter configuration (used when adapter is "claude-code"). */
@@ -145,6 +149,14 @@ export function validateGlobalConfig(config: unknown): ValidationResult {
         message: "team_templates must be a non-array object",
       });
     }
+  }
+
+  // Validate mixins field
+  if (config.mixins !== undefined && !isObject(config.mixins)) {
+    errors.push({
+      field: "mixins",
+      message: "mixins must be a non-array object",
+    });
   }
 
   return { valid: errors.length === 0, errors };

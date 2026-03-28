@@ -125,7 +125,7 @@ function parseBriefingOp(rawItem: BriefingItem): { op: "+" | "-" | "~"; sourceNa
   return { op, sourceName, item: { ...rawItem, source: sourceName } };
 }
 
-function deepMerge(parent: Record<string, unknown>, child: Record<string, unknown>): Record<string, unknown> {
+export function deepMerge(parent: Record<string, unknown>, child: Record<string, unknown>): Record<string, unknown> {
   const result = { ...parent };
   for (const key of Object.keys(child)) {
     const pVal = parent[key];

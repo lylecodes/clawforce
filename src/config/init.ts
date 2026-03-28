@@ -11,11 +11,12 @@ import { normalizeAgentConfig as resolveAliases } from "./aliases.js";
 import { registerGlobalAgents, assignAgentsToDomain } from "./registry.js";
 import { registerDomain } from "../lifecycle.js";
 import { registerWorkforceConfig } from "../project.js";
-import { resolveConfig, BUILTIN_AGENT_PRESETS, mergeConfigLayer } from "../presets.js";
+import { resolveConfig, deepMerge, BUILTIN_AGENT_PRESETS, mergeConfigLayer } from "../presets.js";
 import { safeLog } from "../diagnostics.js";
 import type { AgentConfig, ContextSource, Expectation, PerformancePolicy, WorkforceConfig } from "../types.js";
 import type { GlobalConfig, DomainConfig, GlobalAgentDef } from "./schema.js";
 import { inferPreset, markInferred } from "./inference.js";
+import { resolveConditionals } from "./conditionals.js";
 import { normalizeDomainProfile } from "../profiles/operational.js";
 import { createGoal, listGoals } from "../goals/ops.js";
 import { getDb } from "../db.js";
@@ -159,10 +160,19 @@ function buildWorkforceConfig(
     if (!globalDef) continue; // warned about in validateDomainAgents
 
     // Resolve config aliases (group→department, subgroup→team, role→extends)
-    const normalizedDef = resolveAliases({ ...globalDef } as Record<string, unknown>);
+    const aliasResolved = resolveAliases({ ...globalDef } as Record<string, unknown>);
+
+    // Resolve conditional `when` blocks using agent's own fields as context
+    const conditionalContext: Record<string, unknown> = {
+      department: aliasResolved.department,
+      team: aliasResolved.team,
+      extends: aliasResolved.extends,
+      title: aliasResolved.title,
+    };
+    const normalizedDef = resolveConditionals(aliasResolved, conditionalContext);
 
     // Resolve preset inheritance using BUILTIN_AGENT_PRESETS
-    const resolved = resolveConfig(normalizedDef, BUILTIN_AGENT_PRESETS);
+    let resolved = resolveConfig(normalizedDef, BUILTIN_AGENT_PRESETS);
 
     // Preserve the extends field in the resolved config (resolveConfig strips it).
     // Use normalizedDef so that `role` alias is captured as well.
@@ -170,6 +180,10 @@ function buildWorkforceConfig(
     if (effectiveExtends) {
       resolved.extends = effectiveExtends as string;
     }
+
+    // Apply mixins after preset resolution, before agent overrides.
+    // Mixins merge left-to-right, then agent's own fields re-applied on top.
+    resolved = applyMixins(resolved, globalDef, global.mixins);
 
     // Apply role defaults from domain config (based on extends/role field).
     // Merge order: preset -> role defaults -> team template -> agent override.
@@ -211,6 +225,9 @@ function buildWorkforceConfig(
         Object.assign(resolved, mergeConfigLayer(withTeamTemplate, agentOverrides));
       }
     }
+
+    // Normalize job triggers (filter invalid entries from raw YAML)
+    normalizeJobTriggers(resolved);
 
     // Apply global defaults
     if (global.defaults?.performance_policy && !resolved.performance_policy) {
@@ -345,6 +362,67 @@ function seedGoals(projectId: string, goals: Record<string, GoalConfigEntry>): v
  * - Domain default performance_policy is used if the agent doesn't specify one explicitly
  *   (i.e. it only has the inherited preset default).
  */
+
+/**
+ * Apply named mixins to a resolved agent config.
+ *
+ * Merge order: resolved preset base -> mixin1 -> mixin2 -> ... -> agent overrides.
+ * Agent's own explicit fields always win over mixin values.
+ */
+export function applyMixins(
+  resolved: Record<string, unknown>,
+  agentDef: GlobalAgentDef,
+  mixinDefs?: Record<string, Partial<GlobalAgentDef>>,
+): Record<string, unknown> {
+  const mixinNames = agentDef.mixins;
+  if (!mixinNames || mixinNames.length === 0 || !mixinDefs) return resolved;
+
+  // Collect agent's own explicit keys (excluding extends/mixins) so we can re-apply them
+  const { extends: _e, mixins: _m, ...agentOwnFields } = agentDef;
+
+  // Apply each mixin left-to-right on top of the resolved preset
+  let result = resolved;
+  for (const name of mixinNames) {
+    const mixin = mixinDefs[name];
+    if (!mixin) continue; // validation catches missing refs separately
+    const { mixins: _mx, ...mixinFields } = mixin;
+    result = deepMerge(result, mixinFields as Record<string, unknown>);
+  }
+
+  // Re-apply agent's own fields so they always override mixin values
+  result = deepMerge(result, agentOwnFields as Record<string, unknown>);
+
+  return result;
+}
+
+/**
+ * Normalize trigger arrays on all jobs in a resolved agent config.
+ * Filters out invalid trigger entries (non-objects, missing/empty `on` field).
+ */
+function normalizeJobTriggers(resolved: Record<string, unknown>): void {
+  const jobs = resolved.jobs as Record<string, Record<string, unknown>> | undefined;
+  if (!jobs || typeof jobs !== "object") return;
+
+  for (const jobDef of Object.values(jobs)) {
+    if (!jobDef || typeof jobDef !== "object") continue;
+    const rawTriggers = jobDef.triggers;
+    if (!Array.isArray(rawTriggers)) continue;
+
+    const normalized: Array<{ on: string; conditions?: Record<string, unknown> }> = [];
+    for (const item of rawTriggers) {
+      if (typeof item !== "object" || item === null) continue;
+      const t = item as Record<string, unknown>;
+      if (typeof t.on !== "string" || !t.on.trim()) continue;
+      const trigger: { on: string; conditions?: Record<string, unknown> } = { on: t.on.trim() };
+      if (typeof t.conditions === "object" && t.conditions !== null && !Array.isArray(t.conditions)) {
+        trigger.conditions = t.conditions as Record<string, unknown>;
+      }
+      normalized.push(trigger);
+    }
+    jobDef.triggers = normalized;
+  }
+}
+
 export function mergeDomainDefaults(
   agentConfig: AgentConfig,
   domainDefaults: DomainConfig["defaults"],

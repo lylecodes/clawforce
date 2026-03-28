@@ -327,6 +327,8 @@ export type AgentConfig = {
   compaction?: boolean | CompactionConfig;
   /** Name of the skill_pack to apply to this agent. */
   skill_pack?: string;
+  /** Named mixins composed into this agent (resolved during config init). */
+  mixins?: string[];
   /** Coordination config for agents that manage other agents. */
   coordination?: CoordinationConfig;
   /** Scoped sessions. Each key is a job name with its own briefing/expectations/cron. */
@@ -425,6 +427,8 @@ export type JobDefinition = {
    * Format: "N/period" where period is "hour", "day", "week".
    * Example: "3/day" means run 3 times per day at optimal times. */
   frequency?: string;
+  /** Event triggers that can invoke this job on-demand (in addition to cron/frequency). */
+  triggers?: Array<{ on: string; conditions?: Record<string, unknown> }>;
 };
 
 /** Top-level approval policy configuration. */
