@@ -8,6 +8,21 @@
 import type { TaskState, TaskPriority, EventStatus } from "../types.js";
 import type { MessageType, MessageStatus } from "../types.js";
 import type { ProtocolStatus, GoalStatus } from "../types.js";
+import { TASK_STATES, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
+
+/** Parse an integer from a string, returning a default if NaN. */
+function safeParseInt(value: string, defaultValue: number): number {
+  const parsed = parseInt(value, 10);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+const VALID_MESSAGE_STATUSES: readonly string[] = ["queued", "delivered", "read", "failed"];
+const VALID_PROTOCOL_STATUSES: readonly string[] = [
+  "awaiting_response", "resolved", "pending_acceptance", "in_progress",
+  "completed", "rejected", "awaiting_review", "reviewed", "approved",
+  "revision_requested", "expired", "escalated", "cancelled",
+];
+const VALID_GOAL_STATUSES: readonly string[] = ["active", "achieved", "abandoned"];
 import {
   queryProjects,
   queryAgents,
@@ -90,24 +105,29 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
         }
         // GET /api/projects/:id/tasks
         const stateParam = params.state;
-        const states = stateParam ? stateParam.split(",") as TaskState[] : undefined;
+        const states = stateParam
+          ? stateParam.split(",").filter((s): s is TaskState => (TASK_STATES as readonly string[]).includes(s))
+          : undefined;
+        const priority = params.priority && (TASK_PRIORITIES as readonly string[]).includes(params.priority)
+          ? params.priority as TaskPriority
+          : undefined;
         return ok(queryTasks(projectId, {
-          state: states && states.length === 1 ? states[0] : states as any,
+          state: states && states.length === 1 ? states[0] : states,
           assignedTo: params.assignee,
-          priority: params.priority as TaskPriority | undefined,
+          priority,
           department: params.department,
           team: params.team,
         }, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
-          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
         }));
       }
 
       case "sessions": {
         // GET /api/projects/:id/sessions
         return ok(querySessions(projectId, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
-          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
         }));
       }
 
@@ -129,11 +149,14 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           return { status: result.deduplicated ? 200 : 201, body: result };
         }
         // GET /api/projects/:id/events
+        const eventStatus = params.status && (EVENT_STATUSES as readonly string[]).includes(params.status)
+          ? params.status as EventStatus
+          : undefined;
         return ok(queryEvents(projectId, {
-          status: params.status as EventStatus | undefined,
+          status: eventStatus,
           type: params.type as string | undefined,
         }, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
         }));
       }
 
@@ -142,7 +165,7 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
         return ok(queryMetricsDashboard(projectId, {
           type: params.type,
           key: params.key,
-          window: params.window ? parseInt(params.window, 10) : undefined,
+          window: params.window ? safeParseInt(params.window, 3600) : undefined,
         }));
       }
 
@@ -151,8 +174,8 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
         return ok(queryCosts(projectId, {
           agentId: params.agent,
           taskId: params.task,
-          since: params.since ? parseInt(params.since, 10) : undefined,
-          until: params.until ? parseInt(params.until, 10) : undefined,
+          since: params.since ? safeParseInt(params.since, 0) : undefined,
+          until: params.until ? safeParseInt(params.until, Date.now()) : undefined,
           days: params.days,
         }));
       }
@@ -184,12 +207,18 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
 
       case "messages": {
         // GET /api/projects/:id/messages?agent=foo&type=direct&status=queued&limit=50
+        const msgType = params.type && (MESSAGE_TYPES as readonly string[]).includes(params.type)
+          ? params.type as MessageType
+          : undefined;
+        const msgStatus = params.status && VALID_MESSAGE_STATUSES.includes(params.status)
+          ? params.status as MessageStatus
+          : undefined;
         return ok(queryMessages(projectId, {
           agentId: params.agent,
-          type: params.type as MessageType | undefined,
-          status: params.status as MessageStatus | undefined,
-          since: params.since ? parseInt(params.since, 10) : undefined,
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          type: msgType,
+          status: msgStatus,
+          since: params.since ? safeParseInt(params.since, 0) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
         }));
       }
 
@@ -199,12 +228,15 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           const detail = queryGoalDetail(projectId, segments[4]);
           return detail ? ok(detail) : notFound("Goal not found");
         }
+        const goalStatus = params.status && VALID_GOAL_STATUSES.includes(params.status)
+          ? params.status as GoalStatus
+          : undefined;
         return ok(queryGoals(projectId, {
-          status: params.status as GoalStatus | undefined,
+          status: goalStatus,
           ownerAgentId: params.owner,
           parentGoalId: params.parent === "none" ? null : params.parent,
         }, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
         }));
       }
 
@@ -216,11 +248,17 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
 
       case "protocols": {
         // GET /api/projects/:id/protocols?agent=foo&type=request&status=awaiting_response
+        const protoType = params.type && (MESSAGE_TYPES as readonly string[]).includes(params.type)
+          ? params.type as MessageType
+          : undefined;
+        const protoStatus = params.status && VALID_PROTOCOL_STATUSES.includes(params.status)
+          ? params.status as ProtocolStatus
+          : undefined;
         return ok(queryProtocols(projectId, {
           agentId: params.agent,
-          type: params.type as MessageType | undefined,
-          protocolStatus: params.status as ProtocolStatus | undefined,
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          type: protoType,
+          protocolStatus: protoStatus,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
         }));
       }
 
@@ -230,8 +268,8 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           action: params.action,
           targetType: params.targetType,
         }, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
-          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
         }));
       }
 
@@ -240,8 +278,8 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           agentId: params.agent,
           status: params.status,
         }, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
-          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
         }));
       }
 
@@ -249,8 +287,8 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
         return ok(queryEnforcementRetries(projectId, {
           agentId: params.agent,
         }, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
-          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
         }));
       }
 
@@ -260,8 +298,8 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
 
       case "tracked-sessions": {
         return ok(queryTrackedSessions(projectId, {
-          limit: params.limit ? parseInt(params.limit, 10) : undefined,
-          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
         }));
       }
 

@@ -250,7 +250,7 @@ describe("workflow module", () => {
       expect(status!.resolved).toBe(2);
     });
 
-    it("ready=false when all tasks FAILED (none DONE)", () => {
+    it("ready=true when all tasks FAILED (all resolved regardless of outcome)", () => {
       const wf = createWorkflow({
         projectId: PROJECT,
         name: "WF",
@@ -267,7 +267,7 @@ describe("workflow module", () => {
       failTask(t2.id);
 
       const status = getPhaseStatus(PROJECT, wf.id, 0, db);
-      expect(status!.ready).toBe(false);
+      expect(status!.ready).toBe(true);
       expect(status!.completed).toBe(0);
       expect(status!.failed).toBe(2);
     });

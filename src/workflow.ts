@@ -11,7 +11,7 @@ import { writeAuditEntry } from "./audit.js";
 import { getDb } from "./db.js";
 import { emitDiagnosticEvent, safeLog } from "./diagnostics.js";
 import { ingestEvent } from "./events/store.js";
-import { getTask, listTasks } from "./tasks/ops.js";
+import { getTasksByIds, listTasks } from "./tasks/ops.js";
 import type { Task, Workflow, WorkflowPhase } from "./types.js";
 
 function rowToWorkflow(row: Record<string, unknown>): Workflow {
@@ -119,11 +119,7 @@ export function getPhaseStatus(projectId: string, workflowId: string, phase: num
   if (!workflow || phase < 0 || phase >= workflow.phases.length) return null;
 
   const phaseSpec = workflow.phases[phase]!;
-  const tasks: Task[] = [];
-  for (const taskId of phaseSpec.taskIds) {
-    const task = getTask(projectId, taskId, db);
-    if (task) tasks.push(task);
-  }
+  const tasks = getTasksByIds(projectId, phaseSpec.taskIds, db);
 
   const completed = tasks.filter((t) => t.state === "DONE").length;
   const failed = tasks.filter((t) => t.state === "FAILED").length;
@@ -140,10 +136,10 @@ export function getPhaseStatus(projectId: string, workflowId: string, phase: num
       ready = completed > 0;
       break;
     case "all_resolved":
-      ready = resolved === total && total > 0 && completed > 0;
+      ready = resolved === total && total > 0;
       break;
     case "any_resolved":
-      ready = resolved > 0 && completed > 0;
+      ready = resolved > 0;
       break;
   }
 

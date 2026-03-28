@@ -76,8 +76,11 @@ export function approveProposal(projectId: string, proposalId: string, feedback?
   }
 
   // Edit Telegram notification to show resolution
-  getApprovalNotifier()?.editProposalMessage(proposalId, projectId, "approved", feedback)
-    .catch(err => safeLog("approval.approve.editMessage", err));
+  const approveNotifier = getApprovalNotifier();
+  if (approveNotifier) {
+    approveNotifier.editProposalMessage(proposalId, projectId, "approved", feedback)
+      .catch(err => safeLog("approval.approve.editMessage", err));
+  }
 
   // Emit event so the router can re-attempt the gated action
   try {
@@ -124,8 +127,11 @@ export function rejectProposal(projectId: string, proposalId: string, feedback?:
   }
 
   // Edit Telegram notification to show rejection
-  getApprovalNotifier()?.editProposalMessage(proposalId, projectId, "rejected", feedback)
-    .catch(err => safeLog("approval.reject.editMessage", err));
+  const rejectNotifier = getApprovalNotifier();
+  if (rejectNotifier) {
+    rejectNotifier.editProposalMessage(proposalId, projectId, "rejected", feedback)
+      .catch(err => safeLog("approval.reject.editMessage", err));
+  }
 
   // Emit proposal_rejected event
   try {

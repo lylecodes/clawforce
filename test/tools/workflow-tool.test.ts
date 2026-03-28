@@ -226,7 +226,7 @@ describe("clawforce_workflow tool", () => {
     expect(data.currentPhase).toBe(1);
   });
 
-  it("all_resolved gate: NOT satisfied when all tasks FAILED (no DONE)", async () => {
+  it("all_resolved gate: satisfied when all tasks FAILED (all resolved)", async () => {
     const wfResult = await exec({
       action: "create",
       project_id: PROJECT,
@@ -246,10 +246,12 @@ describe("clawforce_workflow tool", () => {
     transitionTask({ projectId: PROJECT, taskId: taskB.id, toState: "ASSIGNED", actor: "a" }, db);
     transitionTask({ projectId: PROJECT, taskId: taskB.id, toState: "FAILED", actor: "a" }, db);
 
-    // Gate should NOT be satisfied — no DONE tasks
+    // Gate should be satisfied — all tasks reached terminal state
     const advResult = await exec({ action: "advance", project_id: PROJECT, workflow_id: wf.id });
     const data = parseResult(advResult);
-    expect(data.ok).toBe(false);
+    expect(data.ok).toBe(true);
+    expect(data.advanced).toBe(true);
+    expect(data.currentPhase).toBe(1);
   });
 
   it("any_resolved gate: satisfied when one task is DONE", async () => {

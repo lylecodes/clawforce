@@ -55,6 +55,8 @@ export function handleAction(
       return handleMeetingAction(projectId, segments, body);
     case "messages":
       return handleMessageAction(projectId, segments, body);
+    case "events":
+      return handleEventsAction(projectId, segments, body);
     case "config":
       return handleConfigAction(projectId, segments, body);
     case "budget":
@@ -495,6 +497,34 @@ function handleBudgetAction(
       return { status: 501, body: { error: "Budget allocation not yet implemented" } };
     default:
       return notFound(`Unknown budget action: ${action}`);
+  }
+}
+
+function handleEventsAction(
+  projectId: string,
+  segments: string[],
+  body: Record<string, unknown>,
+): RouteResult {
+  const action = segments[1];
+
+  switch (action) {
+    case "ingest": {
+      if (!body.type || typeof body.type !== "string") {
+        return badRequest("Missing required field: type");
+      }
+      const db = getDb(projectId);
+      const result = ingestEvent(
+        projectId,
+        body.type as string,
+        "webhook",
+        (body.payload as Record<string, unknown>) ?? {},
+        (body.dedup_key as string) ?? undefined,
+        db,
+      );
+      return { status: result.deduplicated ? 200 : 201, body: result };
+    }
+    default:
+      return notFound(`Unknown events action: ${action}`);
   }
 }
 

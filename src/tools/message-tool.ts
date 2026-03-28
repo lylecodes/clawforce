@@ -24,6 +24,7 @@ import { notifyMessage } from "../messaging/notify.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { MessageType, MessagePriority } from "../types.js";
 import { MESSAGE_TYPES, MESSAGE_PRIORITIES } from "../types.js";
+import { safeLog } from "../diagnostics.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
 
@@ -157,7 +158,7 @@ function handleSend(
     content,
   });
 
-  notifyMessage(msg).catch(() => {});
+  notifyMessage(msg).catch(err => safeLog("message.notify", err));
 
   try {
     ingestEvent(projectId, "message_sent", "tool", {
@@ -264,7 +265,7 @@ function handleReply(
     parentMessageId: messageId,
   });
 
-  notifyMessage(reply).catch(() => {});
+  notifyMessage(reply).catch(err => safeLog("message.notify", err));
 
   try {
     ingestEvent(projectId, "message_sent", "tool", {
@@ -306,7 +307,7 @@ function handleRequest(
     fromAgent: actor, toAgent: to, projectId, content, priority, deadlineMs,
   });
 
-  notifyMessage(msg).catch(() => {});
+  notifyMessage(msg).catch(err => safeLog("message.notify", err));
   try {
     ingestEvent(projectId, "protocol_started", "tool", {
       messageId: msg.id, protocolType: "request", fromAgent: actor, toAgent: to,
@@ -343,7 +344,7 @@ function handleDelegate(
     fromAgent: actor, toAgent: to, projectId, content, priority, deadlineMs, taskId,
   });
 
-  notifyMessage(msg).catch(() => {});
+  notifyMessage(msg).catch(err => safeLog("message.notify", err));
   try {
     ingestEvent(projectId, "protocol_started", "tool", {
       messageId: msg.id, protocolType: "delegation", fromAgent: actor, toAgent: to,
@@ -383,7 +384,7 @@ function handleRequestFeedback(
     artifact, reviewCriteria,
   });
 
-  notifyMessage(msg).catch(() => {});
+  notifyMessage(msg).catch(err => safeLog("message.notify", err));
   try {
     ingestEvent(projectId, "protocol_started", "tool", {
       messageId: msg.id, protocolType: "feedback", fromAgent: actor, toAgent: to,
@@ -416,7 +417,7 @@ function handleRespond(
       projectId, originalMessageId: messageId, responderAgent: actor, content,
     });
 
-    notifyMessage(response).catch(() => {});
+    notifyMessage(response).catch(err => safeLog("message.notify", err));
     try {
       ingestEvent(projectId, "protocol_responded", "tool", {
         messageId: original.id, responseMessageId: response.id,
@@ -478,7 +479,7 @@ function handleReject(
       projectId, originalMessageId: messageId, rejecterAgent: actor, reason,
     });
 
-    notifyMessage(rejection).catch(() => {});
+    notifyMessage(rejection).catch(err => safeLog("message.notify", err));
     try {
       ingestEvent(projectId, "protocol_responded", "tool", {
         messageId, protocolType: "delegation", protocolStatus: "rejected",
@@ -510,7 +511,7 @@ function handleComplete(
       projectId, originalMessageId: messageId, completerAgent: actor, content,
     });
 
-    notifyMessage(completion).catch(() => {});
+    notifyMessage(completion).catch(err => safeLog("message.notify", err));
     try {
       ingestEvent(projectId, "protocol_completed", "tool", {
         messageId, completionMessageId: completion.id,
@@ -547,7 +548,7 @@ function handleSubmitReview(
       content, verdict: verdict as "approve" | "revise" | "reject",
     });
 
-    notifyMessage(review).catch(() => {});
+    notifyMessage(review).catch(err => safeLog("message.notify", err));
     try {
       ingestEvent(projectId, "protocol_completed", "tool", {
         messageId, reviewMessageId: review.id,

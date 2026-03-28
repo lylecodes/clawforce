@@ -10,7 +10,7 @@
  */
 
 import type { AgentConfig } from "../types.js";
-import { emitDiagnosticEvent } from "../diagnostics.js";
+import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { createMessage, markDelivered } from "../messaging/store.js";
 import { notifyMessage } from "../messaging/notify.js";
 import { resolveEscalationChain } from "../org.js";
@@ -99,7 +99,7 @@ export async function routeEscalation(params: EscalationParams): Promise<void> {
         }
 
         // Mirror to Telegram (fire-and-forget)
-        notifyMessage(msg).catch(() => {});
+        notifyMessage(msg).catch(err => safeLog("escalation.notify", err));
 
         return; // Message persisted — stop escalating up the chain
       } catch (err) {

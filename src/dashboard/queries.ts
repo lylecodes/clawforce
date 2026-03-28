@@ -264,7 +264,8 @@ export function queryCosts(
   params?: { agentId?: string; taskId?: string; since?: number; until?: number; days?: string },
 ) {
   // Compute time range from days param
-  const daysNum = params?.days ? parseInt(params.days, 10) : 7;
+  const daysRaw = params?.days ? parseInt(params.days, 10) : 7;
+  const daysNum = isNaN(daysRaw) ? 7 : daysRaw;
   const since = params?.since ?? Date.now() - daysNum * 86_400_000;
   const until = params?.until ?? Date.now();
 

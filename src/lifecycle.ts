@@ -27,10 +27,9 @@ export function initClawforce(config: ClawforceConfig): void {
         try {
           const p = sweep({ projectId }).catch((err) => {
             safeLog(`lifecycle.sweep.${projectId}`, err);
-          }).finally(() => {
-            inFlightSweeps.delete(p);
           });
           inFlightSweeps.add(p);
+          p.finally(() => inFlightSweeps.delete(p));
         } catch (err) {
           // Synchronous errors (e.g., DatabaseSync throws) must not
           // interrupt the loop for remaining projects.

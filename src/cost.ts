@@ -140,30 +140,30 @@ export function recordCost(
       params.projectId, params.agentId,
     );
 
+    // Dual-write to metrics for aggregation (inside transaction to stay in sync)
+    try {
+      recordMetric({
+        projectId: params.projectId,
+        type: "cost",
+        subject: params.agentId,
+        key: "cost_cents",
+        value: costCents,
+        unit: "cents",
+        tags: {
+          taskId: params.taskId,
+          model: params.model,
+          inputTokens: params.inputTokens,
+          outputTokens: params.outputTokens,
+        },
+      }, db);
+    } catch (err) {
+      safeLog("cost.metric", err);
+    }
+
     db.prepare("COMMIT").run();
   } catch (err) {
     try { db.prepare("ROLLBACK").run(); } catch { /* already rolled back */ }
     throw err;
-  }
-
-  // Dual-write to metrics for aggregation
-  try {
-    recordMetric({
-      projectId: params.projectId,
-      type: "cost",
-      subject: params.agentId,
-      key: "cost_cents",
-      value: costCents,
-      unit: "cents",
-      tags: {
-        taskId: params.taskId,
-        model: params.model,
-        inputTokens: params.inputTokens,
-        outputTokens: params.outputTokens,
-      },
-    }, db);
-  } catch (err) {
-    safeLog("cost.metric", err);
   }
 
   return {

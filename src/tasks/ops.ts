@@ -360,29 +360,10 @@ export function transitionTask(
 
   if (error) return { ok: false, reason: error.message };
 
-  // Lease-conflict check: reject OPEN→ASSIGNED and ASSIGNED→IN_PROGRESS
-  // if another agent holds an active lease
-  if (
+  // Lease-conflict check condition — actual query moved inside transaction to avoid TOCTOU
+  const needsLeaseCheck =
     (task.state === "OPEN" && params.toState === "ASSIGNED") ||
-    (task.state === "ASSIGNED" && params.toState === "IN_PROGRESS")
-  ) {
-    const leaseRow = db.prepare(
-      "SELECT lease_holder, lease_expires_at FROM tasks WHERE id = ?",
-    ).get(params.taskId) as Record<string, unknown> | undefined;
-
-    if (leaseRow) {
-      const holder = leaseRow.lease_holder as string | null;
-      const expiresAt = leaseRow.lease_expires_at as number | null;
-      const actor = params.assignedTo ?? params.actor;
-
-      if (holder && expiresAt && expiresAt > Date.now() && holder !== actor) {
-        return {
-          ok: false,
-          reason: `Task is leased by "${holder}" until ${new Date(expiresAt).toISOString()}. Cannot transition while another agent holds the lease.`,
-        };
-      }
-    }
-  }
+    (task.state === "ASSIGNED" && params.toState === "IN_PROGRESS");
 
   const now = Date.now();
   const transitionId = crypto.randomUUID();
@@ -423,6 +404,27 @@ export function transitionTask(
   const ownTransaction = !params.withinTransaction;
   if (ownTransaction) db.prepare("BEGIN IMMEDIATE").run();
   try {
+    // Lease-conflict check inside transaction to prevent TOCTOU race
+    if (needsLeaseCheck) {
+      const leaseRow = db.prepare(
+        "SELECT lease_holder, lease_expires_at FROM tasks WHERE id = ?",
+      ).get(params.taskId) as Record<string, unknown> | undefined;
+
+      if (leaseRow) {
+        const holder = leaseRow.lease_holder as string | null;
+        const expiresAt = leaseRow.lease_expires_at as number | null;
+        const actor = params.assignedTo ?? params.actor;
+
+        if (holder && expiresAt && expiresAt > Date.now() && holder !== actor) {
+          if (ownTransaction) db.prepare("ROLLBACK").run();
+          return {
+            ok: false,
+            reason: `Task is leased by "${holder}" until ${new Date(expiresAt).toISOString()}. Cannot transition while another agent holds the lease.`,
+          };
+        }
+      }
+    }
+
     const updateResult = db.prepare(
       `UPDATE tasks SET ${updateFields.join(", ")} WHERE id = ? AND state = ? AND project_id = ?`
     ).run(...updateValues);
@@ -853,6 +855,14 @@ export function getTask(projectId: string, taskId: string, dbOverride?: Database
   return row ? rowToTask(row) : undefined;
 }
 
+export function getTasksByIds(projectId: string, taskIds: string[], dbOverride?: DatabaseSync): Task[] {
+  if (taskIds.length === 0) return [];
+  const db = dbOverride ?? getDb(projectId);
+  const placeholders = taskIds.map(() => "?").join(", ");
+  const rows = db.prepare(`SELECT * FROM tasks WHERE id IN (${placeholders})`).all(...taskIds) as Record<string, unknown>[];
+  return rows.map(rowToTask);
+}
+
 export function getTaskEvidence(projectId: string, taskId: string, dbOverride?: DatabaseSync): Evidence[] {
   const db = dbOverride ?? getDb(projectId);
   const rows = db.prepare("SELECT * FROM evidence WHERE task_id = ? ORDER BY attached_at").all(taskId) as Record<string, unknown>[];
@@ -915,7 +925,7 @@ export function listTasks(
     values.push(filter.team);
   }
 
-  const limit = filter?.limit ?? 100;
+  const limit = Math.min(filter?.limit ?? 100, 1000);
   const sql = `SELECT * FROM tasks WHERE ${conditions.join(" AND ")}
     ORDER BY
       CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 END,
