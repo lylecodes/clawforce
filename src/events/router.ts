@@ -114,7 +114,8 @@ export function processEvents(
         const effectiveAction = result.action === "ignored" && hasUserActions
           ? "handled"
           : result.action;
-        markHandled(event.id, effectiveAction, db);
+        const handlerId = `system:event_handler:${event.type}`;
+        markHandled(event.id, handlerId, db);
         if (effectiveAction === "enqueued") outcomes.enqueued++;
         else outcomes.handled++;
       }

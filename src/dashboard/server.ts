@@ -53,8 +53,11 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 export function createDashboardServer(options?: DashboardOptions) {
-  const port = options?.port ?? 3117;
-  const host = options?.host ?? "127.0.0.1";
+  const port = options?.port
+    ?? (process.env.CLAWFORCE_DASHBOARD_PORT ? Number(process.env.CLAWFORCE_DASHBOARD_PORT) : 3117);
+  const host = options?.host
+    ?? process.env.CLAWFORCE_DASHBOARD_HOST
+    ?? "127.0.0.1";
   const corsOrigin = options?.corsOrigin ?? "*";
   const token = options?.token;
 
