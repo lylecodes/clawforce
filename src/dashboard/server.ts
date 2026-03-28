@@ -63,7 +63,12 @@ export function createDashboardServer(options?: DashboardOptions) {
 
   // Resolve static dir — use the provided dashboardDir or look for
   // clawforce-dashboard/dist as a sibling project (the extracted dashboard repo)
-  const defaultDir = path.resolve(import.meta.dirname, "../../../clawforce-dashboard/dist");
+  const candidates = [
+    path.resolve(import.meta.dirname, "../../../clawforce-dashboard/dist"),
+    // Sibling project when running from source (adapters/ or src/)
+    path.resolve(import.meta.dirname, "../../clawforce-dashboard/dist"),
+  ];
+  const defaultDir = candidates.find(d => fs.existsSync(d)) ?? candidates[0]!;
   const staticDir = options?.dashboardDir ?? defaultDir;
 
   // Create the gateway-routes handler for /api/* requests.
@@ -99,9 +104,24 @@ export function createDashboardServer(options?: DashboardOptions) {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const pathname = url.pathname;
 
-    // --- API routes: /api/* → delegate to gateway handler ---
+    // --- API routes: /clawforce/api/* or /api/* → delegate to gateway handler ---
+    if (pathname.startsWith("/clawforce/api/") || pathname === "/clawforce/api") {
+      // Already has /clawforce prefix — pass through directly
+      try {
+        await gatewayHandler(req, res);
+      } catch (err) {
+        if (!res.headersSent) {
+          respondJson(res, 500, {
+            error: "Internal server error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return;
+    }
+
     if (pathname.startsWith("/api/") || pathname === "/api") {
-      // Rewrite the URL to add /clawforce prefix so gateway-routes can parse it
+      // Legacy: rewrite /api/* → /clawforce/api/* for backward compat
       req.url = `/clawforce${req.url}`;
       try {
         await gatewayHandler(req, res);
@@ -123,7 +143,9 @@ export function createDashboardServer(options?: DashboardOptions) {
     }
 
     // Try to serve a static file from dashboard/dist/
-    const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+    // Strip /clawforce/ prefix since the SPA is built with base="/clawforce/"
+    const stripped = pathname.replace(/^\/clawforce\/?/, "/");
+    const relativePath = stripped === "/" ? "index.html" : stripped.slice(1);
     const filePath = path.join(staticDir, relativePath);
 
     // Security: prevent path traversal
@@ -139,7 +161,7 @@ export function createDashboardServer(options?: DashboardOptions) {
       const content = fs.readFileSync(resolved);
 
       // Assets get long cache, everything else no-cache
-      const isAsset = pathname.startsWith("/assets/");
+      const isAsset = stripped.startsWith("/assets/");
       const cacheControl = isAsset
         ? "public, max-age=31536000, immutable"
         : "no-cache";

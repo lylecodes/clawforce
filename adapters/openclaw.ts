@@ -2102,8 +2102,17 @@ const clawforcePlugin = {
     });
 
     // --- Dashboard HTTP handler ---
+    // Resolve dashboard dist directory — try sibling clawforce-dashboard project first,
+    // then fall back to a dashboard/ subdirectory (for bundled/monorepo layouts).
+    const dashboardDistCandidates = [
+      path.resolve(import.meta.dirname, "../../clawforce-dashboard/dist"),
+      path.resolve(import.meta.dirname, "../dashboard/dist"),
+    ];
+    const resolvedDashboardDir = dashboardDistCandidates.find(d => fs.existsSync(d))
+      ?? dashboardDistCandidates[0]!;
+
     const dashboardHandler = createDashboardHandler({
-      staticDir: path.resolve(import.meta.dirname, "../dashboard/dist"),
+      staticDir: resolvedDashboardDir,
       injectAgentMessage: (params) => cliInjectMessage(params),
     });
 
@@ -2119,6 +2128,7 @@ const clawforcePlugin = {
     // gateway's Control UI SPA catch-all that intercepts /clawforce/ paths.
     const dashboardServer = createDashboardServer({
       port: 3117,
+      dashboardDir: resolvedDashboardDir,
       injectAgentMessage: (params) => cliInjectMessage(params),
     });
 
