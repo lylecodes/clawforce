@@ -35,6 +35,11 @@ export type GlobalConfig = {
   adapter?: AdapterType;
   /** Claude Code adapter configuration (used when adapter is "claude-code"). */
   claude_code?: Record<string, unknown>;
+  /**
+   * Team-level config templates. Agents with a matching `team` field
+   * inherit these defaults. Merge order: org defaults -> team template -> preset -> agent override.
+   */
+  team_templates?: Record<string, Partial<GlobalAgentDef>>;
 };
 
 export type DomainConfig = {
@@ -74,6 +79,16 @@ export type DomainConfig = {
     expectations?: unknown[];
     performance_policy?: Record<string, unknown>;
   };
+  /**
+   * Role-level defaults applied to agents based on their `extends` field.
+   * Merge order: org defaults -> role defaults -> team template -> agent override.
+   */
+  role_defaults?: Record<string, Partial<GlobalAgentDef>>;
+  /**
+   * Team-level config templates (domain-scoped, overrides global team_templates).
+   * Agents with a matching `team` field inherit these defaults.
+   */
+  team_templates?: Record<string, Partial<GlobalAgentDef>>;
   [key: string]: unknown;
 };
 
@@ -120,6 +135,16 @@ export function validateGlobalConfig(config: unknown): ValidationResult {
       field: "claude_code",
       message: "claude_code must be an object",
     });
+  }
+
+  // Validate team_templates shape
+  if (config.team_templates !== undefined) {
+    if (!isObject(config.team_templates)) {
+      errors.push({
+        field: "team_templates",
+        message: "team_templates must be a non-array object",
+      });
+    }
   }
 
   return { valid: errors.length === 0, errors };

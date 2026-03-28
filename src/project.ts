@@ -63,6 +63,7 @@ import type {
   VerificationConfig,
   VerificationGate,
   GitIsolationConfig,
+  ObserveEntry,
   WorkforceConfig,
 } from "./types.js";
 import { EVENT_ACTION_TYPES, TRIGGER_SOURCES } from "./types.js";
@@ -525,8 +526,28 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
 
   const jobs = normalizeJobs(raw.jobs);
 
-  const observe = Array.isArray(raw.observe)
-    ? (raw.observe.filter((s: unknown) => typeof s === "string") as string[])
+  const observe: ObserveEntry[] | undefined = Array.isArray(raw.observe)
+    ? (raw.observe.filter((entry: unknown) => {
+        if (typeof entry === "string") return true;
+        if (entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).pattern === "string") return true;
+        return false;
+      }).map((entry: unknown) => {
+        if (typeof entry === "string") return entry;
+        const obj = entry as Record<string, unknown>;
+        const result: { pattern: string; scope?: { team?: string; agent?: string } } = {
+          pattern: obj.pattern as string,
+        };
+        if (obj.scope && typeof obj.scope === "object") {
+          const scope = obj.scope as Record<string, unknown>;
+          const scopeResult: { team?: string; agent?: string } = {};
+          if (typeof scope.team === "string") scopeResult.team = scope.team;
+          if (typeof scope.agent === "string") scopeResult.agent = scope.agent;
+          if (scopeResult.team || scopeResult.agent) {
+            result.scope = scopeResult;
+          }
+        }
+        return result;
+      }) as ObserveEntry[])
     : undefined;
 
   const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;

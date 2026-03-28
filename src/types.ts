@@ -276,6 +276,18 @@ export type BootstrapConfig = {
   totalMaxChars?: number;
 };
 
+/**
+ * An observe entry: either a plain pattern string or an object with scope filters.
+ * Scope filters narrow which events match — by team or specific agent.
+ */
+export type ObserveEntry = string | {
+  pattern: string;
+  scope?: {
+    team?: string;
+    agent?: string;
+  };
+};
+
 /** Per-agent configuration. */
 export type AgentConfig = {
   /** Preset to inherit defaults from (e.g. "manager", "employee"). */
@@ -325,8 +337,8 @@ export type AgentConfig = {
   skillCap?: number;
   /** Memory governance configuration. */
   memory?: MemoryGovernanceConfig;
-  /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. */
-  observe?: string[];
+  /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. Supports scoped entries to filter by team or agent. */
+  observe?: ObserveEntry[];
   /**
    * Render briefing sources as compact previews instead of full content.
    * Agents can expand any source via `clawforce_context expand`.
@@ -578,6 +590,11 @@ export type WorkforceConfig = {
    * Individual agent bootstrapConfig overrides these defaults.
    */
   bootstrapDefaults?: BootstrapConfig;
+  /**
+   * Team-level config templates. Agents with a matching `team` field
+   * inherit these defaults. Merge order: org defaults -> team template -> preset -> agent override.
+   */
+  team_templates?: Record<string, Partial<AgentConfig>>;
   /** Manager/orchestrator cron configuration. */
   manager?: {
     enabled: boolean;

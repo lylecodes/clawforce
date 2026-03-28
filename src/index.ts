@@ -352,4 +352,5 @@ export type {
   ManagerBehaviorConfig,
   TelemetryConfig,
   ContextOwnershipConfig,
+  ObserveEntry,
 } from "./types.js";

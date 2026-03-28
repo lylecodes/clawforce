@@ -1,7 +1,7 @@
 /**
  * Clawforce — Config Inheritance / Preset Resolution
  *
- * Walks `extends` chains, deep-merges configs, supports +/- array operators.
+ * Walks `extends` chains, deep-merges configs, supports +/-/~ array operators.
  */
 
 function hasMergeOperators(arr: unknown[]): boolean {
@@ -30,6 +30,101 @@ export function mergeArrayWithOperators(
   return result;
 }
 
+/**
+ * Briefing composition operators for ContextSource arrays.
+ *
+ * Briefing items can be strings or ContextSource objects. Operators are
+ * detected on string items with prefix characters:
+ *   +source  — add source to the preset base
+ *   -source  — remove source from the preset base
+ *   ~source  — override: replace matching source in preset base with this item's params
+ *
+ * When an item uses `~`, it is returned as a ContextSource with the original
+ * source name plus any params from the override item (parsed from "~source:key=val" or object form).
+ *
+ * If NO items use operators, the child array replaces the parent (standard behavior).
+ */
+export type BriefingItem = string | { source: string; [key: string]: unknown };
+
+function hasBriefingOperators(arr: BriefingItem[]): boolean {
+  return arr.length > 0 && arr.every((item) => {
+    if (typeof item === "string") {
+      return item.startsWith("+") || item.startsWith("-") || item.startsWith("~");
+    }
+    // Object items with an operator prefix on their source field
+    if (typeof item === "object" && item !== null && typeof item.source === "string") {
+      return item.source.startsWith("+") || item.source.startsWith("-") || item.source.startsWith("~");
+    }
+    return false;
+  });
+}
+
+export function mergeBriefingWithOperators(
+  parent: BriefingItem[] | undefined,
+  child: BriefingItem[],
+): BriefingItem[] {
+  if (!hasBriefingOperators(child)) return child;
+
+  // Preserve parent items in their original format (string or object)
+  const result = [...(parent ?? [])];
+
+  for (const rawItem of child) {
+    const { op, sourceName, item } = parseBriefingOp(rawItem);
+
+    switch (op) {
+      case "+": {
+        // Add if not already present
+        const exists = result.some((r) => getSourceName(r) === sourceName);
+        if (!exists) result.push(item);
+        break;
+      }
+      case "-": {
+        // Remove matching source
+        const idx = result.findIndex((r) => getSourceName(r) === sourceName);
+        if (idx !== -1) result.splice(idx, 1);
+        break;
+      }
+      case "~": {
+        // Override: replace matching source with item (preserving extra params from override)
+        const idx = result.findIndex((r) => getSourceName(r) === sourceName);
+        if (idx !== -1) {
+          result[idx] = item;
+        } else {
+          // If source not found in parent, add it
+          result.push(item);
+        }
+        break;
+      }
+    }
+  }
+
+  return result;
+}
+
+function normalizeBriefingItem(item: BriefingItem): BriefingItem {
+  if (typeof item === "string") return { source: item };
+  return item;
+}
+
+function getSourceName(item: BriefingItem): string {
+  if (typeof item === "string") return item;
+  return item.source;
+}
+
+function parseBriefingOp(rawItem: BriefingItem): { op: "+" | "-" | "~"; sourceName: string; item: BriefingItem } {
+  if (typeof rawItem === "string") {
+    const op = rawItem[0] as "+" | "-" | "~";
+    const sourceName = rawItem.slice(1);
+    // For string-only items (+ and -), keep them as strings in the result
+    return { op, sourceName, item: sourceName };
+  }
+  // Object form: { source: "+task_board", params: { ... } }
+  const source = rawItem.source;
+  const op = source[0] as "+" | "-" | "~";
+  const sourceName = source.slice(1);
+  return { op, sourceName, item: { ...rawItem, source: sourceName } };
+}
+
 function deepMerge(parent: Record<string, unknown>, child: Record<string, unknown>): Record<string, unknown> {
   const result = { ...parent };
   for (const key of Object.keys(child)) {
@@ -37,12 +132,21 @@ function deepMerge(parent: Record<string, unknown>, child: Record<string, unknow
     const cVal = child[key];
 
     if (Array.isArray(cVal)) {
-      // Arrays of non-string items (e.g., expectations objects) pass through
-      // hasMergeOperators as false and get returned as-is (full replacement).
-      result[key] = mergeArrayWithOperators(
-        Array.isArray(pVal) ? (pVal as string[]) : undefined,
-        cVal as string[],
-      );
+      if (key === "briefing") {
+        // Briefing arrays support +/-/~ composition operators on ContextSource items
+        result[key] = mergeBriefingWithOperators(
+          Array.isArray(pVal) ? (pVal as BriefingItem[]) : undefined,
+          cVal as BriefingItem[],
+        );
+      } else {
+        // Other arrays: +/- operators for string arrays, full replacement otherwise.
+        // Arrays of non-string items (e.g., expectations objects) pass through
+        // hasMergeOperators as false and get returned as-is (full replacement).
+        result[key] = mergeArrayWithOperators(
+          Array.isArray(pVal) ? (pVal as string[]) : undefined,
+          cVal as string[],
+        );
+      }
     } else if (
       cVal !== null &&
       typeof cVal === "object" &&
@@ -60,6 +164,18 @@ function deepMerge(parent: Record<string, unknown>, child: Record<string, unknow
     }
   }
   return result;
+}
+
+/**
+ * Merge a config layer (e.g. role defaults, team template) onto a base config.
+ * Uses the same deep merge logic as preset resolution, including briefing
+ * composition operators and +/- array operators.
+ */
+export function mergeConfigLayer<T extends Record<string, unknown>>(
+  base: T,
+  layer: Record<string, unknown>,
+): T {
+  return deepMerge(base, layer) as T;
 }
 
 type PresetLookup = (name: string) => Record<string, unknown> | undefined;

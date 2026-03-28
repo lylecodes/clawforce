@@ -382,6 +382,51 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
     }
   }
 
+  // Validate team_template references
+  if (config.team_templates) {
+    const templateNames = new Set(Object.keys(config.team_templates));
+    for (const [agentId, agentConfig] of Object.entries(config.agents)) {
+      if (agentConfig.team && !templateNames.has(agentConfig.team)) {
+        // Not an error — team field is valid without a template. Just suggest.
+        warnings.push({
+          level: "suggest",
+          agentId,
+          message: `Agent has team "${agentConfig.team}" but no matching team_template — team defaults won't apply.`,
+        });
+      }
+    }
+    // Warn about unused team templates
+    const usedTeams = new Set(
+      Object.values(config.agents).map(a => a.team).filter(Boolean) as string[]
+    );
+    for (const templateName of templateNames) {
+      if (!usedTeams.has(templateName)) {
+        warnings.push({
+          level: "suggest",
+          message: `team_template "${templateName}" is defined but no agent has team: "${templateName}".`,
+        });
+      }
+    }
+  }
+
+  // Semantic validation: expectations reference tools in the agent's allowed tools
+  for (const [agentId, agentConfig] of Object.entries(config.agents)) {
+    if (agentConfig.allowedTools && agentConfig.allowedTools.length > 0) {
+      const allowedSet = new Set(agentConfig.allowedTools);
+      for (const exp of agentConfig.expectations) {
+        // ClawForce tools (clawforce_*) are always available — not gated by allowedTools
+        if (exp.tool.startsWith("clawforce_") || exp.tool.startsWith("memory_")) continue;
+        if (!allowedSet.has(exp.tool)) {
+          warnings.push({
+            level: "warn",
+            agentId,
+            message: `Expectation references tool "${exp.tool}" which is not in allowedTools — expectation may never be satisfied.`,
+          });
+        }
+      }
+    }
+  }
+
   return warnings;
 }
 
@@ -429,6 +474,38 @@ export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
         level: "error",
         message: `Domain "${domain.domain}": operational_profile "${domain.operational_profile}" is invalid. Valid: ${OPERATIONAL_PROFILES.join(", ")}`,
       });
+    }
+  }
+
+  // Validate role_defaults reference known preset names
+  if (domain.role_defaults) {
+    const KNOWN_ROLES = new Set(["manager", "employee", "assistant", "verifier", "dashboard-assistant", "onboarding", "scheduled"]);
+    for (const roleName of Object.keys(domain.role_defaults)) {
+      if (!KNOWN_ROLES.has(roleName)) {
+        results.push({
+          level: "warn",
+          message: `Domain "${domain.domain}": role_defaults references unknown role "${roleName}" — ensure agents use \`extends: "${roleName}"\` for this to take effect.`,
+        });
+      }
+    }
+  }
+
+  // Validate team_templates
+  if (domain.team_templates) {
+    const domainAgentIds = new Set(domain.agents);
+    for (const [teamName, template] of Object.entries(domain.team_templates)) {
+      if (!teamName || teamName.length === 0) {
+        results.push({
+          level: "error",
+          message: `Domain "${domain.domain}": team_templates contains empty team name.`,
+        });
+      }
+      if (template && typeof template === "object" && (template as Record<string, unknown>).model !== undefined) {
+        results.push({
+          level: "error",
+          message: `Domain "${domain.domain}": team_template "${teamName}" contains "model" — model is a runtime setting, configure it in OpenClaw's agent config.`,
+        });
+      }
     }
   }
 

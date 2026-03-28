@@ -26,9 +26,10 @@ changing the measurement system during experiments invalidates results.
 
 **Stability**
 - 20 consecutive clean cycles across both teams
-- 1 week of continuous autonomous operation, zero human intervention
-- Zero unhandled errors in gateway logs for that week
+- Sustained autonomous operation with zero human intervention needed to unblock agents
+- Zero unhandled errors in gateway logs during autonomous operation
 - No regressions introduced by agent-merged code
+- Cost stays within budget envelope throughout
 
 **Completeness**
 - Every feature in VISION.md implemented and working

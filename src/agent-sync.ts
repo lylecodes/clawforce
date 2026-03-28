@@ -82,8 +82,15 @@ export function buildOpenClawAgentEntry(
     entry.model = { primary: config.model };
   }
 
-  // CO-1: Bootstrap config is stored in ClawForce config only.
-  // OpenClaw does not recognize bootstrapMaxChars/bootstrapTotalMaxChars fields.
+  // CO-1: Propagate bootstrap config to OpenClaw agent entry
+  if (config.bootstrapConfig) {
+    if (config.bootstrapConfig.maxChars !== undefined) {
+      entry.bootstrapMaxChars = config.bootstrapConfig.maxChars;
+    }
+    if (config.bootstrapConfig.totalMaxChars !== undefined) {
+      entry.bootstrapTotalMaxChars = config.bootstrapConfig.totalMaxChars;
+    }
+  }
 
   // CO-3: Propagate allowed tools to OpenClaw agent entry
   if (config.allowedTools && config.allowedTools.length > 0) {
@@ -104,7 +111,7 @@ export function mergeAgentEntry(
   const merged = { ...existing };
 
   // Fields where ClawForce config wins over existing OpenClaw config
-  const CLAWFORCE_WINS = new Set(["model", "allowedTools"]);
+  const CLAWFORCE_WINS = new Set(["model", "allowedTools", "bootstrapMaxChars", "bootstrapTotalMaxChars"]);
 
   for (const key of Object.keys(incoming) as (keyof OpenClawAgentEntry)[]) {
     if (key === "id") continue; // id is always from existing

@@ -24,11 +24,15 @@
 **Effort:** Small
 **Action:** Diagnose failure pattern, fix task definition or agent handling
 
-### CP-2: 1 week autonomous operation
-**Status:** System has run ~5 days total, not 7 continuous
-**Problem:** Time-gated. Can only be met by letting the system run undisturbed.
-**Owner:** Nobody — just run it
-**Effort:** Time (7 days)
+### CP-2: Autonomous operation — outcome-based
+**Status:** System running autonomously. Stability infrastructure in place (rate limiters, backoff, verifiers, cost controls).
+**Exit criteria (all required):**
+- Dashboard reaches full feature completeness (all views, deep UX)
+- No critical bugs surfaced during autonomous operation
+- Cost stays within budget envelope
+- No human intervention needed to unblock agents
+**Continuous:** Agents continue improving designs and finding new optimizations after criteria are met — the exit criteria gate Phase 2, not the agents.
+**Owner:** dash-team (delivery), cf-lead (monitoring)
 **Dependency:** CP-1 (exercise cycles must be stable first)
 
 ### CP-3: Schema + config freeze
@@ -151,17 +155,13 @@
 - Reduce bootstrap budget (CO-1)
 - Let system run continuously
 
-**Week 2:**
-- If exercises stable → start 7-day clock (CP-2)
-- Onboard skill (HP-1)
-- Dashboard data coverage for 6 tables with data (MP-1)
-- Schema freeze decision (CP-3)
-
-**Week 3:**
-- 7-day autonomous operation completes (CP-2)
-- API cleanup (MP-2)
-- Dead code removal (MP-4)
+**Week 2+:**
+- Dogfood continuously — agents build dashboard, friction reveals bugs
+- CP-2 exit criteria checked as outcomes are met, not by calendar
+- Schema freeze decision (CP-3) once dashboard is feature-complete
+- API cleanup (MP-2), dead code removal (MP-4)
 - Run first real experiment (R-4)
 
-**Phase 1 exit:** End of week 3 if all criteria met.
+**Phase 1 exit:** When all CP-2 outcome criteria are met.
 **Phase 2 begins:** Immediately after, with experiment framework already validated.
+**Agents continue:** After Phase 1 exit, agents keep improving designs, UX, and finding optimizations. Phase gates control experiments, not agent activity.

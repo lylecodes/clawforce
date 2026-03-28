@@ -11,7 +11,7 @@ import { normalizeAgentConfig as resolveAliases } from "./aliases.js";
 import { registerGlobalAgents, assignAgentsToDomain } from "./registry.js";
 import { registerDomain } from "../lifecycle.js";
 import { registerWorkforceConfig } from "../project.js";
-import { resolveConfig, BUILTIN_AGENT_PRESETS } from "../presets.js";
+import { resolveConfig, BUILTIN_AGENT_PRESETS, mergeConfigLayer } from "../presets.js";
 import { safeLog } from "../diagnostics.js";
 import type { AgentConfig, ContextSource, Expectation, PerformancePolicy, WorkforceConfig } from "../types.js";
 import type { GlobalConfig, DomainConfig, GlobalAgentDef } from "./schema.js";
@@ -169,6 +169,47 @@ function buildWorkforceConfig(
     const effectiveExtends = normalizedDef.extends ?? globalDef.extends;
     if (effectiveExtends) {
       resolved.extends = effectiveExtends as string;
+    }
+
+    // Apply role defaults from domain config (based on extends/role field).
+    // Merge order: preset -> role defaults -> team template -> agent override.
+    if (domain.role_defaults && effectiveExtends) {
+      const roleDefaults = domain.role_defaults[effectiveExtends as string];
+      if (roleDefaults) {
+        // Role defaults are applied as a layer on top of the preset-resolved config,
+        // but UNDER any agent-specific overrides. We merge role defaults first,
+        // then re-apply agent-specific fields on top.
+        const agentOverrides: Record<string, unknown> = {};
+        for (const key of Object.keys(normalizedDef)) {
+          if (key !== "extends" && key !== "role") {
+            agentOverrides[key] = normalizedDef[key];
+          }
+        }
+        const withRoleDefaults = mergeConfigLayer(resolved, roleDefaults as Record<string, unknown>);
+        // Re-apply agent overrides on top of role defaults
+        Object.assign(resolved, mergeConfigLayer(withRoleDefaults, agentOverrides));
+      }
+    }
+
+    // Apply team template (based on team field).
+    // Merge order: preset -> role defaults -> team template -> agent override.
+    const agentTeam = (resolved.team ?? normalizedDef.team) as string | undefined;
+    if (agentTeam) {
+      // Domain team_templates override global team_templates
+      const teamTemplate =
+        (domain.team_templates as Record<string, Record<string, unknown>> | undefined)?.[agentTeam] ??
+        (global.team_templates as Record<string, Record<string, unknown>> | undefined)?.[agentTeam];
+      if (teamTemplate) {
+        const agentOverrides: Record<string, unknown> = {};
+        for (const key of Object.keys(normalizedDef)) {
+          if (key !== "extends" && key !== "role") {
+            agentOverrides[key] = normalizedDef[key];
+          }
+        }
+        const withTeamTemplate = mergeConfigLayer(resolved, teamTemplate);
+        // Re-apply agent overrides on top of team template
+        Object.assign(resolved, mergeConfigLayer(withTeamTemplate, agentOverrides));
+      }
     }
 
     // Apply global defaults
