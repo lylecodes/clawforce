@@ -88,17 +88,3 @@ export function getModelPricing(
   return null;
 }
 
-/** Get rate limits for a provider. */
-export function getProviderRateLimits(
-  providerId: string,
-): { rpm: number; tpm: number } | null {
-  if (!cachedConfig?.models?.providers) return null;
-
-  const provider = cachedConfig.models.providers.find((p) => p.id === providerId);
-  if (!provider || (!provider.rpm && !provider.tpm)) return null;
-
-  return {
-    rpm: provider.rpm ?? 0,
-    tpm: provider.tpm ?? 0,
-  };
-}

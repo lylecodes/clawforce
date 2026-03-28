@@ -71,6 +71,23 @@ describe("dispatch/dispatcher", () => {
     expect(dispatchedRow.cnt).toBe(1);
   });
 
+  it("dispatches queued items when task state is lowercase assigned", async () => {
+    const task = createTask({
+      projectId: PROJECT, title: "Legacy assigned task", createdBy: "agent:pm", assignedTo: "agent:worker",
+    }, db);
+
+    db.prepare("UPDATE tasks SET state = 'assigned' WHERE id = ? AND project_id = ?").run(task.id, PROJECT);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
+
+    const dispatched = await dispatchLoop(PROJECT, db);
+    expect(dispatched).toBe(1);
+
+    const dispatchedRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND status = 'dispatched'",
+    ).get(PROJECT) as Record<string, unknown>;
+    expect(dispatchedRow.cnt).toBe(1);
+  });
+
   it("fails items for tasks in non-dispatchable states", async () => {
     const task = createTask({ projectId: PROJECT, title: "Open task", createdBy: "agent:pm" }, db);
     // Task is OPEN — not dispatchable

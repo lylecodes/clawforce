@@ -19,13 +19,3 @@ export function stringEnum<T extends readonly string[]>(
   });
 }
 
-export function optionalStringEnum<T extends readonly string[]>(
-  values: T,
-  options?: SchemaOptions,
-): TUnsafe<T[number] | undefined> {
-  return Type.Unsafe<T[number] | undefined>({
-    type: "string",
-    enum: [...values],
-    ...options,
-  });
-}

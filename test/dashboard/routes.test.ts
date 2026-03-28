@@ -19,7 +19,7 @@ vi.mock("../../src/dashboard/queries.js", () => ({
     if (tid === "task1") return { task: { id: "task1" }, evidence: [], transitions: [] };
     return null;
   }),
-  querySessions: vi.fn(() => ({ sessions: [], hasMore: false })),
+  querySessions: vi.fn(() => ({ sessions: [], hasMore: false, count: 0 })),
   queryEvents: vi.fn(() => ({ events: [], total: 0, count: 0, limit: 50, offset: 0 })),
   queryMetricsDashboard: vi.fn(() => ({ metrics: [], count: 0 })),
   queryCosts: vi.fn(() => ({ totalCents: 0 })),
@@ -28,6 +28,16 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryAlerts: vi.fn(() => ({ alerts: [] })),
   queryOrgChart: vi.fn(() => ({ agents: [], departments: [] })),
   queryHealth: vi.fn(() => ({ tier: "GREEN" })),
+  queryMessages: vi.fn(() => ({ threads: [], count: 0 })),
+  queryProtocols: vi.fn(() => ({ protocols: [], count: 0 })),
+  queryGoals: vi.fn(() => ({ goals: [], hasMore: false, count: 0 })),
+  queryGoalDetail: vi.fn(() => null),
+  queryAuditLog: vi.fn(() => ({ entries: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryAuditRuns: vi.fn(() => ({ runs: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryEnforcementRetries: vi.fn(() => ({ retries: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryOnboardingState: vi.fn(() => ({ entries: [], count: 0 })),
+  queryTrackedSessions: vi.fn(() => ({ sessions: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryWorkerAssignments: vi.fn(() => ({ assignments: [], count: 0 })),
 }));
 
 describe("dashboard routes", () => {
@@ -127,6 +137,36 @@ describe("dashboard routes", () => {
 
   it("strips trailing slash", () => {
     const result = handleRequest("/api/projects/", {});
+    expect(result.status).toBe(200);
+  });
+
+  it("GET /api/projects/:id/audit-log returns audit log", () => {
+    const result = handleRequest("/api/projects/proj1/audit-log", {});
+    expect(result.status).toBe(200);
+  });
+
+  it("GET /api/projects/:id/audit-runs returns audit runs", () => {
+    const result = handleRequest("/api/projects/proj1/audit-runs", {});
+    expect(result.status).toBe(200);
+  });
+
+  it("GET /api/projects/:id/enforcement-retries returns retries", () => {
+    const result = handleRequest("/api/projects/proj1/enforcement-retries", {});
+    expect(result.status).toBe(200);
+  });
+
+  it("GET /api/projects/:id/onboarding returns onboarding state", () => {
+    const result = handleRequest("/api/projects/proj1/onboarding", {});
+    expect(result.status).toBe(200);
+  });
+
+  it("GET /api/projects/:id/tracked-sessions returns tracked sessions", () => {
+    const result = handleRequest("/api/projects/proj1/tracked-sessions", {});
+    expect(result.status).toBe(200);
+  });
+
+  it("GET /api/projects/:id/worker-assignments returns assignments", () => {
+    const result = handleRequest("/api/projects/proj1/worker-assignments", {});
     expect(result.status).toBe(200);
   });
 });

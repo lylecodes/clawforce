@@ -27,6 +27,12 @@ import {
   queryProtocols,
   queryGoals,
   queryGoalDetail,
+  queryAuditLog,
+  queryAuditRuns,
+  queryEnforcementRetries,
+  queryOnboardingState,
+  queryTrackedSessions,
+  queryWorkerAssignments,
 } from "./queries.js";
 import { ingestEvent } from "../events/store.js";
 import { getDb } from "../db.js";
@@ -216,6 +222,51 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           protocolStatus: params.status as ProtocolStatus | undefined,
           limit: params.limit ? parseInt(params.limit, 10) : undefined,
         }));
+      }
+
+      case "audit-log": {
+        return ok(queryAuditLog(projectId, {
+          actor: params.actor,
+          action: params.action,
+          targetType: params.targetType,
+        }, {
+          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+        }));
+      }
+
+      case "audit-runs": {
+        return ok(queryAuditRuns(projectId, {
+          agentId: params.agent,
+          status: params.status,
+        }, {
+          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+        }));
+      }
+
+      case "enforcement-retries": {
+        return ok(queryEnforcementRetries(projectId, {
+          agentId: params.agent,
+        }, {
+          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+        }));
+      }
+
+      case "onboarding": {
+        return ok(queryOnboardingState(projectId));
+      }
+
+      case "tracked-sessions": {
+        return ok(queryTrackedSessions(projectId, {
+          limit: params.limit ? parseInt(params.limit, 10) : undefined,
+          offset: params.offset ? parseInt(params.offset, 10) : undefined,
+        }));
+      }
+
+      case "worker-assignments": {
+        return ok(queryWorkerAssignments(projectId));
       }
 
       default:

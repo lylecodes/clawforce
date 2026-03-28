@@ -17,8 +17,6 @@ import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { writeAuditEntry } from "../audit.js";
 
-export type ReplanStrategy = "manager" | "escalate_human";
-
 export type FailureAnalysis = {
   taskId: string;
   taskTitle: string;

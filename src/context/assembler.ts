@@ -270,7 +270,7 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
     }
 
     case "soul":
-      return resolveSoulDoc(ctx.agentId, ctx.projectDir);
+      return resolveSoulDoc(ctx.agentId, ctx.projectDir, ctx.config.extends);
 
     case "tools_reference":
       return resolveToolsDocs(ctx.agentId, ctx.config, ctx.projectDir, ctx.projectId);
@@ -402,12 +402,15 @@ case "observed_events": {
       return renderObservedEvents(ctx.projectId, observe, source.since ?? 0);
     }
 
-    case "direction":
+    case "direction": {
+      if (!ctx.projectId) return null;
+      return renderDomainContext(getProjectsDir(), ctx.projectId, source.source, ctx.config.team);
+    }
     case "policies":
     case "standards":
     case "architecture": {
       if (!ctx.projectId) return null;
-      return renderDomainContext(getProjectsDir(), ctx.projectId, source.source);
+      return renderDomainContext(getProjectsDir(), ctx.projectId, source.source, ctx.config.team);
     }
 
     case "task_creation_standards":
@@ -800,8 +803,8 @@ function resolveFileGlob(pattern: string, projectDir: string): string | null {
 function buildProfileHeader(agentId: string, config: AgentConfig, projectDir?: string): string | null {
   const title = config.title;
 
-  // SOUL.md overrides config.persona when present
-  const soulContent = resolveSoulDoc(agentId, projectDir);
+  // SOUL.md overrides config.persona when present (with role-based layering)
+  const soulContent = resolveSoulDoc(agentId, projectDir, config.extends);
   const persona = soulContent ?? config.persona;
 
   if (!title && !persona) return null;

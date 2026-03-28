@@ -410,9 +410,9 @@ describe("worker-context", () => {
       dbOverride: db,
     });
 
-    expect(result!.prompt).toContain("attach_evidence");
-    expect(result!.prompt).toContain("REVIEW");
-    expect(result!.prompt).toContain("BLOCKED");
+    expect(result!.prompt).toContain("Deliverables");
+    expect(result!.prompt).toContain("automatically");
+    expect(result!.prompt).toContain("summary");
   });
 });
 

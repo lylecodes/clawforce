@@ -109,4 +109,179 @@ describe("init wizard", () => {
       initDomain(tmpDir, { name: "existing", agents: ["b"] });
     }).toThrow(/already exists/);
   });
+
+  // --- Extended wizard operations ---
+
+  it("updates domain fields via updateDomain", async () => {
+    const { scaffoldConfigDir, initDomain, updateDomain } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    initDomain(tmpDir, { name: "proj", agents: ["a"] });
+
+    updateDomain(tmpDir, "proj", {
+      updates: { orchestrator: "a", paths: ["~/new-path"] },
+    });
+
+    const content = fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8");
+    expect(content).toContain("orchestrator: a");
+    expect(content).toContain("~/new-path");
+    expect(content).toContain("domain: proj"); // preserved
+  });
+
+  it("updateDomain preserves existing fields", async () => {
+    const { scaffoldConfigDir, initDomain, updateDomain } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    initDomain(tmpDir, { name: "proj", agents: ["a"], orchestrator: "a" });
+
+    updateDomain(tmpDir, "proj", { updates: { paths: ["~/x"] } });
+
+    const YAML = (await import("yaml")).default;
+    const content = YAML.parse(fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8"));
+    expect(content.orchestrator).toBe("a"); // preserved
+    expect(content.paths).toEqual(["~/x"]);
+  });
+
+  it("updateDomain throws for non-existent domain", async () => {
+    const { scaffoldConfigDir, updateDomain } = await import("../../src/config/wizard.js");
+    scaffoldConfigDir(tmpDir);
+
+    expect(() => {
+      updateDomain(tmpDir, "ghost", { updates: {} });
+    }).toThrow(/does not exist/);
+  });
+
+  it("deletes domain via deleteDomain", async () => {
+    const { scaffoldConfigDir, initDomain, deleteDomain } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    initDomain(tmpDir, { name: "doomed", agents: ["a"] });
+
+    deleteDomain(tmpDir, "doomed");
+    expect(fs.existsSync(path.join(tmpDir, "domains", "doomed.yaml"))).toBe(false);
+  });
+
+  it("deleteDomain throws for non-existent domain", async () => {
+    const { scaffoldConfigDir, deleteDomain } = await import("../../src/config/wizard.js");
+    scaffoldConfigDir(tmpDir);
+
+    expect(() => {
+      deleteDomain(tmpDir, "ghost");
+    }).toThrow(/does not exist/);
+  });
+
+  it("adds agent to global config via addAgentToGlobal", async () => {
+    const { scaffoldConfigDir, addAgentToGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    const added = addAgentToGlobal(tmpDir, "new-bot", { extends: "employee", title: "Worker" });
+
+    expect(added).toBe(true);
+    const content = fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8");
+    expect(content).toContain("new-bot");
+    expect(content).toContain("employee");
+  });
+
+  it("addAgentToGlobal is idempotent without force", async () => {
+    const { scaffoldConfigDir, addAgentToGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    addAgentToGlobal(tmpDir, "bot", { extends: "manager" });
+    const secondAdd = addAgentToGlobal(tmpDir, "bot", { extends: "employee" });
+
+    expect(secondAdd).toBe(false); // did not overwrite
+    const YAML = (await import("yaml")).default;
+    const config = YAML.parse(fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8"));
+    expect(config.agents.bot.extends).toBe("manager"); // original preserved
+  });
+
+  it("addAgentToGlobal overwrites with force", async () => {
+    const { scaffoldConfigDir, addAgentToGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    addAgentToGlobal(tmpDir, "bot", { extends: "manager" });
+    const overwritten = addAgentToGlobal(tmpDir, "bot", { extends: "employee" }, true);
+
+    expect(overwritten).toBe(true);
+    const YAML = (await import("yaml")).default;
+    const config = YAML.parse(fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8"));
+    expect(config.agents.bot.extends).toBe("employee");
+  });
+
+  it("removes agent from global via removeAgentFromGlobal", async () => {
+    const { scaffoldConfigDir, addAgentToGlobal, removeAgentFromGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    addAgentToGlobal(tmpDir, "bot", { extends: "employee" });
+    addAgentToGlobal(tmpDir, "keeper", { extends: "manager" });
+
+    const removed = removeAgentFromGlobal(tmpDir, "bot");
+    expect(removed).toBe(true);
+
+    const YAML = (await import("yaml")).default;
+    const config = YAML.parse(fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8"));
+    expect(config.agents.bot).toBeUndefined();
+    expect(config.agents.keeper).toBeDefined();
+  });
+
+  it("removeAgentFromGlobal returns false for missing agent", async () => {
+    const { scaffoldConfigDir, removeAgentFromGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    expect(removeAgentFromGlobal(tmpDir, "ghost")).toBe(false);
+  });
+
+  it("removeAgentFromGlobal cleans up domains when requested", async () => {
+    const { scaffoldConfigDir, initDomain, addAgentToGlobal, removeAgentFromGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    addAgentToGlobal(tmpDir, "bot", { extends: "employee" });
+    addAgentToGlobal(tmpDir, "keeper", { extends: "manager" });
+    initDomain(tmpDir, { name: "proj", agents: ["bot", "keeper"], orchestrator: "bot" });
+
+    removeAgentFromGlobal(tmpDir, "bot", true);
+
+    const YAML = (await import("yaml")).default;
+    const domain = YAML.parse(fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8"));
+    expect(domain.agents).toEqual(["keeper"]);
+    expect(domain.orchestrator).toBeUndefined(); // cleared since orchestrator was bot
+  });
+
+  it("updates agent fields via updateAgentInGlobal", async () => {
+    const { scaffoldConfigDir, addAgentToGlobal, updateAgentInGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    addAgentToGlobal(tmpDir, "bot", { extends: "employee", title: "Worker" });
+
+    updateAgentInGlobal(tmpDir, "bot", { title: "Senior Worker", model: "opus" });
+
+    const YAML = (await import("yaml")).default;
+    const config = YAML.parse(fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8"));
+    expect(config.agents.bot.title).toBe("Senior Worker");
+    expect(config.agents.bot.model).toBe("opus");
+    expect(config.agents.bot.extends).toBe("employee"); // preserved
+  });
+
+  it("updateAgentInGlobal throws for missing agent", async () => {
+    const { scaffoldConfigDir, updateAgentInGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    expect(() => {
+      updateAgentInGlobal(tmpDir, "ghost", { title: "X" });
+    }).toThrow(/not found/);
+  });
+
+  it("updateAgentInGlobal can delete fields with null", async () => {
+    const { scaffoldConfigDir, addAgentToGlobal, updateAgentInGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    addAgentToGlobal(tmpDir, "bot", { extends: "employee", title: "Worker", persona: "Helpful" });
+
+    updateAgentInGlobal(tmpDir, "bot", { persona: null });
+
+    const YAML = (await import("yaml")).default;
+    const config = YAML.parse(fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8"));
+    expect(config.agents.bot.persona).toBeUndefined();
+    expect(config.agents.bot.title).toBe("Worker"); // preserved
+  });
 });

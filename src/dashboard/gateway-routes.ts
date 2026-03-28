@@ -41,6 +41,12 @@ import {
   queryMetricsDashboard,
   queryPolicies,
   queryProtocols,
+  queryAuditLog,
+  queryAuditRuns,
+  queryEnforcementRetries,
+  queryOnboardingState,
+  queryTrackedSessions,
+  queryWorkerAssignments,
 } from "./queries.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
@@ -313,6 +319,7 @@ function routeRead(
     case "sessions":
       return ok(querySessions(domain, {
         limit: params.limit ? parseInt(params.limit, 10) : undefined,
+        offset: params.offset ? parseInt(params.offset, 10) : undefined,
       }));
 
     case "metrics":
@@ -332,6 +339,45 @@ function routeRead(
         protocolStatus: params.status as ProtocolStatus | undefined,
         limit: params.limit ? parseInt(params.limit, 10) : undefined,
       }));
+
+    case "audit-log":
+      return ok(queryAuditLog(domain, {
+        actor: params.actor,
+        action: params.action,
+        targetType: params.targetType,
+      }, {
+        limit: params.limit ? parseInt(params.limit, 10) : undefined,
+        offset: params.offset ? parseInt(params.offset, 10) : undefined,
+      }));
+
+    case "audit-runs":
+      return ok(queryAuditRuns(domain, {
+        agentId: params.agent,
+        status: params.status,
+      }, {
+        limit: params.limit ? parseInt(params.limit, 10) : undefined,
+        offset: params.offset ? parseInt(params.offset, 10) : undefined,
+      }));
+
+    case "enforcement-retries":
+      return ok(queryEnforcementRetries(domain, {
+        agentId: params.agent,
+      }, {
+        limit: params.limit ? parseInt(params.limit, 10) : undefined,
+        offset: params.offset ? parseInt(params.offset, 10) : undefined,
+      }));
+
+    case "onboarding":
+      return ok(queryOnboardingState(domain));
+
+    case "tracked-sessions":
+      return ok(queryTrackedSessions(domain, {
+        limit: params.limit ? parseInt(params.limit, 10) : undefined,
+        offset: params.offset ? parseInt(params.offset, 10) : undefined,
+      }));
+
+    case "worker-assignments":
+      return ok(queryWorkerAssignments(domain));
 
     default:
       return notFound(`Unknown resource: ${topResource}`);

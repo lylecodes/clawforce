@@ -25,6 +25,7 @@ import type {
   ApprovalPolicy,
   AssignmentConfig,
   AssignmentStrategy,
+  BootstrapConfig,
   BudgetConfig,
   ChannelConfig,
   ChannelType,
@@ -273,6 +274,12 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   // Parse verification config
   if (raw.verification && typeof raw.verification === "object") {
     result.verification = normalizeVerificationConfig(raw.verification);
+  }
+
+  // Parse bootstrap_defaults config (CO-1: project-level bootstrap budget)
+  const rawBootstrapDefaults = raw.bootstrap_defaults ?? raw.bootstrapDefaults;
+  if (rawBootstrapDefaults && typeof rawBootstrapDefaults === "object") {
+    result.bootstrapDefaults = normalizeBootstrapConfig(rawBootstrapDefaults);
   }
 
   return result;
@@ -542,6 +549,30 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     };
   }
 
+  // Parse bootstrap config (CO-1: bootstrap budget control)
+  const bootstrapConfig = normalizeBootstrapConfig(raw.bootstrap_config ?? raw.bootstrapConfig);
+
+  // Parse bootstrap exclude files (CO-2: skip unnecessary bootstrap files)
+  const rawExcludeFiles = raw.bootstrap_exclude_files ?? raw.bootstrapExcludeFiles;
+  const bootstrapExcludeFiles = Array.isArray(rawExcludeFiles)
+    ? (rawExcludeFiles as unknown[]).filter((f: unknown): f is string => typeof f === "string")
+    : undefined;
+
+  // Parse allowed OpenClaw tools (CO-3: per-agent tool filtering)
+  const rawAllowedTools = raw.allowed_tools ?? raw.allowedTools;
+  const allowedTools = Array.isArray(rawAllowedTools)
+    ? (rawAllowedTools as unknown[]).filter((t: unknown): t is string => typeof t === "string")
+    : undefined;
+
+  // Resolve defaults from preset for new fields
+  const presetDefaults = BUILTIN_AGENT_PRESETS[extendsFrom];
+  const effectiveBootstrapConfig = bootstrapConfig
+    ?? (presetDefaults?.bootstrapConfig as AgentConfig["bootstrapConfig"] | undefined);
+  const effectiveBootstrapExcludeFiles = bootstrapExcludeFiles
+    ?? (presetDefaults?.bootstrapExcludeFiles as string[] | undefined);
+  const effectiveAllowedTools = allowedTools
+    ?? (presetDefaults?.allowedTools as string[] | undefined);
+
   return {
     extends: extendsFrom,
     title,
@@ -566,7 +597,21 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     contextBudgetChars,
     maxTurnsPerSession,
     model: agentModel,
+    bootstrapConfig: effectiveBootstrapConfig,
+    bootstrapExcludeFiles: effectiveBootstrapExcludeFiles?.length ? effectiveBootstrapExcludeFiles : undefined,
+    allowedTools: effectiveAllowedTools?.length ? effectiveAllowedTools : undefined,
   };
+}
+
+function normalizeBootstrapConfig(raw: unknown): BootstrapConfig | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const result: BootstrapConfig = {};
+  const maxChars = r.max_chars ?? r.maxChars;
+  const totalMaxChars = r.total_max_chars ?? r.totalMaxChars;
+  if (typeof maxChars === "number" && maxChars > 0) result.maxChars = Math.floor(maxChars);
+  if (typeof totalMaxChars === "number" && totalMaxChars > 0) result.totalMaxChars = Math.floor(totalMaxChars);
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function normalizePermissions(raw: unknown): AgentConfig["permissions"] {

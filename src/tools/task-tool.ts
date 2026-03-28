@@ -55,11 +55,6 @@ function recordSessionTaskCreation(sessionKey: string | undefined): void {
   sessionTaskCreationCounts.set(sessionKey, (sessionTaskCreationCounts.get(sessionKey) ?? 0) + 1);
 }
 
-/** Reset session task creation tracking (for tests). */
-export function resetSessionTaskCounts(): void {
-  sessionTaskCreationCounts.clear();
-}
-
 const TASK_ACTIONS = [
   "create", "transition", "attach_evidence", "get", "list", "history", "fail",
   "get_approval_context", "submit_proposal", "check_proposal", "metrics",

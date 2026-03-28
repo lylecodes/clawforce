@@ -30,10 +30,16 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   querySlos: vi.fn(() => ({ slos: [] })),
   queryAlerts: vi.fn(() => ({ alerts: [] })),
   queryEvents: vi.fn(() => ({ events: [], total: 0, count: 0, limit: 50, offset: 0 })),
-  querySessions: vi.fn(() => ({ sessions: [], hasMore: false })),
+  querySessions: vi.fn(() => ({ sessions: [], hasMore: false, count: 0 })),
   queryMetricsDashboard: vi.fn(() => ({ metrics: [], count: 0 })),
   queryPolicies: vi.fn(() => ({ policies: [] })),
   queryProtocols: vi.fn(() => ({ protocols: [], count: 0 })),
+  queryAuditLog: vi.fn(() => ({ entries: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryAuditRuns: vi.fn(() => ({ runs: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryEnforcementRetries: vi.fn(() => ({ retries: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryOnboardingState: vi.fn(() => ({ entries: [], count: 0 })),
+  queryTrackedSessions: vi.fn(() => ({ sessions: [], total: 0, count: 0, limit: 50, offset: 0 })),
+  queryWorkerAssignments: vi.fn(() => ({ assignments: [], count: 0 })),
 }));
 
 vi.mock("../../src/dashboard/actions.js", () => ({
@@ -47,7 +53,11 @@ vi.mock("../../src/dashboard/sse.js", () => ({
 }));
 
 const { createDashboardHandler } = await import("../../src/dashboard/gateway-routes.js");
-const { queryAgents, queryDashboardSummary } = await import("../../src/dashboard/queries.js");
+const {
+  queryAgents, queryDashboardSummary, querySessions,
+  queryAuditLog, queryAuditRuns, queryEnforcementRetries,
+  queryOnboardingState, queryTrackedSessions, queryWorkerAssignments,
+} = await import("../../src/dashboard/queries.js");
 const { handleAction } = await import("../../src/dashboard/actions.js");
 const { getSSEManager } = await import("../../src/dashboard/sse.js");
 
@@ -164,6 +174,14 @@ describe("createDashboardHandler", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("routes GET /clawforce/api/:domain/sessions with pagination", async () => {
+    const handler = createDashboardHandler({});
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/sessions?limit=25&offset=10");
+    await handler(req, res);
+    expect(querySessions).toHaveBeenCalledWith("test-project", { limit: 25, offset: 10 });
+    expect(res.statusCode).toBe(200);
+  });
+
   it("routes GET /clawforce/api/:domain/budget to budget status", async () => {
     const handler = createDashboardHandler({});
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/budget");
@@ -203,6 +221,54 @@ describe("createDashboardHandler", () => {
     const handler = createDashboardHandler({});
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/meetings");
     await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/audit-log to queryAuditLog", async () => {
+    const handler = createDashboardHandler({});
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/audit-log?limit=25&offset=0");
+    await handler(req, res);
+    expect(queryAuditLog).toHaveBeenCalledWith("test-project", { actor: undefined, action: undefined, targetType: undefined }, { limit: 25, offset: 0 });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/audit-runs to queryAuditRuns", async () => {
+    const handler = createDashboardHandler({});
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/audit-runs?agent=bot1");
+    await handler(req, res);
+    expect(queryAuditRuns).toHaveBeenCalledWith("test-project", { agentId: "bot1", status: undefined }, { limit: undefined, offset: undefined });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/enforcement-retries to queryEnforcementRetries", async () => {
+    const handler = createDashboardHandler({});
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/enforcement-retries");
+    await handler(req, res);
+    expect(queryEnforcementRetries).toHaveBeenCalledWith("test-project", { agentId: undefined }, { limit: undefined, offset: undefined });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/onboarding to queryOnboardingState", async () => {
+    const handler = createDashboardHandler({});
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/onboarding");
+    await handler(req, res);
+    expect(queryOnboardingState).toHaveBeenCalledWith("test-project");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/tracked-sessions to queryTrackedSessions", async () => {
+    const handler = createDashboardHandler({});
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/tracked-sessions");
+    await handler(req, res);
+    expect(queryTrackedSessions).toHaveBeenCalledWith("test-project", { limit: undefined, offset: undefined });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/worker-assignments to queryWorkerAssignments", async () => {
+    const handler = createDashboardHandler({});
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/worker-assignments");
+    await handler(req, res);
+    expect(queryWorkerAssignments).toHaveBeenCalledWith("test-project");
     expect(res.statusCode).toBe(200);
   });
 

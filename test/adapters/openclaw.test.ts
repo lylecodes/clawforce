@@ -38,7 +38,7 @@ vi.mock("../../src/context/orchestrator-bootstrap.js", () => ({
   getAutoDetectContext: vi.fn(() => null),
 }));
 vi.mock("../../src/config-validator.js", () => ({
-  validateEnforcementConfig: vi.fn(() => []),
+  validateWorkforceConfig: vi.fn(() => []),
 }));
 vi.mock("../../src/enforcement/check.js", () => ({
   checkCompliance: vi.fn(() => ({ compliant: true })),
@@ -133,7 +133,6 @@ vi.mock("../../src/tools/message-tool.js", () => ({
 }));
 vi.mock("../../src/messaging/notify.js", () => ({
   setMessageNotifier: vi.fn(),
-  getMessageNotifier: vi.fn(() => null),
   formatMessageNotification: vi.fn(() => ""),
   notifyMessage: vi.fn(),
 }));

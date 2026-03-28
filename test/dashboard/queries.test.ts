@@ -28,8 +28,8 @@ vi.mock("../../src/tasks/ops.js", () => ({
   getTaskTransitions: vi.fn(() => []),
 }));
 
-vi.mock("../../src/audit.js", () => ({
-  queryAuditLog: vi.fn(() => [{ sessionKey: "s1" }]),
+vi.mock("../../src/telemetry/session-archive.js", () => ({
+  listSessionArchives: vi.fn(() => [{ sessionKey: "s1", agentId: "agent-dev", durationMs: 1200, toolCallCount: 3, totalCostCents: 15 }]),
 }));
 
 vi.mock("../../src/metrics.js", () => ({
@@ -43,10 +43,55 @@ vi.mock("../../src/cost.js", () => ({
 
 vi.mock("../../src/db.js", () => ({
   getDb: vi.fn(() => ({
-    prepare: vi.fn(() => ({
-      all: vi.fn(() => []),
-      get: vi.fn(() => ({})),
-    })),
+    prepare: vi.fn((sql: string) => {
+      if (sql.includes("audit_log") && sql.includes("COUNT")) {
+        return { get: vi.fn(() => ({ cnt: 2 })) };
+      }
+      if (sql.includes("audit_log")) {
+        return { all: vi.fn(() => [
+          { id: "al1", actor: "agent-dev", action: "task.complete", target_type: "task", target_id: "t1", detail: null, created_at: 1000 },
+          { id: "al2", actor: "agent-mgr", action: "agent.disable", target_type: "agent", target_id: "agent-dev", detail: "test", created_at: 900 },
+        ]) };
+      }
+      if (sql.includes("audit_runs") && sql.includes("COUNT")) {
+        return { get: vi.fn(() => ({ cnt: 1 })) };
+      }
+      if (sql.includes("audit_runs")) {
+        return { all: vi.fn(() => [
+          { id: "ar1", agent_id: "agent-dev", session_key: "sk1", status: "pass", summary: "All good", details: null, started_at: 800, ended_at: 900, duration_ms: 100 },
+        ]) };
+      }
+      if (sql.includes("enforcement_retries") && sql.includes("COUNT")) {
+        return { get: vi.fn(() => ({ cnt: 1 })) };
+      }
+      if (sql.includes("enforcement_retries")) {
+        return { all: vi.fn(() => [
+          { id: "er1", agent_id: "agent-dev", session_key: "sk1", attempted_at: 500, outcome: "success" },
+        ]) };
+      }
+      if (sql.includes("onboarding_state")) {
+        return { all: vi.fn(() => [
+          { key: "welcome_delivered", value: "true", updated_at: 700 },
+        ]) };
+      }
+      if (sql.includes("tracked_sessions") && sql.includes("COUNT")) {
+        return { get: vi.fn(() => ({ cnt: 1 })) };
+      }
+      if (sql.includes("tracked_sessions")) {
+        return { all: vi.fn(() => [
+          { session_key: "sk1", agent_id: "agent-dev", started_at: 600, requirements: "[]", satisfied: "[]", tool_call_count: 3, last_persisted_at: 650 },
+        ]) };
+      }
+      if (sql.includes("worker_assignments")) {
+        return { all: vi.fn(() => [
+          { agent_id: "agent-dev", task_id: "t1", assigned_at: 400 },
+        ]) };
+      }
+      return {
+        all: vi.fn(() => []),
+        get: vi.fn(() => ({})),
+      };
+    }),
   })),
 }));
 
@@ -87,6 +132,8 @@ const {
   queryTasks, queryTaskDetail, querySessions,
   queryEvents, queryMetricsDashboard, queryCosts,
   queryPolicies, querySlos, queryAlerts, queryOrgChart, queryHealth,
+  queryAuditLog, queryAuditRuns, queryEnforcementRetries,
+  queryOnboardingState, queryTrackedSessions, queryWorkerAssignments,
 } = await import("../../src/dashboard/queries.js");
 
 describe("queryProjects", () => {
@@ -150,9 +197,18 @@ describe("queryTaskDetail", () => {
 });
 
 describe("querySessions", () => {
-  it("returns audit sessions", () => {
+  it("returns archived sessions with pagination metadata", () => {
     const result = querySessions("proj1");
     expect(result.sessions).toHaveLength(1);
+    expect(result.hasMore).toBe(false);
+    expect(result.count).toBe(1);
+    expect(result.sessions[0]).toMatchObject({
+      sessionKey: "s1",
+      agentId: "agent-dev",
+      durationMs: 1200,
+      toolCallCount: 3,
+      totalCostCents: 15,
+    });
   });
 });
 
@@ -223,11 +279,150 @@ describe("queryOrgChart", () => {
     expect(result.agents).toHaveLength(2);
     expect(result.departments).toContain("eng");
   });
+
+  it("resolves valid reportsTo chains", () => {
+    const result = queryOrgChart("proj1");
+    const dev = result.agents.find((a: any) => a.id === "agent-dev");
+    const mgr = result.agents.find((a: any) => a.id === "agent-mgr");
+    // agent-dev reports to agent-mgr which exists — should be preserved
+    expect(dev?.reportsTo).toBe("agent-mgr");
+    // agent-mgr has reports_to: null — should remain undefined
+    expect(mgr?.reportsTo).toBeUndefined();
+  });
+
+  it("nullifies unresolved reportsTo references", async () => {
+    // Temporarily add an agent that reports to a non-existent manager
+    const { getAgentConfig, getRegisteredAgentIds } = await import("../../src/project.js");
+    const origGetConfig = vi.mocked(getAgentConfig).getMockImplementation()!;
+    const origGetIds = vi.mocked(getRegisteredAgentIds).getMockImplementation()!;
+
+    vi.mocked(getRegisteredAgentIds).mockImplementation(() => [
+      ...origGetIds(),
+      "agent-orphan",
+    ]);
+    vi.mocked(getAgentConfig).mockImplementation((id: string) => {
+      if (id === "agent-orphan") {
+        return {
+          projectId: "proj1",
+          config: {
+            extends: "employee",
+            title: "Orphan Worker",
+            department: "eng",
+            reports_to: "deleted-manager",
+            expectations: [],
+            performance_policy: {},
+          },
+        } as any;
+      }
+      return origGetConfig(id);
+    });
+
+    const result = queryOrgChart("proj1");
+    const orphan = result.agents.find((a: any) => a.id === "agent-orphan");
+    expect(orphan).toBeDefined();
+    // "deleted-manager" doesn't exist in the project — should be nullified
+    expect(orphan?.reportsTo).toBeUndefined();
+
+    // Restore original mocks
+    vi.mocked(getAgentConfig).mockImplementation(origGetConfig);
+    vi.mocked(getRegisteredAgentIds).mockImplementation(origGetIds);
+  });
+
+  it('treats reports_to: "parent" as a root node', async () => {
+    const { getAgentConfig, getRegisteredAgentIds } = await import("../../src/project.js");
+    const origGetConfig = vi.mocked(getAgentConfig).getMockImplementation()!;
+    const origGetIds = vi.mocked(getRegisteredAgentIds).getMockImplementation()!;
+
+    vi.mocked(getRegisteredAgentIds).mockImplementation(() => [
+      ...origGetIds(),
+      "agent-sub",
+    ]);
+    vi.mocked(getAgentConfig).mockImplementation((id: string) => {
+      if (id === "agent-sub") {
+        return {
+          projectId: "proj1",
+          config: {
+            extends: "employee",
+            title: "Sub Agent",
+            department: "eng",
+            reports_to: "parent",
+            expectations: [],
+            performance_policy: {},
+          },
+        } as any;
+      }
+      return origGetConfig(id);
+    });
+
+    const result = queryOrgChart("proj1");
+    const sub = result.agents.find((a: any) => a.id === "agent-sub");
+    expect(sub).toBeDefined();
+    // "parent" is a special value (subagent auto-announce) — should become undefined (root)
+    expect(sub?.reportsTo).toBeUndefined();
+
+    // Restore original mocks
+    vi.mocked(getAgentConfig).mockImplementation(origGetConfig);
+    vi.mocked(getRegisteredAgentIds).mockImplementation(origGetIds);
+  });
 });
 
 describe("queryHealth", () => {
   it("returns health tier", () => {
     const result = queryHealth("proj1");
     expect(result.tier).toBe("GREEN");
+  });
+});
+
+describe("queryAuditLog", () => {
+  it("returns audit log entries with pagination", () => {
+    const result = queryAuditLog("proj1");
+    expect(result.entries).toHaveLength(2);
+    expect(result.total).toBe(2);
+    expect(result.entries[0]).toMatchObject({ id: "al1", actor: "agent-dev", action: "task.complete" });
+  });
+});
+
+describe("queryAuditRuns", () => {
+  it("returns audit runs with pagination", () => {
+    const result = queryAuditRuns("proj1");
+    expect(result.runs).toHaveLength(1);
+    expect(result.total).toBe(1);
+    expect(result.runs[0]).toMatchObject({ id: "ar1", agentId: "agent-dev", status: "pass" });
+  });
+});
+
+describe("queryEnforcementRetries", () => {
+  it("returns enforcement retries", () => {
+    const result = queryEnforcementRetries("proj1");
+    expect(result.retries).toHaveLength(1);
+    expect(result.total).toBe(1);
+    expect(result.retries[0]).toMatchObject({ id: "er1", agentId: "agent-dev", outcome: "success" });
+  });
+});
+
+describe("queryOnboardingState", () => {
+  it("returns onboarding state entries", () => {
+    const result = queryOnboardingState("proj1");
+    expect(result.entries).toHaveLength(1);
+    expect(result.count).toBe(1);
+    expect(result.entries[0]).toMatchObject({ key: "welcome_delivered", value: "true" });
+  });
+});
+
+describe("queryTrackedSessions", () => {
+  it("returns tracked sessions with pagination", () => {
+    const result = queryTrackedSessions("proj1");
+    expect(result.sessions).toHaveLength(1);
+    expect(result.total).toBe(1);
+    expect(result.sessions[0]).toMatchObject({ sessionKey: "sk1", agentId: "agent-dev", toolCallCount: 3 });
+  });
+});
+
+describe("queryWorkerAssignments", () => {
+  it("returns worker assignments", () => {
+    const result = queryWorkerAssignments("proj1");
+    expect(result.assignments).toHaveLength(1);
+    expect(result.count).toBe(1);
+    expect(result.assignments[0]).toMatchObject({ agentId: "agent-dev", taskId: "t1" });
   });
 });

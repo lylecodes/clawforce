@@ -110,6 +110,7 @@ import { assembleContext, clearAssemblerCache } from "../src/context/assembler.j
 import { resolveJobName, resolveDispatchContext, resolveEffectiveConfig } from "../src/jobs.js";
 import { checkCompliance } from "../src/enforcement/check.js";
 import { executeFailureAction, executeCrashAction, recordCompliantRun } from "../src/enforcement/actions.js";
+import { countRecentRetries } from "../src/enforcement/retry-store.js";
 import { resolveEscalationTarget, routeEscalation } from "../src/enforcement/escalation-router.js";
 import { endSession, getSession, recordToolCall, recordSignificantResult, recoverOrphanedSessions, setDispatchContext, startTracking } from "../src/enforcement/tracker.js";
 import { emitDiagnosticEvent, setDiagnosticEmitter } from "../src/diagnostics.js";
@@ -120,7 +121,7 @@ import {
   getRegisteredAgentIds,
   resolveProjectDir,
 } from "../src/project.js";
-import { getEffectiveLifecycleConfig } from "../src/safety.js";
+import { getEffectiveLifecycleConfig, getSafetyConfig } from "../src/safety.js";
 import { syncAgentsToOpenClaw } from "../src/agent-sync.js";
 import { approveProposal, listPendingProposals, rejectProposal } from "../src/approval/resolve.js";
 import { resolveApprovalChannel } from "../src/approval/channel-router.js";
@@ -178,6 +179,7 @@ type MemoryToolFactory = (opts: { agentSessionKey?: string }) => Record<string, 
 import { recordCostFromLlmOutput } from "../src/cost.js";
 import { registerBulkPricing } from "../src/pricing.js";
 import { updateProviderUsage } from "../src/rate-limits.js";
+import { recordCall as recordRateLimitCall, checkCallLimit, clearSession as clearRateLimitSession, calculateBackoffDelay, type RateLimitConfig, type BackoffConfig } from "../src/safety/rate-limiter.js";
 import { initializeAllDomains } from "../src/config/init.js";
 import { startConfigWatcher, stopConfigWatcher } from "../src/config/watcher.js";
 // Dashboard
@@ -610,6 +612,7 @@ const clawforcePlugin = {
       if (outcome === "ok") return;
 
       // Handle via enforcement system if this was a tracked session
+      clearRateLimitSession(event.targetSessionKey);
       const session = endSession(event.targetSessionKey);
       if (session) {
         const agentEntry = getAgentConfig(session.agentId);
@@ -627,16 +630,36 @@ const clawforcePlugin = {
             `Clawforce: ${session.agentId} crashed — action: ${actionResult.action}`,
           );
 
-          // Retry: re-inject into the crashed agent's session
+          // Retry: re-inject into the crashed agent's session with exponential backoff
           if (actionResult.action === "retry" && actionResult.retryPrompt) {
             try {
-              await cliInjectMessage({
-                sessionKey: event.targetSessionKey,
-                message: actionResult.retryPrompt,
-              });
+              const safetyConfig = getSafetyConfig(session.projectId);
+              const backoffConfig: BackoffConfig = {
+                baseDelayMs: safetyConfig.retryBackoffBaseMs,
+                maxDelayMs: safetyConfig.retryBackoffMaxMs,
+              };
+              const retryCount = countRecentRetries(session.projectId, session.agentId);
+              const delayMs = calculateBackoffDelay(retryCount, backoffConfig);
+              api.logger.info(
+                `Clawforce: crash retry ${session.agentId} with ${Math.round(delayMs / 1000)}s backoff (attempt ${retryCount + 1})`,
+              );
+              const retryPrompt = actionResult.retryPrompt;
+              const targetSession = event.targetSessionKey;
+              setTimeout(async () => {
+                try {
+                  await cliInjectMessage({
+                    sessionKey: targetSession,
+                    message: retryPrompt,
+                  });
+                } catch (err) {
+                  api.logger.warn(
+                    `Clawforce: crash retry inject failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                }
+              }, delayMs);
             } catch (err) {
               api.logger.warn(
-                `Clawforce: crash retry inject failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`,
+                `Clawforce: crash retry backoff failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`,
               );
             }
             return;
@@ -682,12 +705,16 @@ const clawforcePlugin = {
       const action = typeof event.params === "object" && event.params !== null
         ? (event.params as Record<string, unknown>).action as string | undefined
         : undefined;
+      const errorMsg = event.error
+        ? (typeof event.error === "string" ? event.error : String(event.error))
+        : undefined;
       recordToolCall(
         ctx.sessionKey,
         toolName,
         action ?? null,
         event.durationMs ?? 0,
         !event.error,
+        errorMsg,
       );
 
       // Buffer significant tool outputs for auto-lifecycle evidence
@@ -727,6 +754,59 @@ const clawforcePlugin = {
       if (cfg.memoryFlush.enabled && isMemoryWriteCall(toolName, event.params)) {
         emitDiagnosticEvent({ type: "memory_write_detected", sessionKey: ctx.sessionKey, toolName });
       }
+
+      // --- Rate limiting: record call and check per-session limit ---
+      try {
+        const rlEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        if (rlEntry) {
+          const safetyConfig = getSafetyConfig(rlEntry.projectId);
+          const rlConfig: RateLimitConfig = {
+            maxCallsPerSession: safetyConfig.maxCallsPerSession,
+            maxCallsPerMinute: safetyConfig.maxCallsPerMinute,
+            maxCallsPerMinutePerAgent: safetyConfig.maxCallsPerMinutePerAgent,
+          };
+
+          const rlAgentId = ctx.agentId!;
+          const rlSessionKey = ctx.sessionKey!;
+
+          // Record this call
+          recordRateLimitCall(rlEntry.projectId, rlAgentId, rlSessionKey);
+
+          // Check if session has exceeded its per-session call limit
+          const limitCheck = checkCallLimit(
+            rlEntry.projectId,
+            rlAgentId,
+            rlSessionKey,
+            rlConfig,
+          );
+
+          if (!limitCheck.allowed) {
+            api.logger.warn(
+              `Clawforce: rate limit exceeded for ${rlAgentId} (${rlSessionKey}) — killing session. Reason: ${limitCheck.reason}`,
+            );
+            emitDiagnosticEvent({
+              type: "rate_limit_exceeded",
+              sessionKey: rlSessionKey,
+              agentId: rlAgentId,
+              projectId: rlEntry.projectId,
+              reason: limitCheck.reason,
+            });
+            await killStuckAgent({
+              sessionKey: rlSessionKey,
+              agentId: rlAgentId,
+              projectId: rlEntry.projectId,
+              runtimeMs: 0,
+              lastToolCallMs: null,
+              requiredCallsMade: 0,
+              requiredCallsTotal: 0,
+              reason: `Rate limit: ${limitCheck.reason}`,
+            });
+          }
+        }
+      } catch (err) {
+        // Rate limiting must never break the main flow
+        try { api.logger.warn(`Clawforce: rate limit check failed: ${err instanceof Error ? err.message : String(err)}`); } catch { /* */ }
+      }
     });
 
     // --- Universal tool gating via before_tool_call ---
@@ -737,6 +817,40 @@ const clawforcePlugin = {
 
       const entry = getAgentConfig(ctx.agentId);
       if (!entry) return; // Unknown agent — not managed by clawforce, allow
+
+      // --- Per-minute rate limit gate: block if global or agent rate exceeded ---
+      try {
+        if (ctx.sessionKey) {
+          const safetyConfig = getSafetyConfig(entry.projectId);
+          const rlConfig: RateLimitConfig = {
+            maxCallsPerSession: safetyConfig.maxCallsPerSession,
+            maxCallsPerMinute: safetyConfig.maxCallsPerMinute,
+            maxCallsPerMinutePerAgent: safetyConfig.maxCallsPerMinutePerAgent,
+          };
+          const limitCheck = checkCallLimit(
+            entry.projectId,
+            ctx.agentId,
+            ctx.sessionKey,
+            rlConfig,
+          );
+          if (!limitCheck.allowed) {
+            emitDiagnosticEvent({
+              type: "rate_limit_blocked",
+              sessionKey: ctx.sessionKey,
+              agentId: ctx.agentId,
+              projectId: entry.projectId,
+              toolName: event.toolName,
+              reason: limitCheck.reason,
+            });
+            return {
+              block: true,
+              blockReason: `Clawforce rate limit: ${limitCheck.reason}`,
+            };
+          }
+        }
+      } catch {
+        // Rate limit check failures are non-fatal — allow the call
+      }
 
       // Skip clawforce tools — they already run through withPolicyCheck()
       if (event.toolName.startsWith("clawforce_") || event.toolName === "memory_search" || event.toolName === "memory_get") {
@@ -887,6 +1001,7 @@ const clawforcePlugin = {
       // Clean up session state
       clearCooldown(ctx.sessionKey);
       clearAssemblerCache(ctx.sessionKey);
+      clearRateLimitSession(ctx.sessionKey);
       memoryModeStore.delete(ctx.sessionKey);
       sessionTurnCountStore.delete(ctx.sessionKey);
       experimentSessionStore.delete(ctx.sessionKey);
@@ -1123,16 +1238,43 @@ const clawforcePlugin = {
         `Clawforce: ${session.agentId} non-compliant — action: ${actionResult.action}`,
       );
 
-      // Retry: re-inject the compliance prompt into this agent's session
+      // Retry: re-inject the compliance prompt with exponential backoff
       if (actionResult.action === "retry" && actionResult.retryPrompt) {
         try {
-          await cliInjectMessage({
-            sessionKey: ctx.sessionKey,
-            message: actionResult.retryPrompt,
+          const safetyConfig = getSafetyConfig(session.projectId);
+          const backoffConfig: BackoffConfig = {
+            baseDelayMs: safetyConfig.retryBackoffBaseMs,
+            maxDelayMs: safetyConfig.retryBackoffMaxMs,
+          };
+          const retryCount = countRecentRetries(session.projectId, session.agentId);
+          const delayMs = calculateBackoffDelay(retryCount, backoffConfig);
+          api.logger.info(
+            `Clawforce: retry ${session.agentId} with ${Math.round(delayMs / 1000)}s backoff (attempt ${retryCount + 1})`,
+          );
+          emitDiagnosticEvent({
+            type: "retry_backoff",
+            agentId: session.agentId,
+            projectId: session.projectId,
+            retryCount,
+            delayMs,
           });
+          const retryPrompt = actionResult.retryPrompt;
+          const retrySessionKey = ctx.sessionKey;
+          setTimeout(async () => {
+            try {
+              await cliInjectMessage({
+                sessionKey: retrySessionKey,
+                message: retryPrompt,
+              });
+            } catch (err) {
+              api.logger.warn(
+                `Clawforce: retry inject failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }, delayMs);
         } catch (err) {
           api.logger.warn(
-            `Clawforce: retry inject failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`,
+            `Clawforce: retry backoff failed for ${session.agentId}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
         return;

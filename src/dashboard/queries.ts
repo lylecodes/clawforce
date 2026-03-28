@@ -8,7 +8,7 @@
 import { getActiveProjectIds } from "../lifecycle.js";
 import { getAgentConfig, getRegisteredAgentIds, getExtendedProjectConfig } from "../project.js";
 import { listTasks, getTask, getTaskEvidence, getTaskTransitions } from "../tasks/ops.js";
-import { queryAuditLog } from "../audit.js";
+import { listSessionArchives } from "../telemetry/session-archive.js";
 import { queryMetrics, aggregateMetrics } from "../metrics.js";
 import { getCostSummary } from "../cost.js";
 import { evaluateSlos } from "../monitoring/slo.js";
@@ -144,6 +144,7 @@ export function queryAgentDetail(projectId: string, agentId: string) {
     performancePolicy: entry.config.performance_policy,
     tasksCompleted,
     totalCostCents,
+    enforcementRetries: queryEnforcementRetries(projectId, { agentId }).retries,
   };
 }
 
@@ -192,19 +193,22 @@ export function queryTaskDetail(projectId: string, taskId: string) {
   return { task, evidence, transitions };
 }
 
-/** List audit entries. */
+/** List archived sessions. */
 export function querySessions(projectId: string, pagination?: PaginationParams) {
   const limit = pagination?.limit ?? 50;
+  const offset = pagination?.offset ?? 0;
 
-  const entries = queryAuditLog({
-    projectId,
+  const entries = listSessionArchives(projectId, {
     limit: limit + 1,
+    offset,
   });
 
   const hasMore = entries.length > limit;
+  const sessions = entries.slice(0, limit);
   return {
-    sessions: entries.slice(0, limit),
+    sessions,
     hasMore,
+    count: sessions.length,
   };
 }
 
@@ -401,17 +405,41 @@ export function queryAlerts(projectId: string) {
 /** Get org chart for a project. */
 export function queryOrgChart(projectId: string) {
   const allAgentIds = getRegisteredAgentIds();
+
+  // First pass: collect valid agent IDs for this project so we can validate
+  // reportsTo references. Without this, unresolved chains (e.g. referencing a
+  // deleted manager or using "parent") cause the frontend tree-building to
+  // produce an empty root set → blank page.
+  const projectAgentIds = new Set<string>();
+  for (const aid of allAgentIds) {
+    const entry = getAgentConfig(aid);
+    if (entry && entry.projectId === projectId) {
+      projectAgentIds.add(aid);
+    }
+  }
+
+  // Second pass: build the agent list with validated reportsTo
   const agents = allAgentIds
     .map((aid) => {
       const entry = getAgentConfig(aid);
       if (!entry || entry.projectId !== projectId) return null;
+
+      // Resolve reportsTo: keep it only if it references a real agent in this
+      // project. The special value "parent" means "use subagent auto-announce"
+      // which has no org-chart parent — treat as a root node.
+      const rawReportsTo = entry.config.reports_to;
+      const reportsTo =
+        rawReportsTo && rawReportsTo !== "parent" && projectAgentIds.has(rawReportsTo)
+          ? rawReportsTo
+          : undefined;
+
       return {
         id: aid,
         extends: entry.config.extends,
         title: entry.config.title,
         department: entry.config.department,
         team: entry.config.team,
-        reportsTo: entry.config.reports_to,
+        reportsTo,
         directReports: getDirectReports(projectId, aid),
       };
     })
@@ -925,5 +953,271 @@ export function queryMeetingDetail(projectId: string, meetingId: string) {
     // If meeting status fails (not a meeting channel, etc.), return basic channel info
     const transcript = buildChannelTranscript(projectId, meetingId);
     return { channel, transcript };
+  }
+}
+
+// ─── New table queries (MP-1) ──────────────────────────────────────────────────
+
+/** Query audit_log entries with optional filters. */
+export function queryAuditLog(
+  projectId: string,
+  filters?: { actor?: string; action?: string; targetType?: string },
+  pagination?: PaginationParams,
+) {
+  const limit = pagination?.limit ?? 50;
+  const offset = pagination?.offset ?? 0;
+  const db = getDb(projectId);
+
+  try {
+    const conditions = ["project_id = ?"];
+    const params: (string | number)[] = [projectId];
+
+    if (filters?.actor) {
+      conditions.push("actor = ?");
+      params.push(filters.actor);
+    }
+    if (filters?.action) {
+      conditions.push("action = ?");
+      params.push(filters.action);
+    }
+    if (filters?.targetType) {
+      conditions.push("target_type = ?");
+      params.push(filters.targetType);
+    }
+
+    const where = conditions.join(" AND ");
+    const countRow = db.prepare(
+      `SELECT COUNT(*) as cnt FROM audit_log WHERE ${where}`,
+    ).get(...params) as { cnt: number } | undefined;
+    const total = countRow?.cnt ?? 0;
+
+    const rows = db.prepare(
+      `SELECT id, actor, action, target_type, target_id, detail, created_at FROM audit_log WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    ).all(...params, limit, offset) as Array<{
+      id: string;
+      actor: string;
+      action: string;
+      target_type: string;
+      target_id: string;
+      detail: string | null;
+      created_at: number;
+    }>;
+
+    const entries = rows.map((r) => ({
+      id: r.id,
+      actor: r.actor,
+      action: r.action,
+      targetType: r.target_type,
+      targetId: r.target_id,
+      detail: r.detail ?? undefined,
+      createdAt: r.created_at,
+    }));
+
+    return { entries, total, count: entries.length, limit, offset };
+  } catch {
+    return { entries: [], total: 0, count: 0, limit, offset };
+  }
+}
+
+/** Query audit_runs entries with optional filters. */
+export function queryAuditRuns(
+  projectId: string,
+  filters?: { agentId?: string; status?: string },
+  pagination?: PaginationParams,
+) {
+  const limit = pagination?.limit ?? 50;
+  const offset = pagination?.offset ?? 0;
+  const db = getDb(projectId);
+
+  try {
+    const conditions = ["project_id = ?"];
+    const arParams: (string | number)[] = [projectId];
+
+    if (filters?.agentId) {
+      conditions.push("agent_id = ?");
+      arParams.push(filters.agentId);
+    }
+    if (filters?.status) {
+      conditions.push("status = ?");
+      arParams.push(filters.status);
+    }
+
+    const where = conditions.join(" AND ");
+    const countRow = db.prepare(
+      `SELECT COUNT(*) as cnt FROM audit_runs WHERE ${where}`,
+    ).get(...arParams) as { cnt: number } | undefined;
+    const total = countRow?.cnt ?? 0;
+
+    const rows = db.prepare(
+      `SELECT id, agent_id, session_key, status, summary, details, started_at, ended_at, duration_ms FROM audit_runs WHERE ${where} ORDER BY COALESCE(ended_at, started_at) DESC LIMIT ? OFFSET ?`,
+    ).all(...arParams, limit, offset) as Array<{
+      id: string;
+      agent_id: string;
+      session_key: string | null;
+      status: string;
+      summary: string | null;
+      details: string | null;
+      started_at: number | null;
+      ended_at: number | null;
+      duration_ms: number | null;
+    }>;
+
+    const runs = rows.map((r) => ({
+      id: r.id,
+      agentId: r.agent_id,
+      sessionKey: r.session_key ?? undefined,
+      status: r.status,
+      summary: r.summary ?? undefined,
+      details: r.details ?? undefined,
+      startedAt: r.started_at ?? undefined,
+      endedAt: r.ended_at ?? undefined,
+      durationMs: r.duration_ms ?? undefined,
+    }));
+
+    return { runs, total, count: runs.length, limit, offset };
+  } catch {
+    return { runs: [], total: 0, count: 0, limit, offset };
+  }
+}
+
+/** Query enforcement_retries entries. */
+export function queryEnforcementRetries(
+  projectId: string,
+  filters?: { agentId?: string },
+  pagination?: PaginationParams,
+) {
+  const limit = pagination?.limit ?? 50;
+  const offset = pagination?.offset ?? 0;
+  const db = getDb(projectId);
+
+  try {
+    const conditions = ["project_id = ?"];
+    const erParams: (string | number)[] = [projectId];
+
+    if (filters?.agentId) {
+      conditions.push("agent_id = ?");
+      erParams.push(filters.agentId);
+    }
+
+    const where = conditions.join(" AND ");
+    const countRow = db.prepare(
+      `SELECT COUNT(*) as cnt FROM enforcement_retries WHERE ${where}`,
+    ).get(...erParams) as { cnt: number } | undefined;
+    const total = countRow?.cnt ?? 0;
+
+    const rows = db.prepare(
+      `SELECT id, agent_id, session_key, attempted_at, outcome FROM enforcement_retries WHERE ${where} ORDER BY attempted_at DESC LIMIT ? OFFSET ?`,
+    ).all(...erParams, limit, offset) as Array<{
+      id: string;
+      agent_id: string;
+      session_key: string;
+      attempted_at: number;
+      outcome: string;
+    }>;
+
+    const retries = rows.map((r) => ({
+      id: r.id,
+      agentId: r.agent_id,
+      sessionKey: r.session_key,
+      attemptedAt: r.attempted_at,
+      outcome: r.outcome,
+    }));
+
+    return { retries, total, count: retries.length, limit, offset };
+  } catch {
+    return { retries: [], total: 0, count: 0, limit, offset };
+  }
+}
+
+/** Query onboarding_state key-value entries. */
+export function queryOnboardingState(projectId: string) {
+  const db = getDb(projectId);
+
+  try {
+    const rows = db.prepare(
+      "SELECT key, value, updated_at FROM onboarding_state WHERE project_id = ? ORDER BY updated_at DESC",
+    ).all(projectId) as Array<{
+      key: string;
+      value: string;
+      updated_at: number;
+    }>;
+
+    const entries = rows.map((r) => ({
+      key: r.key,
+      value: r.value,
+      updatedAt: r.updated_at,
+    }));
+
+    return { entries, count: entries.length };
+  } catch {
+    return { entries: [], count: 0 };
+  }
+}
+
+/** Query tracked_sessions (active enforcement sessions). */
+export function queryTrackedSessions(
+  projectId: string,
+  pagination?: PaginationParams,
+) {
+  const limit = pagination?.limit ?? 50;
+  const offset = pagination?.offset ?? 0;
+  const db = getDb(projectId);
+
+  try {
+    const countRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM tracked_sessions WHERE project_id = ?",
+    ).get(projectId) as { cnt: number } | undefined;
+    const total = countRow?.cnt ?? 0;
+
+    const rows = db.prepare(
+      "SELECT session_key, agent_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at FROM tracked_sessions WHERE project_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?",
+    ).all(projectId, limit, offset) as Array<{
+      session_key: string;
+      agent_id: string;
+      started_at: number;
+      requirements: string;
+      satisfied: string;
+      tool_call_count: number;
+      last_persisted_at: number;
+    }>;
+
+    const sessions = rows.map((r) => ({
+      sessionKey: r.session_key,
+      agentId: r.agent_id,
+      startedAt: r.started_at,
+      requirements: r.requirements,
+      satisfied: r.satisfied,
+      toolCallCount: r.tool_call_count,
+      lastPersistedAt: r.last_persisted_at,
+    }));
+
+    return { sessions, total, count: sessions.length, limit, offset };
+  } catch {
+    return { sessions: [], total: 0, count: 0, limit, offset };
+  }
+}
+
+/** Query worker_assignments (current agent-to-task mappings). */
+export function queryWorkerAssignments(projectId: string) {
+  const db = getDb(projectId);
+
+  try {
+    const rows = db.prepare(
+      "SELECT agent_id, task_id, assigned_at FROM worker_assignments WHERE project_id = ? ORDER BY assigned_at DESC",
+    ).all(projectId) as Array<{
+      agent_id: string;
+      task_id: string;
+      assigned_at: number;
+    }>;
+
+    const assignments = rows.map((r) => ({
+      agentId: r.agent_id,
+      taskId: r.task_id,
+      assignedAt: r.assigned_at,
+    }));
+
+    return { assignments, count: assignments.length };
+  } catch {
+    return { assignments: [], count: 0 };
   }
 }

@@ -268,6 +268,14 @@ export type SchedulingConfig = {
   maxTurnsPerCycle?: number;
 };
 
+/** OpenClaw bootstrap configuration for controlling session context injection. */
+export type BootstrapConfig = {
+  /** Max chars per individual bootstrap file. Default: 20000 (OpenClaw default). */
+  maxChars?: number;
+  /** Max total chars across all bootstrap files. Default: 150000 (OpenClaw default). */
+  totalMaxChars?: number;
+};
+
 /** Per-agent configuration. */
 export type AgentConfig = {
   /** Preset to inherit defaults from (e.g. "manager", "employee"). */
@@ -337,6 +345,26 @@ export type AgentConfig = {
     /** Minutes to wait before auto-re-enabling. Default: 10. */
     cooldown_minutes: number;
   };
+  /**
+   * OpenClaw bootstrap configuration for this agent's sessions.
+   * Controls how much workspace context gets injected at session start.
+   */
+  bootstrapConfig?: BootstrapConfig;
+  /**
+   * Bootstrap files to exclude from this agent's workspace.
+   * OpenClaw seeds files like AGENTS.md, HEARTBEAT.md, IDENTITY.md, BOOTSTRAP.md
+   * in each workspace. ClawForce agents that don't need them can exclude them
+   * to reduce token usage.
+   * Example: ["AGENTS.md", "HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"]
+   */
+  bootstrapExcludeFiles?: string[];
+  /**
+   * OpenClaw tools this agent is allowed to use (e.g. ["Bash", "Read", "Edit", "Write", "WebSearch"]).
+   * Controls the tools available in the agent's sessions, separate from
+   * ClawForce action scope (which controls ClawForce tool actions).
+   * When not set, all OpenClaw tools are available.
+   */
+  allowedTools?: string[];
 };
 
 /** A scoped session definition for an agent. */
@@ -545,6 +573,11 @@ export type WorkforceConfig = {
   knowledge?: KnowledgeConfig;
   /** Verification gates and git isolation configuration. */
   verification?: VerificationConfig;
+  /**
+   * Default bootstrap configuration applied to all agents in this project.
+   * Individual agent bootstrapConfig overrides these defaults.
+   */
+  bootstrapDefaults?: BootstrapConfig;
   /** Manager/orchestrator cron configuration. */
   manager?: {
     enabled: boolean;
@@ -597,6 +630,16 @@ export type SafetyConfig = {
   emergencyStop?: boolean;
   /** Max queued items per project. Prevents runaway task creation from flooding the queue. Default: 50. */
   maxQueueDepth?: number;
+  /** Max tool calls (LLM API calls) per session before session is killed. Default: 100. */
+  maxCallsPerSession?: number;
+  /** Max tool calls per minute across all active sessions (global). Default: 200. */
+  maxCallsPerMinute?: number;
+  /** Max tool calls per minute per agent. Default: 60. */
+  maxCallsPerMinutePerAgent?: number;
+  /** Base delay in ms for exponential backoff on retries. Default: 30000 (30s). */
+  retryBackoffBaseMs?: number;
+  /** Maximum delay in ms for exponential backoff on retries. Default: 600000 (10min). */
+  retryBackoffMaxMs?: number;
 };
 
 /** @deprecated Use WorkforceConfig instead. */
@@ -619,10 +662,8 @@ export type ReviewConfig = {
 // --- Channel types ---
 
 export type ChannelType = "topic" | "meeting";
-export const CHANNEL_TYPES: readonly ChannelType[] = ["topic", "meeting"] as const;
 
 export type ChannelStatus = "active" | "concluded" | "archived";
-export const CHANNEL_STATUSES: readonly ChannelStatus[] = ["active", "concluded", "archived"] as const;
 
 /** A persistent group communication channel. */
 export type Channel = {
@@ -769,16 +810,6 @@ export type EventType =
   | "goal_abandoned"
   | "custom";
 
-export const EVENT_TYPES: readonly EventType[] = [
-  "ci_failed", "pr_opened", "deploy_finished", "task_completed",
-  "task_failed", "task_assigned", "task_created", "sweep_finding",
-  "dispatch_succeeded", "dispatch_failed", "task_review_ready",
-  "dispatch_dead_letter", "proposal_approved", "proposal_created", "proposal_rejected", "message_sent",
-  "protocol_started", "protocol_responded", "protocol_completed", "protocol_expired", "protocol_escalated",
-  "goal_created", "goal_achieved", "goal_abandoned",
-  "custom",
-] as const;
-
 export type EventSource = "tool" | "internal" | "cron" | "webhook";
 
 export type EventStatus = "pending" | "processing" | "handled" | "failed" | "ignored";
@@ -818,12 +849,6 @@ export type DispatchQueueItem = {
   lastError?: string;
   createdAt: number;
   completedAt?: number;
-};
-
-export type TaskLease = {
-  holder: string;
-  acquiredAt: number;
-  expiresAt: number;
 };
 
 // --- Cost tracking types ---
@@ -919,18 +944,6 @@ export type PolicyDefinition = {
 export type PolicyCheckResult =
   | { allowed: true }
   | { allowed: false; reason: string; policyId: string };
-
-export type PolicyViolation = {
-  id: string;
-  projectId: string;
-  policyId: string;
-  agentId: string;
-  sessionKey?: string;
-  actionAttempted: string;
-  violationDetail: string;
-  outcome: string;
-  createdAt: number;
-};
 
 // --- Monitoring types ---
 
@@ -1040,10 +1053,6 @@ export const MESSAGE_PRIORITIES: readonly MessagePriority[] = [
 
 export type MessageStatus = "queued" | "delivered" | "read" | "failed";
 
-export const MESSAGE_STATUSES: readonly MessageStatus[] = [
-  "queued", "delivered", "read", "failed",
-] as const;
-
 export type Message = {
   id: string;
   fromAgent: string;
@@ -1071,18 +1080,9 @@ export type ProtocolStatus =
   | "awaiting_review" | "reviewed" | "approved" | "revision_requested"
   | "expired" | "escalated" | "cancelled";
 
-export const PROTOCOL_STATUSES: readonly ProtocolStatus[] = [
-  "awaiting_response", "resolved",
-  "pending_acceptance", "in_progress", "completed", "rejected",
-  "awaiting_review", "reviewed", "approved", "revision_requested",
-  "expired", "escalated", "cancelled",
-] as const;
-
 // --- Goal types ---
 
 export type GoalStatus = "active" | "achieved" | "abandoned";
-
-export const GOAL_STATUSES: readonly GoalStatus[] = ["active", "achieved", "abandoned"] as const;
 
 export type Goal = {
   id: string;
@@ -1394,8 +1394,6 @@ export type TriggerDefinition = {
 // --- Experiment framework types ---
 
 export type ExperimentState = "draft" | "running" | "paused" | "completed" | "cancelled";
-
-export const EXPERIMENT_STATES: readonly ExperimentState[] = ["draft", "running", "paused", "completed", "cancelled"] as const;
 
 export type ExperimentAssignmentStrategy =
   | { type: "random"; seed?: number }

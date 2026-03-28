@@ -64,6 +64,35 @@ describe("compliance tracker", () => {
 
     const session = getSession("sess1");
     expect(session!.metrics.errorCount).toBe(1);
+    expect(session!.metrics.exploratoryErrorCount).toBe(0);
+  });
+
+  it("excludes ENOENT errors from errorCount (counts as exploratory)", () => {
+    startTracking("sess1", "coder", "proj1", workerConfig);
+
+    // ENOENT read error — exploratory, not a real failure
+    recordToolCall("sess1", "Read", null, 50, false, "ENOENT: no such file or directory '/some/path'");
+    // "file not found" variant
+    recordToolCall("sess1", "Read", null, 50, false, "File not found: foo.ts");
+    // "does not exist" variant
+    recordToolCall("sess1", "Read", null, 50, false, "/bar/baz does not exist");
+    // Real error — should still count
+    recordToolCall("sess1", "Bash", null, 100, false, "Command failed: exit code 1");
+
+    const session = getSession("sess1");
+    expect(session!.metrics.errorCount).toBe(1);
+    expect(session!.metrics.exploratoryErrorCount).toBe(3);
+  });
+
+  it("counts errors without errorMessage as real errors", () => {
+    startTracking("sess1", "coder", "proj1", workerConfig);
+
+    // No errorMessage provided — counts as real error (backward compat)
+    recordToolCall("sess1", "Bash", null, 100, false);
+
+    const session = getSession("sess1");
+    expect(session!.metrics.errorCount).toBe(1);
+    expect(session!.metrics.exploratoryErrorCount).toBe(0);
   });
 
   it("tracks required call timings", () => {

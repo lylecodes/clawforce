@@ -383,8 +383,12 @@ async function dispatchItem(
     return;
   }
 
-  // Only dispatch tasks in dispatchable states
-  if (task.state !== "ASSIGNED" && task.state !== "IN_PROGRESS") {
+  // Only dispatch tasks in dispatchable states.
+  // REVIEW is dispatchable when a verifier agent is specified in the payload (verification dispatch).
+  // Normalize state for robustness with legacy lowercase rows (e.g. "assigned").
+  const normalizedState = String(task.state).toUpperCase();
+  const isVerifierDispatch = item.payload?.agentId && normalizedState === "REVIEW";
+  if (!isVerifierDispatch && normalizedState !== "ASSIGNED" && normalizedState !== "IN_PROGRESS") {
     failItem(item.id, `Task in non-dispatchable state: ${task.state}`, db, projectId);
     emitDispatchEvent(projectId, "dispatch_failed", item, { error: `Task in non-dispatchable state: ${task.state}` }, db);
     try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "non_dispatchable_state" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }

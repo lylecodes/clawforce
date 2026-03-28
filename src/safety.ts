@@ -9,11 +9,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "./db.js";
 import { getExtendedProjectConfig } from "./project.js";
 import type {
-  ContextOwnershipConfig,
   LifecycleConfig,
-  ManagerBehaviorConfig,
   SafetyConfig,
-  TelemetryConfig,
 } from "./types.js";
 
 // --- Defaults ---
@@ -30,6 +27,11 @@ const DEFAULTS: Required<SafetyConfig> = {
   maxConsecutiveFailures: 5,
   emergencyStop: false,
   maxQueueDepth: 50,
+  maxCallsPerSession: 100,
+  maxCallsPerMinute: 200,
+  maxCallsPerMinutePerAgent: 60,
+  retryBackoffBaseMs: 30_000,
+  retryBackoffMaxMs: 600_000,
 };
 
 export type SafetyCheckResult = { ok: true } | { ok: false; reason: string };
@@ -54,6 +56,11 @@ export function getSafetyConfig(projectId: string): Required<SafetyConfig> {
     maxConsecutiveFailures: userConfig.maxConsecutiveFailures ?? DEFAULTS.maxConsecutiveFailures,
     emergencyStop: userConfig.emergencyStop ?? DEFAULTS.emergencyStop,
     maxQueueDepth: userConfig.maxQueueDepth ?? DEFAULTS.maxQueueDepth,
+    maxCallsPerSession: userConfig.maxCallsPerSession ?? DEFAULTS.maxCallsPerSession,
+    maxCallsPerMinute: userConfig.maxCallsPerMinute ?? DEFAULTS.maxCallsPerMinute,
+    maxCallsPerMinutePerAgent: userConfig.maxCallsPerMinutePerAgent ?? DEFAULTS.maxCallsPerMinutePerAgent,
+    retryBackoffBaseMs: userConfig.retryBackoffBaseMs ?? DEFAULTS.retryBackoffBaseMs,
+    retryBackoffMaxMs: userConfig.retryBackoffMaxMs ?? DEFAULTS.retryBackoffMaxMs,
   };
 }
 
@@ -473,74 +480,3 @@ export function getEffectiveLifecycleConfig(projectId: string): Required<Lifecyc
   };
 }
 
-// --- Manager behavior config defaults ---
-
-const MANAGER_BEHAVIOR_DEFAULTS: Required<ManagerBehaviorConfig> = {
-  maxTasksPerPlanningSession: 10,
-  planningHorizonDays: 7,
-  escalationTrustThreshold: 0.3,
-};
-
-/**
- * Get the effective manager behavior config for a project, merging with defaults.
- */
-export function getEffectiveManagerBehaviorConfig(projectId: string): Required<ManagerBehaviorConfig> {
-  const ext = getExtendedProjectConfig(projectId);
-  const mb = ext?.managerBehavior;
-  if (!mb) return { ...MANAGER_BEHAVIOR_DEFAULTS };
-  return {
-    maxTasksPerPlanningSession: mb.maxTasksPerPlanningSession ?? MANAGER_BEHAVIOR_DEFAULTS.maxTasksPerPlanningSession,
-    planningHorizonDays: mb.planningHorizonDays ?? MANAGER_BEHAVIOR_DEFAULTS.planningHorizonDays,
-    escalationTrustThreshold: mb.escalationTrustThreshold ?? MANAGER_BEHAVIOR_DEFAULTS.escalationTrustThreshold,
-  };
-}
-
-// --- Telemetry config defaults ---
-
-const TELEMETRY_DEFAULTS: Required<TelemetryConfig> = {
-  archiveTranscripts: true,
-  captureToolIO: true,
-  toolIOTruncationLimit: 10_000,
-  retentionDays: 90,
-  trackConfigChanges: true,
-};
-
-/**
- * Get the effective telemetry config for a project, merging with defaults.
- */
-export function getEffectiveTelemetryConfig(projectId: string): Required<TelemetryConfig> {
-  const ext = getExtendedProjectConfig(projectId);
-  const tc = ext?.telemetry;
-  if (!tc) return { ...TELEMETRY_DEFAULTS };
-  return {
-    archiveTranscripts: tc.archiveTranscripts ?? TELEMETRY_DEFAULTS.archiveTranscripts,
-    captureToolIO: tc.captureToolIO ?? TELEMETRY_DEFAULTS.captureToolIO,
-    toolIOTruncationLimit: tc.toolIOTruncationLimit ?? TELEMETRY_DEFAULTS.toolIOTruncationLimit,
-    retentionDays: tc.retentionDays ?? TELEMETRY_DEFAULTS.retentionDays,
-    trackConfigChanges: tc.trackConfigChanges ?? TELEMETRY_DEFAULTS.trackConfigChanges,
-  };
-}
-
-// --- Context ownership config defaults ---
-
-const CONTEXT_OWNERSHIP_DEFAULTS: Required<ContextOwnershipConfig> = {
-  architecture: "any",
-  standards: "manager",
-  direction: "human",
-  policies: "human",
-};
-
-/**
- * Get the effective context ownership config for a project, merging with defaults.
- */
-export function getEffectiveContextOwnershipConfig(projectId: string): Required<ContextOwnershipConfig> {
-  const ext = getExtendedProjectConfig(projectId);
-  const co = ext?.contextOwnership;
-  if (!co) return { ...CONTEXT_OWNERSHIP_DEFAULTS };
-  return {
-    architecture: co.architecture ?? CONTEXT_OWNERSHIP_DEFAULTS.architecture,
-    standards: co.standards ?? CONTEXT_OWNERSHIP_DEFAULTS.standards,
-    direction: co.direction ?? CONTEXT_OWNERSHIP_DEFAULTS.direction,
-    policies: co.policies ?? CONTEXT_OWNERSHIP_DEFAULTS.policies,
-  };
-}

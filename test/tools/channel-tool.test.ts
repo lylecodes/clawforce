@@ -27,7 +27,6 @@ vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
 vi.mock("../../src/channels/notify.js", () => ({
   notifyChannelMessage: vi.fn(async () => {}),
   setChannelNotifier: vi.fn(),
-  getChannelNotifier: vi.fn(() => null),
   formatChannelMessage: vi.fn(() => ""),
   formatMeetingTranscript: vi.fn(() => ""),
 }));

@@ -238,6 +238,24 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
     if (s.maxMessageRate !== undefined && (s.maxMessageRate < 1 || !Number.isInteger(s.maxMessageRate))) {
       warnings.push({ level: "error", message: `safety.max_message_rate must be a positive integer, got ${s.maxMessageRate}.` });
     }
+    if (s.maxCallsPerSession !== undefined && (s.maxCallsPerSession < 1 || !Number.isInteger(s.maxCallsPerSession))) {
+      warnings.push({ level: "error", message: `safety.max_calls_per_session must be a positive integer, got ${s.maxCallsPerSession}.` });
+    }
+    if (s.maxCallsPerMinute !== undefined && (s.maxCallsPerMinute < 1 || !Number.isInteger(s.maxCallsPerMinute))) {
+      warnings.push({ level: "error", message: `safety.max_calls_per_minute must be a positive integer, got ${s.maxCallsPerMinute}.` });
+    }
+    if (s.maxCallsPerMinutePerAgent !== undefined && (s.maxCallsPerMinutePerAgent < 1 || !Number.isInteger(s.maxCallsPerMinutePerAgent))) {
+      warnings.push({ level: "error", message: `safety.max_calls_per_minute_per_agent must be a positive integer, got ${s.maxCallsPerMinutePerAgent}.` });
+    }
+    if (s.retryBackoffBaseMs !== undefined && s.retryBackoffBaseMs < 1000) {
+      warnings.push({ level: "error", message: `safety.retry_backoff_base_ms must be at least 1000ms, got ${s.retryBackoffBaseMs}.` });
+    }
+    if (s.retryBackoffMaxMs !== undefined && s.retryBackoffMaxMs < 1000) {
+      warnings.push({ level: "error", message: `safety.retry_backoff_max_ms must be at least 1000ms, got ${s.retryBackoffMaxMs}.` });
+    }
+    if (s.retryBackoffBaseMs !== undefined && s.retryBackoffMaxMs !== undefined && s.retryBackoffBaseMs > s.retryBackoffMaxMs) {
+      warnings.push({ level: "warn", message: `safety.retry_backoff_base_ms (${s.retryBackoffBaseMs}) exceeds retry_backoff_max_ms (${s.retryBackoffMaxMs}) — base will be clamped.` });
+    }
   }
 
   // Validate review config
@@ -367,8 +385,6 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
   return warnings;
 }
 
-/** @deprecated Use validateWorkforceConfig instead. */
-export const validateEnforcementConfig = validateWorkforceConfig;
 
 /**
  * Validate domain config quality — returns non-blocking suggestions.

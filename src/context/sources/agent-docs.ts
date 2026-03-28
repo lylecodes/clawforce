@@ -103,19 +103,83 @@ function generateCompactToolsSummary(scope: Record<string, unknown>): string {
 }
 
 /**
- * Resolve SOUL.md for an agent.
- * Returns the file contents if present, null otherwise (falls back to config.persona).
+ * Resolve SOUL.md for an agent with role-based layering.
+ *
+ * Resolution order:
+ *   1. `agents/{agentId}/SOUL.md` — agent-specific soul document
+ *   2. `SOUL-{role}.md` in the domain context dir — shared soul for all agents with this role
+ *
+ * Layering behavior:
+ *   - If both role and agent SOUL exist: concatenate (role first, then agent under a heading)
+ *   - If only agent SOUL exists: use it alone
+ *   - If only role SOUL exists: use it alone
+ *   - If neither exists: return null (falls back to config.persona)
+ *
+ * @param agentId - The agent identifier
+ * @param projectDir - The project directory (contains agents/ subdirectory)
+ * @param role - The agent's role from config.extends (e.g. "manager", "employee", "verifier")
  */
 export function resolveSoulDoc(
   agentId: string,
   projectDir: string | undefined,
+  role?: string,
 ): string | null {
   if (!projectDir) return null;
 
+  // 1. Try agent-specific SOUL.md
+  const agentSoul = resolveAgentSoulFile(agentId, projectDir);
+
+  // 2. Try role-based SOUL-{role}.md in context dir
+  const roleSoul = resolveRoleSoulFile(projectDir, role);
+
+  // Layering logic
+  if (roleSoul && agentSoul) {
+    // Both exist: concatenate role soul first, then agent soul
+    const combined = `${roleSoul}\n\n## Agent-Specific Context\n\n${agentSoul}`;
+    return combined.length > MAX_DOC_SIZE
+      ? combined.slice(0, MAX_DOC_SIZE) + "\n…(truncated)"
+      : combined;
+  }
+
+  if (agentSoul) return agentSoul;
+  if (roleSoul) return roleSoul;
+
+  return null;
+}
+
+/**
+ * Read agent-specific SOUL.md from agents/{agentId}/SOUL.md
+ */
+function resolveAgentSoulFile(agentId: string, projectDir: string): string | null {
   const agentDir = resolveAgentDir(agentId, projectDir);
   if (!agentDir) return null;
 
   const soulPath = path.join(agentDir, "SOUL.md");
+  try {
+    if (!fs.existsSync(soulPath)) return null;
+    const content = fs.readFileSync(soulPath, "utf-8").trim();
+    if (!content) return null;
+    return content.length > MAX_DOC_SIZE
+      ? content.slice(0, MAX_DOC_SIZE) + "\n…(truncated)"
+      : content;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read role-based SOUL-{role}.md from the context directory.
+ * The context dir is at the project root level (same as agents/).
+ */
+function resolveRoleSoulFile(projectDir: string, role?: string): string | null {
+  if (!role) return null;
+
+  // Guard against path traversal in role
+  if (role.includes("..") || role.includes("/") || role.includes("\\")) {
+    return null;
+  }
+
+  const soulPath = path.join(projectDir, `SOUL-${role}.md`);
   try {
     if (!fs.existsSync(soulPath)) return null;
     const content = fs.readFileSync(soulPath, "utf-8").trim();

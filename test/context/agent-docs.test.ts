@@ -158,6 +158,131 @@ describe("agent-docs resolvers", () => {
       expect(content!.length).toBeLessThan(15_000);
       expect(content).toContain("…(truncated)");
     });
+
+    // --- Per-role SOUL resolution ---
+
+    it("returns role SOUL when only SOUL-{role}.md exists", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "SOUL-manager.md"),
+        "You are a manager. You coordinate work across teams.",
+        "utf-8",
+      );
+
+      const content = resolveSoulDoc("some-agent", tmpDir, "manager");
+
+      expect(content).toBe("You are a manager. You coordinate work across teams.");
+    });
+
+    it("returns agent SOUL when only agent SOUL.md exists (no role SOUL)", () => {
+      const agentDir = path.join(tmpDir, "agents", "frontend-dev");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(agentDir, "SOUL.md"),
+        "Agent-specific persona.",
+        "utf-8",
+      );
+
+      const content = resolveSoulDoc("frontend-dev", tmpDir, "employee");
+
+      expect(content).toBe("Agent-specific persona.");
+    });
+
+    it("layers role SOUL and agent SOUL when both exist", () => {
+      // Role SOUL
+      fs.writeFileSync(
+        path.join(tmpDir, "SOUL-employee.md"),
+        "You are an employee. Follow standards and deliver quality work.",
+        "utf-8",
+      );
+
+      // Agent SOUL
+      const agentDir = path.join(tmpDir, "agents", "frontend-dev");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(agentDir, "SOUL.md"),
+        "Specializes in React and TypeScript. Prefers functional components.",
+        "utf-8",
+      );
+
+      const content = resolveSoulDoc("frontend-dev", tmpDir, "employee");
+
+      expect(content).not.toBeNull();
+      // Role SOUL comes first
+      expect(content).toContain("You are an employee. Follow standards and deliver quality work.");
+      // Separator heading
+      expect(content).toContain("## Agent-Specific Context");
+      // Agent SOUL comes after
+      expect(content).toContain("Specializes in React and TypeScript. Prefers functional components.");
+      // Verify ordering: role before agent
+      const roleIdx = content!.indexOf("You are an employee");
+      const agentIdx = content!.indexOf("Specializes in React");
+      expect(roleIdx).toBeLessThan(agentIdx);
+    });
+
+    it("returns null when neither role SOUL nor agent SOUL exist", () => {
+      const content = resolveSoulDoc("ghost-agent", tmpDir, "employee");
+      expect(content).toBeNull();
+    });
+
+    it("ignores role SOUL when role is undefined", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "SOUL-manager.md"),
+        "Manager role soul.",
+        "utf-8",
+      );
+
+      const content = resolveSoulDoc("some-agent", tmpDir, undefined);
+      // No agent SOUL and no role lookup → null
+      expect(content).toBeNull();
+    });
+
+    it("ignores role SOUL when role is undefined but returns agent SOUL", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "SOUL-manager.md"),
+        "Manager role soul.",
+        "utf-8",
+      );
+      const agentDir = path.join(tmpDir, "agents", "some-agent");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(path.join(agentDir, "SOUL.md"), "Agent soul only.", "utf-8");
+
+      const content = resolveSoulDoc("some-agent", tmpDir, undefined);
+      // Only agent SOUL, role SOUL not looked up
+      expect(content).toBe("Agent soul only.");
+    });
+
+    it("handles empty role SOUL file gracefully (falls back to agent only)", () => {
+      fs.writeFileSync(path.join(tmpDir, "SOUL-verifier.md"), "   \n  ", "utf-8");
+
+      const agentDir = path.join(tmpDir, "agents", "qa-agent");
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(path.join(agentDir, "SOUL.md"), "QA persona.", "utf-8");
+
+      const content = resolveSoulDoc("qa-agent", tmpDir, "verifier");
+      expect(content).toBe("QA persona.");
+    });
+
+    it("handles path traversal in role parameter", () => {
+      const content = resolveSoulDoc("some-agent", tmpDir, "../../etc");
+      expect(content).toBeNull();
+    });
+
+    it("truncates combined layered SOUL when it exceeds 10KB", () => {
+      // Role SOUL close to limit
+      const roleSoul = "R".repeat(6000);
+      fs.writeFileSync(path.join(tmpDir, "SOUL-employee.md"), roleSoul, "utf-8");
+
+      // Agent SOUL also large
+      const agentDir = path.join(tmpDir, "agents", "big-agent");
+      fs.mkdirSync(agentDir, { recursive: true });
+      const agentSoul = "A".repeat(6000);
+      fs.writeFileSync(path.join(agentDir, "SOUL.md"), agentSoul, "utf-8");
+
+      const content = resolveSoulDoc("big-agent", tmpDir, "employee");
+      // Combined would be > 12000 chars, should be truncated to MAX_DOC_SIZE (10240)
+      expect(content!.length).toBeLessThanOrEqual(10240 + 20); // +20 for truncation marker
+      expect(content).toContain("…(truncated)");
+    });
   });
 
   describe("path traversal protection", () => {

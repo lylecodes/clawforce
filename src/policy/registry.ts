@@ -76,32 +76,6 @@ export function getPolicies(
   );
 }
 
-/**
- * Toggle a policy enabled/disabled.
- */
-export function togglePolicy(
-  projectId: string,
-  policyId: string,
-  enabled: boolean,
-  dbOverride?: DatabaseSync,
-): boolean {
-  const db = dbOverride ?? getDb(projectId);
-  const now = Date.now();
-
-  const result = db.prepare(
-    "UPDATE policies SET enabled = ?, updated_at = ? WHERE id = ? AND project_id = ?",
-  ).run(enabled ? 1 : 0, now, policyId, projectId);
-
-  // Update cache
-  const cached = policyCache.get(projectId);
-  if (cached) {
-    const policy = cached.find((p) => p.id === policyId);
-    if (policy) policy.enabled = enabled;
-  }
-
-  return result.changes > 0;
-}
-
 /** Clear cache (for testing). */
 export function resetPolicyRegistryForTest(): void {
   policyCache.clear();

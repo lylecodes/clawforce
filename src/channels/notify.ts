@@ -23,10 +23,6 @@ export function setChannelNotifier(n: ChannelNotifier | null): void {
   notifier = n;
 }
 
-export function getChannelNotifier(): ChannelNotifier | null {
-  return notifier;
-}
-
 /**
  * Format a channel message for Telegram (Markdown V2 safe).
  */

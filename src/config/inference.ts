@@ -31,10 +31,3 @@ export function markInferred(agentId: string): void {
   inferredAgents.set(agentId, true);
 }
 
-export function wasInferred(agentId: string): boolean {
-  return inferredAgents.get(agentId) === true;
-}
-
-export function clearInferenceState(): void {
-  inferredAgents.clear();
-}

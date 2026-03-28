@@ -9,6 +9,8 @@
  * are preserved via a "user-wins" merge strategy.
  */
 
+import fs from "node:fs";
+import path from "node:path";
 import type { AgentConfig as ClawforceAgentConfig } from "./types.js";
 
 /** Minimal shape of an OpenClaw agent entry (config.agents.list[]). */
@@ -80,6 +82,14 @@ export function buildOpenClawAgentEntry(
     entry.model = { primary: config.model };
   }
 
+  // CO-1: Bootstrap config is stored in ClawForce config only.
+  // OpenClaw does not recognize bootstrapMaxChars/bootstrapTotalMaxChars fields.
+
+  // CO-3: Propagate allowed tools to OpenClaw agent entry
+  if (config.allowedTools && config.allowedTools.length > 0) {
+    entry.allowedTools = config.allowedTools;
+  }
+
   return entry;
 }
 
@@ -94,7 +104,7 @@ export function mergeAgentEntry(
   const merged = { ...existing };
 
   // Fields where ClawForce config wins over existing OpenClaw config
-  const CLAWFORCE_WINS = new Set(["model"]);
+  const CLAWFORCE_WINS = new Set(["model", "allowedTools"]);
 
   for (const key of Object.keys(incoming) as (keyof OpenClawAgentEntry)[]) {
     if (key === "id") continue; // id is always from existing
@@ -186,6 +196,83 @@ export async function syncAgentsToOpenClaw(params: SyncParams): Promise<SyncResu
       result.errors.push(msg);
       logger?.warn(`Clawforce agent sync: ${msg}`);
     }
+  }
+
+  return result;
+}
+
+/**
+ * CO-2: Clean up bootstrap files excluded by agent config.
+ *
+ * OpenClaw seeds workspace bootstrap files (AGENTS.md, HEARTBEAT.md, etc.)
+ * on first use. ClawForce agents that don't need them can exclude them via
+ * `bootstrapExcludeFiles`. This function removes those files from the workspace.
+ *
+ * Only deletes files whose basenames match VALID_BOOTSTRAP_NAMES to prevent
+ * accidental deletion of user files.
+ */
+const VALID_BOOTSTRAP_NAMES = new Set([
+  "AGENTS.md",
+  "SOUL.md",
+  "TOOLS.md",
+  "IDENTITY.md",
+  "USER.md",
+  "HEARTBEAT.md",
+  "BOOTSTRAP.md",
+  "MEMORY.md",
+  "MEMORIES.md",
+]);
+
+export type BootstrapCleanupResult = {
+  deleted: string[];
+  skipped: string[];
+  errors: string[];
+};
+
+export function cleanupBootstrapFiles(
+  workspaceDir: string,
+  excludeFiles: string[],
+): BootstrapCleanupResult {
+  const result: BootstrapCleanupResult = { deleted: [], skipped: [], errors: [] };
+
+  for (const fileName of excludeFiles) {
+    // Safety: only delete recognized bootstrap filenames
+    if (!VALID_BOOTSTRAP_NAMES.has(fileName)) {
+      result.skipped.push(fileName);
+      continue;
+    }
+
+    const filePath = path.join(workspaceDir, fileName);
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        result.deleted.push(fileName);
+      }
+    } catch (err) {
+      result.errors.push(`${fileName}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Clean up bootstrap files for all agents in a batch.
+ * Call after syncAgentsToOpenClaw to enforce bootstrap exclusions.
+ */
+export function cleanupAllBootstrapFiles(
+  agents: SyncAgentInput[],
+): BootstrapCleanupResult {
+  const result: BootstrapCleanupResult = { deleted: [], skipped: [], errors: [] };
+
+  for (const { agentId, config, projectDir } of agents) {
+    if (!config.bootstrapExcludeFiles || config.bootstrapExcludeFiles.length === 0) continue;
+    if (!projectDir) continue;
+
+    const agentResult = cleanupBootstrapFiles(projectDir, config.bootstrapExcludeFiles);
+    result.deleted.push(...agentResult.deleted.map(f => `${agentId}:${f}`));
+    result.skipped.push(...agentResult.skipped.map(f => `${agentId}:${f}`));
+    result.errors.push(...agentResult.errors.map(e => `${agentId}:${e}`));
   }
 
   return result;

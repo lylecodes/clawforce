@@ -18,6 +18,16 @@ export type ToolCallRecord = {
   success: boolean;
 };
 
+/** Patterns that indicate exploratory file-not-found errors (not real failures). */
+const EXPLORATORY_ERROR_PATTERNS = [
+  /ENOENT/i,
+  /no such file/i,
+  /file not found/i,
+  /does not exist/i,
+  /couldn't read/i,
+  /cannot find/i,
+];
+
 /** Full session metrics snapshot. */
 export type SessionMetrics = {
   startedAt: number;
@@ -26,6 +36,8 @@ export type SessionMetrics = {
   lastToolCallAt: number | null;
   requiredCallTimings: number[];
   errorCount: number;
+  /** Errors excluded from errorCount (ENOENT, file-not-found, etc.) — exploratory, not real failures. */
+  exploratoryErrorCount: number;
   significantResults: Array<{ toolName: string; action: string | null; resultPreview: string }>;
   toolCallBuffer: Array<{
     toolName: string;
@@ -89,6 +101,7 @@ export function startTracking(
       lastToolCallAt: null,
       requiredCallTimings: [],
       errorCount: 0,
+      exploratoryErrorCount: 0,
       significantResults: [],
       toolCallBuffer: [],
     },
@@ -104,6 +117,15 @@ export function startTracking(
 }
 
 /**
+ * Check if an error message indicates an exploratory file-not-found error.
+ * These are common during agent file exploration and should not count as real failures.
+ */
+function isExploratoryError(errorMessage: string | undefined): boolean {
+  if (!errorMessage) return false;
+  return EXPLORATORY_ERROR_PATTERNS.some((pattern) => pattern.test(errorMessage));
+}
+
+/**
  * Record a tool call.
  * Called from after_tool_call hook.
  */
@@ -113,6 +135,7 @@ export function recordToolCall(
   action: string | null,
   durationMs: number,
   success: boolean,
+  errorMessage?: string,
 ): void {
   const session = sessions.get(sessionKey);
   if (!session) return;
@@ -132,7 +155,11 @@ export function recordToolCall(
     session.metrics.firstToolCallAt = now;
   }
   if (!success) {
-    session.metrics.errorCount++;
+    if (isExploratoryError(errorMessage)) {
+      session.metrics.exploratoryErrorCount++;
+    } else {
+      session.metrics.errorCount++;
+    }
   }
 
   // Check if this satisfies any requirement (only successful calls count)

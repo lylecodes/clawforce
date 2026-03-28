@@ -20,10 +20,6 @@ export function setMessageNotifier(n: MessageNotifier | null): void {
   notifier = n;
 }
 
-export function getMessageNotifier(): MessageNotifier | null {
-  return notifier;
-}
-
 /**
  * Format a message notification for Telegram (Markdown V2 safe).
  */

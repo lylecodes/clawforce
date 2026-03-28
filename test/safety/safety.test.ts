@@ -43,6 +43,19 @@ describe("getSafetyDefaults", () => {
     expect(defaults.maxConcurrentMeetings).toBe(2);
     expect(defaults.maxMessageRate).toBe(60);
   });
+
+  it("includes rate limiting defaults", () => {
+    const defaults = getSafetyDefaults();
+    expect(defaults.maxCallsPerSession).toBe(100);
+    expect(defaults.maxCallsPerMinute).toBe(200);
+    expect(defaults.maxCallsPerMinutePerAgent).toBe(60);
+  });
+
+  it("includes retry backoff defaults", () => {
+    const defaults = getSafetyDefaults();
+    expect(defaults.retryBackoffBaseMs).toBe(30_000);
+    expect(defaults.retryBackoffMaxMs).toBe(600_000);
+  });
 });
 
 describe("checkSpawnDepth", () => {

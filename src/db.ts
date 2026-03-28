@@ -56,10 +56,6 @@ export function setDataDir(dir: string): void {
     : dir;
 }
 
-export function getDataDir(): string {
-  return dataDir;
-}
-
 export function getDbByDomain(domainId: string): DatabaseSync {
   const key = `domain:${domainId}`;
   const existing = databases.get(key);

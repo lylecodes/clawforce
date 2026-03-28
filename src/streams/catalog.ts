@@ -42,21 +42,3 @@ export function clearCatalog(): void {
   catalog.clear();
 }
 
-export function formatStreamCatalog(): string {
-  const streams = listStreams();
-  if (streams.length === 0) return "No streams registered.";
-
-  const lines = [`## Available Streams (${streams.length})`, ""];
-  for (const s of streams) {
-    const tag = s.builtIn ? "built-in" : "custom";
-    lines.push(`- **${s.name}** (${tag}): ${s.description}`);
-    if (s.params && s.params.length > 0) {
-      for (const p of s.params) {
-        const req = p.required ? " (required)" : "";
-        const def = p.default !== undefined ? ` [default: ${JSON.stringify(p.default)}]` : "";
-        lines.push(`  - \`${p.name}\` (${p.type}${req}${def}): ${p.description}`);
-      }
-    }
-  }
-  return lines.join("\n");
-}

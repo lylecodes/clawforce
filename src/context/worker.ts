@@ -109,16 +109,15 @@ export function buildWorkerContext(options: {
   // Instructions
   lines.push("## Instructions", "", instructions, "");
 
-  // Completion requirements
+  // Completion requirements — aligned with auto-lifecycle (no manual transitions)
   lines.push(
     "## Deliverables",
     "",
-    "When done, attach evidence of your work using the clawforce_task tool:",
-    "1. Use action `attach_evidence` with your output/results",
-    "2. Use action `transition` to move the task to REVIEW",
+    "Complete the task and end your session. The system automatically:",
+    "- Captures your tool outputs as evidence",
+    "- Transitions the task through its lifecycle",
     "",
-    "If you encounter a blocker, transition the task to BLOCKED with a reason.",
-    "If the task cannot be completed, transition to FAILED with a reason.",
+    "End with a clear summary of what you accomplished and anything the reviewer should check.",
   );
 
   return {
