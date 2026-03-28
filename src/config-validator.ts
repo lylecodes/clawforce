@@ -14,6 +14,42 @@ import { EVENT_ACTION_TYPES, OPERATIONAL_PROFILES } from "./types.js";
 const VALID_RISK_TIERS: RiskTier[] = ["low", "medium", "high", "critical"];
 const VALID_GATE_ACTIONS: RiskGateAction[] = ["none", "delay", "confirm", "approval", "human_approval"];
 
+/**
+ * All valid briefing source names — derived from the ContextSource union type
+ * and the assembler switch statement. Keep in sync when new sources are added.
+ */
+export const VALID_BRIEFING_SOURCES: ReadonlySet<string> = new Set([
+  "instructions", "custom", "project_md", "task_board", "assigned_task",
+  "knowledge", "file", "skill", "memory", "memory_instructions",
+  "memory_review_context", "escalations", "workflows", "activity",
+  "sweep_status", "proposals", "agent_status", "cost_summary",
+  "policy_status", "health_status", "team_status", "team_performance",
+  "soul", "tools_reference", "pending_messages", "goal_hierarchy",
+  "channel_messages", "planning_delta", "velocity", "preferences",
+  "trust_scores", "resources", "initiative_status", "cost_forecast",
+  "available_capacity", "knowledge_candidates", "budget_guidance",
+  "onboarding_welcome", "weekly_digest", "intervention_suggestions",
+  "custom_stream", "observed_events", "direction", "policies",
+  "standards", "architecture", "task_creation_standards",
+  "execution_standards", "review_standards", "rejection_standards",
+  "worker_findings", "recent_decisions", "clawforce_health_report",
+]);
+
+/**
+ * All known ClawForce tools — derived from DEFAULT_ACTION_SCOPES in profiles.ts.
+ */
+export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
+  "clawforce_task", "clawforce_verify", "clawforce_message",
+  "clawforce_context", "clawforce_experiment", "clawforce_ops",
+  "clawforce_memory", "clawforce_skill", "clawforce_knowledge",
+  "clawforce_scale", "clawforce_workflow", "clawforce_channel",
+  "clawforce_goal", "clawforce_log",
+]);
+
+const VALID_PERFORMANCE_ACTIONS = new Set([
+  "retry", "alert", "terminate_and_alert", "disable", "escalate",
+]);
+
 export type ConfigWarning = {
   level: "warn" | "error" | "suggest";
   agentId?: string;
@@ -421,6 +457,75 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
             level: "warn",
             agentId,
             message: `Expectation references tool "${exp.tool}" which is not in allowedTools — expectation may never be satisfied.`,
+          });
+        }
+      }
+    }
+
+    // Validate expectation tool names against known tools
+    for (const exp of agentConfig.expectations) {
+      if (!KNOWN_TOOLS.has(exp.tool) && !exp.tool.startsWith("memory_")) {
+        warnings.push({
+          level: "warn",
+          agentId,
+          message: `Expectation references unknown tool "${exp.tool}" — may be a typo.`,
+        });
+      }
+    }
+
+    // Validate performance_policy action
+    if (agentConfig.performance_policy?.action && !VALID_PERFORMANCE_ACTIONS.has(agentConfig.performance_policy.action)) {
+      warnings.push({
+        level: "warn",
+        agentId,
+        message: `Performance policy action "${agentConfig.performance_policy.action}" is not recognized — valid: ${[...VALID_PERFORMANCE_ACTIONS].join(", ")}.`,
+      });
+    }
+
+    // Validate briefing sources against known sources
+    for (const source of agentConfig.briefing) {
+      const sourceName = typeof source === "string" ? source : source.source;
+      if (sourceName && !VALID_BRIEFING_SOURCES.has(sourceName)) {
+        warnings.push({
+          level: "warn",
+          agentId,
+          message: `Briefing source "${sourceName}" is not a known source — may be a typo.`,
+        });
+      }
+    }
+
+    // Validate job-level fields
+    if (agentConfig.jobs) {
+      for (const [jobName, job] of Object.entries(agentConfig.jobs)) {
+        // Job briefing source validation
+        if (job.briefing) {
+          for (const source of job.briefing) {
+            const sourceName = typeof source === "string" ? source : source.source;
+            if (sourceName && !VALID_BRIEFING_SOURCES.has(sourceName)) {
+              warnings.push({
+                level: "warn",
+                agentId,
+                message: `Job "${jobName}" briefing source "${sourceName}" is not a known source — may be a typo.`,
+              });
+            }
+          }
+        }
+
+        // Job frequency validation
+        if (job.frequency && !/^\d+\/(hour|day|week)$/.test(job.frequency)) {
+          warnings.push({
+            level: "warn",
+            agentId,
+            message: `Job "${jobName}" has invalid frequency "${job.frequency}" — must be "N/period" where period is hour, day, or week.`,
+          });
+        }
+
+        // Job performance_policy action validation
+        if (job.performance_policy?.action && !VALID_PERFORMANCE_ACTIONS.has(job.performance_policy.action)) {
+          warnings.push({
+            level: "warn",
+            agentId,
+            message: `Job "${jobName}" performance policy action "${job.performance_policy.action}" is not recognized — valid: ${[...VALID_PERFORMANCE_ACTIONS].join(", ")}.`,
           });
         }
       }

@@ -424,6 +424,276 @@ describe("config validation", () => {
       w.message.includes("nonexistent_source") && w.message.includes("unknown"),
     )).toBe(true);
   });
+
+  // --- Briefing source validation ---
+
+  it("warns on misspelled briefing source", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "employee",
+          briefing: [{ source: "assinged_task" as any }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.level === "warn" && w.message.includes("assinged_task") && w.message.includes("not a known source"),
+    )).toBe(true);
+  });
+
+  it("does not warn on valid briefing sources", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "employee",
+          briefing: [
+            { source: "instructions" },
+            { source: "assigned_task" },
+            { source: "task_board" },
+            { source: "soul" },
+          ],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(warnings.filter((w) => w.message.includes("not a known source"))).toHaveLength(0);
+  });
+
+  it("warns on misspelled job briefing source", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "manager",
+          coordination: { enabled: true },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          jobs: {
+            review: {
+              cron: "0 18 * * *",
+              briefing: [{ source: "teem_performance" as any }],
+            },
+          },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.level === "warn" && w.message.includes("teem_performance") && w.message.includes("not a known source"),
+    )).toBe(true);
+  });
+
+  // --- Job field validation ---
+
+  it("warns on invalid job frequency format", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "manager",
+          coordination: { enabled: true },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          jobs: {
+            sweep: {
+              frequency: "5 times daily",
+            },
+          },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.message.includes("invalid frequency") && w.message.includes("5 times daily"),
+    )).toBe(true);
+  });
+
+  it("does not warn on valid frequency N/period", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "manager",
+          coordination: { enabled: true },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          jobs: {
+            sweep: { frequency: "3/day" },
+            check: { frequency: "1/hour" },
+            weekly: { frequency: "2/week" },
+          },
+        },
+      },
+    });
+
+    expect(warnings.filter((w) => w.message.includes("invalid frequency"))).toHaveLength(0);
+  });
+
+  it("warns on unknown delivery mode in jobs", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "manager",
+          coordination: { enabled: true },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          jobs: {
+            sweep: {
+              delivery: { mode: "email" as any },
+            },
+          },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.message.includes("invalid delivery mode") && w.message.includes("email"),
+    )).toBe(true);
+  });
+
+  it("warns on unrecognized job performance_policy action", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "manager",
+          coordination: { enabled: true },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          jobs: {
+            sweep: {
+              performance_policy: { action: "punish" as any },
+            },
+          },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.message.includes("not recognized") && w.message.includes("punish"),
+    )).toBe(true);
+  });
+
+  // --- Expectation tool validation ---
+
+  it("warns when expectation references unknown tool", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "employee",
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_logg", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.level === "warn" && w.message.includes("clawforce_logg") && w.message.includes("unknown tool"),
+    )).toBe(true);
+  });
+
+  it("does not warn on valid expectation tools", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "employee",
+          briefing: [{ source: "instructions" }],
+          expectations: [
+            { tool: "clawforce_log", action: "write", min_calls: 1 },
+            { tool: "memory_search", action: "search", min_calls: 1 },
+            { tool: "clawforce_task", action: "propose", min_calls: 1 },
+          ],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(warnings.filter((w) => w.message.includes("unknown tool"))).toHaveLength(0);
+  });
+
+  // --- Performance policy action validation ---
+
+  it("warns on unrecognized agent performance_policy action", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "employee",
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "nuke" as any },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.message.includes("not recognized") && w.message.includes("nuke"),
+    )).toBe(true);
+  });
+
+  // --- Cron format validation ---
+
+  it("recognizes valid cron formats", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "manager",
+          coordination: { enabled: true },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          jobs: {
+            a: { cron: "5m" },
+            b: { cron: "1h" },
+            c: { cron: "0 9 * * MON" },
+            d: { cron: "at:2025-12-31T23:59:00Z" },
+            e: { cron: "cron:0 */5 * * *" },
+          },
+        },
+      },
+    });
+
+    expect(warnings.filter((w) => w.message.includes("unrecognized cron format"))).toHaveLength(0);
+  });
+
+  it("warns on unrecognized cron format", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        agent1: {
+          extends: "manager",
+          coordination: { enabled: true },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_log", action: "write", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+          jobs: {
+            bad: { cron: "every tuesday" },
+          },
+        },
+      },
+    });
+
+    expect(warnings.some((w) =>
+      w.message.includes("unrecognized cron format") && w.message.includes("every tuesday"),
+    )).toBe(true);
+  });
 });
 
 describe("escalation cycle detection", () => {

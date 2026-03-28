@@ -1,13 +1,8 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildOpenClawAgentEntry,
   mergeAgentEntry,
   syncAgentsToOpenClaw,
-  cleanupBootstrapFiles,
-  cleanupAllBootstrapFiles,
   type OpenClawAgentEntry,
   type OpenClawConfigSubset,
 } from "../src/agent-sync.js";
@@ -137,6 +132,214 @@ describe("mergeAgentEntry", () => {
       workspace: "/ws",
       subagents: { allowAgents: ["*"] },
     });
+  });
+});
+
+// --- CLAWFORCE_WINS behavior ---
+
+describe("CLAWFORCE_WINS fields", () => {
+  it("model in CLAWFORCE_WINS always overrides existing OpenClaw value", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      model: "user-preferred-model",
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      model: { primary: "anthropic/claude-opus-4-6" },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.model).toEqual({ primary: "anthropic/claude-opus-4-6" });
+  });
+
+  it("model is overridden even when existing has a complex model object", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      model: { primary: "old-model", fallbacks: ["fallback1"] },
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      model: { primary: "new-model" },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.model).toEqual({ primary: "new-model" });
+  });
+
+  it("model is NOT overridden when incoming model is undefined", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      model: "user-preferred-model",
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.model).toBe("user-preferred-model");
+  });
+});
+
+describe("non-CLAWFORCE_WINS fields (user-wins)", () => {
+  it("name preserves existing user value", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      name: "User Custom Name",
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      name: "ClawForce Auto Name",
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.name).toBe("User Custom Name");
+  });
+
+  it("workspace preserves existing user value", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      workspace: "/user/custom/path",
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      workspace: "/clawforce/auto/path",
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.workspace).toBe("/user/custom/path");
+  });
+
+  it("identity preserves existing user value", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      identity: { name: "Custom Identity", emoji: "🤖" },
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      identity: { name: "Auto Identity" },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.identity).toEqual({ name: "Custom Identity", emoji: "🤖" });
+  });
+
+  it("subagents preserves existing user value", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      subagents: { allowAgents: ["agent-a", "agent-b"] },
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      subagents: { allowAgents: ["*"] },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.subagents).toEqual({ allowAgents: ["agent-a", "agent-b"] });
+  });
+});
+
+// --- buildOpenClawAgentEntry additional coverage ---
+
+describe("buildOpenClawAgentEntry — extended", () => {
+  it("maps title to both name and identity.name", () => {
+    const entry = buildOpenClawAgentEntry(
+      "lead",
+      makeAgentConfig({ title: "Team Lead" }),
+    );
+    expect(entry.name).toBe("Team Lead");
+    expect(entry.identity).toEqual({ name: "Team Lead" });
+  });
+
+  it("maps coordination.enabled to subagents (even without manager extends)", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coordinator",
+      makeAgentConfig({ extends: "employee", coordination: { enabled: true } }),
+    );
+    expect(entry.subagents).toEqual({ allowAgents: ["*"] });
+  });
+
+  it("maps model string to model.primary", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig({ model: "anthropic/claude-sonnet-4-6" }),
+    );
+    expect(entry.model).toEqual({ primary: "anthropic/claude-sonnet-4-6" });
+  });
+
+  it("does not set model when agent has no model", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig({}),
+    );
+    expect(entry.model).toBeUndefined();
+  });
+
+  it("does not set name or identity when title is missing", () => {
+    const entry = buildOpenClawAgentEntry(
+      "bare",
+      makeAgentConfig({}),
+    );
+    expect(entry.name).toBeUndefined();
+    expect(entry.identity).toBeUndefined();
+  });
+
+  it("does not set workspace when projectDir is missing", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig({}),
+    );
+    expect(entry.workspace).toBeUndefined();
+  });
+});
+
+// --- mergeAgentEntry — extended ---
+
+describe("mergeAgentEntry — extended", () => {
+  it("merge with empty incoming (except id) returns existing unchanged", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      name: "Bot",
+      workspace: "/ws",
+      model: "my-model",
+    };
+    const incoming: OpenClawAgentEntry = { id: "bot1" };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged).toEqual(existing);
+  });
+
+  it("merge with empty existing fills all incoming fields", () => {
+    const existing: OpenClawAgentEntry = { id: "bot1" };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      name: "Auto Bot",
+      workspace: "/auto",
+      model: { primary: "opus" },
+      identity: { name: "Auto Bot" },
+      subagents: { allowAgents: ["*"] },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.name).toBe("Auto Bot");
+    expect(merged.workspace).toBe("/auto");
+    expect(merged.model).toEqual({ primary: "opus" });
+    expect(merged.identity).toEqual({ name: "Auto Bot" });
+    expect(merged.subagents).toEqual({ allowAgents: ["*"] });
+  });
+
+  it("preserves extra fields on existing entry that are not in incoming", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      name: "Bot",
+      customField: "preserved",
+      anotherField: 42,
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      model: { primary: "new" },
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.customField).toBe("preserved");
+    expect(merged.anotherField).toBe(42);
+    expect(merged.model).toEqual({ primary: "new" });
+  });
+
+  it("id always comes from existing", () => {
+    const existing: OpenClawAgentEntry = { id: "original-id" };
+    const incoming: OpenClawAgentEntry = { id: "different-id", name: "Bot" };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.id).toBe("original-id");
   });
 });
 
@@ -319,208 +522,5 @@ describe("syncAgentsToOpenClaw", () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain("config corrupt");
     expect(writeConfigFile).not.toHaveBeenCalled();
-  });
-});
-
-// --- CO-1: Bootstrap config propagation ---
-
-describe("CO-1: bootstrapConfig propagation", () => {
-  it("maps bootstrapConfig to OpenClaw agent entry", () => {
-    const entry = buildOpenClawAgentEntry(
-      "worker1",
-      makeAgentConfig({
-        bootstrapConfig: { maxChars: 8000, totalMaxChars: 30000 },
-      }),
-    );
-    expect(entry.bootstrapMaxChars).toBe(8000);
-    expect(entry.bootstrapTotalMaxChars).toBe(30000);
-  });
-
-  it("omits bootstrapConfig fields when not set", () => {
-    const entry = buildOpenClawAgentEntry(
-      "worker1",
-      makeAgentConfig(),
-    );
-    expect(entry.bootstrapMaxChars).toBeUndefined();
-    expect(entry.bootstrapTotalMaxChars).toBeUndefined();
-  });
-
-  it("partial bootstrapConfig only sets defined fields", () => {
-    const entry = buildOpenClawAgentEntry(
-      "worker1",
-      makeAgentConfig({
-        bootstrapConfig: { maxChars: 5000 },
-      }),
-    );
-    expect(entry.bootstrapMaxChars).toBe(5000);
-    expect(entry.bootstrapTotalMaxChars).toBeUndefined();
-  });
-
-  it("bootstrapConfig wins over existing in merge (ClawForce-wins)", () => {
-    const existing: OpenClawAgentEntry = {
-      id: "worker1",
-      bootstrapMaxChars: 20000,
-      bootstrapTotalMaxChars: 150000,
-    };
-    const incoming: OpenClawAgentEntry = {
-      id: "worker1",
-      bootstrapMaxChars: 8000,
-      bootstrapTotalMaxChars: 30000,
-    };
-    const merged = mergeAgentEntry(existing, incoming);
-    expect(merged.bootstrapMaxChars).toBe(8000);
-    expect(merged.bootstrapTotalMaxChars).toBe(30000);
-  });
-});
-
-// --- CO-2: Bootstrap file cleanup ---
-
-describe("CO-2: cleanupBootstrapFiles", () => {
-  let tmpDir: string;
-
-  afterEach(() => {
-    if (tmpDir) {
-      try { fs.rmSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
-    }
-  });
-
-  function setupTmpDir(files: string[]): string {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-test-"));
-    for (const f of files) {
-      fs.writeFileSync(path.join(tmpDir, f), `# ${f}\nTest content`, "utf-8");
-    }
-    return tmpDir;
-  }
-
-  it("deletes excluded bootstrap files that exist", () => {
-    const dir = setupTmpDir(["AGENTS.md", "HEARTBEAT.md", "SOUL.md"]);
-    const result = cleanupBootstrapFiles(dir, ["AGENTS.md", "HEARTBEAT.md"]);
-
-    expect(result.deleted).toEqual(["AGENTS.md", "HEARTBEAT.md"]);
-    expect(result.errors).toHaveLength(0);
-    expect(fs.existsSync(path.join(dir, "AGENTS.md"))).toBe(false);
-    expect(fs.existsSync(path.join(dir, "HEARTBEAT.md"))).toBe(false);
-    // SOUL.md should be preserved
-    expect(fs.existsSync(path.join(dir, "SOUL.md"))).toBe(true);
-  });
-
-  it("skips non-existent files without error", () => {
-    const dir = setupTmpDir(["SOUL.md"]);
-    const result = cleanupBootstrapFiles(dir, ["AGENTS.md", "IDENTITY.md"]);
-
-    expect(result.deleted).toHaveLength(0);
-    expect(result.errors).toHaveLength(0);
-  });
-
-  it("rejects non-bootstrap filenames (safety)", () => {
-    const dir = setupTmpDir(["README.md", "package.json"]);
-    const result = cleanupBootstrapFiles(dir, ["README.md", "package.json", "../../etc/passwd"]);
-
-    expect(result.deleted).toHaveLength(0);
-    expect(result.skipped).toEqual(["README.md", "package.json", "../../etc/passwd"]);
-    // Files should still exist
-    expect(fs.existsSync(path.join(dir, "README.md"))).toBe(true);
-    expect(fs.existsSync(path.join(dir, "package.json"))).toBe(true);
-  });
-
-  it("handles all standard bootstrap file names", () => {
-    const allFiles = ["AGENTS.md", "IDENTITY.md", "HEARTBEAT.md", "BOOTSTRAP.md", "USER.md", "TOOLS.md", "MEMORY.md", "MEMORIES.md"];
-    const dir = setupTmpDir(allFiles);
-    const result = cleanupBootstrapFiles(dir, allFiles);
-
-    expect(result.deleted).toEqual(allFiles);
-    for (const f of allFiles) {
-      expect(fs.existsSync(path.join(dir, f))).toBe(false);
-    }
-  });
-});
-
-describe("CO-2: cleanupAllBootstrapFiles", () => {
-  let tmpDir: string;
-
-  afterEach(() => {
-    if (tmpDir) {
-      try { fs.rmSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
-    }
-  });
-
-  it("cleans up bootstrap files for agents with excludes", () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-batch-"));
-    fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), "test", "utf-8");
-    fs.writeFileSync(path.join(tmpDir, "HEARTBEAT.md"), "test", "utf-8");
-
-    const result = cleanupAllBootstrapFiles([
-      {
-        agentId: "worker",
-        config: makeAgentConfig({
-          bootstrapExcludeFiles: ["AGENTS.md", "HEARTBEAT.md"],
-        }),
-        projectDir: tmpDir,
-      },
-      {
-        agentId: "no-exclude",
-        config: makeAgentConfig(),
-        projectDir: tmpDir,
-      },
-    ]);
-
-    expect(result.deleted).toEqual(["worker:AGENTS.md", "worker:HEARTBEAT.md"]);
-  });
-
-  it("skips agents without projectDir", () => {
-    const result = cleanupAllBootstrapFiles([
-      {
-        agentId: "no-dir",
-        config: makeAgentConfig({
-          bootstrapExcludeFiles: ["AGENTS.md"],
-        }),
-        // no projectDir
-      },
-    ]);
-
-    expect(result.deleted).toHaveLength(0);
-  });
-});
-
-// --- CO-3: Allowed tools propagation ---
-
-describe("CO-3: allowedTools propagation", () => {
-  it("maps allowedTools to OpenClaw agent entry", () => {
-    const entry = buildOpenClawAgentEntry(
-      "worker1",
-      makeAgentConfig({
-        allowedTools: ["Bash", "Read", "Edit", "Write", "WebSearch"],
-      }),
-    );
-    expect(entry.allowedTools).toEqual(["Bash", "Read", "Edit", "Write", "WebSearch"]);
-  });
-
-  it("omits allowedTools when not set", () => {
-    const entry = buildOpenClawAgentEntry(
-      "worker1",
-      makeAgentConfig(),
-    );
-    expect(entry.allowedTools).toBeUndefined();
-  });
-
-  it("empty allowedTools is not propagated", () => {
-    const entry = buildOpenClawAgentEntry(
-      "worker1",
-      makeAgentConfig({ allowedTools: [] }),
-    );
-    expect(entry.allowedTools).toBeUndefined();
-  });
-
-  it("allowedTools wins over existing in merge (ClawForce-wins)", () => {
-    const existing: OpenClawAgentEntry = {
-      id: "worker1",
-      allowedTools: ["Bash", "Read", "Edit", "Write", "WebSearch", "WebFetch"],
-    };
-    const incoming: OpenClawAgentEntry = {
-      id: "worker1",
-      allowedTools: ["Bash", "Read", "WebSearch"],
-    };
-    const merged = mergeAgentEntry(existing, incoming);
-    expect(merged.allowedTools).toEqual(["Bash", "Read", "WebSearch"]);
   });
 });

@@ -30,11 +30,18 @@ export type GlobalDefaults = {
 /** Supported adapter backends for ClawForce dispatch. */
 export type AdapterType = "openclaw" | "claude-code";
 
+/** A named mixin: a reusable partial agent config applied via `mixins: [name]`. */
+export type MixinDef = {
+  /** Other mixins this mixin itself includes (allows composition). */
+  mixins?: string[];
+  [key: string]: unknown;
+};
+
 export type GlobalConfig = {
   defaults?: GlobalDefaults;
   agents: Record<string, GlobalAgentDef>;
   /** Reusable behavior bundles that agents can compose via `mixins: [name]`. */
-  mixins?: Record<string, Partial<GlobalAgentDef>>;
+  mixins?: Record<string, MixinDef>;
   /** Adapter backend to use for dispatch (default: "openclaw"). */
   adapter?: AdapterType;
   /** Claude Code adapter configuration (used when adapter is "claude-code"). */

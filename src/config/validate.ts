@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { safeLog } from "../diagnostics.js";
+import { VALID_BRIEFING_SOURCES, KNOWN_TOOLS } from "../config-validator.js";
 
 // --- Types ---
 
@@ -203,11 +204,161 @@ export function validateAllConfigs(baseDir: string): ValidationReport {
           }
         }
       }
+
+      // --- Type coercion checks ---
+      if ("skillCap" in agentDef && typeof agentDef.skillCap === "string") {
+        issues.push({
+          severity: "error",
+          file: "project.yaml",
+          path: `agents.${agentId}.skillCap`,
+          agentId,
+          code: "TYPE_COERCION",
+          message: `Agent ${agentId}: skillCap must be a number, got string "${agentDef.skillCap}"`,
+        });
+      }
+
+      if ("contextBudgetChars" in agentDef && typeof agentDef.contextBudgetChars === "string") {
+        issues.push({
+          severity: "error",
+          file: "project.yaml",
+          path: `agents.${agentId}.contextBudgetChars`,
+          agentId,
+          code: "TYPE_COERCION",
+          message: `Agent ${agentId}: contextBudgetChars must be a number, got string "${agentDef.contextBudgetChars}"`,
+        });
+      }
+
+      if ("maxTurnsPerSession" in agentDef && typeof agentDef.maxTurnsPerSession === "string") {
+        issues.push({
+          severity: "error",
+          file: "project.yaml",
+          path: `agents.${agentId}.maxTurnsPerSession`,
+          agentId,
+          code: "TYPE_COERCION",
+          message: `Agent ${agentId}: maxTurnsPerSession must be a number, got string "${agentDef.maxTurnsPerSession}"`,
+        });
+      }
+
+      // --- Briefing source validation ---
+      const briefing = agentDef.briefing ?? agentDef.context_in;
+      if (Array.isArray(briefing)) {
+        for (const entry of briefing) {
+          if (entry && typeof entry === "object" && "source" in entry) {
+            const src = (entry as Record<string, unknown>).source;
+            if (typeof src === "string" && !VALID_BRIEFING_SOURCES.has(src)) {
+              issues.push({
+                severity: "warn",
+                file: "project.yaml",
+                path: `agents.${agentId}.briefing`,
+                agentId,
+                code: "UNKNOWN_BRIEFING_SOURCE",
+                message: `Agent ${agentId}: briefing source "${src}" is not a known source — may be a typo`,
+              });
+            }
+          }
+        }
+      }
+
+      // --- Expectation tool validation ---
+      const expectations = agentDef.expectations ?? agentDef.required_outputs;
+      if (Array.isArray(expectations)) {
+        for (const exp of expectations) {
+          if (exp && typeof exp === "object" && "tool" in exp) {
+            const tool = (exp as Record<string, unknown>).tool;
+            if (typeof tool === "string" && !KNOWN_TOOLS.has(tool) && !tool.startsWith("memory_")) {
+              issues.push({
+                severity: "warn",
+                file: "project.yaml",
+                path: `agents.${agentId}.expectations`,
+                agentId,
+                code: "UNKNOWN_EXPECTATION_TOOL",
+                message: `Agent ${agentId}: expectation references unknown tool "${tool}"`,
+              });
+            }
+          }
+        }
+      }
+
+      // --- Job validation ---
+      const jobs = agentDef.jobs as Record<string, Record<string, unknown>> | undefined;
+      if (jobs && typeof jobs === "object") {
+        for (const [jobName, job] of Object.entries(jobs)) {
+          if (!job || typeof job !== "object") continue;
+
+          // Job briefing source validation
+          const jobBriefing = job.briefing as unknown[];
+          if (Array.isArray(jobBriefing)) {
+            for (const entry of jobBriefing) {
+              if (entry && typeof entry === "object" && "source" in (entry as Record<string, unknown>)) {
+                const src = (entry as Record<string, unknown>).source;
+                if (typeof src === "string" && !VALID_BRIEFING_SOURCES.has(src)) {
+                  issues.push({
+                    severity: "warn",
+                    file: "project.yaml",
+                    path: `agents.${agentId}.jobs.${jobName}.briefing`,
+                    agentId,
+                    code: "UNKNOWN_BRIEFING_SOURCE",
+                    message: `Agent ${agentId}, job "${jobName}": briefing source "${src}" is not a known source — may be a typo`,
+                  });
+                }
+              }
+            }
+          }
+
+          // Job frequency validation
+          const freq = job.frequency;
+          if (typeof freq === "string" && !/^\d+\/(hour|day|week)$/.test(freq)) {
+            issues.push({
+              severity: "warn",
+              file: "project.yaml",
+              path: `agents.${agentId}.jobs.${jobName}.frequency`,
+              agentId,
+              code: "INVALID_FREQUENCY",
+              message: `Agent ${agentId}, job "${jobName}": invalid frequency "${freq}" — must be "N/period" where period is hour, day, or week`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // --- Global type coercion checks ---
+  if (Array.isArray(parsed.agents)) {
+    issues.push({
+      severity: "error",
+      file: "project.yaml",
+      path: "agents",
+      code: "TYPE_COERCION",
+      message: "agents must be an object/map, got array",
+    });
+  } else if (parsed.agents !== undefined && typeof parsed.agents !== "object") {
+    issues.push({
+      severity: "error",
+      file: "project.yaml",
+      path: "agents",
+      code: "TYPE_COERCION",
+      message: `agents must be an object/map, got ${typeof parsed.agents}`,
+    });
+  }
+
+  // Check for number agent IDs (YAML parses `123:` as a number key)
+  if (agents && typeof agents === "object") {
+    for (const key of Object.keys(agents)) {
+      if (/^\d+$/.test(key)) {
+        issues.push({
+          severity: "warn",
+          file: "project.yaml",
+          path: `agents.${key}`,
+          agentId: key,
+          code: "NUMERIC_AGENT_ID",
+          message: `Agent ID "${key}" is numeric — YAML may have coerced this from an unquoted number. Use a string ID.`,
+        });
+      }
     }
   }
 
   // Validate mixins section
-  const mixins = parsed.mixins as Record<string, unknown> | undefined;
+  const mixins = parsed.mixins as Record<string, Record<string, unknown>> | undefined;
   if (mixins !== undefined) {
     if (typeof mixins !== "object" || mixins === null || Array.isArray(mixins)) {
       issues.push({
@@ -217,6 +368,20 @@ export function validateAllConfigs(baseDir: string): ValidationReport {
         code: "INVALID_MIXINS",
         message: "mixins must be an object mapping mixin names to config fragments",
       });
+    } else {
+      // Check for circular mixin references
+      for (const mixinName of Object.keys(mixins)) {
+        const cycle = detectMixinCycle(mixinName, mixins, []);
+        if (cycle) {
+          issues.push({
+            severity: "error",
+            file: "project.yaml",
+            path: `mixins.${mixinName}`,
+            code: "CIRCULAR_MIXIN",
+            message: `Circular mixin reference: ${cycle}`,
+          });
+        }
+      }
     }
   }
 
@@ -355,6 +520,34 @@ export function validateAllConfigs(baseDir: string): ValidationReport {
 }
 
 // --- Helpers ---
+
+/**
+ * Detect circular mixin references by walking the mixin.mixins graph.
+ * Returns the cycle chain as a string if found, null otherwise.
+ */
+function detectMixinCycle(
+  name: string,
+  allMixins: Record<string, Record<string, unknown>>,
+  path: string[],
+): string | null {
+  if (path.includes(name)) {
+    return [...path, name].join(" → ");
+  }
+
+  const mixin = allMixins[name];
+  if (!mixin) return null;
+
+  const nested = mixin.mixins;
+  if (!Array.isArray(nested)) return null;
+
+  for (const child of nested) {
+    if (typeof child !== "string") continue;
+    const cycle = detectMixinCycle(child, allMixins, [...path, name]);
+    if (cycle) return cycle;
+  }
+
+  return null;
+}
 
 function requireYaml(): { parse: (s: string) => unknown } | null {
   try {

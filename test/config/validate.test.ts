@@ -167,4 +167,198 @@ domain:
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i => i.code === "ORCHESTRATOR_NOT_IN_DOMAIN")).toBe(true);
   });
+
+  // --- Briefing source validation ---
+
+  it("warns on unknown agent briefing source", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  lead:
+    extends: manager
+    briefing:
+      - source: assinged_task
+      - source: instructions
+domain:
+  agents: [lead]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "UNKNOWN_BRIEFING_SOURCE" && i.message.includes("assinged_task"))).toBe(true);
+  });
+
+  it("does not warn on valid briefing sources", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  lead:
+    extends: manager
+    briefing:
+      - source: assigned_task
+      - source: instructions
+      - source: task_board
+domain:
+  agents: [lead]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "UNKNOWN_BRIEFING_SOURCE")).toBe(false);
+  });
+
+  it("warns on unknown job briefing source", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  lead:
+    extends: manager
+    jobs:
+      review:
+        cron: "0 18 * * *"
+        briefing:
+          - source: teem_status
+domain:
+  agents: [lead]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "UNKNOWN_BRIEFING_SOURCE" && i.message.includes("teem_status"))).toBe(true);
+  });
+
+  // --- Expectation tool validation ---
+
+  it("warns on unknown expectation tool", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  worker:
+    extends: employee
+    expectations:
+      - tool: clawforce_logg
+        action: write
+        min_calls: 1
+domain:
+  agents: [worker]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "UNKNOWN_EXPECTATION_TOOL" && i.message.includes("clawforce_logg"))).toBe(true);
+  });
+
+  it("does not warn on valid expectation tools", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  worker:
+    extends: employee
+    expectations:
+      - tool: clawforce_log
+        action: write
+        min_calls: 1
+      - tool: memory_search
+        action: search
+        min_calls: 1
+domain:
+  agents: [worker]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "UNKNOWN_EXPECTATION_TOOL")).toBe(false);
+  });
+
+  // --- Job field validation ---
+
+  it("warns on invalid job frequency format", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  lead:
+    extends: manager
+    jobs:
+      sweep:
+        frequency: "5 times daily"
+domain:
+  agents: [lead]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "INVALID_FREQUENCY" && i.message.includes("5 times daily"))).toBe(true);
+  });
+
+  it("does not warn on valid frequency formats", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  lead:
+    extends: manager
+    jobs:
+      sweep:
+        frequency: "3/day"
+      check:
+        frequency: "1/hour"
+      weekly:
+        frequency: "2/week"
+domain:
+  agents: [lead]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "INVALID_FREQUENCY")).toBe(false);
+  });
+
+  // --- Type coercion edge cases ---
+
+  it("errors when skillCap is a string", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  lead:
+    extends: manager
+    skillCap: "10"
+domain:
+  agents: [lead]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "TYPE_COERCION" && i.message.includes("skillCap"))).toBe(true);
+  });
+
+  it("errors when contextBudgetChars is a string", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  lead:
+    extends: manager
+    contextBudgetChars: "30000"
+domain:
+  agents: [lead]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "TYPE_COERCION" && i.message.includes("contextBudgetChars"))).toBe(true);
+  });
+
+  it("warns on numeric agent IDs", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  123:
+    extends: employee
+domain:
+  agents: ["123"]
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "NUMERIC_AGENT_ID")).toBe(true);
+  });
+
+  it("errors when agents is an array instead of object", () => {
+    writeYaml(`
+version: "1"
+project_id: test
+agents:
+  - extends: employee
+`);
+    const report = validateAllConfigs(tmpDir);
+    expect(report.issues.some(i => i.code === "TYPE_COERCION" && i.message.includes("agents") && i.message.includes("array"))).toBe(true);
+  });
 });

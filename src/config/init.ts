@@ -14,7 +14,7 @@ import { registerWorkforceConfig } from "../project.js";
 import { resolveConfig, deepMerge, BUILTIN_AGENT_PRESETS, mergeConfigLayer } from "../presets.js";
 import { safeLog } from "../diagnostics.js";
 import type { AgentConfig, ContextSource, Expectation, PerformancePolicy, WorkforceConfig } from "../types.js";
-import type { GlobalConfig, DomainConfig, GlobalAgentDef } from "./schema.js";
+import type { GlobalConfig, DomainConfig, GlobalAgentDef, MixinDef } from "./schema.js";
 import { inferPreset, markInferred } from "./inference.js";
 import { resolveConditionals } from "./conditionals.js";
 import { normalizeDomainProfile } from "../profiles/operational.js";
@@ -364,15 +364,52 @@ function seedGoals(projectId: string, goals: Record<string, GoalConfigEntry>): v
  */
 
 /**
+ * Resolve a single mixin by name, recursively resolving any nested `mixins` it includes.
+ * Detects circular references by tracking the current resolution path.
+ */
+function resolveMixin(
+  name: string,
+  allMixins: Record<string, MixinDef>,
+  path: string[] = [],
+): Record<string, unknown> {
+  if (path.includes(name)) {
+    safeLog("mixin-cycle", `Circular mixin reference detected: ${[...path, name].join(" → ")}`);
+    return {}; // graceful degradation — skip the cycle
+  }
+
+  const mixin = allMixins[name];
+  if (!mixin) return {}; // validation catches missing refs separately
+
+  const currentPath = [...path, name];
+
+  // Start with an empty base, then layer in nested mixins first
+  let resolved: Record<string, unknown> = {};
+
+  if (mixin.mixins && Array.isArray(mixin.mixins)) {
+    for (const nested of mixin.mixins) {
+      const nestedResolved = resolveMixin(nested, allMixins, currentPath);
+      resolved = { ...resolved, ...nestedResolved };
+    }
+  }
+
+  // Apply this mixin's own fields on top (its fields win over nested mixins)
+  const { mixins: _, ...ownFields } = mixin;
+  resolved = { ...resolved, ...ownFields };
+
+  return resolved;
+}
+
+/**
  * Apply named mixins to a resolved agent config.
  *
  * Merge order: resolved preset base -> mixin1 -> mixin2 -> ... -> agent overrides.
  * Agent's own explicit fields always win over mixin values.
+ * Circular mixin references are detected and gracefully skipped.
  */
 export function applyMixins(
   resolved: Record<string, unknown>,
   agentDef: GlobalAgentDef,
-  mixinDefs?: Record<string, Partial<GlobalAgentDef>>,
+  mixinDefs?: Record<string, MixinDef> | Record<string, Partial<GlobalAgentDef>>,
 ): Record<string, unknown> {
   const mixinNames = agentDef.mixins;
   if (!mixinNames || mixinNames.length === 0 || !mixinDefs) return resolved;
@@ -383,10 +420,8 @@ export function applyMixins(
   // Apply each mixin left-to-right on top of the resolved preset
   let result = resolved;
   for (const name of mixinNames) {
-    const mixin = mixinDefs[name];
-    if (!mixin) continue; // validation catches missing refs separately
-    const { mixins: _mx, ...mixinFields } = mixin;
-    result = deepMerge(result, mixinFields as Record<string, unknown>);
+    const mixinResolved = resolveMixin(name, mixinDefs as Record<string, MixinDef>);
+    result = deepMerge(result, mixinResolved);
   }
 
   // Re-apply agent's own fields so they always override mixin values
