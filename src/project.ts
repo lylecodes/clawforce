@@ -18,6 +18,7 @@ import { applyProfile } from "./profiles.js";
 import { BUILTIN_AGENT_PRESETS } from "./presets.js";
 import { normalizeAgentConfig as resolveAliases } from "./config/aliases.js";
 import { registerCustomSkills } from "./skills/registry.js";
+import { toNamespacedAgentId, parseNamespacedAgentId } from "./agent-sync.js";
 import type {
   AgentConfig,
   AlertRuleDefinition,
@@ -1410,6 +1411,14 @@ type AgentConfigEntry = {
 
 const agentConfigRegistry = new Map<string, AgentConfigEntry>();
 
+/**
+ * Namespace alias map: namespaced ID → bare ID.
+ * When OpenClaw sends a namespaced agentId (e.g. "clawforce-dev:cf-lead") via hooks,
+ * this map lets getAgentConfig resolve it to the canonical bare entry.
+ * Kept separate from agentConfigRegistry so getRegisteredAgentIds() only returns bare IDs.
+ */
+const namespacedAliases = new Map<string, string>();
+
 /** Approval policies keyed by projectId. */
 const approvalPolicies = new Map<string, ApprovalPolicy>();
 
@@ -1451,6 +1460,9 @@ export function registerWorkforceConfig(
 ): void {
   for (const [agentId, config] of Object.entries(wfConfig.agents)) {
     agentConfigRegistry.set(agentId, { projectId, config, projectDir });
+    // Register a namespace alias so OpenClaw hook callbacks (which receive
+    // the namespaced ID like "clawforce-dev:cf-lead") can resolve the agent
+    namespacedAliases.set(toNamespacedAgentId(projectId, agentId), agentId);
   }
   if (wfConfig.approval) {
     approvalPolicies.set(projectId, wfConfig.approval);
@@ -1534,9 +1546,28 @@ export function registerWorkforceConfig(
 /** @deprecated Use registerWorkforceConfig instead. */
 export const registerEnforcementConfig = registerWorkforceConfig;
 
-/** Look up agent config by agent ID. */
+/**
+ * Look up agent config by agent ID.
+ *
+ * Accepts both bare IDs ("cf-lead") and namespaced IDs ("clawforce-dev:cf-lead").
+ * When a namespaced ID is provided and not found directly, resolves via the
+ * namespace alias map or falls back to parsing the bare portion.
+ */
 export function getAgentConfig(agentId: string): AgentConfigEntry | null {
-  return agentConfigRegistry.get(agentId) ?? null;
+  // Direct lookup (bare ID)
+  const direct = agentConfigRegistry.get(agentId);
+  if (direct) return direct;
+
+  // Try namespace alias map (namespaced ID → bare ID → entry)
+  const bareId = namespacedAliases.get(agentId);
+  if (bareId) return agentConfigRegistry.get(bareId) ?? null;
+
+  // Last resort: parse the namespaced ID and try the bare portion
+  const parsed = parseNamespacedAgentId(agentId);
+  if (parsed) {
+    return agentConfigRegistry.get(parsed.agentId) ?? null;
+  }
+  return null;
 }
 
 /** Get approval policy for a project. */
@@ -1552,6 +1583,7 @@ export function getRegisteredAgentIds(): string[] {
 /** Clear all registrations (for testing). */
 export function resetEnforcementConfigForTest(): void {
   agentConfigRegistry.clear();
+  namespacedAliases.clear();
   approvalPolicies.clear();
   projectExtendedConfig.clear();
 }
@@ -1559,6 +1591,9 @@ export function resetEnforcementConfigForTest(): void {
 /**
  * Register a single agent into the config registry at runtime.
  * Used by adaptation flows (e.g. agent hiring) to spin up new agents.
+ *
+ * Registers both a bare ID entry and a namespace alias so the agent is
+ * reachable from both internal ClawForce code and OpenClaw hooks.
  */
 export function registerAgentInProject(
   projectId: string,
@@ -1567,4 +1602,5 @@ export function registerAgentInProject(
   projectDir?: string,
 ): void {
   agentConfigRegistry.set(agentId, { projectId, config, projectDir });
+  namespacedAliases.set(toNamespacedAgentId(projectId, agentId), agentId);
 }

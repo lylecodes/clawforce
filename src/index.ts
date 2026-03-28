@@ -8,7 +8,7 @@
 
 // --- Lifecycle & Configuration ---
 export { initClawforce, shutdownClawforce, getActiveProjectIds, registerProject, unregisterProject, isClawforceInitialized, registerDomain, unregisterDomain, getActiveDomainIds } from "./lifecycle.js";
-export { syncAgentsToOpenClaw, buildOpenClawAgentEntry, cleanupBootstrapFiles, cleanupAllBootstrapFiles } from "./agent-sync.js";
+export { syncAgentsToOpenClaw, buildOpenClawAgentEntry, cleanupBootstrapFiles, cleanupAllBootstrapFiles, toNamespacedAgentId, parseNamespacedAgentId, isNamespacedAgentId } from "./agent-sync.js";
 export {
   getAgentConfig,
   initProject,

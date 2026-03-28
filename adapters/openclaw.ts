@@ -122,7 +122,7 @@ import {
   resolveProjectDir,
 } from "../src/project.js";
 import { getEffectiveLifecycleConfig, getSafetyConfig } from "../src/safety.js";
-import { syncAgentsToOpenClaw } from "../src/agent-sync.js";
+import { syncAgentsToOpenClaw, toNamespacedAgentId } from "../src/agent-sync.js";
 import { approveProposal, listPendingProposals, rejectProposal } from "../src/approval/resolve.js";
 import { resolveApprovalChannel } from "../src/approval/channel-router.js";
 import {
@@ -2156,12 +2156,13 @@ const clawforcePlugin = {
         }
 
         // Sync agents to OpenClaw's agents.list so they're addressable
+        // Each agent gets namespaced with its domain (projectId) to prevent collisions
         const agentIds = getRegisteredAgentIds();
         const agentsToSync = agentIds
           .map((id) => {
             const entry = getAgentConfig(id);
             if (!entry) return null;
-            return { agentId: id, config: entry.config, projectDir: entry.projectDir };
+            return { agentId: id, config: entry.config, projectDir: entry.projectDir, domain: entry.projectId };
           })
           .filter((e): e is NonNullable<typeof e> => e !== null);
 
@@ -2191,7 +2192,7 @@ const clawforcePlugin = {
                 .map((id) => {
                   const entry = getAgentConfig(id);
                   if (!entry) return null;
-                  return { agentId: id, config: entry.config, projectDir: entry.projectDir };
+                  return { agentId: id, config: entry.config, projectDir: entry.projectDir, domain: entry.projectId };
                 })
                 .filter((e): e is NonNullable<typeof e> => e !== null);
               if (reloadedAgents.length > 0) {
@@ -2229,6 +2230,8 @@ const clawforcePlugin = {
             const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
             const delayMs = 10_000 + (staggerIndex * staggerSec * 1000);
             staggerIndex++;
+            // Namespace the agent ID for OpenClaw's cron service
+            const namespacedAgId = toNamespacedAgentId(ent.projectId, agId);
             setTimeout(async () => {
               const cronService = getCronService();
               if (!cronService) {
@@ -2238,16 +2241,16 @@ const clawforcePlugin = {
               try {
                 const { toCronJobCreate: toCron } = await import("../src/manager-cron.js");
                 const input = toCron({
-                  name: `continuous:${agId}:${jobName}:${Date.now()}`,
+                  name: `continuous:${namespacedAgId}:${jobName}:${Date.now()}`,
                   schedule: `at:${new Date().toISOString()}`,
-                  agentId: agId,
+                  agentId: namespacedAgId,
                   payload: taggedMessage,
                   sessionTarget: "isolated",
                   wakeMode: "now",
                   deleteAfterRun: true,
                 });
                 await cronService.add(input);
-                api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${agId} (isolated session)`);
+                api.logger.info(`Clawforce: continuous job "${jobName}" auto-started for ${namespacedAgId} (isolated session)`);
               } catch (err) {
                 api.logger.warn(`Clawforce: continuous job auto-start failed for ${agId}/${jobName}: ${err instanceof Error ? err.message : String(err)}`);
               }
@@ -2313,13 +2316,14 @@ const clawforcePlugin = {
         }
 
         // Sync clawforce agents to OpenClaw config (agents.list[])
+        // Each agent gets namespaced with its domain (projectId) to prevent collisions
         if (cfg.syncAgents) {
           const agentIds = getRegisteredAgentIds();
           const agentsToSync = agentIds
             .map((id) => {
               const entry = getAgentConfig(id);
               if (!entry) return null;
-              return { agentId: id, config: entry.config, projectDir: entry.projectDir };
+              return { agentId: id, config: entry.config, projectDir: entry.projectDir, domain: entry.projectId };
             })
             .filter((e): e is NonNullable<typeof e> => e !== null);
 

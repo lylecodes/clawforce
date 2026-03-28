@@ -52,11 +52,13 @@ export class ConfigNamespace {
    * Calls initializeAllDomains on the resolved base directory, which reads
    * `config.yaml` + `domains/*.yaml` and registers all agents and domains.
    */
-  load(configPath: string): void {
+  load(configPath?: string): void {
+    // Default to ~/.clawforce if no path provided
+    const resolvedPath = configPath ?? path.join(process.env.HOME ?? "/tmp", ".clawforce");
     // If the caller passes a YAML file path, treat its parent dir as baseDir.
-    const baseDir = configPath.endsWith(".yaml")
-      ? path.dirname(configPath)
-      : configPath;
+    const baseDir = resolvedPath.endsWith(".yaml")
+      ? path.dirname(resolvedPath)
+      : resolvedPath;
 
     initializeAllDomains(baseDir);
   }

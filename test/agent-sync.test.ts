@@ -3,6 +3,9 @@ import {
   buildOpenClawAgentEntry,
   mergeAgentEntry,
   syncAgentsToOpenClaw,
+  toNamespacedAgentId,
+  parseNamespacedAgentId,
+  isNamespacedAgentId,
   type OpenClawAgentEntry,
   type OpenClawConfigSubset,
 } from "../src/agent-sync.js";
@@ -522,5 +525,243 @@ describe("syncAgentsToOpenClaw", () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain("config corrupt");
     expect(writeConfigFile).not.toHaveBeenCalled();
+  });
+});
+
+// --- Namespace utilities ---
+
+describe("toNamespacedAgentId", () => {
+  it("builds domain:agentId format", () => {
+    expect(toNamespacedAgentId("demo-company", "backend")).toBe("demo-company:backend");
+  });
+
+  it("returns as-is when already namespaced with the same domain", () => {
+    expect(toNamespacedAgentId("demo-company", "demo-company:backend")).toBe("demo-company:backend");
+  });
+
+  it("double-namespaces when domain differs", () => {
+    // This is correct — if you pass a different domain, it wraps again
+    expect(toNamespacedAgentId("other", "demo-company:backend")).toBe("other:demo-company:backend");
+  });
+});
+
+describe("parseNamespacedAgentId", () => {
+  it("parses domain:agentId into parts", () => {
+    const result = parseNamespacedAgentId("demo-company:backend");
+    expect(result).toEqual({ domain: "demo-company", agentId: "backend" });
+  });
+
+  it("returns null for bare IDs (no separator)", () => {
+    expect(parseNamespacedAgentId("backend")).toBeNull();
+  });
+
+  it("returns null for empty string", () => {
+    expect(parseNamespacedAgentId("")).toBeNull();
+  });
+
+  it("returns null for trailing colon", () => {
+    expect(parseNamespacedAgentId("domain:")).toBeNull();
+  });
+
+  it("returns null for leading colon", () => {
+    expect(parseNamespacedAgentId(":agentId")).toBeNull();
+  });
+
+  it("handles multi-colon IDs (parses on first colon)", () => {
+    const result = parseNamespacedAgentId("domain:agent:extra");
+    expect(result).toEqual({ domain: "domain", agentId: "agent:extra" });
+  });
+});
+
+describe("isNamespacedAgentId", () => {
+  it("returns true for namespaced IDs", () => {
+    expect(isNamespacedAgentId("demo-company:backend")).toBe(true);
+  });
+
+  it("returns false for bare IDs", () => {
+    expect(isNamespacedAgentId("backend")).toBe(false);
+  });
+
+  it("returns false for leading colon", () => {
+    expect(isNamespacedAgentId(":backend")).toBe(false);
+  });
+
+  it("returns false for trailing colon", () => {
+    expect(isNamespacedAgentId("domain:")).toBe(false);
+  });
+});
+
+// --- buildOpenClawAgentEntry with domain ---
+
+describe("buildOpenClawAgentEntry — namespace isolation", () => {
+  it("namespaces agent ID when domain is provided", () => {
+    const entry = buildOpenClawAgentEntry(
+      "backend",
+      makeAgentConfig({ title: "Backend Dev" }),
+      "/proj",
+      "demo-company",
+    );
+    expect(entry.id).toBe("demo-company:backend");
+    expect(entry.clawforce_domain).toBe("demo-company");
+    expect(entry.name).toBe("Backend Dev");
+  });
+
+  it("does not namespace when domain is omitted", () => {
+    const entry = buildOpenClawAgentEntry(
+      "backend",
+      makeAgentConfig({ title: "Backend Dev" }),
+    );
+    expect(entry.id).toBe("backend");
+    expect(entry.clawforce_domain).toBeUndefined();
+  });
+
+  it("clawforce-dev domain namespaces correctly", () => {
+    const entry = buildOpenClawAgentEntry(
+      "cf-lead",
+      makeAgentConfig({ extends: "manager", coordination: { enabled: true }, title: "CF Lead" }),
+      "/clawforce",
+      "clawforce-dev",
+    );
+    expect(entry.id).toBe("clawforce-dev:cf-lead");
+    expect(entry.clawforce_domain).toBe("clawforce-dev");
+    expect(entry.subagents).toEqual({ allowAgents: ["*"] });
+  });
+
+  it("preserves all other fields when domain is provided", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig({ model: "anthropic/claude-sonnet-4-6", allowedTools: ["Read", "Write"] }),
+      "/workspace",
+      "my-domain",
+    );
+    expect(entry.id).toBe("my-domain:coder");
+    expect(entry.workspace).toBe("/workspace");
+    expect(entry.model).toEqual({ primary: "anthropic/claude-sonnet-4-6" });
+    expect(entry.allowedTools).toEqual(["Read", "Write"]);
+    expect(entry.clawforce_domain).toBe("my-domain");
+  });
+});
+
+// --- syncAgentsToOpenClaw with domain namespacing ---
+
+describe("syncAgentsToOpenClaw — namespace isolation", () => {
+  function makeMocks(initialConfig: OpenClawConfigSubset = {}) {
+    const config = structuredClone(initialConfig);
+    const loadConfig = vi.fn(() => config);
+    const writeConfigFile = vi.fn(async () => {});
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    return { config, loadConfig, writeConfigFile, logger };
+  }
+
+  it("syncs agents with namespaced IDs when domain is provided", async () => {
+    const { loadConfig, writeConfigFile, logger } = makeMocks({});
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "backend", config: makeAgentConfig({ title: "Backend" }), domain: "demo-company" },
+        { agentId: "frontend", config: makeAgentConfig({ title: "Frontend" }), domain: "demo-company" },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.synced).toBe(2);
+    expect(result.collisions).toHaveLength(0);
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written.agents!.list![0]!.id).toBe("demo-company:backend");
+    expect(written.agents!.list![0]!.clawforce_domain).toBe("demo-company");
+    expect(written.agents!.list![1]!.id).toBe("demo-company:frontend");
+  });
+
+  it("agents from different domains do not collide", async () => {
+    const { loadConfig, writeConfigFile, logger } = makeMocks({});
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "backend", config: makeAgentConfig({ title: "Backend A" }), domain: "company-a" },
+        { agentId: "backend", config: makeAgentConfig({ title: "Backend B" }), domain: "company-b" },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.synced).toBe(2);
+    expect(result.collisions).toHaveLength(0);
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written.agents!.list).toHaveLength(2);
+    expect(written.agents!.list![0]!.id).toBe("company-a:backend");
+    expect(written.agents!.list![1]!.id).toBe("company-b:backend");
+  });
+
+  it("detects collision when namespaced ID exists from different domain", async () => {
+    const existingConfig: OpenClawConfigSubset = {
+      agents: {
+        list: [
+          { id: "shared:backend", clawforce_domain: "domain-a", name: "Backend A" },
+        ],
+      },
+    };
+    const { loadConfig, writeConfigFile, logger } = makeMocks(existingConfig);
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "backend", config: makeAgentConfig({ title: "Backend B" }), domain: "shared" },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    // The incoming agent has domain "shared" which produces "shared:backend"
+    // The existing entry has id "shared:backend" but clawforce_domain "domain-a"
+    // This is a cross-domain collision
+    expect(result.collisions).toHaveLength(1);
+    expect(result.collisions[0]).toContain("domain-a");
+    expect(result.skipped).toBe(1);
+    expect(result.synced).toBe(0);
+    // Should NOT overwrite the existing entry
+    expect(writeConfigFile).not.toHaveBeenCalled();
+  });
+
+  it("same domain re-sync merges normally (no collision)", async () => {
+    const existingConfig: OpenClawConfigSubset = {
+      agents: {
+        list: [
+          { id: "demo:backend", clawforce_domain: "demo", name: "Old Name" },
+        ],
+      },
+    };
+    const { loadConfig, writeConfigFile, logger } = makeMocks(existingConfig);
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "backend", config: makeAgentConfig({ title: "New Name" }), projectDir: "/ws", domain: "demo" },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.collisions).toHaveLength(0);
+    expect(result.synced).toBe(1); // workspace was filled in
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written.agents!.list![0]!.name).toBe("Old Name"); // user-wins
+    expect(written.agents!.list![0]!.workspace).toBe("/ws"); // filled in
+    expect(written.agents!.list![0]!.clawforce_domain).toBe("demo"); // domain preserved
+  });
+
+  it("result.collisions is empty array when no collisions", async () => {
+    const { loadConfig, writeConfigFile, logger } = makeMocks({});
+
+    const result = await syncAgentsToOpenClaw({
+      agents: [],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(result.collisions).toHaveLength(0);
   });
 });

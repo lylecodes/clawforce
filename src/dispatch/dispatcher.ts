@@ -29,6 +29,7 @@ import { getApprovedIntentsForTask } from "../approval/intent-store.js";
 import { recordMetric } from "../metrics.js";
 import { writeAuditEntry } from "../audit.js";
 import { isTaskInFuturePhase } from "../workflow.js";
+import { toNamespacedAgentId } from "../agent-sync.js";
 import type { DispatchConfig, DispatchQueueItem } from "../types.js";
 
 /** Task lease duration in milliseconds — long enough for async dispatch + execution + 5min buffer. */
@@ -488,12 +489,17 @@ async function dispatchItem(
       } catch { /* non-fatal */ }
     }
 
+    // Namespace the agent ID at the OpenClaw dispatch boundary.
+    // Internal tracking (concurrency, budgets) uses the short ID;
+    // OpenClaw needs the namespaced form to address the correct agent.
+    const namespacedAgentId = toNamespacedAgentId(projectId, resolvedAgentId);
+
     const result = await dispatchViaInject({
       queueItemId: item.id,
       taskId: item.taskId,
       projectId,
       prompt: fullPrompt,
-      agentId: resolvedAgentId,
+      agentId: namespacedAgentId,
     });
 
     if (result.ok) {
