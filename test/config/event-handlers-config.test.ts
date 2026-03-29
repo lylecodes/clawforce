@@ -41,12 +41,16 @@ describe("config-validator/event-handlers", () => {
   it("valid event handlers produce no warnings", () => {
     const config = makeConfig({
       event_handlers: {
-        "deploy_complete": [
-          { action: "create_task", template: "Post-deploy check" },
-        ],
-        "build_failed": [
-          { action: "notify", message: "Build failed!" },
-        ],
+        "deploy_complete": {
+          actions: [
+            { action: "create_task", template: "Post-deploy check" },
+          ],
+        },
+        "build_failed": {
+          actions: [
+            { action: "notify", message: "Build failed!" },
+          ],
+        },
       },
     });
 
@@ -58,9 +62,11 @@ describe("config-validator/event-handlers", () => {
   it("unknown action type generates error", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "bogus_action" } as any,
-        ],
+        "test_event": {
+          actions: [
+            { action: "bogus_action" } as any,
+          ],
+        },
       },
     });
 
@@ -73,9 +79,11 @@ describe("config-validator/event-handlers", () => {
   it("create_task without template generates error", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "create_task" } as any,
-        ],
+        "test_event": {
+          actions: [
+            { action: "create_task" } as any,
+          ],
+        },
       },
     });
 
@@ -86,9 +94,11 @@ describe("config-validator/event-handlers", () => {
   it("notify without message generates error", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "notify" } as any,
-        ],
+        "test_event": {
+          actions: [
+            { action: "notify" } as any,
+          ],
+        },
       },
     });
 
@@ -99,9 +109,11 @@ describe("config-validator/event-handlers", () => {
   it("escalate without to generates error", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "escalate" } as any,
-        ],
+        "test_event": {
+          actions: [
+            { action: "escalate" } as any,
+          ],
+        },
       },
     });
 
@@ -112,9 +124,11 @@ describe("config-validator/event-handlers", () => {
   it("emit_event without event_type generates error", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "emit_event" } as any,
-        ],
+        "test_event": {
+          actions: [
+            { action: "emit_event" } as any,
+          ],
+        },
       },
     });
 
@@ -125,7 +139,7 @@ describe("config-validator/event-handlers", () => {
   it("empty event type key generates error", () => {
     const config = makeConfig({
       event_handlers: {
-        "": [{ action: "notify", message: "hi" }],
+        "": { actions: [{ action: "notify", message: "hi" }] },
       },
     });
 
@@ -136,9 +150,11 @@ describe("config-validator/event-handlers", () => {
   it("unknown assign_to target generates warning", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "create_task", template: "Test", assign_to: "nonexistent-agent" },
-        ],
+        "test_event": {
+          actions: [
+            { action: "create_task", template: "Test", assign_to: "nonexistent-agent" },
+          ],
+        },
       },
     });
 
@@ -151,9 +167,11 @@ describe("config-validator/event-handlers", () => {
   it("assign_to 'auto' does not generate warning", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "create_task", template: "Test", assign_to: "auto" },
-        ],
+        "test_event": {
+          actions: [
+            { action: "create_task", template: "Test", assign_to: "auto" },
+          ],
+        },
       },
     });
 
@@ -164,9 +182,11 @@ describe("config-validator/event-handlers", () => {
   it("unknown escalate target generates warning", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "escalate", to: "unknown-agent" },
-        ],
+        "test_event": {
+          actions: [
+            { action: "escalate", to: "unknown-agent" },
+          ],
+        },
       },
     });
 
@@ -179,9 +199,11 @@ describe("config-validator/event-handlers", () => {
   it("escalate to 'manager' does not generate warning", () => {
     const config = makeConfig({
       event_handlers: {
-        "test_event": [
-          { action: "escalate", to: "manager" },
-        ],
+        "test_event": {
+          actions: [
+            { action: "escalate", to: "manager" },
+          ],
+        },
       },
     });
 

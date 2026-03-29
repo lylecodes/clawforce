@@ -36,37 +36,70 @@ export type EventHandlerResult = {
   queueItemId?: string;
 };
 
-type EventHandler = (
+export type EventHandler = (
   event: ClawforceEvent,
   db: DatabaseSync,
 ) => EventHandlerResult;
 
-const handlers: Record<string, EventHandler> = {
-  task_completed: handleTaskCompleted,
-  task_failed: handleTaskFailed,
-  task_assigned: handleTaskAssigned,
-  task_created: handleTaskCreated,
-  sweep_finding: handleSweepFinding,
-  dispatch_succeeded: handleDispatchSucceeded,
-  dispatch_failed: handleDispatchFailed,
-  task_review_ready: handleTaskReviewReady,
-  dispatch_dead_letter: handleDispatchDeadLetter,
-  proposal_approved: handleProposalApproved,
-  proposal_created: handleProposalCreated,
-  proposal_rejected: handleProposalRejected,
-  meeting_turn_completed: handleMeetingTurnCompleted,
-  replan_needed: handleReplanNeeded,
-  workflow_completed: handleWorkflowCompleted,
-  goal_achieved: handleGoalAchievedEvent,
-  project_completed: handleCustom,
-  meeting_started: handleCustom,
-  meeting_concluded: handleCustom,
-  channel_created: handleCustom,
-  custom: handleCustom,
-  ci_failed: handleCustom,
-  pr_opened: handleCustom,
-  deploy_finished: handleCustom,
-};
+// ---------------------------------------------------------------------------
+// Unified handler registry
+// ---------------------------------------------------------------------------
+
+const builtinHandlers = new Map<string, EventHandler>();
+
+/**
+ * Register a built-in handler for an event type.
+ * Built-in handlers run before user-defined actions and can be overridden
+ * by user config setting `override_builtin: true`.
+ */
+export function registerBuiltinHandler(eventType: string, handler: EventHandler): void {
+  builtinHandlers.set(eventType, handler);
+}
+
+/** Get the built-in handler for an event type (or undefined). */
+export function getBuiltinHandler(eventType: string): EventHandler | undefined {
+  return builtinHandlers.get(eventType);
+}
+
+/** Reset the registry (for testing). */
+export function resetHandlerRegistryForTest(): void {
+  builtinHandlers.clear();
+  initBuiltinHandlers();
+}
+
+/**
+ * Populate the built-in handler registry. Called once at module load and
+ * can be re-called via resetHandlerRegistryForTest().
+ */
+function initBuiltinHandlers(): void {
+  registerBuiltinHandler("task_completed", handleTaskCompleted);
+  registerBuiltinHandler("task_failed", handleTaskFailed);
+  registerBuiltinHandler("task_assigned", handleTaskAssigned);
+  registerBuiltinHandler("task_created", handleTaskCreated);
+  registerBuiltinHandler("sweep_finding", handleSweepFinding);
+  registerBuiltinHandler("dispatch_succeeded", handleDispatchSucceeded);
+  registerBuiltinHandler("dispatch_failed", handleDispatchFailed);
+  registerBuiltinHandler("task_review_ready", handleTaskReviewReady);
+  registerBuiltinHandler("dispatch_dead_letter", handleDispatchDeadLetter);
+  registerBuiltinHandler("proposal_approved", handleProposalApproved);
+  registerBuiltinHandler("proposal_created", handleProposalCreated);
+  registerBuiltinHandler("proposal_rejected", handleProposalRejected);
+  registerBuiltinHandler("meeting_turn_completed", handleMeetingTurnCompleted);
+  registerBuiltinHandler("replan_needed", handleReplanNeeded);
+  registerBuiltinHandler("workflow_completed", handleWorkflowCompleted);
+  registerBuiltinHandler("goal_achieved", handleGoalAchievedEvent);
+  registerBuiltinHandler("project_completed", handleCustom);
+  registerBuiltinHandler("meeting_started", handleCustom);
+  registerBuiltinHandler("meeting_concluded", handleCustom);
+  registerBuiltinHandler("channel_created", handleCustom);
+  registerBuiltinHandler("custom", handleCustom);
+  registerBuiltinHandler("ci_failed", handleCustom);
+  registerBuiltinHandler("pr_opened", handleCustom);
+  registerBuiltinHandler("deploy_finished", handleCustom);
+}
+
+// Initialize at module load
+initBuiltinHandlers();
 
 /**
  * Claim and process pending events for a project.
@@ -86,15 +119,22 @@ export function processEvents(
   const outcomes = { handled: 0, ignored: 0, enqueued: 0, failed: 0 };
 
   for (const event of events) {
-    const handler = handlers[event.type] ?? handleCustom;
     try {
-      const result = handler(event, db);
+      const userHandlerConfig = userHandlers?.[event.type] ?? null;
+      const skipBuiltin = userHandlerConfig?.override_builtin === true;
 
-      // Run user-defined handlers AFTER built-in handler
+      // 1. Run built-in handler (unless user override)
+      let builtinResult: EventHandlerResult | undefined;
+      if (!skipBuiltin) {
+        const handler = builtinHandlers.get(event.type) ?? handleCustom;
+        builtinResult = handler(event, db);
+      }
+
+      // 2. Run user-defined actions (if configured)
       let userResults: ActionResult[] | undefined;
-      if (userHandlers?.[event.type]) {
+      if (userHandlerConfig) {
         userResults = [];
-        for (const actionConfig of userHandlers[event.type]!) {
+        for (const actionConfig of userHandlerConfig.actions) {
           try {
             userResults.push(executeAction(event, actionConfig, db));
           } catch (err) {
@@ -105,6 +145,9 @@ export function processEvents(
         }
       }
 
+      // Determine effective result
+      const result = builtinResult ?? { action: "ignored" as const };
+
       // If built-in said "ignored" but user handlers ran, mark as "handled"
       const hasUserActions = userResults && userResults.length > 0;
       if (result.action === "ignored" && !hasUserActions) {
@@ -114,8 +157,7 @@ export function processEvents(
         const effectiveAction = result.action === "ignored" && hasUserActions
           ? "handled"
           : result.action;
-        const handlerId = `system:event_handler:${event.type}`;
-        markHandled(event.id, handlerId, db);
+        markHandled(event.id, effectiveAction, db);
         if (effectiveAction === "enqueued") outcomes.enqueued++;
         else outcomes.handled++;
       }
@@ -393,28 +435,13 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   const task = getTask(event.projectId, taskId, db);
   if (!task || task.state !== "REVIEW") return { action: "handled", taskId };
 
-  // Resolve verifier agent: per-team naming convention first, then global config, then regex fallback
+  // Look for a verifier: config-driven first, then regex fallback
   const extCfg = getExtendedProjectConfig(event.projectId);
   let verifierAgentId: string | null = null;
   let verifierProjectDir: string | undefined;
 
-  // 1. Per-team resolution: derive verifier from the assigned worker's name
-  //    Convention: worker "X-worker" → verifier "X-verifier"
-  if (task.assignedTo) {
-    const workerPrefix = task.assignedTo.replace(/-worker$/, "");
-    if (workerPrefix !== task.assignedTo) {
-      // Worker follows naming convention — look for matching verifier
-      const candidateId = `${workerPrefix}-verifier`;
-      const entry = getAgentConfig(candidateId);
-      if (entry && entry.projectId === event.projectId) {
-        verifierAgentId = candidateId;
-        verifierProjectDir = entry.projectDir;
-      }
-    }
-  }
-
-  // 2. Try explicit review.verifierAgent config (global fallback)
-  if (!verifierAgentId && extCfg?.review?.verifierAgent) {
+  // 1. Try explicit review.verifierAgent config
+  if (extCfg?.review?.verifierAgent) {
     const entry = getAgentConfig(extCfg.review.verifierAgent);
     if (entry && entry.projectId === event.projectId) {
       verifierAgentId = extCfg.review.verifierAgent;
@@ -422,7 +449,7 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
     }
   }
 
-  // 3. Fallback: regex pattern matching (backward compat)
+  // 2. Fallback: regex pattern matching (backward compat)
   if (!verifierAgentId) {
     const agentIds = getRegisteredAgentIds();
     for (const agentId of agentIds) {
@@ -459,13 +486,9 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   try {
     // skipStateCheck=true: REVIEW tasks are normally blocked from dispatch,
     // but verification dispatches are the intended consumer of REVIEW tasks.
-    // agentId overrides task.assignedTo so the verifier runs instead of the worker.
-    const agentModel = getAgentModel(verifierAgentId);
     const result = enqueue(event.projectId, taskId, {
       prompt: verifyPrompt,
       projectDir: verifierProjectDir ?? process.cwd(),
-      agentId: verifierAgentId,
-      ...(agentModel ? { model: agentModel } : {}),
     }, undefined, db, undefined, true);
 
     if (result) {
@@ -644,12 +667,6 @@ function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandl
   const task = getTask(event.projectId, taskId, db);
   if (!task || task.state !== "ASSIGNED") return { action: "handled", taskId };
 
-  // Prevent ASSIGNED → ASSIGNED loops: skip if a non-terminal queue item already exists
-  const existingItem = db.prepare(
-    `SELECT id FROM dispatch_queue WHERE project_id = ? AND task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled') LIMIT 1`,
-  ).get(event.projectId, taskId);
-  if (existingItem) return { action: "handled", taskId };
-
   // Build dispatch payload from agent config
   const payload: Record<string, unknown> = {};
   const agentModel = task.assignedTo ? getAgentModel(task.assignedTo) : null;
@@ -663,70 +680,24 @@ function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandl
   return { action: "handled", taskId };
 }
 
-/**
- * handleTaskCreated — the SINGLE entry point for all newly created tasks.
- *
- * Canonical flow:
- *   createTask() → emits task_created ONLY
- *     ↓
- *   handleTaskCreated() → decides next step based on state:
- *     - OPEN + no assignee: auto-assign (if configured) → autoAssign emits task_assigned
- *     - OPEN + has assignee: transition OPEN → ASSIGNED → transitionTask emits task_assigned
- *     - ASSIGNED: emit task_assigned so dispatch fires
- *     ↓
- *   handleTaskAssigned() → enqueues for dispatch (with dedup)
- *     ↓
- *   Dispatcher dispatches
- */
 function handleTaskCreated(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
   const taskId = event.payload.taskId as string | undefined;
   const state = event.payload.state as string | undefined;
-  const assignedTo = event.payload.assignedTo as string | undefined;
   if (!taskId) return { action: "ignored" };
 
-  // Task was created directly in ASSIGNED state (e.g. createTask with assignedTo).
-  // Emit task_assigned so handleTaskAssigned fires and enqueues for dispatch.
-  if (state === "ASSIGNED" && assignedTo) {
-    try {
-      ingestEvent(event.projectId, "task_assigned", "internal", {
-        taskId,
-        assignedTo,
-        fromState: "OPEN",
-      }, `task-assigned:${taskId}:created`, db);
-    } catch (err) { safeLog("event.router.taskCreatedAssigned", err); }
-    return { action: "handled", taskId };
-  }
+  // Only auto-assign OPEN tasks (not already ASSIGNED)
+  if (state !== "OPEN") return { action: "handled", taskId };
 
-  // OPEN task — attempt auto-assignment if configured
-  if (state === "OPEN") {
-    // If created OPEN but with an assignee specified (edge case: workflow phase gate
-    // forced OPEN), transition to ASSIGNED which will emit task_assigned via transitionTask
-    if (assignedTo) {
-      try {
-        transitionTask({
-          projectId: event.projectId,
-          taskId,
-          toState: "ASSIGNED",
-          actor: "system:auto-assign",
-          assignedTo,
-          reason: "Auto-assigned on creation (deferred from phase gate)",
-          verificationRequired: false,
-        }, db);
-      } catch (err) { safeLog("event.router.taskCreatedDeferredAssign", err); }
-      return { action: "handled", taskId };
-    }
+  const extConfig = getExtendedProjectConfig(event.projectId);
+  if (!extConfig?.assignment?.enabled) return { action: "handled", taskId };
 
-    const extConfig = getExtendedProjectConfig(event.projectId);
-    if (!extConfig?.assignment?.enabled) return { action: "handled", taskId };
-
-    try {
-      // Dynamic import to avoid circular dependency
-      // (assignment → tasks/ops → events/store → router → assignment)
-      const { autoAssign } = require("../assignment/engine.js") as typeof import("../assignment/engine.js");
-      const result = autoAssign(event.projectId, taskId, extConfig.assignment, db);
-      if (result.assigned) return { action: "handled", taskId };
-    } catch (err) { safeLog("event.router.autoAssign", err); }
-  }
+  try {
+    // Dynamic import to avoid circular dependency
+    // (assignment → tasks/ops → events/store → router → assignment)
+    const { autoAssign } = require("../assignment/engine.js") as typeof import("../assignment/engine.js");
+    const result = autoAssign(event.projectId, taskId, extConfig.assignment, db);
+    if (result.assigned) return { action: "handled", taskId };
+  } catch (err) { safeLog("event.router.autoAssign", err); }
 
   return { action: "handled", taskId };
 }
