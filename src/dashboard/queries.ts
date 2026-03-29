@@ -1660,3 +1660,151 @@ export function queryInterventions(projectId: string): InterventionListResponse 
     return { suggestions: [], count: 0 };
   }
 }
+
+// --- Missing backend endpoints (unblocks dashboard 404s) ---
+
+/** Query tool call details with optional filters. */
+export function queryToolCalls(
+  projectId: string,
+  filters?: { agentId?: string; sessionKey?: string; limit?: number },
+) {
+  const db = getDb(projectId);
+  const limit = filters?.limit ?? 100;
+
+  let sql = "SELECT * FROM tool_call_details WHERE project_id = ?";
+  const params: (string | number)[] = [projectId];
+
+  if (filters?.agentId) {
+    sql += " AND agent_id = ?";
+    params.push(filters.agentId);
+  }
+  if (filters?.sessionKey) {
+    sql += " AND session_key = ?";
+    params.push(filters.sessionKey);
+  }
+
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  params.push(limit + 1);
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+  const hasMore = rows.length > limit;
+
+  return {
+    toolCalls: rows.slice(0, limit).map((r) => ({
+      id: r.id,
+      agentId: r.agent_id,
+      sessionKey: r.session_key,
+      toolName: r.tool_name,
+      action: r.action,
+      inputPreview: typeof r.input === "string" ? r.input.slice(0, 200) : null,
+      outputPreview: typeof r.output === "string" ? r.output.slice(0, 200) : null,
+      durationMs: r.duration_ms,
+      createdAt: r.created_at,
+    })),
+    count: rows.length > limit ? limit : rows.length,
+    hasMore,
+  };
+}
+
+/** Query config version history. */
+export function queryConfigVersions(projectId: string, limit = 50) {
+  const db = getDb(projectId);
+  const rows = db.prepare(
+    "SELECT * FROM config_versions WHERE project_id = ? ORDER BY created_at DESC LIMIT ?",
+  ).all(projectId, limit) as Record<string, unknown>[];
+
+  return {
+    versions: rows.map((r) => ({
+      id: r.id,
+      hash: r.hash,
+      source: r.source,
+      agentId: r.agent_id,
+      diff: r.diff,
+      createdAt: r.created_at,
+    })),
+    count: rows.length,
+  };
+}
+
+/** Query manager reviews with optional task filter. */
+export function queryManagerReviews(projectId: string, taskId?: string, limit = 50) {
+  const db = getDb(projectId);
+  let sql = "SELECT * FROM manager_reviews WHERE project_id = ?";
+  const params: (string | number)[] = [projectId];
+
+  if (taskId) {
+    sql += " AND task_id = ?";
+    params.push(taskId);
+  }
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+
+  return {
+    reviews: rows.map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      reviewerAgentId: r.reviewer_agent_id,
+      sessionKey: r.session_key,
+      verdict: r.verdict,
+      reasoning: r.reasoning,
+      createdAt: r.created_at,
+    })),
+    count: rows.length,
+  };
+}
+
+/** Query trust decisions. */
+export function queryTrustDecisions(projectId: string, agentId?: string, limit = 50) {
+  const db = getDb(projectId);
+  let sql = "SELECT * FROM trust_decisions WHERE project_id = ?";
+  const params: (string | number)[] = [projectId];
+
+  if (agentId) {
+    sql += " AND agent_id = ?";
+    params.push(agentId);
+  }
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+
+  return {
+    decisions: rows.map((r) => ({
+      id: r.id,
+      category: r.category,
+      decision: r.decision,
+      agentId: r.agent_id,
+      toolName: r.tool_name,
+      riskTier: r.risk_tier,
+      severity: r.severity,
+      createdAt: r.created_at,
+    })),
+    count: rows.length,
+  };
+}
+
+/** Query policy violations. */
+export function queryPolicyViolations(projectId: string, limit = 50) {
+  const db = getDb(projectId);
+  try {
+    const rows = db.prepare(
+      "SELECT * FROM policy_violations WHERE project_id = ? ORDER BY created_at DESC LIMIT ?",
+    ).all(projectId, limit) as Record<string, unknown>[];
+
+    return {
+      violations: rows.map((r) => ({
+        id: r.id,
+        agentId: r.agent_id,
+        policyName: r.policy_name,
+        action: r.action,
+        detail: r.detail,
+        createdAt: r.created_at,
+      })),
+      count: rows.length,
+    };
+  } catch {
+    return { violations: [], count: 0 };
+  }
+}

@@ -54,6 +54,11 @@ import {
   queryKnowledgeFlags,
   queryPromotionCandidates,
   queryQueueStatus,
+  queryToolCalls,
+  queryConfigVersions,
+  queryManagerReviews,
+  queryTrustDecisions,
+  queryPolicyViolations,
 } from "./queries.js";
 import { ingestEvent } from "../events/store.js";
 import { getDb } from "../db.js";
@@ -353,6 +358,35 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
           offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
         }));
+      }
+
+      case "tool-calls": {
+        // GET /api/projects/:id/tool-calls?agent=foo&session=bar&limit=100
+        return ok(queryToolCalls(projectId, {
+          agentId: params.agent,
+          sessionKey: params.session,
+          limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
+        }));
+      }
+
+      case "config-versions": {
+        // GET /api/projects/:id/config-versions?limit=50
+        return ok(queryConfigVersions(projectId, params.limit ? safeParseInt(params.limit, 50) : undefined));
+      }
+
+      case "manager-reviews": {
+        // GET /api/projects/:id/manager-reviews?task=tid&limit=50
+        return ok(queryManagerReviews(projectId, params.task, params.limit ? safeParseInt(params.limit, 50) : undefined));
+      }
+
+      case "trust-decisions": {
+        // GET /api/projects/:id/trust-decisions?agent=foo&limit=50
+        return ok(queryTrustDecisions(projectId, params.agent, params.limit ? safeParseInt(params.limit, 50) : undefined));
+      }
+
+      case "policy-violations": {
+        // GET /api/projects/:id/policy-violations?limit=50
+        return ok(queryPolicyViolations(projectId, params.limit ? safeParseInt(params.limit, 50) : undefined));
       }
 
       default:
