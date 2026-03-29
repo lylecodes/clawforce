@@ -140,9 +140,32 @@ describe("dispatch/dispatcher", () => {
     expect(events[0]!.payload.error).toContain("non-dispatchable state");
   });
 
-  it("emits dispatch_failed event when cron creation fails", async () => {
+  it("releases item to queued when cron service is unavailable (transient)", async () => {
     mockDispatchViaInject.mockResolvedValue({
-      ok: false, error: "Cron service not available",
+      ok: false, error: "Cron service not available (bootstrap may still be in progress)",
+    });
+
+    const task = createTask({
+      projectId: PROJECT, title: "Fail task", createdBy: "agent:pm", assignedTo: "agent:worker",
+      description: "Test task. Acceptance criteria: item is dispatched.",
+    }, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
+
+    await dispatchLoop(PROJECT, db);
+
+    // Item should be released back to queued, NOT failed
+    const status = getQueueStatus(PROJECT, db);
+    expect(status.queued).toBe(1);
+    expect(status.failed).toBe(0);
+
+    // No dispatch_failed event should be emitted for transient cron errors
+    const events = listEvents(PROJECT, { type: "dispatch_failed" }, db);
+    expect(events).toHaveLength(0);
+  });
+
+  it("emits dispatch_failed event when dispatch fails with non-cron error", async () => {
+    mockDispatchViaInject.mockResolvedValue({
+      ok: false, error: "Agent session spawn failed",
     });
 
     const task = createTask({
@@ -154,7 +177,7 @@ describe("dispatch/dispatcher", () => {
 
     const events = listEvents(PROJECT, { type: "dispatch_failed" }, db);
     expect(events).toHaveLength(1);
-    expect(events[0]!.payload.error).toBe("Cron service not available");
+    expect(events[0]!.payload.error).toBe("Agent session spawn failed");
   });
 
   // --- Dead letter emission from dispatcher ---

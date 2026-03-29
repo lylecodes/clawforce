@@ -2,6 +2,7 @@
  * Clawforce — Config Hot-Reload
  *
  * Watches config files for changes, diffs, and applies updates without restart.
+ * Validates YAML before applying — invalid configs are skipped with a warning.
  */
 
 import fs from "node:fs";
@@ -108,6 +109,31 @@ export function startConfigWatcher(baseDir: string, onReload: ReloadCallback): v
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       try {
+        // Validate the changed file before applying the reload.
+        // If the new config has invalid YAML, skip the reload entirely
+        // to avoid putting the system in a broken state.
+        const changedFile = filename === "config.yaml"
+          ? path.join(baseDir, filename)
+          : filename
+            ? path.join(baseDir, "domains", filename)
+            : null;
+
+        if (changedFile && fs.existsSync(changedFile)) {
+          try {
+            const raw = fs.readFileSync(changedFile, "utf-8");
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const yaml = require("yaml") as { parse: (s: string) => unknown };
+            const parsed = yaml.parse(raw);
+            if (!parsed || typeof parsed !== "object") {
+              safeLog("config.watcher", `Skipping reload: ${filename} parsed to non-object value`);
+              return;
+            }
+          } catch (parseErr) {
+            safeLog("config.watcher", `Skipping reload: ${filename} has invalid YAML — ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+            return;
+          }
+        }
+
         if (filename === "config.yaml") {
           onReload({ file: filename, type: "global", diff: { changed: true, agentChanges: [], defaultsChanged: true } });
         } else {

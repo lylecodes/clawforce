@@ -61,12 +61,10 @@ describe("default event handlers for event-driven mode", () => {
       session_type: "reactive",
     });
 
-    expect(extConfig?.eventHandlers?.task_assigned).toBeDefined();
-    expect(extConfig?.eventHandlers?.task_assigned?.[0]).toEqual({
-      action: "dispatch_agent",
-      agent_role: "worker",
-      session_type: "active",
-    });
+    // task_assigned is intentionally NOT a default handler — the built-in
+    // handleTaskAssigned() in router.ts already enqueues for dispatch.
+    // Having both would cause double-dispatch.
+    expect(extConfig?.eventHandlers?.task_assigned).toBeUndefined();
 
     expect(extConfig?.eventHandlers?.budget_changed).toBeDefined();
     expect(extConfig?.eventHandlers?.budget_changed?.[0]).toEqual({

@@ -10,6 +10,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "../../db.js";
 import { safeLog } from "../../diagnostics.js";
 import { computeBudgetPacing } from "../../budget/pacer.js";
+import { getAllCategoryStats } from "../../trust/tracker.js";
 
 export function resolveBudgetPlanSource(
   projectId: string,
@@ -93,6 +94,43 @@ export function resolveBudgetPlanSource(
 
     if (pacing.paceDelay > 0) {
       lines.push(`- Pace delay: ${Math.round(pacing.paceDelay / 1000)}s (throttling active)`);
+    }
+
+    // Agent trust scores — informational for leads assigning tasks.
+    // Trust is tracked via approval/rejection decisions per action category.
+    // These scores are informational only and do not gate dispatch.
+    try {
+      const trustStats = getAllCategoryStats(projectId, db);
+      if (trustStats.length > 0) {
+        // Compute per-agent approval rates from trust_decisions
+        const agentRows = db.prepare(
+          `SELECT agent_id, decision, COUNT(*) as cnt
+           FROM trust_decisions
+           WHERE project_id = ? AND agent_id IS NOT NULL
+           GROUP BY agent_id, decision
+           ORDER BY agent_id`,
+        ).all(projectId) as { agent_id: string; decision: string; cnt: number }[];
+
+        if (agentRows.length > 0) {
+          const agentMap = new Map<string, { approved: number; total: number }>();
+          for (const row of agentRows) {
+            const entry = agentMap.get(row.agent_id) ?? { approved: 0, total: 0 };
+            entry.total += row.cnt;
+            if (row.decision === "approved") entry.approved += row.cnt;
+            agentMap.set(row.agent_id, entry);
+          }
+
+          lines.push("");
+          lines.push("### Agent Trust (informational)");
+          for (const [agentId, data] of agentMap) {
+            const pct = data.total > 0 ? Math.round((data.approved / data.total) * 100) : 0;
+            const tier = pct > 80 ? "high" : pct > 50 ? "medium" : "low";
+            lines.push(`- ${agentId}: ${pct}% approval (${data.approved}/${data.total}) — tier: ${tier}`);
+          }
+        }
+      }
+    } catch {
+      // Trust data is informational — never break the budget plan
     }
 
     lines.push("");

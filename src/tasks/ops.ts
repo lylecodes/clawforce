@@ -199,7 +199,11 @@ export function createTask(
     safeLog("task.create.audit", err);
   }
 
-  // Emit task_created event (for auto-assignment)
+  // Emit task_created event ONLY. handleTaskCreated() in the event router is the
+  // single entry point that handles both OPEN and ASSIGNED tasks:
+  // - OPEN tasks → auto-assign (if configured) → emits task_assigned
+  // - ASSIGNED tasks → emits task_assigned (so dispatch fires)
+  // This eliminates duplicate task_assigned events from createTask + handleTaskCreated.
   try {
     ingestEvent(params.projectId, "task_created", "internal", {
       taskId: id,
@@ -210,17 +214,6 @@ export function createTask(
       team: params.team,
     }, `task-created:${id}`, db);
   } catch (err) { safeLog("task.create.event", err); }
-
-  // Emit task_assigned event when created directly in ASSIGNED state
-  if (state === "ASSIGNED" && params.assignedTo) {
-    try {
-      ingestEvent(params.projectId, "task_assigned", "internal", {
-        taskId: id,
-        assignedTo: params.assignedTo,
-        fromState: "OPEN",
-      }, `task-assigned:${id}:${params.assignedTo}`, db);
-    } catch (err) { safeLog("task.create.assignedEvent", err); }
-  }
 
   return task;
 }

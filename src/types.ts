@@ -915,6 +915,7 @@ export type DispatchQueueItem = {
   maxDispatchAttempts: number;
   lastError?: string;
   createdAt: number;
+  dispatchedAt?: number;
   completedAt?: number;
 };
 

@@ -491,7 +491,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     // 7.1. Recover dispatch queue items stuck in 'dispatched' state with no active session
     try {
       const dispatchedItems = db.prepare(
-        `SELECT id, task_id, created_at, dispatch_attempts, max_dispatch_attempts FROM dispatch_queue
+        `SELECT id, task_id, created_at, dispatched_at, dispatch_attempts, max_dispatch_attempts FROM dispatch_queue
          WHERE project_id = ? AND status = 'dispatched'`,
       ).all(projectId) as Record<string, unknown>[];
 
@@ -508,18 +508,20 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
         for (const row of dispatchedItems) {
           const itemId = row.id as string;
           const taskId = row.task_id as string;
-          const createdAt = row.created_at as number;
+          // Use dispatched_at if available (new column), fall back to created_at for pre-migration items
+          const dispatchedAt = (row.dispatched_at as number | null) ?? (row.created_at as number);
 
           // Skip items that haven't been dispatched long enough
-          if (now - createdAt < staleDispatchTimeout) continue;
+          if (now - dispatchedAt < staleDispatchTimeout) continue;
 
           // Skip items that have an active session backing them
           if (activeSessionDispatchIds.has(itemId)) continue;
 
           // No active session and past the timeout — fail the queue item and re-enqueue
+          const staleDurationMs = now - dispatchedAt;
           failQueueItem(
             itemId,
-            `Stale dispatched item: no active session after ${Math.round((now - createdAt) / 60_000)}m`,
+            `Stale dispatched item: no active session after ${Math.round(staleDurationMs / 60_000)}m`,
             db,
             projectId,
           );
@@ -532,14 +534,14 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
             projectId,
             taskId,
             queueItemId: itemId,
-            staleDurationMs: now - createdAt,
+            staleDurationMs,
           });
 
           ingestEvent(projectId, "sweep_finding", "cron", {
             finding: "stale_dispatch_recovered",
             taskId,
             queueItemId: itemId,
-            staleDurationMs: now - createdAt,
+            staleDurationMs,
           }, sweepDedupKey("stale-dispatch", itemId, now), db);
 
           staleDispatchRecoveredCount++;
@@ -608,15 +610,23 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     safeLog("sweep.goalCascade", err);
   }
 
-  // 12. Auto-assign orphaned OPEN tasks (backstop for missed events)
+  // 12. Auto-assign orphaned OPEN tasks (BACKSTOP — not the primary assignment path).
+  //
+  // The primary assignment path is:
+  //   createTask() → task_created event → handleTaskCreated() → autoAssign()
+  //
+  // This backstop catches tasks that slipped through event processing (e.g. event
+  // router was down, event was lost, race condition). Only considers tasks older
+  // than 60s to avoid racing with handleTaskCreated() which handles freshly created tasks.
   let autoAssigned = 0;
   try {
     const extConfig = getExtendedProjectConfig(projectId);
     if (extConfig?.assignment?.enabled) {
       const { autoAssign } = await import("../assignment/engine.js");
+      const BACKSTOP_AGE_MS = 60_000; // 60s — give event processing time to handle it
       const openTasks = db.prepare(
-        "SELECT id FROM tasks WHERE project_id = ? AND state = 'OPEN' AND assigned_to IS NULL",
-      ).all(projectId) as Record<string, unknown>[];
+        "SELECT id FROM tasks WHERE project_id = ? AND state = 'OPEN' AND assigned_to IS NULL AND created_at < ?",
+      ).all(projectId, now - BACKSTOP_AGE_MS) as Record<string, unknown>[];
 
       for (const row of openTasks) {
         const taskId = row.id as string;

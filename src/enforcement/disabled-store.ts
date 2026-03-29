@@ -120,7 +120,11 @@ export function enableScope(
 
 /**
  * Check whether an agent is effectively disabled — either directly,
- * or via a team/department scope, or via the legacy disabled_agents table.
+ * or via a team/department/domain scope, or via the legacy disabled_agents table.
+ *
+ * Uses at most 2 queries:
+ * 1. A single query against disabled_scopes checking all scope levels (domain, department, team, agent).
+ * 2. A backward-compat check against the legacy disabled_agents table.
  *
  * To avoid circular imports when `getAgentConfig` is not available
  * (or when the caller already has the agent's team/department), pass
@@ -134,25 +138,7 @@ export function isAgentEffectivelyDisabled(
 ): boolean {
   const db = dbOverride ?? getDb(projectId);
 
-  // 0. Check domain-level disable — if the entire domain is disabled, all agents are disabled
-  const domainScope = db.prepare(
-    "SELECT 1 FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
-  ).get(projectId, projectId);
-  if (domainScope) return true;
-
-  // 1. Check legacy disabled_agents table
-  const legacyRow = db.prepare(
-    "SELECT 1 FROM disabled_agents WHERE project_id = ? AND agent_id = ?",
-  ).get(projectId, agentId);
-  if (legacyRow) return true;
-
-  // 2. Check disabled_scopes for agent-level scope
-  const agentScope = db.prepare(
-    "SELECT 1 FROM disabled_scopes WHERE project_id = ? AND scope_type = 'agent' AND scope_value = ?",
-  ).get(projectId, agentId);
-  if (agentScope) return true;
-
-  // 3. Resolve team/department — use provided opts or look up from config
+  // Resolve team/department — use provided opts or look up from config
   let team = opts?.team;
   let department = opts?.department;
   if (team === undefined || department === undefined) {
@@ -163,21 +149,34 @@ export function isAgentEffectivelyDisabled(
     }
   }
 
-  // 4. Check disabled_scopes for team-level scope
+  // Query 1: Single query checks all scope levels in disabled_scopes.
+  // Builds dynamic OR clauses for domain, agent, and optionally team/department.
+  const conditions: string[] = [
+    "(scope_type = 'domain' AND scope_value = ?)",
+    "(scope_type = 'agent' AND scope_value = ?)",
+  ];
+  const params: Array<string> = [projectId, agentId];
+
   if (team) {
-    const teamScope = db.prepare(
-      "SELECT 1 FROM disabled_scopes WHERE project_id = ? AND scope_type = 'team' AND scope_value = ?",
-    ).get(projectId, team);
-    if (teamScope) return true;
+    conditions.push("(scope_type = 'team' AND scope_value = ?)");
+    params.push(team);
   }
 
-  // 5. Check disabled_scopes for department-level scope
   if (department) {
-    const deptScope = db.prepare(
-      "SELECT 1 FROM disabled_scopes WHERE project_id = ? AND scope_type = 'department' AND scope_value = ?",
-    ).get(projectId, department);
-    if (deptScope) return true;
+    conditions.push("(scope_type = 'department' AND scope_value = ?)");
+    params.push(department);
   }
+
+  const scopeMatch = db.prepare(
+    `SELECT 1 FROM disabled_scopes WHERE project_id = ? AND (${conditions.join(" OR ")}) LIMIT 1`,
+  ).get(projectId, ...params);
+  if (scopeMatch) return true;
+
+  // Query 2: Backward-compat check against legacy disabled_agents table.
+  const legacyRow = db.prepare(
+    "SELECT 1 FROM disabled_agents WHERE project_id = ? AND agent_id = ?",
+  ).get(projectId, agentId);
+  if (legacyRow) return true;
 
   return false;
 }

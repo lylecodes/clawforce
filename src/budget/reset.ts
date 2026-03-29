@@ -4,6 +4,16 @@
  * Self-healing window resets. Every budget read checks if windows have elapsed.
  * Serialized via conditional UPDATE to prevent race conditions.
  * Reservations are NOT reset — they persist until plan completion.
+ *
+ * Reset semantics:
+ * - Each budget row stores `hourly_reset_at`, `daily_reset_at`, and `monthly_reset_at`
+ *   timestamps marking the END of the current window (i.e., when the window expires).
+ * - `ensureWindowsCurrent()` is called before every budget check. If `now >= *_reset_at`,
+ *   the spent counters for that window are zeroed and `*_reset_at` is advanced to the
+ *   NEXT boundary (next hour, next midnight UTC, next month start).
+ * - The conditional UPDATE (`WHERE id = ? AND daily_reset_at = ?`) ensures only one
+ *   process performs the reset if multiple readers hit the same stale window.
+ * - Windows where `*_reset_at` is NULL are skipped (no limit configured for that window).
  */
 
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";

@@ -43,7 +43,7 @@ describe("auto-dispatch on task_assigned", () => {
       agents: { "worker-1": { extends: "employee", briefing: [], expectations: [], performance_policy: { action: "alert" } } },
     });
 
-    // Create an ASSIGNED task (emits task_assigned event)
+    // Create an ASSIGNED task (emits task_created only — not task_assigned)
     const task = createTask({
       projectId: PROJECT,
       title: "Auto dispatch test",
@@ -51,9 +51,10 @@ describe("auto-dispatch on task_assigned", () => {
       assignedTo: "worker-1",
     }, db);
 
-    // Process events — task_assigned should trigger auto-enqueue
-    const processed = processEvents(PROJECT, db);
-    expect(processed).toBeGreaterThan(0);
+    // First pass: handleTaskCreated sees state=ASSIGNED → emits task_assigned
+    processEvents(PROJECT, db);
+    // Second pass: handleTaskAssigned → enqueues for dispatch
+    processEvents(PROJECT, db);
 
     // Check dispatch queue
     const queueStatus = getQueueStatus(PROJECT, db);
@@ -84,10 +85,13 @@ describe("auto-dispatch on task_assigned", () => {
     expect(assignedEvents[0]!.payload.taskId).toBe(task.id);
   });
 
-  it("createTask with assignedTo emits both task_created and task_assigned", () => {
+  it("createTask with assignedTo emits only task_created (not task_assigned directly)", () => {
+    // createTask now emits ONLY task_created. The task_assigned event is emitted
+    // by handleTaskCreated() in the event router when it processes the task_created event.
+    // This ensures exactly ONE canonical path from creation to dispatch.
     const task = createTask({
       projectId: PROJECT,
-      title: "Dual event test",
+      title: "Single event test",
       createdBy: "pm",
       assignedTo: "worker-1",
     }, db);
@@ -97,9 +101,32 @@ describe("auto-dispatch on task_assigned", () => {
     const assignedEvents = events.filter((e) => e.type === "task_assigned");
 
     expect(createdEvents.length).toBe(1);
-    expect(assignedEvents.length).toBe(1);
+    // task_assigned is NOT emitted by createTask — it comes from handleTaskCreated
+    expect(assignedEvents.length).toBe(0);
     expect(createdEvents[0]!.payload.taskId).toBe(task.id);
+    expect(createdEvents[0]!.payload.state).toBe("ASSIGNED");
+    expect(createdEvents[0]!.payload.assignedTo).toBe("worker-1");
+  });
+
+  it("processing task_created for ASSIGNED task emits exactly one task_assigned", () => {
+    // Full canonical flow: createTask → task_created → handleTaskCreated → task_assigned
+    const task = createTask({
+      projectId: PROJECT,
+      title: "Canonical flow test",
+      createdBy: "pm",
+      assignedTo: "worker-1",
+    }, db);
+
+    // Process events: handleTaskCreated should see state=ASSIGNED and emit task_assigned
+    processEvents(PROJECT, db);
+
+    const allEvents = listEvents(PROJECT, {}, db);
+    const assignedEvents = allEvents.filter((e) => e.type === "task_assigned");
+
+    // Exactly ONE task_assigned event from handleTaskCreated
+    expect(assignedEvents.length).toBe(1);
     expect(assignedEvents[0]!.payload.taskId).toBe(task.id);
+    expect(assignedEvents[0]!.payload.assignedTo).toBe("worker-1");
   });
 
   it("dedup prevents double-enqueue for same task", () => {
@@ -115,7 +142,8 @@ describe("auto-dispatch on task_assigned", () => {
       assignedTo: "worker-1",
     }, db);
 
-    // Process events (first pass)
+    // Process events: task_created → task_assigned → enqueue
+    processEvents(PROJECT, db);
     processEvents(PROJECT, db);
 
     // Ingest another task_assigned event for the same task
@@ -127,9 +155,7 @@ describe("auto-dispatch on task_assigned", () => {
 
     processEvents(PROJECT, db);
 
-    // Queue should still only have 1 item (dedup in enqueue)
-    const queueStatus = getQueueStatus(PROJECT, db);
-    // Non-terminal items for this task should be exactly 1
+    // Queue should still only have 1 item (dedup in handleTaskAssigned)
     const items = db.prepare(
       "SELECT * FROM dispatch_queue WHERE project_id = ? AND task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
     ).all(PROJECT, task.id) as Record<string, unknown>[];
@@ -150,6 +176,8 @@ describe("auto-dispatch on task_assigned", () => {
       assignedTo: "worker-1",
     }, db);
 
+    // Process task_created → task_assigned → handleTaskAssigned (but autoDispatch disabled)
+    processEvents(PROJECT, db);
     processEvents(PROJECT, db);
 
     // Queue should be empty — auto-dispatch was disabled

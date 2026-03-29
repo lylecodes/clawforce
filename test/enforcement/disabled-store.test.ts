@@ -269,4 +269,80 @@ describe("isAgentEffectivelyDisabled", () => {
     disableScope("proj2", "team", "frontend", "reason");
     expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(false);
   });
+
+  it("detects domain-level disable in single consolidated query", () => {
+    mockGetAgentConfig.mockReturnValue({
+      projectId: "proj1",
+      config: { team: "frontend", department: "engineering" },
+    });
+    disableScope("proj1", "domain", "proj1", "domain shutdown");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(true);
+
+    // Enabling domain re-enables agent
+    enableScope("proj1", "domain", "proj1");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(false);
+  });
+
+  it("handles multiple scope types disabled simultaneously", () => {
+    mockGetAgentConfig.mockReturnValue({
+      projectId: "proj1",
+      config: { team: "frontend", department: "engineering" },
+    });
+
+    // Disable at all scope levels
+    disableScope("proj1", "domain", "proj1", "domain");
+    disableScope("proj1", "department", "engineering", "dept");
+    disableScope("proj1", "team", "frontend", "team");
+    disableScope("proj1", "agent", "agent-a", "agent");
+    disableAgent("proj1", "agent-a", "legacy");
+
+    // Should still return true with everything disabled
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(true);
+
+    // Remove scopes one by one — still disabled via others
+    enableScope("proj1", "domain", "proj1");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(true);
+
+    enableScope("proj1", "department", "engineering");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(true);
+
+    enableScope("proj1", "team", "frontend");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(true);
+
+    enableScope("proj1", "agent", "agent-a");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(true); // legacy still active
+
+    enableAgent("proj1", "agent-a");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-a")).toBe(false); // finally clear
+  });
+
+  it("works with only team provided in opts (no department)", () => {
+    mockGetAgentConfig.mockReturnValue(null);
+    disableScope("proj1", "team", "backend", "reason");
+
+    expect(isAgentEffectivelyDisabled("proj1", "agent-x", undefined, { team: "backend" })).toBe(true);
+    expect(isAgentEffectivelyDisabled("proj1", "agent-x", undefined, { team: "frontend" })).toBe(false);
+  });
+
+  it("works with only department provided in opts (no team)", () => {
+    mockGetAgentConfig.mockReturnValue(null);
+    disableScope("proj1", "department", "engineering", "reason");
+
+    expect(isAgentEffectivelyDisabled("proj1", "agent-x", undefined, { department: "engineering" })).toBe(true);
+    expect(isAgentEffectivelyDisabled("proj1", "agent-x", undefined, { department: "sales" })).toBe(false);
+  });
+
+  it("consolidated query correctly handles agent with no team/department config", () => {
+    // Agent has no config at all — only agent-level and domain-level should be checked
+    mockGetAgentConfig.mockReturnValue(null);
+
+    // Team/dept disables should NOT affect this agent (no team/dept to match)
+    disableScope("proj1", "team", "frontend", "team reason");
+    disableScope("proj1", "department", "engineering", "dept reason");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-orphan")).toBe(false);
+
+    // But agent-level disable SHOULD affect it
+    disableScope("proj1", "agent", "agent-orphan", "direct disable");
+    expect(isAgentEffectivelyDisabled("proj1", "agent-orphan")).toBe(true);
+  });
 });

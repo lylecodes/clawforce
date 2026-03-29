@@ -663,24 +663,70 @@ function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandl
   return { action: "handled", taskId };
 }
 
+/**
+ * handleTaskCreated — the SINGLE entry point for all newly created tasks.
+ *
+ * Canonical flow:
+ *   createTask() → emits task_created ONLY
+ *     ↓
+ *   handleTaskCreated() → decides next step based on state:
+ *     - OPEN + no assignee: auto-assign (if configured) → autoAssign emits task_assigned
+ *     - OPEN + has assignee: transition OPEN → ASSIGNED → transitionTask emits task_assigned
+ *     - ASSIGNED: emit task_assigned so dispatch fires
+ *     ↓
+ *   handleTaskAssigned() → enqueues for dispatch (with dedup)
+ *     ↓
+ *   Dispatcher dispatches
+ */
 function handleTaskCreated(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
   const taskId = event.payload.taskId as string | undefined;
   const state = event.payload.state as string | undefined;
+  const assignedTo = event.payload.assignedTo as string | undefined;
   if (!taskId) return { action: "ignored" };
 
-  // Only auto-assign OPEN tasks (not already ASSIGNED)
-  if (state !== "OPEN") return { action: "handled", taskId };
+  // Task was created directly in ASSIGNED state (e.g. createTask with assignedTo).
+  // Emit task_assigned so handleTaskAssigned fires and enqueues for dispatch.
+  if (state === "ASSIGNED" && assignedTo) {
+    try {
+      ingestEvent(event.projectId, "task_assigned", "internal", {
+        taskId,
+        assignedTo,
+        fromState: "OPEN",
+      }, `task-assigned:${taskId}:created`, db);
+    } catch (err) { safeLog("event.router.taskCreatedAssigned", err); }
+    return { action: "handled", taskId };
+  }
 
-  const extConfig = getExtendedProjectConfig(event.projectId);
-  if (!extConfig?.assignment?.enabled) return { action: "handled", taskId };
+  // OPEN task — attempt auto-assignment if configured
+  if (state === "OPEN") {
+    // If created OPEN but with an assignee specified (edge case: workflow phase gate
+    // forced OPEN), transition to ASSIGNED which will emit task_assigned via transitionTask
+    if (assignedTo) {
+      try {
+        transitionTask({
+          projectId: event.projectId,
+          taskId,
+          toState: "ASSIGNED",
+          actor: "system:auto-assign",
+          assignedTo,
+          reason: "Auto-assigned on creation (deferred from phase gate)",
+          verificationRequired: false,
+        }, db);
+      } catch (err) { safeLog("event.router.taskCreatedDeferredAssign", err); }
+      return { action: "handled", taskId };
+    }
 
-  try {
-    // Dynamic import to avoid circular dependency
-    // (assignment → tasks/ops → events/store → router → assignment)
-    const { autoAssign } = require("../assignment/engine.js") as typeof import("../assignment/engine.js");
-    const result = autoAssign(event.projectId, taskId, extConfig.assignment, db);
-    if (result.assigned) return { action: "handled", taskId };
-  } catch (err) { safeLog("event.router.autoAssign", err); }
+    const extConfig = getExtendedProjectConfig(event.projectId);
+    if (!extConfig?.assignment?.enabled) return { action: "handled", taskId };
+
+    try {
+      // Dynamic import to avoid circular dependency
+      // (assignment → tasks/ops → events/store → router → assignment)
+      const { autoAssign } = require("../assignment/engine.js") as typeof import("../assignment/engine.js");
+      const result = autoAssign(event.projectId, taskId, extConfig.assignment, db);
+      if (result.assigned) return { action: "handled", taskId };
+    } catch (err) { safeLog("event.router.autoAssign", err); }
+  }
 
   return { action: "handled", taskId };
 }

@@ -23,7 +23,7 @@ import { getTask, getTaskEvidence } from "../tasks/ops.js";
 import { acquireTaskLease, releaseTaskLease } from "../tasks/ops.js";
 import { ingestEvent } from "../events/store.js";
 import { processEvents } from "../events/router.js";
-import { claimNext, failItem, markDispatched, reclaimExpiredLeases } from "./queue.js";
+import { claimNext, failItem, markDispatched, reclaimExpiredLeases, releaseToQueued } from "./queue.js";
 import { dispatchViaInject } from "./inject-dispatch.js";
 import { buildTaskPrompt } from "./spawn.js";
 import { getApprovedIntentsForTask } from "../approval/intent-store.js";
@@ -36,6 +36,18 @@ import { computeBudgetPacing } from "../budget/pacer.js";
 
 /** Task lease duration in milliseconds — long enough for async dispatch + execution + 5min buffer. */
 const TASK_LEASE_MS = 2 * 60 * 60 * 1000 + 5 * 60 * 1000; // 2h + 5min buffer
+
+/**
+ * Sentinel error thrown when the cron service is unavailable.
+ * Caught by dispatchLoop to abort the current pass gracefully
+ * (items already released back to queued).
+ */
+class CronUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CronUnavailableError";
+  }
+}
 
 // --- Concurrency tracking ---
 
@@ -249,6 +261,14 @@ export async function dispatchLoop(
     try {
       await dispatchItem(projectId, item, db, agentId);
       dispatched++;
+    } catch (err) {
+      if (err instanceof CronUnavailableError) {
+        // Cron service unavailable — item already released to queued.
+        // Abort the dispatch loop; items will be retried on next sweep pass.
+        safeLog("dispatcher.cronUnavailable", "Cron service unavailable — aborting dispatch loop for this pass");
+        break;
+      }
+      throw err;
     } finally {
       releaseDispatch(projectId, agentId);
     }
@@ -613,14 +633,31 @@ async function dispatchItem(
       try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_injected", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
     } else {
       const error = result.error ?? "Unknown dispatch error";
-      failItem(item.id, error, db, projectId);
-      emitDispatchEvent(projectId, "dispatch_failed", item, { error }, db);
-      maybeEmitDeadLetter(projectId, item, error, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "inject_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      const isCronUnavailable = error.includes("Cron service not available");
+
+      if (isCronUnavailable) {
+        // Cron service not yet bootstrapped — release back to queue for retry
+        // on the next sweep pass instead of permanently failing the item.
+        releaseToQueued(item.id, error, db, projectId);
+        safeLog("dispatcher.cronUnavailable", `Queue item ${item.id} released to queued — cron not ready`);
+        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_deferred", value: 1, tags: { queueItemId: item.id, reason: "cron_unavailable" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+        // Release lease and abort the loop — no point trying more items
+        // when the cron service is down. They'll be retried next sweep pass.
+        try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (err) { safeLog("dispatcher.releaseLease", err); }
+        throw new CronUnavailableError(error);
+      } else {
+        failItem(item.id, error, db, projectId);
+        emitDispatchEvent(projectId, "dispatch_failed", item, { error }, db);
+        maybeEmitDeadLetter(projectId, item, error, db);
+        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "inject_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      }
       // Release lease on failure — no session will run
       try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (err) { safeLog("dispatcher.releaseLease", err); }
     }
   } catch (err) {
+    // Re-throw CronUnavailableError so dispatchLoop can catch it and abort gracefully
+    if (err instanceof CronUnavailableError) throw err;
+
     const message = err instanceof Error ? err.message : String(err);
     failItem(item.id, message, db, projectId);
     emitDispatchEvent(projectId, "dispatch_failed", item, { error: message }, db);

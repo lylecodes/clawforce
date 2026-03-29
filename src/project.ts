@@ -1603,12 +1603,17 @@ export function registerWorkforceConfig(
 
   // Inject default event handlers for event-driven mode
   // User config overrides defaults per event type (full replacement, not merge)
+  //
+  // NOTE: task_assigned is intentionally NOT included here. The built-in
+  // handleTaskAssigned() in router.ts already enqueues for dispatch (with dedup).
+  // Having a dispatch_agent user handler here too would cause double-dispatch.
+  // The canonical dispatch path is:
+  //   createTask → handleTaskCreated → emits task_assigned → handleTaskAssigned → enqueue
   let effectiveEventHandlers = wfConfig.event_handlers;
   if (wfConfig.dispatch?.mode === "event-driven") {
     const defaults: Record<string, EventHandlerConfig> = {
       task_review_ready: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }],
       task_failed: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }],
-      task_assigned: [{ action: "dispatch_agent", agent_role: "worker", session_type: "active" }],
       budget_changed: [{ action: "dispatch_agent", agent_role: "lead", session_type: "planning" }],
     };
     effectiveEventHandlers = { ...defaults, ...effectiveEventHandlers };

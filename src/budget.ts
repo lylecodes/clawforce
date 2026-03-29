@@ -19,6 +19,16 @@ import type { BudgetCheckResult, BudgetConfig, BudgetConfigV2 } from "./types.js
  * Set or update a budget for a project or agent.
  * Accepts both legacy BudgetConfig and BudgetConfigV2.
  * Normalizes legacy config to v2 format, then writes all dimension/window columns.
+ *
+ * Reset semantics:
+ * - Each window (hourly/daily/monthly) has a `*_reset_at` timestamp marking the end of the current window.
+ * - When a budget is created or updated with a window config, `*_reset_at` is set to the next boundary
+ *   (e.g., next hour, next midnight UTC, next month). This means reconfiguring a budget always
+ *   resets the window boundary to a fresh value.
+ * - When `ensureWindowsCurrent()` detects the current time has passed `*_reset_at`, it zeroes
+ *   the spent counters and advances `*_reset_at` to the NEXT boundary. This is a rolling window.
+ * - If a window config is removed (e.g., hourly limit set to null), `*_reset_at` is set to null
+ *   and the corresponding spent counters are no longer enforced.
  */
 export function setBudget(
   params: {
@@ -52,8 +62,8 @@ export function setBudget(
         daily_limit_cents = ?, daily_limit_tokens = ?, daily_limit_requests = ?,
         monthly_limit_cents = ?, monthly_limit_tokens = ?, monthly_limit_requests = ?,
         session_limit_cents = ?, task_limit_cents = ?,
-        hourly_reset_at = COALESCE(hourly_reset_at, ?),
-        monthly_reset_at = COALESCE(monthly_reset_at, ?),
+        hourly_reset_at = ?,
+        monthly_reset_at = ?,
         updated_at = ?
       WHERE id = ?
     `).run(

@@ -296,6 +296,80 @@ describe("sweep", () => {
     expect(row.state).toBe("OPEN");
   });
 
+  it("recovers stale dispatched queue items with no active session", async () => {
+    // Create a task to associate with the dispatch queue item
+    const task = createTask(
+      { projectId: PROJECT, title: "Dispatched but orphaned", createdBy: "agent:a" },
+      db,
+    );
+    transitionTask(
+      { projectId: PROJECT, taskId: task.id, toState: "ASSIGNED", actor: "agent:a" },
+      db,
+    );
+
+    const itemId = "test-dispatch-item-stale";
+    const now = Date.now();
+    const dispatchedAt = now - 15 * 60 * 1000; // 15 minutes ago (past 10-min default)
+
+    // Insert a dispatch queue item in 'dispatched' status with stale dispatched_at
+    db.prepare(`
+      INSERT INTO dispatch_queue (id, project_id, task_id, priority, status, dispatch_attempts, max_dispatch_attempts, created_at, dispatched_at)
+      VALUES (?, ?, ?, 2, 'dispatched', 1, 3, ?, ?)
+    `).run(itemId, PROJECT, task.id, dispatchedAt - 60_000, dispatchedAt);
+
+    const result = await sweep({ projectId: PROJECT, dbOverride: db });
+    expect(result.staleDispatchRecovered).toBe(1);
+
+    // Verify the original item was failed
+    const failedItem = db.prepare("SELECT status, last_error FROM dispatch_queue WHERE id = ?").get(itemId) as Record<string, unknown>;
+    expect(failedItem.status).toBe("failed");
+    expect(failedItem.last_error).toContain("Stale dispatched item");
+
+    // Verify a retry item was created (it may have been picked up by the dispatch loop backstop,
+    // so check for any item other than the original — in any status)
+    const retryItems = db.prepare(
+      "SELECT id, status FROM dispatch_queue WHERE project_id = ? AND task_id = ? AND id != ?",
+    ).all(PROJECT, task.id, itemId) as Record<string, unknown>[];
+    expect(retryItems.length).toBeGreaterThanOrEqual(1);
+
+    // Verify diagnostic event was emitted
+    expect(vi.mocked(emitDiagnosticEvent)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "dispatch_stale_recovered",
+        projectId: PROJECT,
+        taskId: task.id,
+        queueItemId: itemId,
+      }),
+    );
+  });
+
+  it("does not recover recently dispatched queue items", async () => {
+    const task = createTask(
+      { projectId: PROJECT, title: "Recently dispatched", createdBy: "agent:a" },
+      db,
+    );
+    transitionTask(
+      { projectId: PROJECT, taskId: task.id, toState: "ASSIGNED", actor: "agent:a" },
+      db,
+    );
+
+    const itemId = "test-dispatch-item-recent";
+    const now = Date.now();
+    const dispatchedAt = now - 5 * 60 * 1000; // 5 minutes ago (under 10-min threshold)
+
+    db.prepare(`
+      INSERT INTO dispatch_queue (id, project_id, task_id, priority, status, dispatch_attempts, max_dispatch_attempts, created_at, dispatched_at)
+      VALUES (?, ?, ?, 2, 'dispatched', 1, 3, ?, ?)
+    `).run(itemId, PROJECT, task.id, dispatchedAt - 60_000, dispatchedAt);
+
+    const result = await sweep({ projectId: PROJECT, dbOverride: db });
+    expect(result.staleDispatchRecovered).toBe(0);
+
+    // Item should still be dispatched
+    const item = db.prepare("SELECT status FROM dispatch_queue WHERE id = ?").get(itemId) as Record<string, unknown>;
+    expect(item.status).toBe("dispatched");
+  });
+
   it("emits task_escalated diagnostic event when task is escalated", async () => {
     const task = createTask(
       { projectId: PROJECT, title: "Exhausted task", createdBy: "agent:a", maxRetries: 1 },

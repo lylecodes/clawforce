@@ -138,34 +138,16 @@ describe("event-driven dispatch E2E", () => {
     // Verify default event handlers are registered for event-driven mode
     const extConfig = getExtendedProjectConfig(PROJECT);
     expect(extConfig?.dispatch?.mode).toBe("event-driven");
-    expect(extConfig?.eventHandlers?.task_assigned).toBeDefined();
-    expect(extConfig?.eventHandlers?.task_assigned?.[0]).toEqual({
-      action: "dispatch_agent",
-      agent_role: "worker",
-      session_type: "active",
-    });
+    // task_assigned is NOT a default user handler — the built-in handleTaskAssigned()
+    // in router.ts handles dispatch. User handlers for task_assigned would double-dispatch.
+    expect(extConfig?.eventHandlers?.task_assigned).toBeUndefined();
 
-    // 4. Verify dispatch_agent action resolves the worker
-    const event: ClawforceEvent = {
-      id: eventResult.id,
-      type: "task_assigned",
-      source: "internal",
-      projectId: PROJECT,
-      payload: { taskId: task.id, assignedTo: "e2e-worker" },
-      status: "pending",
-      createdAt: Date.now(),
-    };
+    // 4. Verify the built-in handleTaskAssigned enqueues for dispatch
+    //    (no user handler needed — the canonical path uses the built-in router handler)
+    //    Process the task_assigned event we manually ingested above
+    processEvents(PROJECT, db);
 
-    const dispatchConfig = extConfig!.eventHandlers!.task_assigned![0] as EventActionConfig;
-    const actionResult = executeAction(event, dispatchConfig, db);
-
-    expect(actionResult.ok).toBe(true);
-    expect(actionResult.action).toBe("dispatch_agent");
-    expect(actionResult.detail?.agentId).toBe("e2e-worker");
-
-    // 5. Verify enqueue was called (queue item exists)
-    expect(actionResult.detail?.queueItemId).toBeTruthy();
-
+    // 5. Verify enqueue was called via built-in handleTaskAssigned (queue item exists)
     const queueItems = db.prepare(
       "SELECT * FROM dispatch_queue WHERE project_id = ? AND task_id = ? AND status = 'queued'",
     ).all(PROJECT, task.id) as Record<string, unknown>[];

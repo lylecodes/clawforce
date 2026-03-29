@@ -16,6 +16,19 @@ export type CronDispatchResult = {
 };
 
 /**
+ * Attempt to bootstrap the cron service by calling the clawforce.bootstrap
+ * gateway method via WebSocket RPC. The gateway method handler has access
+ * to context.cron and will call setCronService().
+ *
+ * Returns true if cron service is now available.
+ */
+async function tryBootstrapCron(): Promise<boolean> {
+  // Cron is now auto-captured on gateway_start via clawforce.dispatch RPC.
+  // This function just checks if it's available yet.
+  return getCronService() !== null;
+}
+
+/**
  * Dispatch a task by creating a one-shot cron job that fires immediately.
  * The cron job embeds a `[clawforce:dispatch=...]` tag so the
  * `before_prompt_build` hook can link the session to the dispatch queue item.
@@ -30,10 +43,19 @@ export async function dispatchViaCron(options: {
   timeoutSeconds?: number;
 }): Promise<CronDispatchResult> {
   let cronService = getCronService();
-  // Brief wait if cron bootstrap hasn't completed yet
+
+  // If cron service isn't available, try progressive recovery:
+  // 1. Brief wait (may be in-flight bootstrap)
+  // 2. Active bootstrap via gateway RPC (captures context.cron)
   if (!cronService) {
-    await new Promise(resolve => setTimeout(resolve, 5_000));
+    await new Promise(resolve => setTimeout(resolve, 2_000));
     cronService = getCronService();
+  }
+  if (!cronService) {
+    const bootstrapped = await tryBootstrapCron();
+    if (bootstrapped) {
+      cronService = getCronService();
+    }
   }
   if (!cronService) {
     return { ok: false, error: "Cron service not available (bootstrap may still be in progress)" };

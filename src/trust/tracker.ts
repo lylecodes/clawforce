@@ -4,6 +4,16 @@
  * Records approval/rejection decisions per action category.
  * Computes approval rates and suggests tier adjustments.
  * Handles trust decay for inactive categories.
+ *
+ * USAGE NOTE: Trust scores are INFORMATIONAL ONLY. They do not gate dispatch
+ * or block agent actions. They are surfaced in:
+ * - The `trust_scores` context source (for manager/lead briefings)
+ * - The `budget_plan` context source (per-agent trust summaries for leads)
+ * - The SDK's `cf.trust.score()` / `cf.trust.tier()` methods
+ *
+ * Tier suggestions (`suggestTierAdjustments`) are advisory — they recommend
+ * tier changes based on approval history but do not auto-apply. A human or
+ * manager agent must explicitly call `applyTrustOverride()` to act on them.
  */
 
 import crypto from "node:crypto";

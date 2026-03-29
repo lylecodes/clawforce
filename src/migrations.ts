@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 37;
+export const SCHEMA_VERSION = 38;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -51,6 +51,7 @@ const migrations: Record<number, Migration> = {
   35: migrateV35,
   36: migrateV36,
   37: migrateV37,
+  38: migrateV38,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1226,6 +1227,12 @@ function migrateV37(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_disabled_scopes_project ON disabled_scopes(project_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_disabled_scopes_lookup ON disabled_scopes(project_id, scope_type, scope_value);
   `);
+}
+
+// --- Migration V38: Add dispatched_at column to dispatch_queue ---
+
+function migrateV38(db: DatabaseSync): void {
+  safeAlterTable(db, `ALTER TABLE dispatch_queue ADD COLUMN dispatched_at INTEGER`);
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */

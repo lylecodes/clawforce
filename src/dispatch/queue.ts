@@ -30,6 +30,7 @@ function rowToQueueItem(row: Record<string, unknown>): DispatchQueueItem {
     maxDispatchAttempts: row.max_dispatch_attempts as number,
     lastError: (row.last_error as string) ?? undefined,
     createdAt: row.created_at as number,
+    dispatchedAt: (row.dispatched_at as number) ?? undefined,
     completedAt: (row.completed_at as number) ?? undefined,
   };
 }
@@ -264,11 +265,12 @@ export function markDispatched(
   projectId?: string,
 ): void {
   const db = dbOverride ?? getDb(projectId ?? "");
+  const now = Date.now();
   db.prepare(
     `UPDATE dispatch_queue
-     SET status = 'dispatched', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL
+     SET status = 'dispatched', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL, dispatched_at = ?
      WHERE id = ?`,
-  ).run(id);
+  ).run(now, id);
 
   if (projectId) {
     try {
@@ -311,6 +313,35 @@ export function failItem(
     try {
       writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.fail", targetType: "dispatch_queue", targetId: id, detail: error.slice(0, 500) }, db);
     } catch (err) { safeLog("queue.fail.audit", err); }
+  }
+}
+
+/**
+ * Release a leased item back to 'queued' status without incrementing attempts
+ * or marking as failed. Used for transient infrastructure issues (e.g. cron
+ * service not yet available) where the item should be retried on the next pass.
+ *
+ * Decrements dispatch_attempts to undo the increment from claimNext(),
+ * ensuring the transient failure doesn't consume a retry slot.
+ */
+export function releaseToQueued(
+  id: string,
+  reason: string,
+  dbOverride?: DatabaseSync,
+  projectId?: string,
+): void {
+  const db = dbOverride ?? getDb(projectId ?? "");
+  db.prepare(
+    `UPDATE dispatch_queue
+     SET status = 'queued', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL,
+         last_error = ?, dispatch_attempts = MAX(0, dispatch_attempts - 1)
+     WHERE id = ?`,
+  ).run(reason, id);
+
+  if (projectId) {
+    try {
+      writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.release_to_queued", targetType: "dispatch_queue", targetId: id, detail: reason.slice(0, 500) }, db);
+    } catch (err) { safeLog("queue.releaseToQueued.audit", err); }
   }
 }
 
