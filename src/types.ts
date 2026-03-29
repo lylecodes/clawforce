@@ -39,6 +39,8 @@ export type Evidence = {
   metadata?: Record<string, unknown>;
 };
 
+export type TaskOrigin = "user_request" | "lead_proposal" | "reactive";
+
 export type Task = {
   id: string;
   projectId: string;
@@ -61,6 +63,8 @@ export type Task = {
   department?: string;
   team?: string;
   goalId?: string;
+  origin?: TaskOrigin;
+  originId?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -239,7 +243,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "worker_findings" | "recent_decisions" | "clawforce_health_report" | "budget_plan";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "user_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "worker_findings" | "recent_decisions" | "clawforce_health_report" | "budget_plan";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */

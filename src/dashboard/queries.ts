@@ -756,6 +756,9 @@ function mapProposalRow(row: Record<string, unknown>) {
     toolName: undefined as string | undefined,
     category: undefined as string | undefined,
     summary: (row.description as string) ?? (row.title as string),
+    origin: (row.origin as string) ?? "risk_gate",
+    reasoning: (row.reasoning as string) ?? undefined,
+    relatedGoalId: (row.related_goal_id as string) ?? undefined,
   };
 }
 
@@ -1806,5 +1809,242 @@ export function queryPolicyViolations(projectId: string, limit = 50) {
     };
   } catch {
     return { violations: [], count: 0 };
+  }
+}
+
+// ─── Work Streams ─────────────────────────────────────────────────────────────
+
+export type WorkStreamTask = {
+  id: string;
+  title: string;
+  state: string;
+  priority: string;
+  kind?: string;
+  origin?: string;
+  originId?: string;
+  goalId?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type WorkStream = {
+  leadId: string;
+  leadTitle?: string;
+  department?: string;
+  team?: string;
+  activeGoals: Array<{ id: string; title: string; status: string; progress?: number }>;
+  executing: WorkStreamTask[];
+  queued: WorkStreamTask[];
+  proposed: Array<{ id: string; title: string; origin: string; reasoning?: string; createdAt: number }>;
+  completed: WorkStreamTask[];
+  totalCostCents: number;
+  tasksByOrigin: { user_request: number; lead_proposal: number; reactive: number; unknown: number };
+};
+
+export type WorkStreamResponse = {
+  workStreams: WorkStream[];
+  count: number;
+};
+
+/** Query work streams — per-lead grouped data showing active goals, tasks by state, cost. */
+export function queryWorkStreams(projectId: string, leadId?: string): WorkStreamResponse {
+  const allAgentIds = getRegisteredAgentIds();
+
+  // Find leads — agents with coordination.enabled or extends containing "lead"
+  const leadIds = allAgentIds.filter((aid) => {
+    const entry = getAgentConfig(aid);
+    if (!entry || entry.projectId !== projectId) return false;
+    if (leadId && aid !== leadId) return false;
+    // A lead has coordination enabled, or their role extends "lead"
+    return entry.config.coordination?.enabled || entry.config.extends?.includes("lead");
+  });
+
+  const db = getDb(projectId);
+  const workStreams: WorkStream[] = [];
+
+  for (const lid of leadIds) {
+    const entry = getAgentConfig(lid)!;
+    const dept = entry.config.department;
+    const team = entry.config.team;
+
+    // Get direct reports for this lead
+    const reports = getDirectReports(projectId, lid);
+    const managedAgentIds = [lid, ...reports];
+    const placeholders = managedAgentIds.map(() => "?").join(", ");
+
+    // Active goals owned by this lead
+    let activeGoals: WorkStream["activeGoals"] = [];
+    try {
+      const goals = listGoals(projectId, { ownerAgentId: lid, status: "active" as GoalStatus, limit: 20 });
+      activeGoals = goals.map((g) => {
+        let progress: number | undefined;
+        try { progress = computeGoalProgress(projectId, g.id)?.progressPct; } catch { /* ignore */ }
+        return { id: g.id, title: g.title, status: g.status, progress };
+      });
+    } catch { /* ignore */ }
+
+    // Tasks by state for all managed agents
+    let executing: WorkStreamTask[] = [];
+    let queued: WorkStreamTask[] = [];
+    let completed: WorkStreamTask[] = [];
+    try {
+      const taskRows = db.prepare(
+        `SELECT id, title, state, priority, kind, origin, origin_id, goal_id, created_at, updated_at
+         FROM tasks WHERE project_id = ? AND (assigned_to IN (${placeholders}) OR created_by IN (${placeholders}))
+         AND state != 'CANCELLED'
+         ORDER BY updated_at DESC LIMIT 200`,
+      ).all(projectId, ...managedAgentIds, ...managedAgentIds) as Record<string, unknown>[];
+
+      for (const r of taskRows) {
+        const t: WorkStreamTask = {
+          id: r.id as string,
+          title: r.title as string,
+          state: r.state as string,
+          priority: r.priority as string,
+          kind: (r.kind as string) ?? undefined,
+          origin: (r.origin as string) ?? undefined,
+          originId: (r.origin_id as string) ?? undefined,
+          goalId: (r.goal_id as string) ?? undefined,
+          createdAt: r.created_at as number,
+          updatedAt: r.updated_at as number,
+        };
+        switch (r.state) {
+          case "ASSIGNED":
+          case "IN_PROGRESS":
+          case "REVIEW":
+            executing.push(t);
+            break;
+          case "OPEN":
+          case "BLOCKED":
+            queued.push(t);
+            break;
+          case "DONE":
+            completed.push(t);
+            break;
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Pending proposals from this lead
+    let proposed: WorkStream["proposed"] = [];
+    try {
+      const rows = db.prepare(
+        "SELECT id, title, origin, reasoning, created_at FROM proposals WHERE project_id = ? AND proposed_by = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 20",
+      ).all(projectId, lid) as Record<string, unknown>[];
+      proposed = rows.map((r) => ({
+        id: r.id as string,
+        title: r.title as string,
+        origin: (r.origin as string) ?? "risk_gate",
+        reasoning: (r.reasoning as string) ?? undefined,
+        createdAt: r.created_at as number,
+      }));
+    } catch { /* ignore */ }
+
+    // Cost for this work stream
+    let totalCostCents = 0;
+    try {
+      const costRow = db.prepare(
+        `SELECT COALESCE(SUM(cost_cents), 0) as total FROM cost_records WHERE project_id = ? AND agent_id IN (${placeholders})`,
+      ).get(projectId, ...managedAgentIds) as { total: number } | undefined;
+      totalCostCents = costRow?.total ?? 0;
+    } catch { /* ignore */ }
+
+    // Count tasks by origin
+    const tasksByOrigin = { user_request: 0, lead_proposal: 0, reactive: 0, unknown: 0 };
+    for (const t of [...executing, ...queued, ...completed]) {
+      const o = t.origin as keyof typeof tasksByOrigin;
+      if (o && o in tasksByOrigin) {
+        tasksByOrigin[o]++;
+      } else {
+        tasksByOrigin.unknown++;
+      }
+    }
+
+    workStreams.push({
+      leadId: lid,
+      leadTitle: entry.config.title,
+      department: dept,
+      team,
+      activeGoals,
+      executing,
+      queued,
+      proposed,
+      completed: completed.slice(0, 20), // limit completed to recent
+      totalCostCents,
+      tasksByOrigin,
+    });
+  }
+
+  return { workStreams, count: workStreams.length };
+}
+
+// ─── User Inbox (messaging between dashboard user and agents) ─────────────────
+
+export type UserInboxMessage = {
+  id: string;
+  fromAgent: string;
+  toAgent: string;
+  content: string;
+  createdAt: number;
+  status: string;
+  parentMessageId?: string;
+  proposalId?: string;
+};
+
+export type UserInboxResponse = {
+  messages: UserInboxMessage[];
+  count: number;
+};
+
+/** Query messages to/from the "user" pseudo-agent for dashboard messaging. */
+export function queryUserInbox(
+  projectId: string,
+  filters?: { agentId?: string; limit?: number; since?: number },
+): UserInboxResponse {
+  const db = getDb(projectId);
+  const limit = filters?.limit ?? 50;
+
+  try {
+    let sql = `SELECT id, from_agent, to_agent, content, created_at, status, parent_message_id, metadata
+               FROM messages
+               WHERE project_id = ? AND (from_agent = 'user' OR to_agent = 'user')`;
+    const params: (string | number)[] = [projectId];
+
+    if (filters?.agentId) {
+      sql += " AND (from_agent = ? OR to_agent = ?)";
+      params.push(filters.agentId, filters.agentId);
+    }
+    if (filters?.since) {
+      sql += " AND created_at > ?";
+      params.push(filters.since);
+    }
+    sql += " ORDER BY created_at DESC LIMIT ?";
+    params.push(limit);
+
+    const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+
+    const messages: UserInboxMessage[] = rows.map((r) => {
+      let proposalId: string | undefined;
+      if (r.metadata) {
+        try {
+          const meta = JSON.parse(r.metadata as string);
+          proposalId = meta.proposalId;
+        } catch { /* ignore */ }
+      }
+      return {
+        id: r.id as string,
+        fromAgent: r.from_agent as string,
+        toAgent: r.to_agent as string,
+        content: r.content as string,
+        createdAt: r.created_at as number,
+        status: r.status as string,
+        parentMessageId: (r.parent_message_id as string) ?? undefined,
+        proposalId,
+      };
+    });
+
+    return { messages, count: messages.length };
+  } catch {
+    return { messages: [], count: 0 };
   }
 }

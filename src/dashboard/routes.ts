@@ -59,6 +59,8 @@ import {
   queryManagerReviews,
   queryTrustDecisions,
   queryPolicyViolations,
+  queryWorkStreams,
+  queryUserInbox,
 } from "./queries.js";
 import { ingestEvent } from "../events/store.js";
 import { getDb } from "../db.js";
@@ -387,6 +389,21 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
       case "policy-violations": {
         // GET /api/projects/:id/policy-violations?limit=50
         return ok(queryPolicyViolations(projectId, params.limit ? safeParseInt(params.limit, 50) : undefined));
+      }
+
+      case "workstreams": {
+        // GET /api/projects/:id/workstreams or /api/projects/:id/workstreams/:leadId
+        const leadId = segments[4];
+        return ok(queryWorkStreams(projectId, leadId));
+      }
+
+      case "inbox": {
+        // GET /api/projects/:id/inbox — user messages
+        return ok(queryUserInbox(projectId, {
+          agentId: params.agent,
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          since: params.since ? safeParseInt(params.since, 0) : undefined,
+        }));
       }
 
       default:

@@ -59,6 +59,8 @@ function rowToTask(row: Record<string, unknown>): Task {
     team: (row.team as string) ?? undefined,
     goalId: (row.goal_id as string) ?? undefined,
     kind: (row.kind as TaskKind) ?? undefined,
+    origin: (row.origin as import("../types.js").TaskOrigin) ?? undefined,
+    originId: (row.origin_id as string) ?? undefined,
     metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
   };
 }
@@ -108,6 +110,8 @@ export function createTask(
     team?: string;
     goalId?: string;
     kind?: TaskKind;
+    origin?: import("../types.js").TaskOrigin;
+    originId?: string;
     metadata?: Record<string, unknown>;
   },
   dbOverride?: DatabaseSync,
@@ -128,8 +132,8 @@ export function createTask(
   const stmt = db.prepare(`
     INSERT INTO tasks (id, project_id, title, description, state, priority, assigned_to,
       created_by, created_at, updated_at, deadline, retry_count, max_retries, tags,
-      workflow_id, workflow_phase, parent_task_id, department, team, goal_id, kind, metadata)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      workflow_id, workflow_phase, parent_task_id, department, team, goal_id, kind, origin, origin_id, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -153,6 +157,8 @@ export function createTask(
     params.team ?? null,
     params.goalId ?? null,
     params.kind ?? null,
+    params.origin ?? null,
+    params.originId ?? null,
     params.metadata ? JSON.stringify(params.metadata) : null,
   );
 

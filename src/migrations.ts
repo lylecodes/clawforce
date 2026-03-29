@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 39;
+export const SCHEMA_VERSION = 40;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -53,6 +53,7 @@ const migrations: Record<number, Migration> = {
   37: migrateV37,
   38: migrateV38,
   39: migrateV39,
+  40: migrateV40,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1241,6 +1242,24 @@ function migrateV38(db: DatabaseSync): void {
 function migrateV39(db: DatabaseSync): void {
   safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN kind TEXT`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind)`);
+}
+
+// --- Migration V40: Origin tracking for proposals and tasks, user messaging support ---
+
+function migrateV40(db: DatabaseSync): void {
+  // Proposal origin tracking — distinguish lead_proposal from risk_gate
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN origin TEXT DEFAULT 'risk_gate'`);
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN reasoning TEXT`);
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN related_goal_id TEXT`);
+
+  // Task origin tracking — trace every task back to its source
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN origin TEXT`);
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN origin_id TEXT`);
+
+  // Indexes for efficient work stream queries
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_proposals_origin ON proposals(origin)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_origin ON tasks(origin)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_origin_id ON tasks(origin_id) WHERE origin_id IS NOT NULL`);
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */

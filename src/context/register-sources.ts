@@ -503,6 +503,62 @@ registerContextSource("pending_messages", (ctx) => {
   return lines.join("\n");
 });
 
+// --- user_messages ---
+// Shows messages from the dashboard user to this agent, separate from agent-to-agent messaging.
+registerContextSource("user_messages", (ctx) => {
+  if (!ctx.projectId) return null;
+
+  let db: DatabaseSync;
+  try { db = getDb(ctx.projectId); } catch { return null; }
+
+  // Fetch undelivered messages from "user" to this agent
+  let rows: Record<string, unknown>[];
+  try {
+    rows = db.prepare(
+      `SELECT id, content, created_at, metadata FROM messages WHERE project_id = ? AND to_agent = ? AND from_agent = 'user' AND status = 'queued' ORDER BY created_at ASC`,
+    ).all(ctx.projectId, ctx.agentId) as Record<string, unknown>[];
+  } catch { return null; }
+
+  if (!rows || rows.length === 0) return null;
+
+  // Mark as delivered
+  try {
+    const stmt = db.prepare("UPDATE messages SET status = 'delivered', delivered_at = ? WHERE id = ?");
+    const now = Date.now();
+    for (const r of rows) {
+      stmt.run(now, r.id as string);
+    }
+  } catch { /* best effort */ }
+
+  const lines = [
+    "## Messages from the User",
+    "",
+    `You have ${rows.length} message(s) from the user (dashboard):`,
+    "",
+  ];
+
+  for (const row of rows) {
+    const ago = formatTimeAgo(Date.now() - (row.created_at as number));
+    lines.push(`### User Message — ${ago}`);
+    lines.push(String(row.content));
+
+    // Check for linked proposal
+    if (row.metadata) {
+      try {
+        const meta = JSON.parse(row.metadata as string);
+        if (meta.proposalId) {
+          lines.push(`*Related to proposal: \`${meta.proposalId}\`*`);
+        }
+      } catch { /* ignore */ }
+    }
+    lines.push("");
+  }
+
+  lines.push("*Respond to the user by creating tasks, proposals, or sending a message to agent \"user\".*");
+
+  return lines.join("\n");
+});
+
 // --- goal_hierarchy ---
 registerContextSource("goal_hierarchy", (ctx) => {
   if (!ctx.projectId) return null;

@@ -35,6 +35,7 @@ const ALL_SOURCE_NAMES = [
   "soul",
   "tools_reference",
   "pending_messages",
+  "user_messages",
   "goal_hierarchy",
   "channel_messages",
   "planning_delta",

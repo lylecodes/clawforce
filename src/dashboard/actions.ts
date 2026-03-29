@@ -12,6 +12,7 @@ import { attachEvidence, createTask, reassignTask, transitionTask } from "../tas
 import { disableAgent, enableAgent } from "../enforcement/disabled-store.js";
 import { startMeeting, concludeMeeting } from "../channels/meeting.js";
 import { sendChannelMessage } from "../channels/messages.js";
+import { createMessage } from "../messaging/store.js";
 import { emitSSE } from "./sse.js";
 import type { EvidenceType, TaskPriority, TaskState } from "../types.js";
 import { ingestEvent } from "../events/store.js";
@@ -342,7 +343,41 @@ function handleMessageAction(
   segments: string[],
   body: Record<string, unknown>,
 ): RouteResult {
-  // messages/:threadId/send
+  // POST /messages/send — user sends a direct message to an agent
+  if (segments[1] === "send") {
+    const to = body.to as string;
+    const content = body.content as string;
+    if (!to) return badRequest("to is required");
+    if (!content) return badRequest("content is required");
+
+    try {
+      const msg = createMessage({
+        fromAgent: "user",
+        toAgent: to,
+        projectId,
+        content,
+        type: "direct",
+        priority: (body.priority as "normal" | "high" | "urgent") ?? "normal",
+        metadata: body.proposalId ? { proposalId: body.proposalId as string } : undefined,
+      });
+      emitSSE(projectId, "message:new", { toAgent: to, messageId: msg.id, fromAgent: "user" });
+
+      // Emit event so the lead picks up the user message in its next briefing
+      try {
+        ingestEvent(projectId, "user_message", "internal", {
+          messageId: msg.id,
+          toAgent: to,
+          content: content.slice(0, 200),
+        }, `user-msg:${msg.id}`);
+      } catch { /* non-fatal */ }
+
+      return { status: 201, body: msg };
+    } catch (err) {
+      return badRequest(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // messages/:threadId/send — existing channel message pattern
   if (segments.length < 3) return notFound("Missing message action");
 
   const threadId = segments[1]!;

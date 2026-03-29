@@ -77,6 +77,7 @@ const OPS_ACTIONS = [
   "disable_domain", "enable_domain", "domain_status",
   "create_experiment", "start_experiment", "pause_experiment", "complete_experiment",
   "kill_experiment", "apply_experiment", "experiment_status", "list_experiments",
+  "propose_feature",
 ] as const;
 
 const ClawforceOpsSchema = Type.Object({
@@ -157,6 +158,11 @@ const ClawforceOpsSchema = Type.Object({
   experiment_criteria: Type.Optional(Type.String({ description: "Completion criteria JSON (for create_experiment)." })),
   experiment_auto_apply: Type.Optional(Type.Boolean({ description: "Auto-apply winner when complete (for create_experiment)." })),
   experiment_state_filter: Type.Optional(Type.String({ description: "Filter by state: draft, running, paused, completed, cancelled (for list_experiments)." })),
+  // propose_feature params
+  proposal_title: Type.Optional(Type.String({ description: "Feature proposal title (for propose_feature)." })),
+  proposal_description: Type.Optional(Type.String({ description: "Feature proposal description (for propose_feature)." })),
+  proposal_reasoning: Type.Optional(Type.String({ description: "Gap analysis vs DIRECTION explaining why this feature is needed (for propose_feature)." })),
+  proposal_goal_id: Type.Optional(Type.String({ description: "Related goal ID, if applicable (for propose_feature)." })),
 });
 
 export function createClawforceOpsTool(options?: {
@@ -177,7 +183,8 @@ export function createClawforceOpsTool(options?: {
       "Use enqueue_work to add tasks to the dispatch queue with priority. " +
       "Use process_events to trigger event processing + dispatch. " +
       "Knowledge lifecycle: flag_knowledge (report wrong knowledge), approve_promotion/dismiss_promotion (manage promotion candidates), resolve_flag/dismiss_flag (manage knowledge corrections), list_candidates/list_flags (view pending items). " +
-      "Init flow: init_questions (get setup wizard questions), init_apply (apply answers to scaffold config). ",
+      "Init flow: init_questions (get setup wizard questions), init_apply (apply answers to scaffold config). " +
+      "Proposals: propose_feature (submit a feature proposal with gap analysis reasoning for user approval). ",
     parameters: ClawforceOpsSchema,
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
@@ -1451,6 +1458,74 @@ export function createClawforceOpsTool(options?: {
             const db = getDb(projectId);
             const experiments = listExperiments(projectId, stateFilter as ExperimentState | undefined, db);
             return jsonResult({ ok: true, experiments, count: experiments.length });
+          }
+
+          case "propose_feature": {
+            const title = readStringParam(params, "proposal_title");
+            const description = readStringParam(params, "proposal_description");
+            const reasoning = readStringParam(params, "proposal_reasoning");
+            const relatedGoalId = readStringParam(params, "proposal_goal_id");
+            if (!title) return jsonResult({ ok: false, reason: "proposal_title is required" });
+            if (!description) return jsonResult({ ok: false, reason: "proposal_description is required" });
+
+            const db = getDb(projectId);
+            const proposalId = randomUUID();
+            const now = Date.now();
+
+            db.prepare(`
+              INSERT INTO proposals (id, project_id, title, description, proposed_by, session_key, status, created_at, origin, reasoning, related_goal_id)
+              VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'lead_proposal', ?, ?)
+            `).run(
+              proposalId,
+              projectId,
+              title,
+              description,
+              caller,
+              options?.agentSessionKey ?? null,
+              now,
+              reasoning ?? null,
+              relatedGoalId ?? null,
+            );
+
+            // Emit proposal_created event
+            try {
+              ingestEvent(projectId, "proposal_created", "internal", {
+                proposalId,
+                proposedBy: caller,
+                origin: "lead_proposal",
+                title,
+                reasoning: reasoning ?? undefined,
+                relatedGoalId: relatedGoalId ?? undefined,
+              }, `proposal-created:${proposalId}`);
+            } catch (err) {
+              safeLog("ops.propose_feature.event", err);
+            }
+
+            // Notify via approval channel if available
+            try {
+              const { getApprovalNotifier } = await import("../approval/notify.js");
+              const notifier = getApprovalNotifier();
+              if (notifier) {
+                await notifier.sendProposalNotification({
+                  proposalId,
+                  projectId,
+                  title,
+                  description,
+                  proposedBy: caller,
+                  riskTier: "low",
+                });
+              }
+            } catch (err) {
+              safeLog("ops.propose_feature.notify", err);
+            }
+
+            return jsonResult({
+              ok: true,
+              proposalId,
+              origin: "lead_proposal",
+              status: "pending",
+              message: "Feature proposal submitted for user approval.",
+            });
           }
 
           default:

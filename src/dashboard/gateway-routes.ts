@@ -55,6 +55,8 @@ import {
   queryKnowledgeFlags,
   queryPromotionCandidates,
   queryInterventions,
+  queryWorkStreams,
+  queryUserInbox,
 } from "./queries.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
@@ -466,6 +468,21 @@ function routeRead(
 
     case "interventions":
       return ok(queryInterventions(domain));
+
+    case "workstreams": {
+      // GET /:domain/workstreams or /:domain/workstreams/:leadId
+      const leadId = segments[1];
+      return ok(queryWorkStreams(domain, leadId));
+    }
+
+    case "inbox": {
+      // GET /:domain/inbox — user messages (to/from "user" pseudo-agent)
+      return ok(queryUserInbox(domain, {
+        agentId: params.agent,
+        limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+        since: params.since ? safeParseInt(params.since, 0) : undefined,
+      }));
+    }
 
     default:
       return notFound(`Unknown resource: ${topResource}`);
