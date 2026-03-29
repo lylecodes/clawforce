@@ -11,23 +11,64 @@ tasks to the same workers. The system must be designed around this reality.
 
 **Humans decide WHAT gets built. AI decides HOW to build it.**
 
-## Work Origination
+## User Interaction Model
 
-Work enters the system two ways:
+The user manages intent, not tasks. They never see a blank task board and wonder what
+to type. The system guides them.
 
-1. **User-provided** — User creates a feature, bug report, or task. The lead breaks it
-   down, assigns workers, reviews output. Full autonomy on execution. No approval needed
-   for subtasks created during execution.
+**The primary loop:**
+```
+User provides feature → Lead plans breakdown → User sees plan →
+User approves → Workers execute → Lead reviews → User sees results → Repeat
+```
 
-2. **Lead-suggested** — Lead observes friction, spots a bug, or identifies an improvement.
-   It creates a proposal: "I noticed X, I think we should build Y." The proposal goes to
-   an approval queue. User approves → becomes a task. User rejects → dropped.
+**What the user sees in the dashboard:**
+1. "What's happening right now?" — agents working, costs ticking, tasks progressing
+2. "What's the plan?" — lead's breakdown of approved features, what's next
+3. "Do I need to do anything?" — proposals waiting for approval, work ready for review
+4. "I want X built" — user tells the lead, lead breaks it down, user sees the plan
 
-The approval gate is ONLY on lead-originated work ideas, not on every task. Leads stay
-aggressive on execution within approved scope. Don't dampen the agents.
+The user is never surprised. They always know what's coming and what it'll cost.
 
-Whether leads can suggest work is configurable — some users want fully human-driven,
-some want the AI surfacing ideas.
+## Task Sourcing
+
+Task sourcing is the cornerstone of human-in-the-loop. Every task has a clear origin,
+and the user controls the pipeline.
+
+**How tasks enter the system:**
+
+1. **User-initiated** — User provides a feature or request (via dashboard conversation
+   with lead). Lead breaks it into a task plan. User sees the breakdown and approves
+   before workers start. Full autonomy on execution within approved scope.
+
+2. **Lead-proposed** — Lead compares current state against DIRECTION, spots gaps, and
+   proposes features with reasoning. Proposals go to an approval queue. User approves →
+   lead creates the task plan. User rejects → dropped. (Configurable — can be disabled.)
+
+3. **Reactive** — Lead creates tasks in response to failures, bugs, or blocked work.
+   These don't need approval — they're maintaining approved work that's already in flight.
+
+Every task traces back to a decision. The budget spend makes sense because every dollar
+connects to an approved intent. The dashboard shows this clearly — "these 5 tasks came
+from your feature request, these 2 from approved proposals, this 1 is a reactive fix."
+
+## Work Stream Visibility
+
+Each lead has a visible work stream showing exactly what will happen while the user is
+away:
+
+- What's been approved and is executing
+- What's queued next
+- What the lead is proposing (pending approval)
+- What's been completed
+- What it's costing
+
+The user opens the dashboard, sees the work streams, and knows the plan. If they don't
+like it, they change it before leaving. No surprises.
+
+This is not a task board. It's the narrative: "We're building agent messaging. Backend
+API is in progress ($2.40 spent). Dashboard UI is next. I'm also proposing we add
+notification sounds — approve?"
 
 ## Budget Drives the Schedule
 
