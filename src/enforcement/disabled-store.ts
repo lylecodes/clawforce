@@ -23,7 +23,7 @@ export type DisabledAgent = {
   disabledAt: number;
 };
 
-export type DisableScope = "agent" | "team" | "department";
+export type DisableScope = "agent" | "team" | "department" | "domain";
 
 export type DisabledScopeEntry = {
   id: string;
@@ -134,6 +134,12 @@ export function isAgentEffectivelyDisabled(
 ): boolean {
   const db = dbOverride ?? getDb(projectId);
 
+  // 0. Check domain-level disable — if the entire domain is disabled, all agents are disabled
+  const domainScope = db.prepare(
+    "SELECT 1 FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId);
+  if (domainScope) return true;
+
   // 1. Check legacy disabled_agents table
   const legacyRow = db.prepare(
     "SELECT 1 FROM disabled_agents WHERE project_id = ? AND agent_id = ?",
@@ -174,6 +180,72 @@ export function isAgentEffectivelyDisabled(
   }
 
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Domain-level disable functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Disable an entire domain (project). Uses the disabled_scopes table
+ * with scope_type="domain" and scope_value=projectId.
+ * When a domain is disabled, ALL dispatches for the project are blocked.
+ */
+export function disableDomain(
+  projectId: string,
+  reason: string,
+  disabledBy?: string,
+  dbOverride?: DatabaseSync,
+): void {
+  disableScope(projectId, "domain", projectId, reason, disabledBy, dbOverride);
+}
+
+/**
+ * Enable (remove disable) for a domain.
+ */
+export function enableDomain(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): void {
+  enableScope(projectId, "domain", projectId, dbOverride);
+}
+
+/**
+ * Check if a domain is currently disabled.
+ */
+export function isDomainDisabled(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): boolean {
+  const db = dbOverride ?? getDb(projectId);
+  const row = db.prepare(
+    "SELECT 1 FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId);
+  return !!row;
+}
+
+/**
+ * Get domain disable details (reason, timestamp, who disabled it).
+ * Returns null if domain is not disabled.
+ */
+export function getDomainDisableInfo(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): DisabledScopeEntry | null {
+  const db = dbOverride ?? getDb(projectId);
+  const row = db.prepare(
+    "SELECT id, project_id, scope_type, scope_value, reason, disabled_at, disabled_by FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    scopeType: row.scope_type as DisableScope,
+    scopeValue: row.scope_value as string,
+    reason: row.reason as string,
+    disabledAt: row.disabled_at as number,
+    disabledBy: (row.disabled_by as string) ?? null,
+  };
 }
 
 /**

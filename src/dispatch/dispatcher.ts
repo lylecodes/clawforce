@@ -11,6 +11,7 @@ import { checkBudget } from "../budget.js";
 import { checkBudgetV2 } from "../budget/check-v2.js";
 import { isProviderThrottled } from "../rate-limits.js";
 import { checkSpawnDepth, checkCostCircuitBreaker, checkLoopDetection, isEmergencyStopActive, getSafetyConfig } from "../safety.js";
+import { isAgentEffectivelyDisabled, isDomainDisabled } from "../enforcement/disabled-store.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { getExtendedProjectConfig } from "../project.js";
@@ -221,6 +222,24 @@ export async function dispatchLoop(
       failItem(item.id, agentLimitReason, db, projectId);
       emitDispatchEvent(projectId, "dispatch_failed", item, { error: agentLimitReason, rateLimited: true }, db);
       try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "agent_rate_limited" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      dispatched++;
+      continue;
+    }
+
+    // Check if domain is disabled — blocks all dispatches for this project
+    if (isDomainDisabled(projectId, db)) {
+      failItem(item.id, "Domain is disabled — all dispatches blocked", db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: "Domain is disabled", safetyLimit: "domain_disabled" }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "domain_disabled" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      dispatched++;
+      continue;
+    }
+
+    // Check if the target agent is disabled (individually, by team, or by department)
+    if (isAgentEffectivelyDisabled(projectId, agentId, db)) {
+      failItem(item.id, `Agent "${agentId}" is disabled — dispatch blocked`, db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: `Agent "${agentId}" is disabled`, safetyLimit: "agent_disabled" }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "agent_disabled" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
       dispatched++;
       continue;
     }
@@ -672,6 +691,16 @@ export function shouldDispatch(
   // Emergency stop — blocks everything
   if (isEmergencyStopActive(projectId)) {
     return { ok: false, reason: "Emergency stop active — all dispatches blocked" };
+  }
+
+  // Domain disabled — blocks all dispatches for this project
+  if (isDomainDisabled(projectId)) {
+    return { ok: false, reason: "Domain is disabled — all dispatches blocked" };
+  }
+
+  // Agent disabled — blocks dispatches for this specific agent
+  if (isAgentEffectivelyDisabled(projectId, agentId)) {
+    return { ok: false, reason: `Agent "${agentId}" is disabled — dispatch blocked` };
   }
 
   // Check multi-window budget via v2 (hourly / daily / monthly + all dimensions)

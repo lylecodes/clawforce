@@ -1,10 +1,10 @@
 #!/usr/bin/env npx tsx
 /**
- * clawforce CLI — operational diagnostics + experiment analysis
+ * clawforce CLI — operational diagnostics + runtime control
  *
  * Usage: npx tsx src/cli.ts <command> [options]
  *
- * Commands:
+ * Diagnostics:
  *   status          System vitals — gateway, budget, task counts, queue
  *   tasks           Active tasks with states and assignees
  *   costs           Cost breakdown by agent, task, or time window
@@ -14,12 +14,20 @@
  *   agents          Agent session status and activity
  *   streams         List available data streams
  *   query           Raw SQL query against the project DB
- *   disable         Disable all ClawForce domains and kill agent sessions
- *   enable [domain] Enable ClawForce domains (optionally specific domain)
- *   kill            Kill all ClawForce agent sessions and cancel queued dispatches
+ *
+ * Runtime Control:
+ *   disable         Disable domain via DB (blocks new dispatches)
+ *   enable          Enable domain via DB (resume dispatches)
+ *   kill            Emergency stop: disable domain + cancel queued + kill processes
+ *   kill --resume   Clear emergency stop and re-enable domain
+ *
+ * Verification:
+ *   running         Show what's actually running right now
+ *   health          Comprehensive health check
  */
 
 import { DatabaseSync } from "node:sqlite";
+import crypto from "node:crypto";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
@@ -397,6 +405,407 @@ function cmdQuery(db: DatabaseSync, sql: string) {
   }
 }
 
+// ─── Lifecycle commands (DB-backed) ──────────────────────────────────
+
+function cmdDisable(db: DatabaseSync, projectId: string, args: string[]): void {
+  // Check if already disabled
+  const existing = db.prepare(
+    "SELECT reason, disabled_at, disabled_by FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId) as Record<string, unknown> | undefined;
+
+  if (existing) {
+    console.log(`Domain "${projectId}" is already disabled.`);
+    console.log(`  Reason: ${existing.reason}`);
+    console.log(`  Since:  ${fmtDate(existing.disabled_at as number)}`);
+    console.log(`  By:     ${existing.disabled_by ?? "unknown"}`);
+    return;
+  }
+
+  const reason = args.find(a => a.startsWith("--reason="))?.split("=").slice(1).join("=") ?? "Disabled via CLI";
+
+  // Insert domain disable via DB
+  // crypto imported at top level
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  db.prepare(`
+    INSERT OR REPLACE INTO disabled_scopes (id, project_id, scope_type, scope_value, reason, disabled_at, disabled_by)
+    VALUES (?, ?, 'domain', ?, ?, ?, ?)
+  `).run(id, projectId, projectId, reason, now, "cli");
+
+  console.log(`## Domain Disabled: ${projectId}\n`);
+  console.log(`Reason: ${reason}`);
+  console.log("Effect: New dispatches will be blocked immediately.");
+  console.log("Running sessions will finish naturally.");
+  console.log(`\nTo re-enable: pnpm cf enable`);
+}
+
+function cmdEnable(db: DatabaseSync, projectId: string): void {
+  const existing = db.prepare(
+    "SELECT reason, disabled_at FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId) as Record<string, unknown> | undefined;
+
+  if (!existing) {
+    console.log(`Domain "${projectId}" is already enabled.`);
+
+    // Also check emergency stop
+    const estop = db.prepare(
+      "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+    ).get(projectId) as Record<string, unknown> | undefined;
+    if (estop?.value === "true") {
+      console.log("\nWARNING: Emergency stop is active. Use 'pnpm cf kill --resume' to clear it.");
+    }
+    return;
+  }
+
+  db.prepare(
+    "DELETE FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).run(projectId, projectId);
+
+  const disabledForMs = Date.now() - (existing.disabled_at as number);
+  console.log(`## Domain Enabled: ${projectId}\n`);
+  console.log(`Was disabled for: ${fmtAge(disabledForMs)}`);
+  console.log("Effect: Dispatches will resume on next dispatch loop pass.");
+}
+
+function cmdKill(db: DatabaseSync, projectId: string, args: string[]): void {
+  console.log("## Emergency Stop\n");
+
+  const reason = args.find(a => a.startsWith("--reason="))?.split("=").slice(1).join("=") ?? "Emergency stop via CLI";
+
+  // 1. Disable domain via DB
+  // crypto imported at top level
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  db.prepare(`
+    INSERT OR REPLACE INTO disabled_scopes (id, project_id, scope_type, scope_value, reason, disabled_at, disabled_by)
+    VALUES (?, ?, 'domain', ?, ?, ?, ?)
+  `).run(id, projectId, projectId, `EMERGENCY: ${reason}`, now, "cli:kill");
+  console.log("  Domain disabled (DB)");
+
+  // 2. Activate emergency stop flag
+  db.prepare(
+    "INSERT OR REPLACE INTO project_metadata (project_id, key, value) VALUES (?, 'emergency_stop', 'true')",
+  ).run(projectId);
+  console.log("  Emergency stop activated");
+
+  // 3. Cancel all queued/leased dispatch items
+  const cancelled = db.prepare(
+    "UPDATE dispatch_queue SET status = 'cancelled', last_error = ?, completed_at = ? WHERE project_id = ? AND status IN ('queued', 'leased')",
+  ).run(`EMERGENCY: ${reason}`, now, projectId);
+  if (cancelled.changes > 0) {
+    console.log(`  Cancelled ${cancelled.changes} queued dispatch item(s)`);
+  } else {
+    console.log("  No queued dispatch items to cancel");
+  }
+
+  // 4. Kill ClawForce agent processes
+  try {
+    const result = execSync(
+      `ps aux | grep -E "agent.*(cf-lead|cf-worker|cf-verifier|dash-lead|dash-worker|dash-verifier)" | grep -v grep | awk '{print $2}'`,
+      { encoding: "utf-8" },
+    ).trim();
+    if (result) {
+      const pids = result.split("\n");
+      for (const pid of pids) {
+        try { process.kill(Number(pid), "SIGTERM"); } catch {}
+      }
+      console.log(`  Killed ${pids.length} agent process(es)`);
+    } else {
+      console.log("  No agent processes found");
+    }
+  } catch {
+    console.log("  No agent processes found");
+  }
+
+  console.log(`\n## Emergency Stop Complete\n`);
+  console.log("To resume:");
+  console.log("  1. pnpm cf enable       (re-enable domain)");
+  console.log("  2. pnpm cf kill --resume (clear emergency stop flag)");
+}
+
+function cmdKillResume(db: DatabaseSync, projectId: string): void {
+  // Clear emergency stop flag
+  const estop = db.prepare(
+    "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+  ).get(projectId) as Record<string, unknown> | undefined;
+
+  if (!estop || estop.value !== "true") {
+    console.log("Emergency stop is not active.");
+    return;
+  }
+
+  db.prepare(
+    "DELETE FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+  ).run(projectId);
+
+  // Also clear domain disable if it was set by kill
+  const domainDisable = db.prepare(
+    "SELECT disabled_by FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId) as Record<string, unknown> | undefined;
+  if (domainDisable?.disabled_by === "cli:kill") {
+    db.prepare(
+      "DELETE FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+    ).run(projectId, projectId);
+    console.log("Emergency stop cleared + domain re-enabled.");
+  } else {
+    console.log("Emergency stop cleared.");
+    if (domainDisable) {
+      console.log("NOTE: Domain is still disabled (was disabled separately). Use 'pnpm cf enable' to re-enable.");
+    }
+  }
+  console.log("Dispatches will resume on next dispatch loop pass.");
+}
+
+// ─── Running command ─────────────────────────────────────────────────
+
+function cmdRunning(db: DatabaseSync, projectId: string): void {
+  console.log("## Running State\n");
+
+  // 1. Domain disabled?
+  const domainDisabled = db.prepare(
+    "SELECT reason, disabled_at, disabled_by FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId) as Record<string, unknown> | undefined;
+
+  // 2. Emergency stop?
+  const estop = db.prepare(
+    "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+  ).get(projectId) as Record<string, unknown> | undefined;
+  const emergencyStopActive = estop?.value === "true";
+
+  if (emergencyStopActive) {
+    console.log("EMERGENCY STOP: ACTIVE");
+  }
+  if (domainDisabled) {
+    console.log(`Domain: DISABLED (${domainDisabled.reason}) since ${fmtDate(domainDisabled.disabled_at as number)}`);
+  } else {
+    console.log("Domain: enabled");
+  }
+  console.log("");
+
+  // 3. Active sessions (tracked_sessions where ended_at IS NULL)
+  let activeSessions: Array<Record<string, unknown>> = [];
+  try {
+    activeSessions = db.prepare(`
+      SELECT session_key, agent_id, started_at
+      FROM tracked_sessions
+      WHERE project_id = ? AND ended_at IS NULL
+      ORDER BY started_at DESC
+    `).all(projectId) as Array<Record<string, unknown>>;
+  } catch { /* table may not exist */ }
+
+  console.log(`Active Sessions: ${activeSessions.length}`);
+  for (const s of activeSessions.slice(0, 15)) {
+    const age = Date.now() - (s.started_at as number);
+    console.log(`  ${s.agent_id} (${fmtAge(age)}) key=${(s.session_key as string).slice(0, 20)}...`);
+  }
+  if (activeSessions.length > 15) {
+    console.log(`  ... and ${activeSessions.length - 15} more`);
+  }
+  console.log("");
+
+  // 4. Disabled agents
+  const disabledAgents = db.prepare(
+    "SELECT agent_id, reason FROM disabled_agents WHERE project_id = ?",
+  ).all(projectId) as Array<Record<string, unknown>>;
+
+  const disabledScopes = db.prepare(
+    "SELECT scope_type, scope_value, reason FROM disabled_scopes WHERE project_id = ? AND scope_type != 'domain'",
+  ).all(projectId) as Array<Record<string, unknown>>;
+
+  if (disabledAgents.length > 0 || disabledScopes.length > 0) {
+    console.log("Disabled:");
+    for (const a of disabledAgents) {
+      console.log(`  agent: ${a.agent_id} — ${a.reason}`);
+    }
+    for (const s of disabledScopes) {
+      console.log(`  ${s.scope_type}: ${s.scope_value} — ${s.reason}`);
+    }
+    console.log("");
+  }
+
+  // 5. Queue status
+  const queueCounts = db.prepare(
+    "SELECT status, COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? GROUP BY status",
+  ).all(projectId) as Array<{ status: string; cnt: number }>;
+  const queueMap = Object.fromEntries(queueCounts.map(r => [r.status, r.cnt]));
+
+  console.log("Queue:");
+  for (const status of ["queued", "leased", "dispatched", "completed", "failed", "cancelled"]) {
+    if (queueMap[status]) console.log(`  ${status.padEnd(14)} ${queueMap[status]}`);
+  }
+  if (queueCounts.length === 0) console.log("  (empty)");
+  console.log("");
+
+  // 6. Recent transitions (last 5 minutes)
+  const fiveMinAgo = Date.now() - 5 * 60_000;
+  const recentTransitions = db.prepare(`
+    SELECT t.task_id, tk.title, t.from_state, t.to_state, t.actor,
+           datetime(t.created_at/1000, 'unixepoch') as ts
+    FROM transitions t LEFT JOIN tasks tk ON t.task_id = tk.id
+    WHERE t.created_at > ?
+    ORDER BY t.created_at DESC LIMIT 10
+  `).all(fiveMinAgo) as Array<Record<string, unknown>>;
+
+  if (recentTransitions.length > 0) {
+    console.log("Recent transitions (5min):");
+    for (const r of recentTransitions) {
+      const title = r.title ? ` "${(r.title as string).slice(0, 35)}"` : "";
+      console.log(`  ${r.ts} ${r.from_state} -> ${r.to_state}${title}`);
+    }
+    console.log("");
+  }
+
+  // 7. Active dispatches (dispatched items)
+  const activeDispatches = db.prepare(`
+    SELECT dq.task_id, t.title, dq.status, datetime(dq.created_at/1000, 'unixepoch') as created
+    FROM dispatch_queue dq LEFT JOIN tasks t ON dq.task_id = t.id
+    WHERE dq.project_id = ? AND dq.status IN ('leased', 'dispatched')
+    ORDER BY dq.created_at DESC LIMIT 10
+  `).all(projectId) as Array<Record<string, unknown>>;
+
+  if (activeDispatches.length > 0) {
+    console.log("Active dispatches:");
+    for (const d of activeDispatches) {
+      const title = d.title ? ` "${(d.title as string).slice(0, 40)}"` : "";
+      console.log(`  [${d.status}] ${d.created}${title}`);
+    }
+    console.log("");
+  }
+
+  // 8. Cron metadata
+  try {
+    const cronRows = db.prepare(
+      "SELECT key, value FROM project_metadata WHERE project_id = ? AND key LIKE 'cron_%'",
+    ).all(projectId) as Array<Record<string, unknown>>;
+    if (cronRows.length > 0) {
+      console.log("Cron metadata:");
+      for (const r of cronRows) {
+        console.log(`  ${r.key}: ${(r.value as string).slice(0, 60)}`);
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+// ─── Health command ──────────────────────────────────────────────────
+
+function cmdHealth(db: DatabaseSync, projectId: string): void {
+  console.log("## Health Check\n");
+
+  let issues = 0;
+
+  // 1. Gateway running?
+  let gatewayPid = "down";
+  try {
+    const ps = execSync("ps aux | grep openclaw-gateway | grep -v grep", { encoding: "utf8" }).trim();
+    const match = ps.match(/\S+\s+(\d+)/);
+    if (match) gatewayPid = match[1]!;
+  } catch { /* not running */ }
+  const gwStatus = gatewayPid === "down" ? "DOWN" : `running (PID ${gatewayPid})`;
+  console.log(`Gateway:          ${gwStatus}`);
+  if (gatewayPid === "down") issues++;
+
+  // 2. Domain enabled/disabled?
+  const domainDisabled = db.prepare(
+    "SELECT reason FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
+  ).get(projectId, projectId) as Record<string, unknown> | undefined;
+  console.log(`Domain:           ${domainDisabled ? `DISABLED (${domainDisabled.reason})` : "enabled"}`);
+  if (domainDisabled) issues++;
+
+  // 3. Emergency stop?
+  const estop = db.prepare(
+    "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+  ).get(projectId) as Record<string, unknown> | undefined;
+  const emergencyStop = estop?.value === "true";
+  console.log(`Emergency stop:   ${emergencyStop ? "ACTIVE" : "off"}`);
+  if (emergencyStop) issues++;
+
+  // 4. Disabled agents/teams/departments
+  const disabledCount = db.prepare(
+    "SELECT COUNT(*) as cnt FROM disabled_agents WHERE project_id = ?",
+  ).get(projectId) as { cnt: number };
+  const disabledScopeCount = db.prepare(
+    "SELECT COUNT(*) as cnt FROM disabled_scopes WHERE project_id = ? AND scope_type != 'domain'",
+  ).get(projectId) as { cnt: number };
+  const totalDisabled = disabledCount.cnt + disabledScopeCount.cnt;
+  console.log(`Disabled scopes:  ${totalDisabled > 0 ? `${totalDisabled} (agents/teams/departments)` : "none"}`);
+
+  // 5. Queue health
+  const queueCounts = db.prepare(
+    "SELECT status, COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? GROUP BY status",
+  ).all(projectId) as Array<{ status: string; cnt: number }>;
+  const queueMap = Object.fromEntries(queueCounts.map(r => [r.status, r.cnt]));
+  const queued = queueMap["queued"] ?? 0;
+  const failed = queueMap["failed"] ?? 0;
+  const completed = queueMap["completed"] ?? 0;
+  const total = queued + failed + completed + (queueMap["leased"] ?? 0) + (queueMap["dispatched"] ?? 0) + (queueMap["cancelled"] ?? 0);
+  const failRate = total > 0 ? Math.round((failed / total) * 100) : 0;
+  console.log(`Queue:            ${queued} queued, ${failed} failed (${failRate}% fail rate)`);
+  if (failRate > 50) issues++;
+
+  // Stuck items (queued for more than 30 minutes)
+  const stuckItems = db.prepare(
+    "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND status = 'queued' AND created_at < ?",
+  ).get(projectId, Date.now() - 30 * 60_000) as { cnt: number };
+  if (stuckItems.cnt > 0) {
+    console.log(`Stuck items:      ${stuckItems.cnt} (queued > 30min)`);
+    issues++;
+  }
+
+  // 6. Budget status
+  const budget = db.prepare(
+    "SELECT daily_limit_cents, daily_spent_cents, monthly_spent_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+  ).get(projectId) as Record<string, number> | undefined;
+  if (budget) {
+    const pct = Math.round((budget.daily_spent_cents / budget.daily_limit_cents) * 100);
+    console.log(`Budget:           ${fmt$(budget.daily_spent_cents)} / ${fmt$(budget.daily_limit_cents)} daily (${pct}%)`);
+    if (pct >= 90) {
+      console.log(`                  WARNING: Budget at ${pct}%`);
+      issues++;
+    }
+  } else {
+    console.log("Budget:           not configured");
+  }
+
+  // 7. Last activity timestamp
+  let lastActivity = "unknown";
+  try {
+    const lastCost = db.prepare(
+      "SELECT MAX(created_at) as ts FROM cost_records WHERE project_id = ?",
+    ).get(projectId) as { ts: number | null } | undefined;
+    if (lastCost?.ts) {
+      const age = Date.now() - lastCost.ts;
+      lastActivity = `${fmtDate(lastCost.ts)} (${fmtAge(age)} ago)`;
+    }
+  } catch { /* ignore */ }
+  console.log(`Last activity:    ${lastActivity}`);
+
+  // 8. TypeScript compile status
+  let tscStatus = "unknown";
+  try {
+    execSync("npx tsc --noEmit 2>&1", { encoding: "utf8", cwd: process.cwd() });
+    tscStatus = "OK";
+  } catch (err) {
+    const output = err instanceof Error && "stdout" in err ? (err as { stdout: string }).stdout : "";
+    const errorCount = (output.match(/error TS/g) ?? []).length;
+    tscStatus = `${errorCount} error(s)`;
+    issues++;
+  }
+  console.log(`TypeScript:       ${tscStatus}`);
+
+  // 9. Test status (count only)
+  let testStatus = "unknown";
+  try {
+    const testFiles = fs.readdirSync(path.join(process.cwd(), "test"), { recursive: true })
+      .filter(f => String(f).endsWith(".test.ts"));
+    testStatus = `${testFiles.length} test files`;
+  } catch {
+    testStatus = "no test directory found";
+  }
+  console.log(`Tests:            ${testStatus}`);
+
+  console.log(`\n${issues === 0 ? "All checks passed." : `${issues} issue(s) found.`}`);
+}
+
 // ─── Main ────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -405,11 +814,11 @@ const projectId = (args.find(a => a.startsWith("--project="))?.split("=")[1]) ??
 
 if (!command || command === "help" || command === "--help") {
   console.log(`
-clawforce CLI — operational diagnostics + experiment analysis
+clawforce CLI — operational diagnostics + runtime control
 
 Usage: npx tsx src/cli.ts <command> [options]
 
-Commands:
+Diagnostics:
   status                    System vitals — gateway, budget, task counts, queue
   tasks [STATE]             Active tasks (or filter by state: ASSIGNED, REVIEW, etc)
   costs [--by=agent|task|day] [--hours=N]  Cost breakdown (default: by agent, last 24h)
@@ -419,6 +828,16 @@ Commands:
   agents                    Agent activity and assignments
   streams                   List available data streams
   query "SQL"               Raw SQL query against the project DB
+
+Runtime Control:
+  disable [--reason=MSG]    Disable domain via DB (blocks new dispatches)
+  enable                    Enable domain via DB (resume dispatches)
+  kill [--reason=MSG]       Emergency stop: disable domain + cancel queued + kill processes
+  kill --resume             Clear emergency stop and re-enable domain
+
+Verification:
+  running                   Show what's actually running right now
+  health                    Comprehensive health check
 
 Options:
   --project=ID              Project ID (default: clawforce-dev)
@@ -465,13 +884,23 @@ switch (command) {
     break;
   }
   case "disable":
-    cmdDisable();
+    cmdDisable(db, projectId, args);
     break;
   case "enable":
-    cmdEnable();
+    cmdEnable(db, projectId);
     break;
   case "kill":
-    cmdKill();
+    if (args.includes("--resume")) {
+      cmdKillResume(db, projectId);
+    } else {
+      cmdKill(db, projectId, args);
+    }
+    break;
+  case "running":
+    cmdRunning(db, projectId);
+    break;
+  case "health":
+    cmdHealth(db, projectId);
     break;
   default:
     console.error(`Unknown command: ${command}\nRun with --help for usage.`);
@@ -479,108 +908,3 @@ switch (command) {
 }
 
 db.close();
-
-// --- Lifecycle commands (don't need DB) ---
-
-function cmdDisable(): void {
-  const domainsDir = path.join(DB_DIR, "domains");
-  if (!fs.existsSync(domainsDir)) {
-    console.error("No domains directory found");
-    process.exit(1);
-  }
-  const files = fs.readdirSync(domainsDir).filter(f => f.endsWith(".yaml") && !f.endsWith(".disabled"));
-  let disabled = 0;
-  for (const file of files) {
-    const filePath = path.join(domainsDir, file);
-    let content = fs.readFileSync(filePath, "utf-8");
-    if (/^enabled:\s*true/m.test(content)) {
-      content = content.replace(/^enabled:\s*true/m, "enabled: false");
-      fs.writeFileSync(filePath, content, "utf-8");
-      console.log(`  Disabled: ${file}`);
-      disabled++;
-    } else if (!/^enabled:/m.test(content)) {
-      // No enabled field — add it at the top
-      content = `enabled: false\n${content}`;
-      fs.writeFileSync(filePath, content, "utf-8");
-      console.log(`  Disabled: ${file} (added enabled: false)`);
-      disabled++;
-    } else {
-      console.log(`  Already disabled: ${file}`);
-    }
-  }
-  // Kill ClawForce agent sessions
-  try {
-    const result = execSync(
-      `ps aux | grep -E "agent.*(cf-lead|cf-worker|cf-verifier|dash-lead|dash-worker|dash-verifier)" | grep -v grep | awk '{print $2}'`,
-      { encoding: "utf-8" },
-    ).trim();
-    if (result) {
-      const pids = result.split("\n");
-      for (const pid of pids) {
-        try { process.kill(Number(pid), "SIGTERM"); } catch {}
-      }
-      console.log(`  Killed ${pids.length} ClawForce agent process(es)`);
-    }
-  } catch {}
-  console.log(`\n## ClawForce Disabled\n\n${disabled} domain(s) disabled. Restart gateway to take effect: openclaw gateway restart`);
-}
-
-function cmdEnable(): void {
-  const domainsDir = path.join(DB_DIR, "domains");
-  if (!fs.existsSync(domainsDir)) {
-    console.error("No domains directory found");
-    process.exit(1);
-  }
-  const targetDomain = args[1];
-  const files = fs.readdirSync(domainsDir).filter(f => {
-    if (!f.endsWith(".yaml")) return false;
-    if (targetDomain) return f === `${targetDomain}.yaml`;
-    return true;
-  });
-  let enabled = 0;
-  for (const file of files) {
-    const filePath = path.join(domainsDir, file);
-    let content = fs.readFileSync(filePath, "utf-8");
-    if (/^enabled:\s*false/m.test(content)) {
-      content = content.replace(/^enabled:\s*false/m, "enabled: true");
-      fs.writeFileSync(filePath, content, "utf-8");
-      console.log(`  Enabled: ${file}`);
-      enabled++;
-    } else {
-      console.log(`  Already enabled: ${file}`);
-    }
-  }
-  console.log(`\n## ClawForce Enabled\n\n${enabled} domain(s) enabled. Restart gateway to take effect: openclaw gateway restart`);
-}
-
-function cmdKill(): void {
-  console.log("## Killing ClawForce agent sessions\n");
-  try {
-    const result = execSync(
-      `ps aux | grep -E "agent.*(cf-lead|cf-worker|cf-verifier|dash-lead|dash-worker|dash-verifier)" | grep -v grep | awk '{print $2}'`,
-      { encoding: "utf-8" },
-    ).trim();
-    if (result) {
-      const pids = result.split("\n");
-      for (const pid of pids) {
-        try { process.kill(Number(pid), "SIGTERM"); } catch {}
-      }
-      console.log(`Killed ${pids.length} ClawForce agent process(es)`);
-    } else {
-      console.log("No ClawForce agent processes found");
-    }
-  } catch {
-    console.log("No ClawForce agent processes found");
-  }
-  // Also cancel queued dispatch items
-  try {
-    const killDb = getDb(DEFAULT_PROJECT);
-    const cancelled = killDb.prepare(
-      "UPDATE dispatch_queue SET status = 'cancelled' WHERE status IN ('queued', 'leased')",
-    ).run();
-    if (cancelled.changes > 0) {
-      console.log(`Cancelled ${cancelled.changes} queued dispatch item(s)`);
-    }
-    killDb.close();
-  } catch {}
-}

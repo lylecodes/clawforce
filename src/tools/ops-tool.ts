@@ -13,7 +13,7 @@ import { Type } from "@sinclair/typebox";
 import { getInitQuestions, buildConfigFromAnswers, getBudgetGuidance } from "../config/init-flow.js";
 import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
 import { getActiveSessions, getSession } from "../enforcement/tracker.js";
-import { listDisabledAgents, disableAgent, enableAgent, isAgentDisabled, disableScope, enableScope, isAgentEffectivelyDisabled, listDisabledScopes } from "../enforcement/disabled-store.js";
+import { listDisabledAgents, disableAgent, enableAgent, isAgentDisabled, disableScope, enableScope, isAgentEffectivelyDisabled, listDisabledScopes, disableDomain, enableDomain, isDomainDisabled, getDomainDisableInfo } from "../enforcement/disabled-store.js";
 import type { DisableScope } from "../enforcement/disabled-store.js";
 import { countRecentRetries } from "../enforcement/retry-store.js";
 import { detectStuckAgents } from "../audit/stuck-detector.js";
@@ -74,6 +74,7 @@ const OPS_ACTIONS = [
   "flag_knowledge", "approve_promotion", "dismiss_promotion", "resolve_flag", "dismiss_flag", "list_candidates", "list_flags",
   "init_questions", "init_apply", "route",
   "emergency_stop", "emergency_resume",
+  "disable_domain", "enable_domain", "domain_status",
   "create_experiment", "start_experiment", "pause_experiment", "complete_experiment",
   "kill_experiment", "apply_experiment", "experiment_status", "list_experiments",
 ] as const;
@@ -169,7 +170,7 @@ export function createClawforceOpsTool(options?: {
     description:
       "Team observability and control. " +
       "Read: agent_status, query_audit, refresh_context, list_events, queue_status, dispatch_metrics, list_jobs, introspect. " +
-      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, allocate_budget, emergency_stop, emergency_resume. " +
+      "Write: kill_agent, disable_agent, enable_agent, reassign, trigger_sweep, dispatch_worker, emit_event, enqueue_work, process_events, create_job, update_job, delete_job, allocate_budget, emergency_stop, emergency_resume, disable_domain, enable_domain. " +
       "Job management: list_jobs (view agent jobs), create_job/update_job/delete_job (manage scoped sessions). " +
       "introspect: view your own config, expectations, budget, and SLO status. " +
       "Use emit_event to ingest external events (CI failures, PR opens, etc). " +
@@ -1160,6 +1161,69 @@ export function createClawforceOpsTool(options?: {
             });
 
             return jsonResult({ ok: true, emergencyStop: false, message: "Emergency stop deactivated — dispatches resumed." });
+          }
+
+          case "disable_domain": {
+            const reason = readStringParam(params, "reason") ?? "Disabled by manager";
+
+            if (isDomainDisabled(projectId)) {
+              const info = getDomainDisableInfo(projectId);
+              return jsonResult({
+                ok: false,
+                reason: "Domain is already disabled.",
+                existingDisable: info ? { reason: info.reason, disabledAt: info.disabledAt, disabledBy: info.disabledBy } : undefined,
+              });
+            }
+
+            disableDomain(projectId, reason, caller);
+
+            writeAuditEntry({
+              projectId,
+              actor: caller,
+              action: "disable_domain",
+              targetType: "domain",
+              targetId: projectId,
+              detail: reason,
+            });
+
+            return jsonResult({ ok: true, domainDisabled: true, reason });
+          }
+
+          case "enable_domain": {
+            if (!isDomainDisabled(projectId)) {
+              return jsonResult({ ok: false, reason: "Domain is not disabled." });
+            }
+
+            enableDomain(projectId);
+
+            writeAuditEntry({
+              projectId,
+              actor: caller,
+              action: "enable_domain",
+              targetType: "domain",
+              targetId: projectId,
+            });
+
+            return jsonResult({ ok: true, domainDisabled: false, message: "Domain enabled — dispatches will resume." });
+          }
+
+          case "domain_status": {
+            const disabled = isDomainDisabled(projectId);
+            const info = disabled ? getDomainDisableInfo(projectId) : null;
+            const emergencyStop = isEmergencyStopActive(projectId);
+
+            // Get disabled scopes summary
+            const scopes = listDisabledScopes(projectId);
+            const disabledAgentsList = listDisabledAgents(projectId);
+
+            return jsonResult({
+              ok: true,
+              domainDisabled: disabled,
+              domainDisableInfo: info ? { reason: info.reason, disabledAt: info.disabledAt, disabledBy: info.disabledBy } : null,
+              emergencyStopActive: emergencyStop,
+              disabledScopes: scopes.filter(s => s.scopeType !== "domain"),
+              disabledAgents: disabledAgentsList,
+            });
           }
 
           case "init_apply": {
