@@ -13,6 +13,7 @@ import type {
   EscalateAction,
   EnqueueWorkAction,
   EmitEventAction,
+  DispatchAgentAction,
   EventActionConfig,
 } from "../types.js";
 import { safeLog } from "../diagnostics.js";
@@ -52,6 +53,7 @@ export function executeAction(
     case "escalate": return executeEscalate(event, config, db);
     case "enqueue_work": return executeEnqueueWork(event, config, db);
     case "emit_event": return executeEmitEvent(event, config, db);
+    case "dispatch_agent": return executeDispatchAgent(event, config, db);
     default:
       return { action: (config as { action: string }).action, ok: false, error: "Unknown action type" };
   }
@@ -201,6 +203,61 @@ function executeEmitEvent(
   const result = ingestEvent(event.projectId, eventType, "internal", payload, dedupKey, db);
 
   return { action: "emit_event", ok: true, detail: { eventId: result.id, type: eventType, deduplicated: result.deduplicated } };
+}
+
+function executeDispatchAgent(
+  event: ClawforceEvent,
+  config: DispatchAgentAction,
+  db: DatabaseSync,
+): ActionResult {
+  const agentId = findAgentByRole(event.projectId, config.agent_role);
+  if (!agentId) {
+    return { action: "dispatch_agent", ok: false, error: `No agent found with role "${config.agent_role}" in project ${event.projectId}` };
+  }
+
+  const taskId = (event.payload.taskId as string | undefined);
+  if (!taskId) {
+    return { action: "dispatch_agent", ok: false, error: "No taskId in event payload for dispatch_agent" };
+  }
+
+  const payload: Record<string, unknown> = {
+    agentId,
+    ...(config.model ? { model: config.model } : {}),
+    ...(config.session_type ? { sessionType: config.session_type } : {}),
+    ...(config.payload ?? {}),
+  };
+
+  const item = enqueue(event.projectId, taskId, payload, undefined, db);
+
+  if (!item) {
+    return { action: "dispatch_agent", ok: true, detail: { deduplicated: true, taskId, agentId } };
+  }
+
+  return { action: "dispatch_agent", ok: true, detail: { queueItemId: item.id, taskId, agentId } };
+}
+
+/** Find an agent by role (extends preset) for a project. */
+export function findAgentByRole(projectId: string, role: string): string | undefined {
+  try {
+    const agentIds = getRegisteredAgentIds();
+    for (const agentId of agentIds) {
+      const entry = getAgentConfig(agentId);
+      if (entry?.projectId !== projectId) continue;
+
+      // Match by extends preset (e.g., "lead" maps to "manager", "worker" maps to "employee")
+      const preset = entry.config.extends;
+      if (preset === role) return agentId;
+
+      // Common role aliases
+      if (role === "lead" && (preset === "manager" || entry.config.coordination?.enabled)) return agentId;
+      if (role === "worker" && preset === "employee") return agentId;
+      if (role === "verifier" && preset === "verifier") return agentId;
+
+      // Match by explicit role field if present
+      if ((entry.config as Record<string, unknown>).role === role) return agentId;
+    }
+  } catch { /* project module not available */ }
+  return undefined;
 }
 
 /** Find the first manager agent for a project. */

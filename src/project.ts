@@ -1028,8 +1028,16 @@ function normalizeApprovalPolicy(raw: unknown): ApprovalPolicy | null {
 
 const VALID_ASSIGNMENT_STRATEGIES: AssignmentStrategy[] = ["workload_balanced", "round_robin", "skill_matched"];
 
+const VALID_DISPATCH_MODES = ["event-driven", "cron", "manual"] as const;
+
 function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
   const result: DispatchConfig = {};
+
+  // Dispatch mode
+  if (typeof raw.mode === "string" && (VALID_DISPATCH_MODES as readonly string[]).includes(raw.mode)) {
+    result.mode = raw.mode as DispatchConfig["mode"];
+  }
+
   if (typeof raw.max_concurrent_dispatches === "number" && raw.max_concurrent_dispatches > 0) {
     result.maxConcurrentDispatches = raw.max_concurrent_dispatches;
   }
@@ -1048,6 +1056,48 @@ function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
     }
     if (Object.keys(result.agentLimits).length === 0) delete result.agentLimits;
   }
+
+  // Budget pacing config
+  if (raw.budget_pacing && typeof raw.budget_pacing === "object") {
+    const bp = raw.budget_pacing as Record<string, unknown>;
+    result.budget_pacing = {
+      enabled: typeof bp.enabled === "boolean" ? bp.enabled : true,
+      reactive_reserve_pct: typeof bp.reactive_reserve_pct === "number" ? bp.reactive_reserve_pct : 20,
+      low_budget_threshold: typeof bp.low_budget_threshold === "number" ? bp.low_budget_threshold : 10,
+      critical_threshold: typeof bp.critical_threshold === "number" ? bp.critical_threshold : 5,
+    };
+  }
+
+  // Lead schedule config
+  if (raw.lead_schedule && typeof raw.lead_schedule === "object") {
+    const ls = raw.lead_schedule as Record<string, unknown>;
+    result.lead_schedule = {
+      planning_sessions_per_day: typeof ls.planning_sessions_per_day === "number" ? ls.planning_sessions_per_day : 3,
+      planning_model: typeof ls.planning_model === "string" ? ls.planning_model : undefined,
+      review_model: typeof ls.review_model === "string" ? ls.review_model : undefined,
+      wake_on: Array.isArray(ls.wake_on) ? (ls.wake_on as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
+    };
+  }
+
+  // Worker dispatch config
+  if (raw.worker && typeof raw.worker === "object") {
+    const w = raw.worker as Record<string, unknown>;
+    result.worker = {
+      session_loop: typeof w.session_loop === "boolean" ? w.session_loop : true,
+      max_tasks_per_session: typeof w.max_tasks_per_session === "number" ? w.max_tasks_per_session : 5,
+      idle_timeout_ms: typeof w.idle_timeout_ms === "number" ? w.idle_timeout_ms : 300000,
+      wake_on: Array.isArray(w.wake_on) ? (w.wake_on as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
+    };
+  }
+
+  // Verifier dispatch config
+  if (raw.verifier && typeof raw.verifier === "object") {
+    const v = raw.verifier as Record<string, unknown>;
+    result.verifier = {
+      wake_on: Array.isArray(v.wake_on) ? (v.wake_on as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
+    };
+  }
+
   return result;
 }
 
@@ -1120,6 +1170,15 @@ function normalizeEventHandlersConfig(
               ? Object.fromEntries(Object.entries(a.event_payload as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
               : undefined,
             dedup_key: typeof a.dedup_key === "string" ? a.dedup_key : undefined,
+          });
+          break;
+        case "dispatch_agent":
+          actions.push({
+            action: "dispatch_agent",
+            agent_role: typeof a.agent_role === "string" ? a.agent_role : "worker",
+            model: typeof a.model === "string" ? a.model : undefined,
+            session_type: typeof a.session_type === "string" ? a.session_type as "reactive" | "active" | "planning" : undefined,
+            payload: typeof a.payload === "object" && a.payload !== null ? a.payload as Record<string, unknown> : undefined,
           });
           break;
       }
@@ -1519,8 +1578,21 @@ export function registerWorkforceConfig(
     }
   }
 
+  // Inject default event handlers for event-driven mode
+  // User config overrides defaults per event type (full replacement, not merge)
+  let effectiveEventHandlers = wfConfig.event_handlers;
+  if (wfConfig.dispatch?.mode === "event-driven") {
+    const defaults: Record<string, EventHandlerConfig> = {
+      task_review_ready: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }],
+      task_failed: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }],
+      task_assigned: [{ action: "dispatch_agent", agent_role: "worker", session_type: "active" }],
+      budget_changed: [{ action: "dispatch_agent", agent_role: "lead", session_type: "planning" }],
+    };
+    effectiveEventHandlers = { ...defaults, ...effectiveEventHandlers };
+  }
+
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification) {
+  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || effectiveEventHandlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification) {
     projectExtendedConfig.set(projectId, {
       policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
@@ -1529,7 +1601,7 @@ export function registerWorkforceConfig(
       assignment: wfConfig.assignment,
       toolGates: wfConfig.toolGates,
       bulkThresholds: wfConfig.bulkThresholds,
-      eventHandlers: wfConfig.event_handlers,
+      eventHandlers: effectiveEventHandlers,
       triggers: wfConfig.triggers,
       review: wfConfig.review,
       channels: wfConfig.channels,

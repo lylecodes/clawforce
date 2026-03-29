@@ -246,7 +246,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
       "escalations", "team_status", "trust_scores", "cost_summary", "resources",
       "pending_messages", "channel_messages", "memory_instructions", "skill",
       "policy_status", "preferences", "cost_forecast", "available_capacity",
-      "knowledge_candidates", "budget_guidance",
+      "knowledge_candidates", "budget_guidance", "budget_plan",
       "onboarding_welcome", "weekly_digest", "intervention_suggestions",
       "task_creation_standards",
     ],
@@ -267,7 +267,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     title: "Employee",
     persona: "You are an employee agent responsible for executing assigned tasks and reporting results.",
     briefing: [
-      "soul", "assigned_task", "execution_standards",
+      "soul", "assigned_task", "execution_standards", "task_board",
     ],
     // Employees have zero ClawForce tools — expectations must be empty (auto-lifecycle handles transitions)
     expectations: [],

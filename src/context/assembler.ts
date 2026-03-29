@@ -48,6 +48,7 @@ import { getDirectReports } from "../org.js";
 import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 import { getStream } from "../streams/catalog.js";
 import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
+import { resolveBudgetPlanSource } from "./sources/budget-plan.js";
 import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
 import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
 import { buildReviewContext } from "../memory/review-context.js";
@@ -313,6 +314,9 @@ function resolveSourceRaw(source: ContextSource, ctx: AssemblerContext): string 
 
     case "budget_guidance":
       return resolveBudgetGuidanceSource(ctx.projectId ?? "", source.params);
+
+    case "budget_plan":
+      return resolveBudgetPlanSource(ctx.projectId ?? "");
 
     case "onboarding_welcome": {
       if (!ctx.projectId) return null;

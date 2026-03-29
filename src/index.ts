@@ -83,6 +83,7 @@ export { evaluateRoute, executeRoute, deliverToOutput } from "./streams/router.j
 
 // --- Onboarding Sources ---
 export { resolveBudgetGuidanceSource } from "./context/sources/budget-guidance.js";
+export { resolveBudgetPlanSource } from "./context/sources/budget-plan.js";
 export { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./context/sources/onboarding-sources.js";
 
 export { generateDefaultScopePolicies } from "./profiles.js";
@@ -203,6 +204,8 @@ export { ensureWindowsCurrent, getNextHourBoundary, getNextMidnightUTC, getNextM
 export { checkBudgetV2 } from "./budget/check-v2.js";
 export { reserveBudget, settlePlanItem, releasePlanReservation, cleanupStaleReservations } from "./budget/reservation.js";
 export { computeDailySnapshot, computeWeeklyTrend, computeMonthlyProjection } from "./budget/forecast.js";
+export { computeBudgetPacing } from "./budget/pacer.js";
+export type { BudgetPacingInput, DispatchBudget } from "./budget/pacer.js";
 export type { BudgetConfigV2, BudgetWindowConfig, DailyBudgetSnapshot, WeeklyTrend, MonthlyProjection } from "./types.js";
 
 // --- Capacity ---

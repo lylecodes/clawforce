@@ -32,6 +32,7 @@ import { writeAuditEntry } from "../audit.js";
 import { isTaskInFuturePhase } from "../workflow.js";
 import { toNamespacedAgentId } from "../agent-sync.js";
 import type { DispatchConfig, DispatchQueueItem } from "../types.js";
+import { computeBudgetPacing } from "../budget/pacer.js";
 
 /** Task lease duration in milliseconds — long enough for async dispatch + execution + 5min buffer. */
 const TASK_LEASE_MS = 2 * 60 * 60 * 1000 + 5 * 60 * 1000; // 2h + 5min buffer
@@ -274,6 +275,59 @@ async function dispatchItem(
     emitDispatchEvent(projectId, "dispatch_failed", item, { error: "Emergency stop active", safetyLimit: "emergency_stop" }, db);
     try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "emergency_stop" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
     return;
+  }
+
+  // Budget pacing gate — spread spend across the day
+  try {
+    const extConfigForPacing = getExtendedProjectConfig(projectId);
+    const dispatchConfigForPacing = extConfigForPacing?.dispatch;
+    if (dispatchConfigForPacing?.budget_pacing?.enabled !== false) {
+      const budgetRow = db.prepare(
+        "SELECT daily_limit_cents, daily_spent_cents, hourly_spent_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+      ).get(projectId) as { daily_limit_cents: number | null; daily_spent_cents: number; hourly_spent_cents: number } | undefined;
+
+      if (budgetRow && budgetRow.daily_limit_cents && budgetRow.daily_limit_cents > 0) {
+        const now = new Date();
+        const endOfDay = new Date(now);
+        endOfDay.setUTCHours(23, 59, 59, 999);
+        const hoursRemaining = Math.max(0, (endOfDay.getTime() - now.getTime()) / (60 * 60 * 1000));
+
+        const pacing = computeBudgetPacing({
+          dailyBudgetCents: budgetRow.daily_limit_cents,
+          spentCents: budgetRow.daily_spent_cents ?? 0,
+          hoursRemaining,
+          currentHourSpentCents: budgetRow.hourly_spent_cents ?? 0,
+          reactiveReservePct: dispatchConfigForPacing?.budget_pacing?.reactive_reserve_pct,
+          lowBudgetThreshold: dispatchConfigForPacing?.budget_pacing?.low_budget_threshold,
+          criticalThreshold: dispatchConfigForPacing?.budget_pacing?.critical_threshold,
+        });
+
+        // Determine if agent is a worker or lead
+        const agentEntry = (() => {
+          try {
+            const { getAgentConfig: getAgentCfg } = require("../project.js") as typeof import("../project.js");
+            return getAgentCfg(resolvedAgentId);
+          } catch { return undefined; }
+        })();
+        const isWorker = agentEntry?.config?.extends === "employee";
+
+        if (isWorker && !pacing.canDispatchWorker) {
+          failItem(item.id, `Budget pacing: worker dispatch blocked — ${pacing.recommendation}`, db, projectId);
+          emitDispatchEvent(projectId, "dispatch_failed", item, { error: pacing.recommendation, budgetPacing: true }, db);
+          try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_pacing_worker" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+          return;
+        }
+        if (!isWorker && !pacing.canDispatchLead) {
+          failItem(item.id, `Budget pacing: lead dispatch blocked — ${pacing.recommendation}`, db, projectId);
+          emitDispatchEvent(projectId, "dispatch_failed", item, { error: pacing.recommendation, budgetPacing: true }, db);
+          try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_pacing_lead" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+          return;
+        }
+      }
+    }
+  } catch (err) {
+    safeLog("dispatcher.budgetPacing", err);
+    // Budget pacing failure is non-fatal — proceed with dispatch
   }
 
   // Pre-dispatch budget check: single v2 call covers all windows + dimensions + reservations

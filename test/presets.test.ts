@@ -187,7 +187,7 @@ describe("builtin agent presets", () => {
     const emp = BUILTIN_AGENT_PRESETS.employee;
     expect(emp.briefing).toContain("soul");
     expect(emp.briefing).toContain("assigned_task");
-    expect(emp.briefing).not.toContain("task_board");
+    expect(emp.briefing).toContain("task_board");
     expect(emp.coordination?.enabled).toBe(false);
     expect(emp.compaction).toBe(false);
   });

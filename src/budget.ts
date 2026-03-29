@@ -12,6 +12,7 @@ import { safeLog } from "./diagnostics.js";
 import { checkBudgetV2 } from "./budget/check-v2.js";
 import { normalizeBudgetConfig } from "./budget/normalize.js";
 import { getNextHourBoundary, getNextMidnightUTC, getNextMonthBoundaryUTC } from "./budget/reset.js";
+import { ingestEvent } from "./events/store.js";
 import type { BudgetCheckResult, BudgetConfig, BudgetConfigV2 } from "./types.js";
 
 /**
@@ -36,12 +37,13 @@ export function setBudget(
   const sessionLimitCents = legacy.sessionLimitCents ?? (v2.session?.cents ?? null);
   const taskLimitCents = legacy.taskLimitCents ?? (v2.task?.cents ?? null);
 
-  // Upsert: check if budget exists
+  // Upsert: check if budget exists (and read old daily limit for change detection)
   const existing = db.prepare(
     params.agentId
-      ? "SELECT id FROM budgets WHERE project_id = ? AND agent_id = ?"
-      : "SELECT id FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+      ? "SELECT id, daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id = ?"
+      : "SELECT id, daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
   ).get(...(params.agentId ? [params.projectId, params.agentId] : [params.projectId])) as Record<string, unknown> | undefined;
+  const previousDailyLimit = (existing?.daily_limit_cents as number | null) ?? 0;
 
   if (existing) {
     db.prepare(`
@@ -97,6 +99,26 @@ export function setBudget(
       now,
       now,
     );
+  }
+
+  // Emit budget_changed event for project-level budgets (not per-agent)
+  if (!params.agentId) {
+    try {
+      ingestEvent(
+        params.projectId,
+        "budget_changed",
+        "internal",
+        {
+          oldLimit: previousDailyLimit,
+          newLimit: v2.daily?.cents ?? 0,
+          source: "setBudget",
+        },
+        `budget-changed:${params.projectId}:${now}:${crypto.randomUUID().slice(0, 8)}`,
+        db,
+      );
+    } catch (err) {
+      safeLog("budget.emitChanged", err);
+    }
   }
 }
 

@@ -163,8 +163,34 @@ export type ClawforceConfig = {
 
 // --- Dispatch throttle types ---
 
+/** Budget pacing configuration — controls how budget is spread across the day. */
+export type BudgetPacingConfig = {
+  enabled?: boolean;
+  reactive_reserve_pct?: number;
+  low_budget_threshold?: number;
+  critical_threshold?: number;
+};
+
+/** Lead agent scheduling configuration. */
+export type LeadScheduleConfig = {
+  planning_sessions_per_day?: number;
+  planning_model?: string;
+  review_model?: string;
+  wake_on?: string[];
+};
+
+/** Worker dispatch configuration. */
+export type WorkerDispatchConfig = {
+  session_loop?: boolean;
+  max_tasks_per_session?: number;
+  idle_timeout_ms?: number;
+  wake_on?: string[];
+};
+
 /** Per-project dispatch concurrency and rate-limiting configuration. */
 export type DispatchConfig = {
+  /** Dispatch mode: event-driven (default), cron (legacy), or manual. */
+  mode?: "event-driven" | "cron" | "manual";
   /** Max concurrent dispatches per project (default: 3). */
   maxConcurrentDispatches?: number;
   /** Max dispatches per hour per project. */
@@ -174,6 +200,14 @@ export type DispatchConfig = {
     maxConcurrent?: number;
     maxPerHour?: number;
   }>;
+  /** Budget pacing — spread budget across the day. */
+  budget_pacing?: BudgetPacingConfig;
+  /** Lead agent scheduling — planning sessions + reactive wake events. */
+  lead_schedule?: LeadScheduleConfig;
+  /** Worker dispatch — session loop, task limits, wake events. */
+  worker?: WorkerDispatchConfig;
+  /** Verifier dispatch — wake events. */
+  verifier?: { wake_on?: string[] };
 };
 
 /** Strategy for automatic task assignment. */
@@ -199,7 +233,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "worker_findings" | "recent_decisions" | "clawforce_health_report";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "worker_findings" | "recent_decisions" | "clawforce_health_report" | "budget_plan";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
@@ -728,10 +762,10 @@ export type ChannelConfig = {
 // --- Event handler config types ---
 
 /** Built-in action types for event handlers. */
-export type EventActionType = "create_task" | "notify" | "escalate" | "enqueue_work" | "emit_event";
+export type EventActionType = "create_task" | "notify" | "escalate" | "enqueue_work" | "emit_event" | "dispatch_agent";
 
 export const EVENT_ACTION_TYPES: readonly EventActionType[] = [
-  "create_task", "notify", "escalate", "enqueue_work", "emit_event",
+  "create_task", "notify", "escalate", "enqueue_work", "emit_event", "dispatch_agent",
 ] as const;
 
 /** Create a task when the event fires. */
@@ -792,12 +826,21 @@ export type EmitEventAction = {
 };
 
 /** Union of all event action configs. */
+export type DispatchAgentAction = {
+  action: "dispatch_agent";
+  agent_role: "lead" | "worker" | "verifier" | string;
+  model?: string;
+  session_type?: "reactive" | "active" | "planning";
+  payload?: Record<string, unknown>;
+};
+
 export type EventActionConfig =
   | CreateTaskAction
   | NotifyAction
   | EscalateAction
   | EnqueueWorkAction
-  | EmitEventAction;
+  | EmitEventAction
+  | DispatchAgentAction;
 
 /** Array of actions triggered by a single event type. */
 export type EventHandlerConfig = EventActionConfig[];
@@ -829,6 +872,7 @@ export type EventType =
   | "goal_created"
   | "goal_achieved"
   | "goal_abandoned"
+  | "budget_changed"
   | "custom";
 
 export type EventSource = "tool" | "internal" | "cron" | "webhook";
