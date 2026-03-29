@@ -21,6 +21,9 @@ export type TaskPriority = "P0" | "P1" | "P2" | "P3";
 
 export const TASK_PRIORITIES: readonly TaskPriority[] = ["P0", "P1", "P2", "P3"] as const;
 
+export type TaskKind = "exercise" | "bug" | "feature" | "infra" | "research";
+export const TASK_KINDS: readonly TaskKind[] = ["exercise", "bug", "feature", "infra", "research"] as const;
+
 export type EvidenceType = "output" | "diff" | "test_result" | "screenshot" | "log" | "custom";
 
 export const EVIDENCE_TYPES: readonly EvidenceType[] = ["output", "diff", "test_result", "screenshot", "log", "custom"] as const;
@@ -43,6 +46,7 @@ export type Task = {
   description?: string;
   state: TaskState;
   priority: TaskPriority;
+  kind?: TaskKind;
   assignedTo?: string;
   createdBy: string;
   createdAt: number;
@@ -163,8 +167,34 @@ export type ClawforceConfig = {
 
 // --- Dispatch throttle types ---
 
+/** Budget pacing configuration — controls how budget is spread across the day. */
+export type BudgetPacingConfig = {
+  enabled?: boolean;
+  reactive_reserve_pct?: number;
+  low_budget_threshold?: number;
+  critical_threshold?: number;
+};
+
+/** Lead agent scheduling configuration. */
+export type LeadScheduleConfig = {
+  planning_sessions_per_day?: number;
+  planning_model?: string;
+  review_model?: string;
+  wake_on?: string[];
+};
+
+/** Worker dispatch configuration. */
+export type WorkerDispatchConfig = {
+  session_loop?: boolean;
+  max_tasks_per_session?: number;
+  idle_timeout_ms?: number;
+  wake_on?: string[];
+};
+
 /** Per-project dispatch concurrency and rate-limiting configuration. */
 export type DispatchConfig = {
+  /** Dispatch mode: event-driven (default), cron (legacy), or manual. */
+  mode?: "event-driven" | "cron" | "manual";
   /** Max concurrent dispatches per project (default: 3). */
   maxConcurrentDispatches?: number;
   /** Max dispatches per hour per project. */
@@ -174,6 +204,16 @@ export type DispatchConfig = {
     maxConcurrent?: number;
     maxPerHour?: number;
   }>;
+  /** Budget pacing — spread budget across the day. */
+  budget_pacing?: BudgetPacingConfig;
+  /** Per-team dispatch configuration overrides. */
+  teams?: Record<string, { budget_pacing?: BudgetPacingConfig }>;
+  /** Lead agent scheduling — planning sessions + reactive wake events. */
+  lead_schedule?: LeadScheduleConfig;
+  /** Worker dispatch — session loop, task limits, wake events. */
+  worker?: WorkerDispatchConfig;
+  /** Verifier dispatch — wake events. */
+  verifier?: { wake_on?: string[] };
 };
 
 /** Strategy for automatic task assignment. */
@@ -199,7 +239,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "clawforce_health_report";
+  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "worker_findings" | "recent_decisions" | "clawforce_health_report" | "budget_plan";
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
@@ -268,6 +308,26 @@ export type SchedulingConfig = {
   maxTurnsPerCycle?: number;
 };
 
+/** OpenClaw bootstrap configuration for controlling session context injection. */
+export type BootstrapConfig = {
+  /** Max chars per individual bootstrap file. Default: 20000 (OpenClaw default). */
+  maxChars?: number;
+  /** Max total chars across all bootstrap files. Default: 150000 (OpenClaw default). */
+  totalMaxChars?: number;
+};
+
+/**
+ * An observe entry: either a plain pattern string or an object with scope filters.
+ * Scope filters narrow which events match — by team or specific agent.
+ */
+export type ObserveEntry = string | {
+  pattern: string;
+  scope?: {
+    team?: string;
+    agent?: string;
+  };
+};
+
 /** Per-agent configuration. */
 export type AgentConfig = {
   /** Preset to inherit defaults from (e.g. "manager", "employee"). */
@@ -307,6 +367,8 @@ export type AgentConfig = {
   compaction?: boolean | CompactionConfig;
   /** Name of the skill_pack to apply to this agent. */
   skill_pack?: string;
+  /** Named mixins composed into this agent (resolved during config init). */
+  mixins?: string[];
   /** Coordination config for agents that manage other agents. */
   coordination?: CoordinationConfig;
   /** Scoped sessions. Each key is a job name with its own briefing/expectations/cron. */
@@ -317,9 +379,15 @@ export type AgentConfig = {
   skillCap?: number;
   /** Memory governance configuration. */
   memory?: MemoryGovernanceConfig;
-  /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. */
-  observe?: string[];
-  /** Context window budget in characters. Default: 15000. */
+  /** Event type patterns this agent monitors (e.g. ["budget.*", "task.failed"]). Observed events are injected into briefing at each tick. Supports scoped entries to filter by team or agent. */
+  observe?: ObserveEntry[];
+  /**
+   * Render briefing sources as compact previews instead of full content.
+   * Agents can expand any source via `clawforce_context expand`.
+   * Defaults to true for managers.
+   */
+  compactBriefing?: boolean;
+  /** Context window budget in characters. Default: 30000. */
   contextBudgetChars?: number;
   /** Max turns per session. Default: 50. */
   maxTurnsPerSession?: number;
@@ -331,6 +399,26 @@ export type AgentConfig = {
     /** Minutes to wait before auto-re-enabling. Default: 10. */
     cooldown_minutes: number;
   };
+  /**
+   * OpenClaw bootstrap configuration for this agent's sessions.
+   * Controls how much workspace context gets injected at session start.
+   */
+  bootstrapConfig?: BootstrapConfig;
+  /**
+   * Bootstrap files to exclude from this agent's workspace.
+   * OpenClaw seeds files like AGENTS.md, HEARTBEAT.md, IDENTITY.md, BOOTSTRAP.md
+   * in each workspace. ClawForce agents that don't need them can exclude them
+   * to reduce token usage.
+   * Example: ["AGENTS.md", "HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"]
+   */
+  bootstrapExcludeFiles?: string[];
+  /**
+   * OpenClaw tools this agent is allowed to use (e.g. ["Bash", "Read", "Edit", "Write", "WebSearch"]).
+   * Controls the tools available in the agent's sessions, separate from
+   * ClawForce action scope (which controls ClawForce tool actions).
+   * When not set, all OpenClaw tools are available.
+   */
+  allowedTools?: string[];
 };
 
 /** A scoped session definition for an agent. */
@@ -379,6 +467,8 @@ export type JobDefinition = {
    * Format: "N/period" where period is "hour", "day", "week".
    * Example: "3/day" means run 3 times per day at optimal times. */
   frequency?: string;
+  /** Event triggers that can invoke this job on-demand (in addition to cron/frequency). */
+  triggers?: Array<{ on: string; conditions?: Record<string, unknown> }>;
 };
 
 /** Top-level approval policy configuration. */
@@ -539,6 +629,16 @@ export type WorkforceConfig = {
   knowledge?: KnowledgeConfig;
   /** Verification gates and git isolation configuration. */
   verification?: VerificationConfig;
+  /**
+   * Default bootstrap configuration applied to all agents in this project.
+   * Individual agent bootstrapConfig overrides these defaults.
+   */
+  bootstrapDefaults?: BootstrapConfig;
+  /**
+   * Team-level config templates. Agents with a matching `team` field
+   * inherit these defaults. Merge order: org defaults -> team template -> preset -> agent override.
+   */
+  team_templates?: Record<string, Partial<AgentConfig>>;
   /** Manager/orchestrator cron configuration. */
   manager?: {
     enabled: boolean;
@@ -591,10 +691,15 @@ export type SafetyConfig = {
   emergencyStop?: boolean;
   /** Max queued items per project. Prevents runaway task creation from flooding the queue. Default: 50. */
   maxQueueDepth?: number;
+  /** Max tool calls (LLM API calls) per session before session is killed. Default: 100. */
   maxCallsPerSession?: number;
+  /** Max tool calls per minute across all active sessions (global). Default: 200. */
   maxCallsPerMinute?: number;
+  /** Max tool calls per minute per agent. Default: 60. */
   maxCallsPerMinutePerAgent?: number;
+  /** Base delay in ms for exponential backoff on retries. Default: 30000 (30s). */
   retryBackoffBaseMs?: number;
+  /** Maximum delay in ms for exponential backoff on retries. Default: 600000 (10min). */
   retryBackoffMaxMs?: number;
 };
 
@@ -618,10 +723,8 @@ export type ReviewConfig = {
 // --- Channel types ---
 
 export type ChannelType = "topic" | "meeting";
-export const CHANNEL_TYPES: readonly ChannelType[] = ["topic", "meeting"] as const;
 
 export type ChannelStatus = "active" | "concluded" | "archived";
-export const CHANNEL_STATUSES: readonly ChannelStatus[] = ["active", "concluded", "archived"] as const;
 
 /** A persistent group communication channel. */
 export type Channel = {
@@ -665,10 +768,10 @@ export type ChannelConfig = {
 // --- Event handler config types ---
 
 /** Built-in action types for event handlers. */
-export type EventActionType = "create_task" | "notify" | "escalate" | "enqueue_work" | "emit_event";
+export type EventActionType = "create_task" | "notify" | "escalate" | "enqueue_work" | "emit_event" | "dispatch_agent";
 
 export const EVENT_ACTION_TYPES: readonly EventActionType[] = [
-  "create_task", "notify", "escalate", "enqueue_work", "emit_event",
+  "create_task", "notify", "escalate", "enqueue_work", "emit_event", "dispatch_agent",
 ] as const;
 
 /** Create a task when the event fires. */
@@ -729,17 +832,25 @@ export type EmitEventAction = {
 };
 
 /** Union of all event action configs. */
+export type DispatchAgentAction = {
+  action: "dispatch_agent";
+  agent_role: "lead" | "worker" | "verifier" | string;
+  model?: string;
+  session_type?: "reactive" | "active" | "planning";
+  payload?: Record<string, unknown>;
+};
+
 export type EventActionConfig =
   | CreateTaskAction
   | NotifyAction
   | EscalateAction
   | EnqueueWorkAction
-  | EmitEventAction;
+  | EmitEventAction
+  | DispatchAgentAction;
 
-/** Array of actions triggered by a single event type, with optional override flag. */
+/** Array of actions triggered by a single event type. */
 export type EventHandlerConfig = {
   actions: EventActionConfig[];
-  /** When true, skip the built-in handler for this event type. */
   override_builtin?: boolean;
 };
 
@@ -770,17 +881,8 @@ export type EventType =
   | "goal_created"
   | "goal_achieved"
   | "goal_abandoned"
+  | "budget_changed"
   | "custom";
-
-export const EVENT_TYPES: readonly EventType[] = [
-  "ci_failed", "pr_opened", "deploy_finished", "task_completed",
-  "task_failed", "task_assigned", "task_created", "sweep_finding",
-  "dispatch_succeeded", "dispatch_failed", "task_review_ready",
-  "dispatch_dead_letter", "proposal_approved", "proposal_created", "proposal_rejected", "message_sent",
-  "protocol_started", "protocol_responded", "protocol_completed", "protocol_expired", "protocol_escalated",
-  "goal_created", "goal_achieved", "goal_abandoned",
-  "custom",
-] as const;
 
 export type EventSource = "tool" | "internal" | "cron" | "webhook";
 
@@ -820,13 +922,8 @@ export type DispatchQueueItem = {
   maxDispatchAttempts: number;
   lastError?: string;
   createdAt: number;
+  dispatchedAt?: number;
   completedAt?: number;
-};
-
-export type TaskLease = {
-  holder: string;
-  acquiredAt: number;
-  expiresAt: number;
 };
 
 // --- Cost tracking types ---
@@ -922,18 +1019,6 @@ export type PolicyDefinition = {
 export type PolicyCheckResult =
   | { allowed: true }
   | { allowed: false; reason: string; policyId: string };
-
-export type PolicyViolation = {
-  id: string;
-  projectId: string;
-  policyId: string;
-  agentId: string;
-  sessionKey?: string;
-  actionAttempted: string;
-  violationDetail: string;
-  outcome: string;
-  createdAt: number;
-};
 
 // --- Monitoring types ---
 
@@ -1043,10 +1128,6 @@ export const MESSAGE_PRIORITIES: readonly MessagePriority[] = [
 
 export type MessageStatus = "queued" | "delivered" | "read" | "failed";
 
-export const MESSAGE_STATUSES: readonly MessageStatus[] = [
-  "queued", "delivered", "read", "failed",
-] as const;
-
 export type Message = {
   id: string;
   fromAgent: string;
@@ -1074,18 +1155,9 @@ export type ProtocolStatus =
   | "awaiting_review" | "reviewed" | "approved" | "revision_requested"
   | "expired" | "escalated" | "cancelled";
 
-export const PROTOCOL_STATUSES: readonly ProtocolStatus[] = [
-  "awaiting_response", "resolved",
-  "pending_acceptance", "in_progress", "completed", "rejected",
-  "awaiting_review", "reviewed", "approved", "revision_requested",
-  "expired", "escalated", "cancelled",
-] as const;
-
 // --- Goal types ---
 
 export type GoalStatus = "active" | "achieved" | "abandoned";
-
-export const GOAL_STATUSES: readonly GoalStatus[] = ["active", "achieved", "abandoned"] as const;
 
 export type Goal = {
   id: string;
@@ -1397,8 +1469,6 @@ export type TriggerDefinition = {
 // --- Experiment framework types ---
 
 export type ExperimentState = "draft" | "running" | "paused" | "completed" | "cancelled";
-
-export const EXPERIMENT_STATES: readonly ExperimentState[] = ["draft", "running", "paused", "completed", "cancelled"] as const;
 
 export type ExperimentAssignmentStrategy =
   | { type: "random"; seed?: number }

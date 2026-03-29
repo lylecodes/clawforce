@@ -5,10 +5,10 @@
  * All routes return JSON via handleRequest().
  */
 
-import type { TaskState, TaskPriority, EventStatus } from "../types.js";
+import type { TaskState, TaskPriority, TaskKind, EventStatus } from "../types.js";
 import type { MessageType, MessageStatus } from "../types.js";
 import type { ProtocolStatus, GoalStatus } from "../types.js";
-import { TASK_STATES, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
+import { TASK_STATES, TASK_KINDS, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
 
 /** Parse an integer from a string, returning a default if NaN. */
 function safeParseInt(value: string, defaultValue: number): number {
@@ -30,6 +30,7 @@ import {
   queryTasks,
   queryTaskDetail,
   querySessions,
+  querySessionDetail,
   queryEvents,
   queryMetricsDashboard,
   queryCosts,
@@ -116,12 +117,20 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
         const priority = params.priority && (TASK_PRIORITIES as readonly string[]).includes(params.priority)
           ? params.priority as TaskPriority
           : undefined;
+        const kindParam = params.kind && (TASK_KINDS as readonly string[]).includes(params.kind)
+          ? params.kind as TaskKind
+          : undefined;
+        const excludeKindsParam = params.excludeKinds
+          ? params.excludeKinds.split(",").filter((k): k is TaskKind => (TASK_KINDS as readonly string[]).includes(k))
+          : undefined;
         return ok(queryTasks(projectId, {
           state: states && states.length === 1 ? states[0] : states,
           assignedTo: params.assignee,
           priority,
           department: params.department,
           team: params.team,
+          kind: kindParam,
+          excludeKinds: excludeKindsParam,
         }, {
           limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
           offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
@@ -129,6 +138,11 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
       }
 
       case "sessions": {
+        // GET /api/projects/:id/sessions/:sessionKey
+        if (segments[4]) {
+          const detail = querySessionDetail(projectId, decodeURIComponent(segments[4]));
+          return detail ? ok(detail) : { status: 404, body: { error: "Session not found" } };
+        }
         // GET /api/projects/:id/sessions
         return ok(querySessions(projectId, {
           limit: params.limit ? safeParseInt(params.limit, 50) : undefined,

@@ -61,6 +61,8 @@ export function handleAction(
       return handleConfigAction(projectId, segments, body);
     case "budget":
       return handleBudgetAction(projectId, segments, body);
+    case "interventions":
+      return handleInterventionAction(projectId, segments, body);
     default:
       return notFound(`Unknown action resource: ${resource}`);
   }
@@ -724,6 +726,47 @@ function validateConfigSection(
   }
 
   return { errors, warnings };
+}
+
+// --- Intervention Actions ---
+
+function handleInterventionAction(
+  projectId: string,
+  segments: string[],
+  body: Record<string, unknown>,
+): RouteResult {
+  // interventions/dismiss
+  const action = segments[1];
+
+  switch (action) {
+    case "dismiss": {
+      const dismissKey = body.dismissKey as string | undefined;
+      if (!dismissKey) return badRequest("Missing dismissKey");
+
+      const db = getDb(projectId);
+      try {
+        const row = db.prepare(
+          `SELECT value FROM onboarding_state WHERE project_id = ? AND key = 'dismissed_interventions'`,
+        ).get(projectId) as { value: string } | undefined;
+
+        const dismissed: string[] = row ? JSON.parse(row.value) : [];
+        if (!dismissed.includes(dismissKey)) {
+          dismissed.push(dismissKey);
+        }
+
+        db.prepare(
+          `INSERT INTO onboarding_state (project_id, key, value, updated_at) VALUES (?, 'dismissed_interventions', ?, ?)
+           ON CONFLICT (project_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        ).run(projectId, JSON.stringify(dismissed), Date.now());
+
+        return ok({ ok: true, dismissKey, status: "dismissed" });
+      } catch (err) {
+        return { status: 500, body: { error: `Failed to dismiss intervention: ${err}` } };
+      }
+    }
+    default:
+      return notFound(`Unknown intervention action: ${action}`);
+  }
 }
 
 // --- Helpers ---

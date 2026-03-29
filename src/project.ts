@@ -18,6 +18,7 @@ import { applyProfile } from "./profiles.js";
 import { BUILTIN_AGENT_PRESETS } from "./presets.js";
 import { normalizeAgentConfig as resolveAliases } from "./config/aliases.js";
 import { registerCustomSkills } from "./skills/registry.js";
+import { toNamespacedAgentId, parseNamespacedAgentId } from "./agent-sync.js";
 import type {
   AgentConfig,
   AlertRuleDefinition,
@@ -25,7 +26,9 @@ import type {
   ApprovalPolicy,
   AssignmentConfig,
   AssignmentStrategy,
+  BootstrapConfig,
   BudgetConfig,
+  BudgetPacingConfig,
   ChannelConfig,
   ChannelType,
   CompactionConfig,
@@ -62,6 +65,7 @@ import type {
   VerificationConfig,
   VerificationGate,
   GitIsolationConfig,
+  ObserveEntry,
   WorkforceConfig,
 } from "./types.js";
 import { EVENT_ACTION_TYPES, TRIGGER_SOURCES } from "./types.js";
@@ -273,6 +277,12 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   // Parse verification config
   if (raw.verification && typeof raw.verification === "object") {
     result.verification = normalizeVerificationConfig(raw.verification);
+  }
+
+  // Parse bootstrap_defaults config (CO-1: project-level bootstrap budget)
+  const rawBootstrapDefaults = raw.bootstrap_defaults ?? raw.bootstrapDefaults;
+  if (rawBootstrapDefaults && typeof rawBootstrapDefaults === "object") {
+    result.bootstrapDefaults = normalizeBootstrapConfig(rawBootstrapDefaults);
   }
 
   return result;
@@ -518,8 +528,28 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
 
   const jobs = normalizeJobs(raw.jobs);
 
-  const observe = Array.isArray(raw.observe)
-    ? (raw.observe.filter((s: unknown) => typeof s === "string") as string[])
+  const observe: ObserveEntry[] | undefined = Array.isArray(raw.observe)
+    ? (raw.observe.filter((entry: unknown) => {
+        if (typeof entry === "string") return true;
+        if (entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).pattern === "string") return true;
+        return false;
+      }).map((entry: unknown) => {
+        if (typeof entry === "string") return entry;
+        const obj = entry as Record<string, unknown>;
+        const result: { pattern: string; scope?: { team?: string; agent?: string } } = {
+          pattern: obj.pattern as string,
+        };
+        if (obj.scope && typeof obj.scope === "object") {
+          const scope = obj.scope as Record<string, unknown>;
+          const scopeResult: { team?: string; agent?: string } = {};
+          if (typeof scope.team === "string") scopeResult.team = scope.team;
+          if (typeof scope.agent === "string") scopeResult.agent = scope.agent;
+          if (scopeResult.team || scopeResult.agent) {
+            result.scope = scopeResult;
+          }
+        }
+        return result;
+      }) as ObserveEntry[])
     : undefined;
 
   const skillCap = typeof raw.skill_cap === "number" ? raw.skill_cap : undefined;
@@ -541,6 +571,30 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
       wakeBounds: Array.isArray(s.wake_bounds) ? s.wake_bounds as [string, string] : undefined,
     };
   }
+
+  // Parse bootstrap config (CO-1: bootstrap budget control)
+  const bootstrapConfig = normalizeBootstrapConfig(raw.bootstrap_config ?? raw.bootstrapConfig);
+
+  // Parse bootstrap exclude files (CO-2: skip unnecessary bootstrap files)
+  const rawExcludeFiles = raw.bootstrap_exclude_files ?? raw.bootstrapExcludeFiles;
+  const bootstrapExcludeFiles = Array.isArray(rawExcludeFiles)
+    ? (rawExcludeFiles as unknown[]).filter((f: unknown): f is string => typeof f === "string")
+    : undefined;
+
+  // Parse allowed OpenClaw tools (CO-3: per-agent tool filtering)
+  const rawAllowedTools = raw.allowed_tools ?? raw.allowedTools;
+  const allowedTools = Array.isArray(rawAllowedTools)
+    ? (rawAllowedTools as unknown[]).filter((t: unknown): t is string => typeof t === "string")
+    : undefined;
+
+  // Resolve defaults from preset for new fields
+  const presetDefaults = BUILTIN_AGENT_PRESETS[extendsFrom];
+  const effectiveBootstrapConfig = bootstrapConfig
+    ?? (presetDefaults?.bootstrapConfig as AgentConfig["bootstrapConfig"] | undefined);
+  const effectiveBootstrapExcludeFiles = bootstrapExcludeFiles
+    ?? (presetDefaults?.bootstrapExcludeFiles as string[] | undefined);
+  const effectiveAllowedTools = allowedTools
+    ?? (presetDefaults?.allowedTools as string[] | undefined);
 
   return {
     extends: extendsFrom,
@@ -566,7 +620,21 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     contextBudgetChars,
     maxTurnsPerSession,
     model: agentModel,
+    bootstrapConfig: effectiveBootstrapConfig,
+    bootstrapExcludeFiles: effectiveBootstrapExcludeFiles?.length ? effectiveBootstrapExcludeFiles : undefined,
+    allowedTools: effectiveAllowedTools?.length ? effectiveAllowedTools : undefined,
   };
+}
+
+function normalizeBootstrapConfig(raw: unknown): BootstrapConfig | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const result: BootstrapConfig = {};
+  const maxChars = r.max_chars ?? r.maxChars;
+  const totalMaxChars = r.total_max_chars ?? r.totalMaxChars;
+  if (typeof maxChars === "number" && maxChars > 0) result.maxChars = Math.floor(maxChars);
+  if (typeof totalMaxChars === "number" && totalMaxChars > 0) result.totalMaxChars = Math.floor(totalMaxChars);
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function normalizePermissions(raw: unknown): AgentConfig["permissions"] {
@@ -795,10 +863,30 @@ function normalizeJobs(raw: unknown): Record<string, JobDefinition> | undefined 
     if (typeof j.frequency === "string" && j.frequency.trim()) {
       job.frequency = j.frequency.trim();
     }
+    if (Array.isArray(j.triggers)) {
+      job.triggers = normalizeTriggers(j.triggers);
+    }
 
     result[jobName] = job;
   }
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeTriggers(
+  raw: unknown[],
+): Array<{ on: string; conditions?: Record<string, unknown> }> {
+  const triggers: Array<{ on: string; conditions?: Record<string, unknown> }> = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const t = item as Record<string, unknown>;
+    if (typeof t.on !== "string" || !t.on.trim()) continue;
+    const trigger: { on: string; conditions?: Record<string, unknown> } = { on: t.on.trim() };
+    if (typeof t.conditions === "object" && t.conditions !== null && !Array.isArray(t.conditions)) {
+      trigger.conditions = t.conditions as Record<string, unknown>;
+    }
+    triggers.push(trigger);
+  }
+  return triggers;
 }
 
 function normalizeBudgetsConfig(raw: Record<string, unknown>): WorkforceConfig["budgets"] {
@@ -941,8 +1029,16 @@ function normalizeApprovalPolicy(raw: unknown): ApprovalPolicy | null {
 
 const VALID_ASSIGNMENT_STRATEGIES: AssignmentStrategy[] = ["workload_balanced", "round_robin", "skill_matched"];
 
+const VALID_DISPATCH_MODES = ["event-driven", "cron", "manual"] as const;
+
 function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
   const result: DispatchConfig = {};
+
+  // Dispatch mode
+  if (typeof raw.mode === "string" && (VALID_DISPATCH_MODES as readonly string[]).includes(raw.mode)) {
+    result.mode = raw.mode as DispatchConfig["mode"];
+  }
+
   if (typeof raw.max_concurrent_dispatches === "number" && raw.max_concurrent_dispatches > 0) {
     result.maxConcurrentDispatches = raw.max_concurrent_dispatches;
   }
@@ -961,6 +1057,70 @@ function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
     }
     if (Object.keys(result.agentLimits).length === 0) delete result.agentLimits;
   }
+
+  // Budget pacing config
+  if (raw.budget_pacing && typeof raw.budget_pacing === "object") {
+    const bp = raw.budget_pacing as Record<string, unknown>;
+    result.budget_pacing = {
+      enabled: typeof bp.enabled === "boolean" ? bp.enabled : true,
+      reactive_reserve_pct: typeof bp.reactive_reserve_pct === "number" ? bp.reactive_reserve_pct : 20,
+      low_budget_threshold: typeof bp.low_budget_threshold === "number" ? bp.low_budget_threshold : 10,
+      critical_threshold: typeof bp.critical_threshold === "number" ? bp.critical_threshold : 5,
+    };
+  }
+
+  // Per-team dispatch overrides
+  if (raw.teams && typeof raw.teams === "object") {
+    const teamsRaw = raw.teams as Record<string, unknown>;
+    const teams: NonNullable<DispatchConfig["teams"]> = {};
+    for (const [teamName, teamCfg] of Object.entries(teamsRaw)) {
+      if (!teamCfg || typeof teamCfg !== "object") continue;
+      const tc = teamCfg as Record<string, unknown>;
+      const teamEntry: { budget_pacing?: BudgetPacingConfig } = {};
+      if (tc.budget_pacing && typeof tc.budget_pacing === "object") {
+        const bp = tc.budget_pacing as Record<string, unknown>;
+        teamEntry.budget_pacing = {
+          enabled: typeof bp.enabled === "boolean" ? bp.enabled : true,
+          reactive_reserve_pct: typeof bp.reactive_reserve_pct === "number" ? bp.reactive_reserve_pct : undefined,
+          low_budget_threshold: typeof bp.low_budget_threshold === "number" ? bp.low_budget_threshold : undefined,
+          critical_threshold: typeof bp.critical_threshold === "number" ? bp.critical_threshold : undefined,
+        };
+      }
+      if (Object.keys(teamEntry).length > 0) teams[teamName] = teamEntry;
+    }
+    if (Object.keys(teams).length > 0) result.teams = teams;
+  }
+
+  // Lead schedule config
+  if (raw.lead_schedule && typeof raw.lead_schedule === "object") {
+    const ls = raw.lead_schedule as Record<string, unknown>;
+    result.lead_schedule = {
+      planning_sessions_per_day: typeof ls.planning_sessions_per_day === "number" ? ls.planning_sessions_per_day : 3,
+      planning_model: typeof ls.planning_model === "string" ? ls.planning_model : undefined,
+      review_model: typeof ls.review_model === "string" ? ls.review_model : undefined,
+      wake_on: Array.isArray(ls.wake_on) ? (ls.wake_on as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
+    };
+  }
+
+  // Worker dispatch config
+  if (raw.worker && typeof raw.worker === "object") {
+    const w = raw.worker as Record<string, unknown>;
+    result.worker = {
+      session_loop: typeof w.session_loop === "boolean" ? w.session_loop : true,
+      max_tasks_per_session: typeof w.max_tasks_per_session === "number" ? w.max_tasks_per_session : 5,
+      idle_timeout_ms: typeof w.idle_timeout_ms === "number" ? w.idle_timeout_ms : 300000,
+      wake_on: Array.isArray(w.wake_on) ? (w.wake_on as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
+    };
+  }
+
+  // Verifier dispatch config
+  if (raw.verifier && typeof raw.verifier === "object") {
+    const v = raw.verifier as Record<string, unknown>;
+    result.verifier = {
+      wake_on: Array.isArray(v.wake_on) ? (v.wake_on as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
+    };
+  }
+
   return result;
 }
 
@@ -981,22 +1141,8 @@ function normalizeEventHandlersConfig(
 ): Record<string, EventHandlerConfig> | undefined {
   const result: Record<string, EventHandlerConfig> = {};
 
-  for (const [eventType, rawEntry] of Object.entries(raw)) {
-    // Support two formats:
-    // 1. Array of actions (backward compatible): { "task_completed": [{ action: ... }] }
-    // 2. Object with actions + override_builtin: { "task_completed": { actions: [...], override_builtin: true } }
-    let rawActions: unknown[];
-    let overrideBuiltin = false;
-
-    if (Array.isArray(rawEntry)) {
-      rawActions = rawEntry;
-    } else if (typeof rawEntry === "object" && rawEntry !== null) {
-      const obj = rawEntry as Record<string, unknown>;
-      rawActions = Array.isArray(obj.actions) ? obj.actions : [];
-      overrideBuiltin = obj.override_builtin === true;
-    } else {
-      continue;
-    }
+  for (const [eventType, rawActions] of Object.entries(raw)) {
+    if (!Array.isArray(rawActions)) continue;
 
     const actions: EventActionConfig[] = [];
     for (const rawAction of rawActions) {
@@ -1049,11 +1195,24 @@ function normalizeEventHandlersConfig(
             dedup_key: typeof a.dedup_key === "string" ? a.dedup_key : undefined,
           });
           break;
+        case "dispatch_agent":
+          actions.push({
+            action: "dispatch_agent",
+            agent_role: typeof a.agent_role === "string" ? a.agent_role : "worker",
+            model: typeof a.model === "string" ? a.model : undefined,
+            session_type: typeof a.session_type === "string" ? a.session_type as "reactive" | "active" | "planning" : undefined,
+            payload: typeof a.payload === "object" && a.payload !== null ? a.payload as Record<string, unknown> : undefined,
+          });
+          break;
       }
     }
 
-    if (actions.length > 0 || overrideBuiltin) {
-      result[eventType] = { actions, override_builtin: overrideBuiltin || undefined };
+    if (actions.length > 0) {
+      // Support both array format (YAML) and object format (with override_builtin)
+      const overrideBuiltin = typeof rawActions === "object" && !Array.isArray(rawActions)
+        ? Boolean((rawActions as Record<string, unknown>).override_builtin)
+        : false;
+      result[eventType] = { actions, override_builtin: overrideBuiltin };
     }
   }
 
@@ -1338,6 +1497,14 @@ type AgentConfigEntry = {
 
 const agentConfigRegistry = new Map<string, AgentConfigEntry>();
 
+/**
+ * Namespace alias map: namespaced ID → bare ID.
+ * When OpenClaw sends a namespaced agentId (e.g. "clawforce-dev:cf-lead") via hooks,
+ * this map lets getAgentConfig resolve it to the canonical bare entry.
+ * Kept separate from agentConfigRegistry so getRegisteredAgentIds() only returns bare IDs.
+ */
+const namespacedAliases = new Map<string, string>();
+
 /** Approval policies keyed by projectId. */
 const approvalPolicies = new Map<string, ApprovalPolicy>();
 
@@ -1379,6 +1546,9 @@ export function registerWorkforceConfig(
 ): void {
   for (const [agentId, config] of Object.entries(wfConfig.agents)) {
     agentConfigRegistry.set(agentId, { projectId, config, projectDir });
+    // Register a namespace alias so OpenClaw hook callbacks (which receive
+    // the namespaced ID like "clawforce-dev:cf-lead") can resolve the agent
+    namespacedAliases.set(toNamespacedAgentId(projectId, agentId), agentId);
   }
   if (wfConfig.approval) {
     approvalPolicies.set(projectId, wfConfig.approval);
@@ -1435,8 +1605,26 @@ export function registerWorkforceConfig(
     }
   }
 
+  // Inject default event handlers for event-driven mode
+  // User config overrides defaults per event type (full replacement, not merge)
+  //
+  // NOTE: task_assigned is intentionally NOT included here. The built-in
+  // handleTaskAssigned() in router.ts already enqueues for dispatch (with dedup).
+  // Having a dispatch_agent user handler here too would cause double-dispatch.
+  // The canonical dispatch path is:
+  //   createTask → handleTaskCreated → emits task_assigned → handleTaskAssigned → enqueue
+  let effectiveEventHandlers = wfConfig.event_handlers;
+  if (wfConfig.dispatch?.mode === "event-driven") {
+    const defaults: Record<string, EventHandlerConfig> = {
+      task_review_ready: { actions: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }] },
+      task_failed: { actions: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }] },
+      budget_changed: { actions: [{ action: "dispatch_agent", agent_role: "lead", session_type: "planning" }] },
+    };
+    effectiveEventHandlers = { ...defaults, ...effectiveEventHandlers };
+  }
+
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || wfConfig.event_handlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification) {
+  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || effectiveEventHandlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification) {
     projectExtendedConfig.set(projectId, {
       policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
@@ -1445,7 +1633,7 @@ export function registerWorkforceConfig(
       assignment: wfConfig.assignment,
       toolGates: wfConfig.toolGates,
       bulkThresholds: wfConfig.bulkThresholds,
-      eventHandlers: wfConfig.event_handlers,
+      eventHandlers: effectiveEventHandlers,
       triggers: wfConfig.triggers,
       review: wfConfig.review,
       channels: wfConfig.channels,
@@ -1462,9 +1650,28 @@ export function registerWorkforceConfig(
 /** @deprecated Use registerWorkforceConfig instead. */
 export const registerEnforcementConfig = registerWorkforceConfig;
 
-/** Look up agent config by agent ID. */
+/**
+ * Look up agent config by agent ID.
+ *
+ * Accepts both bare IDs ("cf-lead") and namespaced IDs ("clawforce-dev:cf-lead").
+ * When a namespaced ID is provided and not found directly, resolves via the
+ * namespace alias map or falls back to parsing the bare portion.
+ */
 export function getAgentConfig(agentId: string): AgentConfigEntry | null {
-  return agentConfigRegistry.get(agentId) ?? null;
+  // Direct lookup (bare ID)
+  const direct = agentConfigRegistry.get(agentId);
+  if (direct) return direct;
+
+  // Try namespace alias map (namespaced ID → bare ID → entry)
+  const bareId = namespacedAliases.get(agentId);
+  if (bareId) return agentConfigRegistry.get(bareId) ?? null;
+
+  // Last resort: parse the namespaced ID and try the bare portion
+  const parsed = parseNamespacedAgentId(agentId);
+  if (parsed) {
+    return agentConfigRegistry.get(parsed.agentId) ?? null;
+  }
+  return null;
 }
 
 /** Get approval policy for a project. */
@@ -1480,6 +1687,7 @@ export function getRegisteredAgentIds(): string[] {
 /** Clear all registrations (for testing). */
 export function resetEnforcementConfigForTest(): void {
   agentConfigRegistry.clear();
+  namespacedAliases.clear();
   approvalPolicies.clear();
   projectExtendedConfig.clear();
 }
@@ -1487,6 +1695,9 @@ export function resetEnforcementConfigForTest(): void {
 /**
  * Register a single agent into the config registry at runtime.
  * Used by adaptation flows (e.g. agent hiring) to spin up new agents.
+ *
+ * Registers both a bare ID entry and a namespace alias so the agent is
+ * reachable from both internal ClawForce code and OpenClaw hooks.
  */
 export function registerAgentInProject(
   projectId: string,
@@ -1495,4 +1706,5 @@ export function registerAgentInProject(
   projectDir?: string,
 ): void {
   agentConfigRegistry.set(agentId, { projectId, config, projectDir });
+  namespacedAliases.set(toNamespacedAgentId(projectId, agentId), agentId);
 }

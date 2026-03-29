@@ -22,6 +22,7 @@ import type {
   Evidence,
   EvidenceType,
   Task,
+  TaskKind,
   TaskPriority,
   TaskResult,
   TaskState,
@@ -57,6 +58,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     department: (row.department as string) ?? undefined,
     team: (row.team as string) ?? undefined,
     goalId: (row.goal_id as string) ?? undefined,
+    kind: (row.kind as TaskKind) ?? undefined,
     metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
   };
 }
@@ -105,6 +107,7 @@ export function createTask(
     department?: string;
     team?: string;
     goalId?: string;
+    kind?: TaskKind;
     metadata?: Record<string, unknown>;
   },
   dbOverride?: DatabaseSync,
@@ -125,8 +128,8 @@ export function createTask(
   const stmt = db.prepare(`
     INSERT INTO tasks (id, project_id, title, description, state, priority, assigned_to,
       created_by, created_at, updated_at, deadline, retry_count, max_retries, tags,
-      workflow_id, workflow_phase, parent_task_id, department, team, goal_id, metadata)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      workflow_id, workflow_phase, parent_task_id, department, team, goal_id, kind, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -149,6 +152,7 @@ export function createTask(
     params.department ?? null,
     params.team ?? null,
     params.goalId ?? null,
+    params.kind ?? null,
     params.metadata ? JSON.stringify(params.metadata) : null,
   );
 
@@ -503,27 +507,29 @@ export function transitionTask(
     }
   } catch (err) { safeLog("transition.queueUpdate", err); }
 
-  // Record cycle time metric when task reaches DONE
+  // Record cycle time metric when task reaches DONE (exclude exercise tasks from KPI metrics)
   if (params.toState === "DONE") {
-    try {
-      recordTaskCycleTime(params.projectId, params.taskId, task.createdAt, now, task.assignedTo, db);
-    } catch (err) { safeLog("transition.cycleTime", err); }
+    if (task.kind !== "exercise") {
+      try {
+        recordTaskCycleTime(params.projectId, params.taskId, task.createdAt, now, task.assignedTo, db);
+      } catch (err) { safeLog("transition.cycleTime", err); }
 
-    // Record completion_rate metric (value 1.0 = completed) for SLO tracking
-    try {
-      recordMetric({
-        projectId: params.projectId,
-        type: "task",
-        subject: params.taskId,
-        key: "completion_rate",
-        value: 1,
-        tags: { assignedTo: task.assignedTo, department: task.department },
-      }, db);
-    } catch (err) { safeLog("transition.completionRate", err); }
+      // Record completion_rate metric (value 1.0 = completed) for SLO tracking
+      try {
+        recordMetric({
+          projectId: params.projectId,
+          type: "task",
+          subject: params.taskId,
+          key: "completion_rate",
+          value: 1,
+          tags: { assignedTo: task.assignedTo, department: task.department },
+        }, db);
+      } catch (err) { safeLog("transition.completionRate", err); }
+    }
   }
 
-  // Record completion_rate metric (value 0 = failed) for SLO tracking
-  if (params.toState === "FAILED") {
+  // Record completion_rate metric (value 0 = failed) for SLO tracking (exclude exercise tasks)
+  if (params.toState === "FAILED" && task.kind !== "exercise") {
     try {
       recordMetric({
         projectId: params.projectId,
@@ -882,6 +888,8 @@ export type ListTasksFilter = {
   workflowId?: string;
   department?: string;
   team?: string;
+  kind?: TaskKind;
+  excludeKinds?: TaskKind[];
   limit?: number;
 };
 
@@ -921,6 +929,15 @@ export function listTasks(
   if (filter?.team) {
     conditions.push("team = ?");
     values.push(filter.team);
+  }
+  if (filter?.kind) {
+    conditions.push("kind = ?");
+    values.push(filter.kind);
+  }
+  if (filter?.excludeKinds && filter.excludeKinds.length > 0) {
+    const placeholders = filter.excludeKinds.map(() => "?").join(", ");
+    conditions.push(`(kind IS NULL OR kind NOT IN (${placeholders}))`);
+    values.push(...filter.excludeKinds);
   }
 
   const limit = Math.min(filter?.limit ?? 100, 1000);

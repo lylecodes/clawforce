@@ -179,8 +179,15 @@ export function listSessionArchives(
   const limit = filters?.limit ?? 50;
   const offset = filters?.offset ?? 0;
 
+  // Exclude heavy compressed columns (transcript, context_content, agent_config_snapshot)
+  // from list queries to keep response size small. Full data is available via getSessionArchive().
   const sql = `
-    SELECT * FROM session_archives
+    SELECT id, session_key, agent_id, project_id, context_hash,
+           task_id, queue_item_id, job_name, outcome, exit_signal, compliance_detail,
+           total_cost_cents, total_input_tokens, total_output_tokens,
+           model, provider, config_version_id, experiment_variant_id,
+           started_at, ended_at, duration_ms, tool_call_count, error_count, created_at
+    FROM session_archives
     WHERE ${conditions.join(" AND ")}
     ORDER BY started_at DESC
     LIMIT ? OFFSET ?

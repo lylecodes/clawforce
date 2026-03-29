@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 38;
+export const SCHEMA_VERSION = 39;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -52,6 +52,7 @@ const migrations: Record<number, Migration> = {
   36: migrateV36,
   37: migrateV37,
   38: migrateV38,
+  39: migrateV39,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1233,6 +1234,13 @@ function migrateV37(db: DatabaseSync): void {
 
 function migrateV38(db: DatabaseSync): void {
   safeAlterTable(db, `ALTER TABLE dispatch_queue ADD COLUMN dispatched_at INTEGER`);
+}
+
+// --- Migration V39: Add kind column to tasks for task categorization ---
+
+function migrateV39(db: DatabaseSync): void {
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN kind TEXT`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind)`);
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */

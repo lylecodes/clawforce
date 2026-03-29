@@ -214,7 +214,7 @@ event_handlers:
 
     const config = loadWorkforceConfig(configPath);
     expect(config?.event_handlers?.task_assigned).toBeDefined();
-    expect(config?.event_handlers?.task_assigned?.[0]).toEqual({
+    expect(config?.event_handlers?.task_assigned?.actions[0]).toEqual({
       action: "dispatch_agent",
       agent_role: "worker",
       model: "sonnet",

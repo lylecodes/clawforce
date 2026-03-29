@@ -248,7 +248,7 @@ describe("event-driven dispatch E2E", () => {
   it("default handlers include budget_changed → dispatch lead for planning", () => {
     const extConfig = getExtendedProjectConfig(PROJECT);
     expect(extConfig?.eventHandlers?.budget_changed).toBeDefined();
-    expect(extConfig?.eventHandlers?.budget_changed?.[0]).toEqual({
+    expect(extConfig?.eventHandlers?.budget_changed?.actions[0]).toEqual({
       action: "dispatch_agent",
       agent_role: "lead",
       session_type: "planning",

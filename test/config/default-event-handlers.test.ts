@@ -48,14 +48,14 @@ describe("default event handlers for event-driven mode", () => {
 
     // Check default handlers are injected
     expect(extConfig?.eventHandlers?.task_review_ready).toBeDefined();
-    expect(extConfig?.eventHandlers?.task_review_ready?.[0]).toEqual({
+    expect(extConfig?.eventHandlers?.task_review_ready?.actions[0]).toEqual({
       action: "dispatch_agent",
       agent_role: "lead",
       session_type: "reactive",
     });
 
     expect(extConfig?.eventHandlers?.task_failed).toBeDefined();
-    expect(extConfig?.eventHandlers?.task_failed?.[0]).toEqual({
+    expect(extConfig?.eventHandlers?.task_failed?.actions[0]).toEqual({
       action: "dispatch_agent",
       agent_role: "lead",
       session_type: "reactive",
@@ -67,7 +67,7 @@ describe("default event handlers for event-driven mode", () => {
     expect(extConfig?.eventHandlers?.task_assigned).toBeUndefined();
 
     expect(extConfig?.eventHandlers?.budget_changed).toBeDefined();
-    expect(extConfig?.eventHandlers?.budget_changed?.[0]).toEqual({
+    expect(extConfig?.eventHandlers?.budget_changed?.actions[0]).toEqual({
       action: "dispatch_agent",
       agent_role: "lead",
       session_type: "planning",
@@ -91,29 +91,29 @@ describe("default event handlers for event-driven mode", () => {
         mode: "event-driven",
       },
       event_handlers: {
-        task_assigned: [
+        task_assigned: { actions: [
           { action: "notify", message: "Custom handler for task_assigned" },
-        ],
+        ] },
       },
     });
 
     const extConfig = getExtendedProjectConfig("test-event-override");
 
     // task_assigned should be overridden by user config
-    expect(extConfig?.eventHandlers?.task_assigned).toHaveLength(1);
-    expect(extConfig?.eventHandlers?.task_assigned?.[0]).toEqual({
+    expect(extConfig?.eventHandlers?.task_assigned?.actions).toHaveLength(1);
+    expect(extConfig?.eventHandlers?.task_assigned?.actions[0]).toEqual({
       action: "notify",
       message: "Custom handler for task_assigned",
     });
 
     // Other defaults should still be present
-    expect(extConfig?.eventHandlers?.task_review_ready?.[0]).toEqual({
+    expect(extConfig?.eventHandlers?.task_review_ready?.actions[0]).toEqual({
       action: "dispatch_agent",
       agent_role: "lead",
       session_type: "reactive",
     });
 
-    expect(extConfig?.eventHandlers?.budget_changed?.[0]).toEqual({
+    expect(extConfig?.eventHandlers?.budget_changed?.actions[0]).toEqual({
       action: "dispatch_agent",
       agent_role: "lead",
       session_type: "planning",

@@ -8,7 +8,7 @@
 import { getActiveProjectIds } from "../lifecycle.js";
 import { getAgentConfig, getRegisteredAgentIds, getExtendedProjectConfig } from "../project.js";
 import { listTasks, getTask, getTaskEvidence, getTaskTransitions } from "../tasks/ops.js";
-import { listSessionArchives } from "../telemetry/session-archive.js";
+import { listSessionArchives, getSessionArchive } from "../telemetry/session-archive.js";
 import { queryMetrics, aggregateMetrics } from "../metrics.js";
 import { getCostSummary } from "../cost.js";
 import { evaluateSlos } from "../monitoring/slo.js";
@@ -23,11 +23,12 @@ import { computeGoalProgress } from "../goals/cascade.js";
 import { getDirectReports, getDepartmentAgents } from "../org.js";
 import { listDisabledAgents } from "../enforcement/disabled-store.js";
 import { getActiveSessions } from "../enforcement/tracker.js";
-import type { TaskState, TaskPriority, EventStatus } from "../types.js";
+import type { TaskState, TaskPriority, TaskKind, EventStatus } from "../types.js";
 import { listPendingProposals } from "../approval/resolve.js";
 import { getBudgetStatus } from "../budget-windows.js";
 import { computeDailySnapshot, computeWeeklyTrend, computeMonthlyProjection } from "../budget/forecast.js";
 import { getAllCategoryStats, getActiveTrustOverrides } from "../trust/tracker.js";
+import { getTrustTimeline } from "../telemetry/trust-history.js";
 import { listChannels, getChannel, getChannelMessages } from "../channels/store.js";
 import { buildChannelTranscript } from "../channels/messages.js";
 import { getMeetingStatus } from "../channels/meeting.js";
@@ -157,6 +158,8 @@ export function queryTasks(
     priority?: TaskPriority;
     department?: string;
     team?: string;
+    kind?: TaskKind;
+    excludeKinds?: TaskKind[];
   },
   pagination?: PaginationParams,
 ) {
@@ -171,6 +174,8 @@ export function queryTasks(
     priority: filters?.priority,
     department: filters?.department,
     team: filters?.team,
+    kind: filters?.kind,
+    excludeKinds: filters?.excludeKinds,
     limit: limit + 1, // fetch one extra to determine hasMore
   });
 
@@ -210,6 +215,13 @@ export function querySessions(projectId: string, pagination?: PaginationParams) 
     hasMore,
     count: sessions.length,
   };
+}
+
+/** Get a single session archive by session key (includes full transcript). */
+export function querySessionDetail(projectId: string, sessionKey: string) {
+  const session = getSessionArchive(projectId, sessionKey);
+  if (!session) return null;
+  return { session };
 }
 
 /** List events with filters. Adds `timestamp` alias of `createdAt` for frontend compatibility. */
@@ -340,13 +352,13 @@ export function querySlos(projectId: string) {
   const db = getDb(projectId);
   for (const result of results) {
     if (result.actual === null && result.metricKey === "completion_rate") {
-      // Compute task-completion-rate directly from the tasks table
+      // Compute task-completion-rate directly from the tasks table (exclude exercise tasks)
       try {
         const doneRow = db.prepare(
-          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state = 'DONE'",
+          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state = 'DONE' AND (kind IS NULL OR kind != 'exercise')",
         ).get(projectId) as { cnt: number } | undefined;
         const totalRow = db.prepare(
-          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state != 'CANCELLED'",
+          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state != 'CANCELLED' AND (kind IS NULL OR kind != 'exercise')",
         ).get(projectId) as { cnt: number } | undefined;
 
         const done = doneRow?.cnt ?? 0;
@@ -703,11 +715,12 @@ export function queryDashboardSummary(projectId: string) {
     activeSessions.some((s) => s.agentId === aid && s.projectId === projectId),
   ).length;
 
-  // Tasks in flight (ASSIGNED + IN_PROGRESS + REVIEW)
+  // Tasks in flight (ASSIGNED + IN_PROGRESS + REVIEW), excluding exercise tasks
   let tasksInFlight = 0;
   try {
     const { tasks } = queryTasks(projectId, {
       state: ["ASSIGNED", "IN_PROGRESS", "REVIEW"] as TaskState[],
+      excludeKinds: ["exercise"],
     });
     tasksInFlight = tasks.length;
   } catch { /* ignore */ }
@@ -849,6 +862,25 @@ export function queryTrustScores(projectId: string) {
     return { agents, overrides };
   } catch {
     return { agents: [], overrides: [] };
+  }
+}
+
+/** Query trust score history for the analytics timeline chart. */
+export function queryTrustHistory(projectId: string, params?: Record<string, string>) {
+  try {
+    const sinceMs = params?.since ? parseInt(params.since, 10) : undefined;
+    const agentId = params?.agent;
+    const snapshots = getTrustTimeline(projectId, agentId, sinceMs);
+
+    const points = snapshots.map((s) => ({
+      agentId: s.agentId ?? "project",
+      overall: s.score,
+      recordedAt: s.createdAt,
+    }));
+
+    return { points };
+  } catch {
+    return { points: [] };
   }
 }
 
@@ -1248,13 +1280,13 @@ export function queryQueueStatus(projectId: string) {
     ).get(projectId) as { cnt: number } | undefined;
     const active = activeRow?.cnt ?? 0;
 
-    // Get max concurrency from project config
-    let maxConcurrency = 0;
+    // Get max concurrency from project config (null = unlimited)
+    let maxConcurrency: number | null = null;
     try {
       const extConfig = getExtendedProjectConfig(projectId);
-      maxConcurrency = extConfig?.dispatch?.maxConcurrentDispatches ?? 0;
+      maxConcurrency = extConfig?.dispatch?.maxConcurrentDispatches ?? null;
     } catch {
-      // Config not available — leave as 0
+      // Config not available — leave as null (unlimited)
     }
 
     // Recent items (last 20, all statuses, newest first)
@@ -1295,7 +1327,7 @@ export function queryQueueStatus(projectId: string) {
       completed: 0,
       failed: 0,
       cancelled: 0,
-      concurrency: { active: 0, max: 0 },
+      concurrency: { active: 0, max: null },
       recentItems: [],
       missingEndpoint: false,
     };
@@ -1515,5 +1547,116 @@ export function queryPromotionCandidates(projectId: string, pagination?: Paginat
     return { candidates, count: candidates.length, total };
   } catch {
     return { candidates: [], count: 0, total: 0 };
+  }
+}
+
+// --- Intervention Suggestions ---
+
+export type InterventionSuggestion = {
+  id: string;
+  agentId: string;
+  issueType: "idle" | "failure";
+  description: string;
+  assignedTaskCount: number;
+  /** Milliseconds since last completion or failure window start. */
+  timeIdleMs: number;
+  dismissKey: string;
+};
+
+export type InterventionListResponse = {
+  suggestions: InterventionSuggestion[];
+  count: number;
+};
+
+/** Query intervention suggestions — idle agents and agents with repeated failures. */
+export function queryInterventions(projectId: string): InterventionListResponse {
+  const db = getDb(projectId);
+  const suggestions: InterventionSuggestion[] = [];
+
+  try {
+    // Load dismissed interventions
+    const dismissedRow = db.prepare(
+      `SELECT value FROM onboarding_state WHERE project_id = ? AND key = 'dismissed_interventions'`,
+    ).get(projectId) as { value: string } | undefined;
+    const dismissed = new Set<string>(
+      dismissedRow ? JSON.parse(dismissedRow.value) : [],
+    );
+
+    // Get all agent IDs for this project
+    const allAgentIds = getRegisteredAgentIds();
+    const agentIds = allAgentIds.filter((aid) => {
+      const entry = getAgentConfig(aid);
+      return entry?.projectId === projectId;
+    });
+
+    const now = Date.now();
+    const fortyEightHoursAgo = now - 48 * 3600 * 1000;
+    const sevenDaysAgo = now - 7 * 24 * 3600 * 1000;
+
+    for (const agentId of agentIds) {
+      // Pattern 1: Idle agent — no task completions in 48h but has assigned tasks
+      const idleKey = `idle:${agentId}`;
+      if (!dismissed.has(idleKey)) {
+        const recent = db.prepare(`
+          SELECT COUNT(*) as count FROM tasks
+          WHERE project_id = ? AND assigned_to = ? AND state = 'DONE'
+            AND updated_at >= ?
+        `).get(projectId, agentId, fortyEightHoursAgo) as { count: number };
+
+        const assigned = db.prepare(`
+          SELECT COUNT(*) as count FROM tasks
+          WHERE project_id = ? AND assigned_to = ? AND state IN ('ASSIGNED', 'IN_PROGRESS')
+        `).get(projectId, agentId) as { count: number };
+
+        if (recent.count === 0 && assigned.count > 0) {
+          // Find last completion time for idle duration
+          const lastDone = db.prepare(`
+            SELECT MAX(updated_at) as last_done FROM tasks
+            WHERE project_id = ? AND assigned_to = ? AND state = 'DONE'
+          `).get(projectId, agentId) as { last_done: number | null };
+
+          suggestions.push({
+            id: idleKey,
+            agentId,
+            issueType: "idle",
+            description: `Has ${assigned.count} assigned task(s) but no completions in 48h`,
+            assignedTaskCount: assigned.count,
+            timeIdleMs: lastDone?.last_done ? now - lastDone.last_done : now - fortyEightHoursAgo,
+            dismissKey: idleKey,
+          });
+        }
+      }
+
+      // Pattern 2: Repeated failure — 3+ failures in 7 days
+      const failKey = `failure:${agentId}`;
+      if (!dismissed.has(failKey)) {
+        const failures = db.prepare(`
+          SELECT COUNT(*) as count FROM audit_runs
+          WHERE project_id = ? AND agent_id = ? AND status = 'failed'
+            AND ended_at >= ?
+        `).get(projectId, agentId, sevenDaysAgo) as { count: number };
+
+        if (failures.count >= 3) {
+          const assignedCount = db.prepare(`
+            SELECT COUNT(*) as count FROM tasks
+            WHERE project_id = ? AND assigned_to = ? AND state IN ('ASSIGNED', 'IN_PROGRESS')
+          `).get(projectId, agentId) as { count: number };
+
+          suggestions.push({
+            id: failKey,
+            agentId,
+            issueType: "failure",
+            description: `${failures.count} task failures in the past 7 days`,
+            assignedTaskCount: assignedCount.count,
+            timeIdleMs: 7 * 24 * 3600 * 1000,
+            dismissKey: failKey,
+          });
+        }
+      }
+    }
+
+    return { suggestions, count: suggestions.length };
+  } catch {
+    return { suggestions: [], count: 0 };
   }
 }

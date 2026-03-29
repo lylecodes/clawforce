@@ -23,8 +23,8 @@ import { getProposal } from "../approval/resolve.js";
 import { queryMetrics } from "../metrics.js";
 import type { MetricType } from "../metrics.js";
 import { getSafetyConfig } from "../safety.js";
-import { EVIDENCE_TYPES, TASK_PRIORITIES, TASK_STATES } from "../types.js";
-import type { EvidenceType, TaskPriority, TaskState } from "../types.js";
+import { EVIDENCE_TYPES, TASK_KINDS, TASK_PRIORITIES, TASK_STATES } from "../types.js";
+import type { EvidenceType, TaskKind, TaskPriority, TaskState } from "../types.js";
 import { getAgentConfig } from "../project.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
@@ -81,6 +81,7 @@ const ClawforceTaskSchema = Type.Object({
   workflow_id: Type.Optional(Type.String({ description: "Workflow ID (for create/list)." })),
   state: Type.Optional(Type.Array(Type.String(), { description: "Filter by state(s): OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE, FAILED, BLOCKED." })),
   goal_id: Type.Optional(Type.String({ description: "Goal ID to link task to (for create)." })),
+  kind: Type.Optional(Type.String({ description: "Task kind: exercise, bug, feature, infra, research. Used for categorization and filtering." })),
   department: Type.Optional(Type.String({ description: "Filter by department (for list)." })),
   team: Type.Optional(Type.String({ description: "Filter by team (for list)." })),
   limit: Type.Optional(Type.Number({ description: "Max results (for list, default 100)." })),
@@ -103,6 +104,7 @@ const ClawforceTaskSchema = Type.Object({
       deadline: Type.Optional(Type.Number()),
       workflow_id: Type.Optional(Type.String()),
       goal_id: Type.Optional(Type.String()),
+      kind: Type.Optional(Type.String()),
     }),
     { description: "Array of task definitions (for bulk_create)." },
   )),
@@ -160,6 +162,11 @@ export function createClawforceTaskTool(options?: {
           const tags = readStringArrayParam(params, "tags");
           const workflowId = readStringParam(params, "workflow_id");
           const goalId = readStringParam(params, "goal_id");
+          const kindRaw = readStringParam(params, "kind");
+          if (kindRaw && !TASK_KINDS.includes(kindRaw as TaskKind)) {
+            return jsonResult({ ok: false, reason: `Invalid kind: ${kindRaw}. Must be one of: ${TASK_KINDS.join(", ")}` });
+          }
+          const kind = kindRaw as TaskKind | undefined;
 
           const task = createTask({
             projectId,
@@ -173,6 +180,7 @@ export function createClawforceTaskTool(options?: {
             tags: tags ?? undefined,
             workflowId: workflowId ?? undefined,
             goalId: goalId ?? undefined,
+            kind: kind ?? undefined,
           });
           recordSessionTaskCreation(options?.agentSessionKey);
           const dupWarning = (task as Record<string, unknown>).duplicateWarning as string | undefined;
@@ -293,6 +301,11 @@ export function createClawforceTaskTool(options?: {
             }
           }
 
+          const kindFilter = readStringParam(params, "kind");
+          if (kindFilter && !TASK_KINDS.includes(kindFilter as TaskKind)) {
+            return jsonResult({ ok: false, reason: `Invalid kind: ${kindFilter}. Must be one of: ${TASK_KINDS.join(", ")}` });
+          }
+
           const detail = readStringParam(params, "detail") ?? "compact";
           const tasks = listTasks(projectId, {
             states: statesRaw && statesRaw.length > 0 ? statesRaw as TaskState[] : undefined,
@@ -302,11 +315,12 @@ export function createClawforceTaskTool(options?: {
             workflowId: workflowId ?? undefined,
             department,
             team,
+            kind: kindFilter as TaskKind | undefined,
             limit: limit ?? undefined,
           });
           // Compact mode: strip descriptions and evidence to reduce context bloat
           const result = detail === "compact"
-            ? tasks.map(t => ({ id: t.id, title: t.title, state: t.state, assignedTo: t.assignedTo, priority: t.priority }))
+            ? tasks.map(t => ({ id: t.id, title: t.title, state: t.state, assignedTo: t.assignedTo, priority: t.priority, kind: t.kind }))
             : tasks;
           return jsonResult({ ok: true, tasks: result, count: tasks.length });
         }
@@ -451,6 +465,11 @@ export function createClawforceTaskTool(options?: {
               results.push({ ok: false, reason: perTaskLimit });
               continue;
             }
+            const bulkKind = t.kind as string | undefined;
+            if (bulkKind && !TASK_KINDS.includes(bulkKind as TaskKind)) {
+              results.push({ ok: false, reason: `Invalid kind: ${bulkKind}` });
+              continue;
+            }
             const task = createTask({
               projectId,
               title,
@@ -463,6 +482,7 @@ export function createClawforceTaskTool(options?: {
               tags: Array.isArray(t.tags) ? t.tags.map(String) : undefined,
               workflowId: (t.workflow_id as string) ?? undefined,
               goalId: (t.goal_id as string) ?? undefined,
+              kind: bulkKind as TaskKind | undefined,
             });
             recordSessionTaskCreation(options?.agentSessionKey);
             results.push({ ok: true, task });

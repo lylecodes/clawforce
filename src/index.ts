@@ -288,6 +288,7 @@ export { getDb, getMemoryDb, closeDb, closeAllDbs, setProjectsDir, getProjectsDi
 export type {
   Task,
   TaskState,
+  TaskKind,
   Evidence,
   EvidenceType,
   Transition,

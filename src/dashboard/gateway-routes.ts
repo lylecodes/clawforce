@@ -29,6 +29,7 @@ import {
   queryBudgetStatus,
   queryBudgetForecast,
   queryTrustScores,
+  queryTrustHistory,
   queryConfig,
   queryMeetings,
   queryMeetingDetail,
@@ -38,6 +39,7 @@ import {
   queryAlerts,
   queryEvents,
   querySessions,
+  querySessionDetail,
   queryMetricsDashboard,
   queryPolicies,
   queryProtocols,
@@ -52,6 +54,7 @@ import {
   queryKnowledge,
   queryKnowledgeFlags,
   queryPromotionCandidates,
+  queryInterventions,
 } from "./queries.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
@@ -302,8 +305,12 @@ function routeRead(
       }
       return ok(queryBudgetStatus(domain));
 
-    case "trust":
+    case "trust": {
+      if (segments[1] === "history") {
+        return ok(queryTrustHistory(domain, params));
+      }
       return ok(queryTrustScores(domain));
+    }
 
     case "costs":
       return ok(queryCosts(domain, {
@@ -358,11 +365,16 @@ function routeRead(
       }));
     }
 
-    case "sessions":
+    case "sessions": {
+      if (segments[1]) {
+        const detail = querySessionDetail(domain, decodeURIComponent(segments[1]));
+        return detail ? ok(detail) : { status: 404, body: { error: "Session not found" } };
+      }
       return ok(querySessions(domain, {
         limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
         offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
       }));
+    }
 
     case "metrics":
       return ok(queryMetricsDashboard(domain, {
@@ -451,6 +463,9 @@ function routeRead(
         limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
         offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
       }));
+
+    case "interventions":
+      return ok(queryInterventions(domain));
 
     default:
       return notFound(`Unknown resource: ${topResource}`);
