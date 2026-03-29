@@ -641,6 +641,11 @@ export function reassignTask(
   const task = getTask(params.projectId, params.taskId, db);
   if (!task) return { ok: false, reason: "Task not found" };
 
+  // Skip reassignment if already assigned to the same agent
+  if (task.state === "ASSIGNED" && task.assignedTo === params.newAssignee) {
+    return { ok: true, task, transition: { id: "", taskId: params.taskId, fromState: "ASSIGNED", toState: "ASSIGNED", actor: params.actor, createdAt: Date.now() } };
+  }
+
   // Validate that the target agent exists in the domain config (when agents are registered)
   try {
     const allAgentIds = getRegisteredAgentIds();
