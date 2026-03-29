@@ -21,6 +21,11 @@
  *   kill            Emergency stop: disable domain + cancel queued + kill processes
  *   kill --resume   Clear emergency stop and re-enable domain
  *
+ * Config:
+ *   config get      Read a config value using dot-notation
+ *   config set      Write a config value (auto-detects type)
+ *   config show     Show full config or a section
+ *
  * Verification:
  *   running         Show what's actually running right now
  *   health          Comprehensive health check
@@ -31,6 +36,7 @@ import crypto from "node:crypto";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
+import YAML from "yaml";
 
 const HOME = process.env.HOME ?? "/tmp";
 const DEFAULT_PROJECT = "clawforce-dev";
@@ -806,11 +812,197 @@ function cmdHealth(db: DatabaseSync, projectId: string): void {
   console.log(`\n${issues === 0 ? "All checks passed." : `${issues} issue(s) found.`}`);
 }
 
+// ─── Config commands ─────────────────────────────────────────────────
+
+const DOMAINS_DIR = path.join(DB_DIR, "domains");
+
+function getDomainYamlPath(domainId: string): string {
+  return path.join(DOMAINS_DIR, `${domainId}.yaml`);
+}
+
+function getGlobalConfigPath(): string {
+  return path.join(DB_DIR, "config.yaml");
+}
+
+function loadYamlDocument(filePath: string): YAML.Document {
+  if (!fs.existsSync(filePath)) {
+    console.error(`File not found: ${filePath}`);
+    process.exit(1);
+  }
+  const raw = fs.readFileSync(filePath, "utf-8");
+  return YAML.parseDocument(raw);
+}
+
+function getByDotPath(obj: unknown, dotPath: string): unknown {
+  const parts = dotPath.split(".");
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current === null || current === undefined || typeof current !== "object") {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function setByDotPath(obj: Record<string, unknown>, dotPath: string, value: unknown): void {
+  const parts = dotPath.split(".");
+  let current: Record<string, unknown> = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i]!;
+    if (current[part] === undefined || current[part] === null || typeof current[part] !== "object") {
+      current[part] = {};
+    }
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]!] = value;
+}
+
+function parseValue(raw: string): unknown {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  if (raw === "null") return null;
+  // Check for numeric (integer or float)
+  if (/^-?\d+(\.\d+)?$/.test(raw)) {
+    const num = Number(raw);
+    if (!isNaN(num)) return num;
+  }
+  return raw;
+}
+
+function formatValue(value: unknown): string {
+  if (value === undefined) return "(undefined)";
+  if (value === null) return "null";
+  if (typeof value === "object") return JSON.stringify(value, null, 2);
+  return String(value);
+}
+
+function cmdConfigGet(domainId: string, dotPath: string, useGlobal: boolean): void {
+  const filePath = useGlobal ? getGlobalConfigPath() : getDomainYamlPath(domainId);
+  if (!fs.existsSync(filePath)) {
+    console.error(`File not found: ${filePath}`);
+    process.exit(1);
+  }
+  const raw = fs.readFileSync(filePath, "utf-8");
+  const parsed = YAML.parse(raw);
+  const value = getByDotPath(parsed, dotPath);
+  if (value === undefined) {
+    const target = useGlobal ? "config.yaml" : domainId;
+    console.error(`Path "${dotPath}" not found in ${target}`);
+    process.exit(1);
+  }
+  console.log(formatValue(value));
+}
+
+function cmdConfigSet(domainId: string, dotPath: string, rawValue: string, useGlobal: boolean): void {
+  const filePath = useGlobal ? getGlobalConfigPath() : getDomainYamlPath(domainId);
+  const doc = loadYamlDocument(filePath);
+
+  const value = parseValue(rawValue);
+  const parts = dotPath.split(".");
+
+  // setIn creates intermediate objects and preserves document structure
+  doc.setIn(parts, value);
+
+  fs.writeFileSync(filePath, String(doc), "utf-8");
+  const target = useGlobal ? "config.yaml" : domainId;
+  console.log(`Set ${dotPath} = ${JSON.stringify(value)} in ${target}`);
+}
+
+function cmdConfigShow(domainId: string, section: string | undefined, useGlobal: boolean): void {
+  const filePath = useGlobal ? getGlobalConfigPath() : getDomainYamlPath(domainId);
+  if (!fs.existsSync(filePath)) {
+    console.error(`File not found: ${filePath}`);
+    process.exit(1);
+  }
+  const raw = fs.readFileSync(filePath, "utf-8");
+  const parsed = YAML.parse(raw);
+
+  if (section) {
+    const value = getByDotPath(parsed, section);
+    if (value === undefined) {
+      const target = useGlobal ? "config.yaml" : domainId;
+      console.error(`Section "${section}" not found in ${target}`);
+      process.exit(1);
+    }
+    if (typeof value === "object" && value !== null) {
+      console.log(YAML.stringify(value).trimEnd());
+    } else {
+      console.log(formatValue(value));
+    }
+  } else {
+    console.log(raw.trimEnd());
+  }
+}
+
+function cmdConfig(domainId: string, args: string[]): void {
+  const subcommand = args[1]; // args[0] is "config"
+  const useGlobal = args.includes("--global");
+
+  if (!subcommand || subcommand === "help" || subcommand === "--help") {
+    console.log(`
+config — Read and write ClawForce configuration
+
+Usage:
+  cf config get <dotpath>              Read a config value
+  cf config set <dotpath> <value>      Write a config value
+  cf config show [section]             Show full config or a section
+
+Options:
+  --domain=ID    Target domain (default: clawforce-dev)
+  --global       Modify config.yaml instead of domain yaml
+
+Examples:
+  cf config get dispatch.mode
+  cf config set budget.project.daily.cents 40000
+  cf config set dispatch.budget_pacing.enabled true
+  cf config show dispatch
+  cf config get agents --global
+`);
+    return;
+  }
+
+  switch (subcommand) {
+    case "get": {
+      const dotPath = args.slice(2).find(a => !a.startsWith("--"));
+      if (!dotPath) {
+        console.error("Usage: cf config get <dotpath>");
+        process.exit(1);
+      }
+      cmdConfigGet(domainId, dotPath, useGlobal);
+      break;
+    }
+    case "set": {
+      const setArgs = args.slice(2).filter(a => !a.startsWith("--"));
+      if (setArgs.length < 2) {
+        console.error("Usage: cf config set <dotpath> <value>");
+        process.exit(1);
+      }
+      const [dotPath, ...valueParts] = setArgs;
+      const rawValue = valueParts.join(" ");
+      cmdConfigSet(domainId, dotPath!, rawValue, useGlobal);
+      break;
+    }
+    case "show": {
+      const section = args.slice(2).find(a => !a.startsWith("--"));
+      cmdConfigShow(domainId, section, useGlobal);
+      break;
+    }
+    default:
+      console.error(`Unknown config subcommand: ${subcommand}`);
+      console.error("Valid subcommands: get, set, show");
+      process.exit(1);
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
 const command = args[0];
-const projectId = (args.find(a => a.startsWith("--project="))?.split("=")[1]) ?? DEFAULT_PROJECT;
+const projectId =
+  (args.find(a => a.startsWith("--domain="))?.split("=")[1]) ??
+  (args.find(a => a.startsWith("--project="))?.split("=")[1]) ??
+  DEFAULT_PROJECT;
 
 if (!command || command === "help" || command === "--help") {
   console.log(`
@@ -835,13 +1027,25 @@ Runtime Control:
   kill [--reason=MSG]       Emergency stop: disable domain + cancel queued + kill processes
   kill --resume             Clear emergency stop and re-enable domain
 
+Config:
+  config get <dotpath>      Read a config value using dot-notation
+  config set <dotpath> <v>  Write a config value (auto-detects type)
+  config show [section]     Show full config or a section
+
 Verification:
   running                   Show what's actually running right now
   health                    Comprehensive health check
 
 Options:
-  --project=ID              Project ID (default: clawforce-dev)
+  --project=ID, --domain=ID Project/domain ID (default: clawforce-dev)
+  --global                  (config only) Target config.yaml instead of domain yaml
 `);
+  process.exit(0);
+}
+
+// Config commands don't need the database
+if (command === "config") {
+  cmdConfig(projectId, args);
   process.exit(0);
 }
 
