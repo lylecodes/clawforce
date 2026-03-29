@@ -644,6 +644,12 @@ function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandl
   const task = getTask(event.projectId, taskId, db);
   if (!task || task.state !== "ASSIGNED") return { action: "handled", taskId };
 
+  // Prevent ASSIGNED → ASSIGNED loops: skip if a non-terminal queue item already exists
+  const existingItem = db.prepare(
+    `SELECT id FROM dispatch_queue WHERE project_id = ? AND task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled') LIMIT 1`,
+  ).get(event.projectId, taskId);
+  if (existingItem) return { action: "handled", taskId };
+
   // Build dispatch payload from agent config
   const payload: Record<string, unknown> = {};
   const agentModel = task.assignedTo ? getAgentModel(task.assignedTo) : null;

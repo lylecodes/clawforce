@@ -138,4 +138,140 @@ describe("budget pacing gate in dispatcher", () => {
     expect(config?.dispatch?.budget_pacing?.enabled).toBe(false);
     // When enabled is false, the dispatcher should skip pacing checks entirely
   });
+
+  it("canDispatchReactive is true when budget remains", () => {
+    const pacing = computeBudgetPacing({
+      dailyBudgetCents: 10000,
+      spentCents: 9600, // 4% remaining — below critical
+      hoursRemaining: 8,
+    });
+
+    // Critical blocks workers and leads, but reactive is still allowed if remaining > 0
+    expect(pacing.canDispatchReactive).toBe(true);
+    expect(pacing.canDispatchWorker).toBe(false);
+    expect(pacing.canDispatchLead).toBe(false);
+  });
+
+  it("canDispatchReactive is false when budget exhausted", () => {
+    const pacing = computeBudgetPacing({
+      dailyBudgetCents: 10000,
+      spentCents: 10000, // 0% remaining
+      hoursRemaining: 8,
+    });
+
+    expect(pacing.canDispatchReactive).toBe(false);
+  });
+});
+
+describe("per-team budget strategy", () => {
+  const PROJECT = "test-team-pacing";
+
+  it("normalizes team dispatch overrides from config", () => {
+    registerWorkforceConfig(PROJECT, {
+      name: "test-team-pacing",
+      agents: {
+        "team-lead": {
+          extends: "manager",
+          title: "Lead",
+          persona: "Test lead",
+          team: "dashboard",
+          briefing: [{ source: "soul" }],
+          expectations: [],
+          coordination: { enabled: true },
+        },
+        "team-worker": {
+          extends: "employee",
+          title: "Worker",
+          persona: "Test worker",
+          team: "core",
+          briefing: [{ source: "soul" }],
+          expectations: [],
+        },
+      },
+      dispatch: {
+        budget_pacing: {
+          enabled: true,
+          reactive_reserve_pct: 20,
+        },
+        teams: {
+          dashboard: {
+            budget_pacing: {
+              enabled: true,
+            },
+          },
+          core: {
+            budget_pacing: {
+              enabled: false,
+            },
+          },
+        },
+      },
+    });
+
+    const config = getExtendedProjectConfig(PROJECT);
+    expect(config?.dispatch?.budget_pacing?.enabled).toBe(true);
+    expect(config?.dispatch?.teams).toBeDefined();
+    expect(config?.dispatch?.teams?.dashboard?.budget_pacing?.enabled).toBe(true);
+    expect(config?.dispatch?.teams?.core?.budget_pacing?.enabled).toBe(false);
+  });
+
+  it("falls back to domain-level pacing when no team override exists", () => {
+    registerWorkforceConfig(PROJECT + "-fallback", {
+      name: "test-fallback",
+      agents: {
+        "fb-worker": {
+          extends: "employee",
+          title: "Worker",
+          persona: "Test worker",
+          team: "unknown-team",
+          briefing: [{ source: "soul" }],
+          expectations: [],
+        },
+      },
+      dispatch: {
+        budget_pacing: {
+          enabled: true,
+        },
+        teams: {
+          dashboard: {
+            budget_pacing: {
+              enabled: false,
+            },
+          },
+        },
+      },
+    });
+
+    const config = getExtendedProjectConfig(PROJECT + "-fallback");
+    // Domain-level pacing is enabled
+    expect(config?.dispatch?.budget_pacing?.enabled).toBe(true);
+    // The unknown-team agent should not find a team override
+    expect(config?.dispatch?.teams?.["unknown-team"]).toBeUndefined();
+    // Dashboard team override exists
+    expect(config?.dispatch?.teams?.dashboard?.budget_pacing?.enabled).toBe(false);
+  });
+
+  it("handles empty teams config gracefully", () => {
+    registerWorkforceConfig(PROJECT + "-empty", {
+      name: "test-empty-teams",
+      agents: {
+        "empty-worker": {
+          extends: "employee",
+          title: "Worker",
+          persona: "Test worker",
+          briefing: [{ source: "soul" }],
+          expectations: [],
+        },
+      },
+      dispatch: {
+        budget_pacing: {
+          enabled: true,
+        },
+      },
+    });
+
+    const config = getExtendedProjectConfig(PROJECT + "-empty");
+    expect(config?.dispatch?.budget_pacing?.enabled).toBe(true);
+    expect(config?.dispatch?.teams).toBeUndefined();
+  });
 });

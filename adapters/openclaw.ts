@@ -2110,6 +2110,8 @@ const clawforcePlugin = {
     ];
     const resolvedDashboardDir = dashboardDistCandidates.find(d => fs.existsSync(d))
       ?? dashboardDistCandidates[0]!;
+    api.logger.info(`Clawforce: dashboard dir candidates: ${JSON.stringify(dashboardDistCandidates)}`);
+    api.logger.info(`Clawforce: resolved dashboard dir: ${resolvedDashboardDir} (exists: ${fs.existsSync(resolvedDashboardDir)})`);
 
     const dashboardHandler = createDashboardHandler({
       staticDir: resolvedDashboardDir,

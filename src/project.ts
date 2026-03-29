@@ -28,6 +28,7 @@ import type {
   AssignmentStrategy,
   BootstrapConfig,
   BudgetConfig,
+  BudgetPacingConfig,
   ChannelConfig,
   ChannelType,
   CompactionConfig,
@@ -1066,6 +1067,28 @@ function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
       low_budget_threshold: typeof bp.low_budget_threshold === "number" ? bp.low_budget_threshold : 10,
       critical_threshold: typeof bp.critical_threshold === "number" ? bp.critical_threshold : 5,
     };
+  }
+
+  // Per-team dispatch overrides
+  if (raw.teams && typeof raw.teams === "object") {
+    const teamsRaw = raw.teams as Record<string, unknown>;
+    const teams: NonNullable<DispatchConfig["teams"]> = {};
+    for (const [teamName, teamCfg] of Object.entries(teamsRaw)) {
+      if (!teamCfg || typeof teamCfg !== "object") continue;
+      const tc = teamCfg as Record<string, unknown>;
+      const teamEntry: { budget_pacing?: BudgetPacingConfig } = {};
+      if (tc.budget_pacing && typeof tc.budget_pacing === "object") {
+        const bp = tc.budget_pacing as Record<string, unknown>;
+        teamEntry.budget_pacing = {
+          enabled: typeof bp.enabled === "boolean" ? bp.enabled : true,
+          reactive_reserve_pct: typeof bp.reactive_reserve_pct === "number" ? bp.reactive_reserve_pct : undefined,
+          low_budget_threshold: typeof bp.low_budget_threshold === "number" ? bp.low_budget_threshold : undefined,
+          critical_threshold: typeof bp.critical_threshold === "number" ? bp.critical_threshold : undefined,
+        };
+      }
+      if (Object.keys(teamEntry).length > 0) teams[teamName] = teamEntry;
+    }
+    if (Object.keys(teams).length > 0) result.teams = teams;
   }
 
   // Lead schedule config

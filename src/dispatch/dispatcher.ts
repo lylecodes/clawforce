@@ -302,7 +302,8 @@ async function dispatchItem(
           criticalThreshold: dispatchConfigForPacing?.budget_pacing?.critical_threshold,
         });
 
-        // Determine if agent is a worker or lead
+        // Determine session type and agent role
+        const sessionType = item.payload?.sessionType as string | undefined;
         const agentEntry = (() => {
           try {
             const { getAgentConfig: getAgentCfg } = require("../project.js") as typeof import("../project.js");
@@ -311,13 +312,43 @@ async function dispatchItem(
         })();
         const isWorker = agentEntry?.config?.extends === "employee";
 
-        if (isWorker && !pacing.canDispatchWorker) {
+        // Resolve effective pacing config: check for team-level override first
+        // Domain-level pacing is already confirmed enabled by the outer guard
+        let effectivePacingEnabled = true;
+        if (agentEntry?.config?.team && dispatchConfigForPacing?.teams) {
+          const teamOverride = dispatchConfigForPacing.teams[agentEntry.config.team];
+          if (teamOverride?.budget_pacing) {
+            effectivePacingEnabled = teamOverride.budget_pacing.enabled !== false;
+          }
+        }
+
+        // If team-level pacing is disabled, skip pacing for this agent
+        if (!effectivePacingEnabled) {
+          // Team override: pacing disabled — skip pacing gate
+        } else if (sessionType === "reactive") {
+          // Reactive sessions bypass pacing — only hard budget limit applies
+          if (!pacing.canDispatchReactive) {
+            failItem(item.id, `Budget pacing: reactive dispatch blocked — ${pacing.recommendation}`, db, projectId);
+            emitDispatchEvent(projectId, "dispatch_failed", item, { error: pacing.recommendation, budgetPacing: true }, db);
+            try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_pacing_reactive" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+            return;
+          }
+        } else if (sessionType === "planning") {
+          // Planning sessions use lead pacing
+          if (!pacing.canDispatchLead) {
+            failItem(item.id, `Budget pacing: planning dispatch blocked — ${pacing.recommendation}`, db, projectId);
+            emitDispatchEvent(projectId, "dispatch_failed", item, { error: pacing.recommendation, budgetPacing: true }, db);
+            try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_pacing_lead" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+            return;
+          }
+        } else if (isWorker && !pacing.canDispatchWorker) {
+          // Active/default worker sessions use worker pacing
           failItem(item.id, `Budget pacing: worker dispatch blocked — ${pacing.recommendation}`, db, projectId);
           emitDispatchEvent(projectId, "dispatch_failed", item, { error: pacing.recommendation, budgetPacing: true }, db);
           try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_pacing_worker" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
           return;
-        }
-        if (!isWorker && !pacing.canDispatchLead) {
+        } else if (!isWorker && !pacing.canDispatchLead) {
+          // Active/default lead sessions use lead pacing
           failItem(item.id, `Budget pacing: lead dispatch blocked — ${pacing.recommendation}`, db, projectId);
           emitDispatchEvent(projectId, "dispatch_failed", item, { error: pacing.recommendation, budgetPacing: true }, db);
           try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "budget_pacing_lead" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }

@@ -37,6 +37,7 @@ vi.mock("../../src/dispatch/inject-dispatch.js", () => ({
 const { getMemoryDb } = await import("../../src/db.js");
 const { sweep } = await import("../../src/sweep/actions.js");
 const { createTask, transitionTask } = await import("../../src/tasks/ops.js");
+const { addDependency } = await import("../../src/tasks/deps.js");
 const { createWorkflow, addTaskToPhase } = await import("../../src/workflow.js");
 const { killAllStuckAgents } = await import("../../src/audit/auto-kill.js");
 const { detectStuckAgents } = await import("../../src/audit/stuck-detector.js");
@@ -235,9 +236,64 @@ describe("sweep", () => {
     expect(row.state).toBe("BLOCKED");
   });
 
+  it("unblocks stale auto-blocked tasks after 2x stale threshold in BLOCKED", async () => {
+    const task = createTask(
+      { projectId: PROJECT, title: "Blocked stale task", createdBy: "agent:a" },
+      db,
+    );
+    transitionTask(
+      { projectId: PROJECT, taskId: task.id, toState: "ASSIGNED", actor: "agent:a" },
+      db,
+    );
+    transitionTask(
+      {
+        projectId: PROJECT,
+        taskId: task.id,
+        toState: "BLOCKED",
+        actor: "system:sweep",
+        reason: "Auto-blocked: no activity for 9h",
+      },
+      db,
+    );
+
+    const now = Date.now();
+    const staleThresholdMs = 4 * 60 * 60 * 1000;
+    const blockedAt = now - (staleThresholdMs * 2 + 1000);
+    db.prepare(
+      "UPDATE transitions SET created_at = ? WHERE task_id = ? AND to_state = 'BLOCKED'",
+    ).run(blockedAt, task.id);
+
+    await sweep({ projectId: PROJECT, dbOverride: db, staleThresholdMs });
+
+    const row = db.prepare("SELECT state FROM tasks WHERE id = ?").get(task.id) as Record<string, unknown>;
+    expect(row.state).toBe("OPEN");
+  });
+
   it("returns autoBlocked: 0 when no severely stale tasks exist", async () => {
     const result = await sweep({ projectId: PROJECT, dbOverride: db });
     expect(result.autoBlocked).toBe(0);
+  });
+
+  it("unblocks dependency-blocked task when all hard dependencies are DONE", async () => {
+    const blocker = createTask({ projectId: PROJECT, title: "Blocker", createdBy: "agent:a" }, db);
+    const dependent = createTask({ projectId: PROJECT, title: "Dependent", createdBy: "agent:a" }, db);
+
+    const dep = addDependency({ projectId: PROJECT, taskId: dependent.id, dependsOnTaskId: blocker.id, createdBy: "agent:a" }, db);
+    expect(dep.ok).toBe(true);
+
+    transitionTask({ projectId: PROJECT, taskId: dependent.id, toState: "BLOCKED", actor: "agent:a", reason: "Blocked on dependency" }, db);
+
+    transitionTask({ projectId: PROJECT, taskId: blocker.id, toState: "ASSIGNED", actor: "agent:a" }, db);
+    transitionTask({ projectId: PROJECT, taskId: blocker.id, toState: "IN_PROGRESS", actor: "agent:a" }, db);
+    const { attachEvidence } = await import("../../src/tasks/ops.js");
+    attachEvidence({ projectId: PROJECT, taskId: blocker.id, type: "output", content: "done", attachedBy: "agent:a" }, db);
+    transitionTask({ projectId: PROJECT, taskId: blocker.id, toState: "REVIEW", actor: "agent:a" }, db);
+    transitionTask({ projectId: PROJECT, taskId: blocker.id, toState: "DONE", actor: "agent:b", verificationRequired: false }, db);
+
+    await sweep({ projectId: PROJECT, dbOverride: db });
+
+    const row = db.prepare("SELECT state FROM tasks WHERE id = ?").get(dependent.id) as Record<string, unknown>;
+    expect(row.state).toBe("OPEN");
   });
 
   it("emits task_escalated diagnostic event when task is escalated", async () => {

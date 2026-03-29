@@ -48,6 +48,11 @@ import {
   queryOnboardingState,
   queryTrackedSessions,
   queryWorkerAssignments,
+  queryExperiments,
+  queryKnowledge,
+  queryKnowledgeFlags,
+  queryPromotionCandidates,
+  queryQueueStatus,
 } from "./queries.js";
 import { ingestEvent } from "../events/store.js";
 import { getDb } from "../db.js";
@@ -305,6 +310,35 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
 
       case "worker-assignments": {
         return ok(queryWorkerAssignments(projectId));
+      }
+
+      case "queue": {
+        return ok(queryQueueStatus(projectId));
+      }
+
+      case "experiments": {
+        return ok(queryExperiments(projectId));
+      }
+
+      case "knowledge": {
+        return ok(queryKnowledge(projectId, {
+          limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+        }));
+      }
+
+      case "knowledge-flags": {
+        return ok(queryKnowledgeFlags(projectId, {
+          limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+        }));
+      }
+
+      case "promotion-candidates": {
+        return ok(queryPromotionCandidates(projectId, {
+          limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+        }));
       }
 
       default:

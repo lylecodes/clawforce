@@ -1222,3 +1222,298 @@ export function queryWorkerAssignments(projectId: string) {
     return { assignments: [], count: 0 };
   }
 }
+
+/** Query dispatch_queue status for the Command Center queue card. */
+export function queryQueueStatus(projectId: string) {
+  const db = getDb(projectId);
+
+  try {
+    // Count by status
+    const statusRows = db.prepare(
+      "SELECT status, COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? GROUP BY status",
+    ).all(projectId) as Array<{ status: string; cnt: number }>;
+
+    const counts: Record<string, number> = {};
+    for (const r of statusRows) counts[r.status] = r.cnt;
+
+    const queued = counts["queued"] ?? 0;
+    const leased = (counts["leased"] ?? 0) + (counts["dispatched"] ?? 0);
+    const completed = counts["completed"] ?? 0;
+    const failed = counts["failed"] ?? 0;
+    const cancelled = counts["cancelled"] ?? 0;
+
+    // Concurrency: active = leased+dispatched, max from config
+    const activeRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND status IN ('leased', 'dispatched')",
+    ).get(projectId) as { cnt: number } | undefined;
+    const active = activeRow?.cnt ?? 0;
+
+    // Get max concurrency from project config
+    let maxConcurrency = 0;
+    try {
+      const extConfig = getExtendedProjectConfig(projectId);
+      maxConcurrency = extConfig?.dispatch?.maxConcurrentDispatches ?? 0;
+    } catch {
+      // Config not available — leave as 0
+    }
+
+    // Recent items (last 20, all statuses, newest first)
+    const recentRows = db.prepare(
+      `SELECT id, task_id, status, last_error, created_at
+       FROM dispatch_queue WHERE project_id = ?
+       ORDER BY created_at DESC LIMIT 20`,
+    ).all(projectId) as Array<{
+      id: string;
+      task_id: string;
+      status: string;
+      last_error: string | null;
+      created_at: number;
+    }>;
+
+    const recentItems = recentRows.map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      status: r.status,
+      lastError: r.last_error ?? undefined,
+      createdAt: r.created_at,
+    }));
+
+    return {
+      queued,
+      leased,
+      completed,
+      failed,
+      cancelled,
+      concurrency: { active, max: maxConcurrency },
+      recentItems,
+      missingEndpoint: false,
+    };
+  } catch {
+    return {
+      queued: 0,
+      leased: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      concurrency: { active: 0, max: 0 },
+      recentItems: [],
+      missingEndpoint: false,
+    };
+  }
+}
+
+/** Query experiments with their variants. */
+export function queryExperiments(projectId: string) {
+  const db = getDb(projectId);
+
+  try {
+    const rows = db.prepare(
+      "SELECT id, name, description, hypothesis, state, completion_criteria, metadata, started_at, completed_at, created_at FROM experiments WHERE project_id = ? ORDER BY created_at DESC",
+    ).all(projectId) as Array<{
+      id: string;
+      name: string;
+      description: string | null;
+      hypothesis: string | null;
+      state: string;
+      completion_criteria: string | null;
+      metadata: string | null;
+      started_at: number | null;
+      completed_at: number | null;
+      created_at: number;
+    }>;
+
+    const experiments = rows.map((r) => {
+      const variants = db.prepare(
+        "SELECT id, name, is_control, config, session_count, compliant_count, total_cost_cents, total_duration_ms, created_at FROM experiment_variants WHERE experiment_id = ? ORDER BY created_at ASC",
+      ).all(r.id) as Array<{
+        id: string;
+        name: string;
+        is_control: number;
+        config: string;
+        session_count: number;
+        compliant_count: number;
+        total_cost_cents: number;
+        total_duration_ms: number;
+        created_at: number;
+      }>;
+
+      let completionCriteria: unknown;
+      try { completionCriteria = r.completion_criteria ? JSON.parse(r.completion_criteria) : undefined; } catch { completionCriteria = r.completion_criteria; }
+
+      let metadata: unknown;
+      try { metadata = r.metadata ? JSON.parse(r.metadata) : undefined; } catch { metadata = r.metadata; }
+
+      return {
+        id: r.id,
+        name: r.name,
+        description: r.description ?? undefined,
+        hypothesis: r.hypothesis ?? undefined,
+        state: r.state,
+        completionCriteria,
+        metadata,
+        startedAt: r.started_at ?? undefined,
+        completedAt: r.completed_at ?? undefined,
+        createdAt: r.created_at,
+        variants: variants.map((v) => {
+          let config: unknown;
+          try { config = JSON.parse(v.config); } catch { config = v.config; }
+          return {
+            id: v.id,
+            name: v.name,
+            isControl: v.is_control === 1,
+            config,
+            sessionCount: v.session_count,
+            compliantCount: v.compliant_count,
+            totalCostCents: v.total_cost_cents,
+            totalDurationMs: v.total_duration_ms,
+            createdAt: v.created_at,
+          };
+        }),
+      };
+    });
+
+    return { experiments, count: experiments.length };
+  } catch {
+    return { experiments: [], count: 0 };
+  }
+}
+
+/** Query knowledge base entries. */
+export function queryKnowledge(projectId: string, pagination?: PaginationParams) {
+  const limit = pagination?.limit ?? 100;
+  const offset = pagination?.offset ?? 0;
+  const db = getDb(projectId);
+
+  try {
+    const countRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM knowledge WHERE project_id = ?",
+    ).get(projectId) as { cnt: number } | undefined;
+    const total = countRow?.cnt ?? 0;
+
+    const rows = db.prepare(
+      "SELECT id, category, title, content, tags, source_agent, source_session, source_task, created_at FROM knowledge WHERE project_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    ).all(projectId, limit, offset) as Array<{
+      id: string;
+      category: string;
+      title: string;
+      content: string;
+      tags: string | null;
+      source_agent: string | null;
+      source_session: string | null;
+      source_task: string | null;
+      created_at: number;
+    }>;
+
+    const knowledge = rows.map((r) => {
+      let tags: string[] = [];
+      if (r.tags) {
+        try { tags = JSON.parse(r.tags); } catch { tags = r.tags.split(",").map((t: string) => t.trim()).filter(Boolean); }
+      }
+      return {
+        id: r.id,
+        category: r.category,
+        title: r.title,
+        content: r.content,
+        tags,
+        source: r.source_agent ?? r.source_session ?? r.source_task ?? undefined,
+        createdAt: r.created_at,
+      };
+    });
+
+    return { knowledge, count: knowledge.length, total };
+  } catch {
+    return { knowledge: [], count: 0, total: 0 };
+  }
+}
+
+/** Query knowledge flags. */
+export function queryKnowledgeFlags(projectId: string, pagination?: PaginationParams) {
+  const limit = pagination?.limit ?? 100;
+  const offset = pagination?.offset ?? 0;
+  const db = getDb(projectId);
+
+  try {
+    const countRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM knowledge_flags WHERE project_id = ?",
+    ).get(projectId) as { cnt: number } | undefined;
+    const total = countRow?.cnt ?? 0;
+
+    const rows = db.prepare(
+      "SELECT id, agent_id, source_type, source_ref, flagged_content, correction, severity, status, created_at, resolved_at FROM knowledge_flags WHERE project_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    ).all(projectId, limit, offset) as Array<{
+      id: string;
+      agent_id: string;
+      source_type: string;
+      source_ref: string;
+      flagged_content: string;
+      correction: string;
+      severity: string;
+      status: string;
+      created_at: number;
+      resolved_at: number | null;
+    }>;
+
+    const flags = rows.map((r) => ({
+      id: r.id,
+      agentId: r.agent_id,
+      severity: r.severity,
+      category: r.source_type,
+      tags: [] as string[],
+      flaggedContent: r.flagged_content,
+      correction: r.correction,
+      status: r.status,
+      source: r.source_ref,
+      createdAt: r.created_at,
+      resolvedAt: r.resolved_at ?? undefined,
+    }));
+
+    return { flags, count: flags.length, total };
+  } catch {
+    return { flags: [], count: 0, total: 0 };
+  }
+}
+
+/** Query promotion candidates. */
+export function queryPromotionCandidates(projectId: string, pagination?: PaginationParams) {
+  const limit = pagination?.limit ?? 100;
+  const offset = pagination?.offset ?? 0;
+  const db = getDb(projectId);
+
+  try {
+    const countRow = db.prepare(
+      "SELECT COUNT(*) as cnt FROM promotion_candidates WHERE project_id = ?",
+    ).get(projectId) as { cnt: number } | undefined;
+    const total = countRow?.cnt ?? 0;
+
+    const rows = db.prepare(
+      "SELECT id, content_snippet, retrieval_count, session_count, suggested_target, target_agent_id, status, created_at, reviewed_at FROM promotion_candidates WHERE project_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    ).all(projectId, limit, offset) as Array<{
+      id: string;
+      content_snippet: string;
+      retrieval_count: number;
+      session_count: number;
+      suggested_target: string;
+      target_agent_id: string | null;
+      status: string;
+      created_at: number;
+      reviewed_at: number | null;
+    }>;
+
+    const candidates = rows.map((r) => ({
+      id: r.id,
+      content: r.content_snippet,
+      tags: [] as string[],
+      source: r.suggested_target,
+      status: r.status,
+      retrievalCount: r.retrieval_count,
+      sessionCount: r.session_count,
+      targetAgentId: r.target_agent_id ?? undefined,
+      createdAt: r.created_at,
+      reviewedAt: r.reviewed_at ?? undefined,
+    }));
+
+    return { candidates, count: candidates.length, total };
+  } catch {
+    return { candidates: [], count: 0, total: 0 };
+  }
+}

@@ -40,6 +40,8 @@ export type DispatchBudget = {
   canDispatchLead: boolean;
   /** Whether a worker session can be dispatched. */
   canDispatchWorker: boolean;
+  /** Whether a reactive session can be dispatched (allowed as long as budget > 0, no pacing). */
+  canDispatchReactive: boolean;
   /** Milliseconds to wait before next dispatch (0 = go now). */
   paceDelay: number;
   /** Human-readable recommendation for briefings. */
@@ -74,6 +76,9 @@ export function computeBudgetPacing(input: BudgetPacingInput): DispatchBudget {
   const pctRemaining =
     dailyBudgetCents > 0 ? (remaining / dailyBudgetCents) * 100 : 0;
 
+  // Reactive dispatch is allowed whenever remaining budget > 0 (no pacing, just hard limit)
+  const canDispatchReactive = remaining > 0;
+
   // --- Exhausted: nothing left or no time left ---
   if (remaining <= 0 || dailyBudgetCents <= 0) {
     return {
@@ -81,6 +86,7 @@ export function computeBudgetPacing(input: BudgetPacingInput): DispatchBudget {
       reactiveReserve: 0,
       canDispatchLead: false,
       canDispatchWorker: false,
+      canDispatchReactive: false,
       paceDelay: 0,
       recommendation: "Budget exhausted — all dispatch blocked.",
     };
@@ -92,6 +98,7 @@ export function computeBudgetPacing(input: BudgetPacingInput): DispatchBudget {
       reactiveReserve: reserve,
       canDispatchLead: false,
       canDispatchWorker: false,
+      canDispatchReactive,
       paceDelay: 0,
       recommendation: "No hours remaining — all dispatch blocked.",
     };
@@ -104,6 +111,7 @@ export function computeBudgetPacing(input: BudgetPacingInput): DispatchBudget {
       reactiveReserve: reserve,
       canDispatchLead: false,
       canDispatchWorker: false,
+      canDispatchReactive,
       paceDelay: 0,
       recommendation: `Budget critical (${pctRemaining.toFixed(1)}% remaining) — all dispatch blocked.`,
     };
@@ -116,6 +124,7 @@ export function computeBudgetPacing(input: BudgetPacingInput): DispatchBudget {
       reactiveReserve: reserve,
       canDispatchLead: true,
       canDispatchWorker: false,
+      canDispatchReactive,
       paceDelay: 0,
       recommendation: `Budget low (${pctRemaining.toFixed(1)}% remaining) — workers blocked, leads allowed for reactive reviews.`,
     };
@@ -147,6 +156,7 @@ export function computeBudgetPacing(input: BudgetPacingInput): DispatchBudget {
     reactiveReserve: reserve,
     canDispatchLead,
     canDispatchWorker,
+    canDispatchReactive,
     paceDelay,
     recommendation,
   };

@@ -16,16 +16,18 @@
 import type { DatabaseSync } from "node:sqlite";
 import { killAllStuckAgents } from "../audit/auto-kill.js";
 import { detectStuckAgents } from "../audit/stuck-detector.js";
+import { getActiveSessions } from "../enforcement/tracker.js";
 import { resetDailyBudgets } from "../budget.js";
 import { getDb } from "../db.js";
 import { transitionTask } from "../tasks/ops.js";
+import { getUnresolvedBlockers } from "../tasks/deps.js";
 import type { Task, TaskState } from "../types.js";
 import { getExtendedProjectConfig } from "../project.js";
 import { enforceWorkerCompliance, getIncompliantWorkers } from "../tasks/compliance.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { advanceWorkflow, getPhaseStatus, listWorkflows } from "../workflow.js";
 import { ingestEvent, reclaimStaleEvents } from "../events/store.js";
-import { reclaimExpiredLeases } from "../dispatch/queue.js";
+import { enqueue, failItem as failQueueItem, reclaimExpiredLeases } from "../dispatch/queue.js";
 import { createMessage } from "../messaging/store.js";
 import { findManagerAgent } from "../events/actions.js";
 import { processAndDispatch } from "../dispatch/dispatcher.js";
@@ -55,6 +57,7 @@ export type SweepResult = {
   reviewEscalated: number;
   meetingsStale: number;
   frequencyDispatched: number;
+  staleDispatchRecovered: number;
   agentsRecovered: number;
   agentsEscalated: number;
 };
@@ -64,11 +67,14 @@ export type SweepOptions = {
   staleThresholdMs?: number;
   stuckTimeoutMs?: number;
   proposalTtlMs?: number;
+  /** How long a dispatch queue item can sit in 'dispatched' status with no active session before recovery. Default 10 minutes. */
+  staleDispatchTimeoutMs?: number;
   dbOverride?: DatabaseSync;
 };
 
 const DEFAULT_STALE_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 hours
 const DEFAULT_PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const DEFAULT_STALE_DISPATCH_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 /** Dedup window for sweep events (1 hour). Allows re-detection of recurring conditions. */
 const SWEEP_DEDUP_WINDOW_MS = 60 * 60 * 1000;
@@ -84,6 +90,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
   const db = dbOverride ?? getDb(projectId);
   const staleThreshold = options.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
   const proposalTtl = options.proposalTtlMs ?? DEFAULT_PROPOSAL_TTL_MS;
+  const staleDispatchTimeout = options.staleDispatchTimeoutMs ?? DEFAULT_STALE_DISPATCH_TIMEOUT_MS;
   const now = Date.now();
 
   let stale = 0;
@@ -97,6 +104,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
   let goalsNeedingPlan = 0;
   let goalsCascadeAchieved = 0;
   let leasesReclaimed = 0;
+  let staleDispatchRecoveredCount = 0;
   let budgetsReset = 0;
   let reviewEscalated = 0;
   let meetingsStale = 0;
@@ -163,6 +171,72 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
         }
       }
     }
+
+    // 1.5. Recover BLOCKED tasks when blocking condition no longer applies
+    let staleUnblocked = 0;
+    const blockedRows = db
+      .prepare("SELECT id FROM tasks WHERE project_id = ? AND state = 'BLOCKED'")
+      .all(projectId) as Record<string, unknown>[];
+
+    for (const row of blockedRows) {
+      const taskId = row.id as string;
+      let unblocked = false;
+
+      // Recover auto-blocked stale tasks after 2x stale threshold in BLOCKED state.
+      const lastBlocked = db.prepare(
+        "SELECT reason, created_at FROM transitions WHERE task_id = ? AND to_state = 'BLOCKED' ORDER BY created_at DESC LIMIT 1",
+      ).get(taskId) as Record<string, unknown> | undefined;
+
+      if (lastBlocked) {
+        const blockReason = (lastBlocked.reason as string | null) ?? "";
+        const blockedAt = lastBlocked.created_at as number;
+        if (blockReason.startsWith("Auto-blocked: no activity") && (now - blockedAt > staleThreshold * 2)) {
+          const reopen = transitionTask(
+            {
+              projectId,
+              taskId,
+              toState: "OPEN",
+              actor: "system:sweep",
+              reason: "Auto-recovered: stale block window expired",
+              verificationRequired: false,
+              withinTransaction: true,
+            },
+            db,
+          );
+          if (reopen.ok) {
+            staleUnblocked++;
+            unblocked = true;
+          }
+        }
+      }
+
+      if (unblocked) continue;
+
+      // Recover dependency-blocked tasks when all hard blockers are DONE.
+      const hardDepCount = db.prepare(
+        "SELECT COUNT(*) as count FROM task_dependencies WHERE project_id = ? AND task_id = ? AND type = 'blocks'",
+      ).get(projectId, taskId) as Record<string, unknown>;
+
+      if ((hardDepCount.count as number) > 0) {
+        const unresolved = getUnresolvedBlockers(projectId, taskId, db);
+        if (unresolved.length === 0) {
+          transitionTask(
+            {
+              projectId,
+              taskId,
+              toState: "OPEN",
+              actor: "system:sweep",
+              reason: "Auto-unblocked: all dependencies are DONE",
+              verificationRequired: false,
+              withinTransaction: true,
+            },
+            db,
+          );
+        }
+      }
+    }
+
+    safeLog("sweep.unblockStale", `Unblocked ${staleUnblocked} stale-blocked tasks`);
 
     // 2. Enforce deadlines — stays direct (safety-critical, no delay acceptable)
     const overdue = db
@@ -414,6 +488,67 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     // 7. Reclaim expired dispatch queue leases
     leasesReclaimed = reclaimExpiredLeases(projectId, db);
 
+    // 7.1. Recover dispatch queue items stuck in 'dispatched' state with no active session
+    try {
+      const dispatchedItems = db.prepare(
+        `SELECT id, task_id, created_at, dispatch_attempts, max_dispatch_attempts FROM dispatch_queue
+         WHERE project_id = ? AND status = 'dispatched'`,
+      ).all(projectId) as Record<string, unknown>[];
+
+      if (dispatchedItems.length > 0) {
+        // Build a set of session keys that are currently active
+        const activeSessions = getActiveSessions();
+        const activeSessionDispatchIds = new Set<string>();
+        for (const session of activeSessions) {
+          if (session.dispatchContext?.queueItemId) {
+            activeSessionDispatchIds.add(session.dispatchContext.queueItemId);
+          }
+        }
+
+        for (const row of dispatchedItems) {
+          const itemId = row.id as string;
+          const taskId = row.task_id as string;
+          const createdAt = row.created_at as number;
+
+          // Skip items that haven't been dispatched long enough
+          if (now - createdAt < staleDispatchTimeout) continue;
+
+          // Skip items that have an active session backing them
+          if (activeSessionDispatchIds.has(itemId)) continue;
+
+          // No active session and past the timeout — fail the queue item and re-enqueue
+          failQueueItem(
+            itemId,
+            `Stale dispatched item: no active session after ${Math.round((now - createdAt) / 60_000)}m`,
+            db,
+            projectId,
+          );
+
+          // Re-enqueue the task for retry
+          enqueue(projectId, taskId, undefined, undefined, db);
+
+          emitDiagnosticEvent({
+            type: "dispatch_stale_recovered",
+            projectId,
+            taskId,
+            queueItemId: itemId,
+            staleDurationMs: now - createdAt,
+          });
+
+          ingestEvent(projectId, "sweep_finding", "cron", {
+            finding: "stale_dispatch_recovered",
+            taskId,
+            queueItemId: itemId,
+            staleDurationMs: now - createdAt,
+          }, sweepDedupKey("stale-dispatch", itemId, now), db);
+
+          staleDispatchRecoveredCount++;
+        }
+      }
+    } catch (err) {
+      safeLog("sweep.staleDispatchRecovery", err);
+    }
+
     db.exec("COMMIT");
 
     // 7.5 Reset daily budgets (outside transaction — idempotent)
@@ -568,7 +703,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     stale, autoBlocked, deadlineExpired, workflowsAdvanced, escalated,
     complianceBlocked, stuckKilled, proposalsExpired, protocolsExpired,
     goalsNeedingPlan, goalsCascadeAchieved,
-    leasesReclaimed,
+    leasesReclaimed, staleDispatchRecovered: staleDispatchRecoveredCount,
     eventsProcessed, dispatched, budgetsReset, autoAssigned,
     sloChecked, sloBreach, alertsFired, anomaliesDetected,
     reviewEscalated, meetingsStale, frequencyDispatched,

@@ -1,5 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("node:fs", () => ({
+  default: {
+    existsSync: vi.fn(() => false),
+    readdirSync: vi.fn(() => []),
+  },
+}));
+vi.mock("../src/config/init.js", () => ({
+  initializeAllDomains: vi.fn(() => ({ domains: [], errors: [], warnings: [] })),
+}));
+vi.mock("../src/project.js", () => ({
+  loadWorkforceConfig: vi.fn(() => null),
+  registerWorkforceConfig: vi.fn(),
+  loadProject: vi.fn(() => ({ id: "legacy", name: "legacy", dir: ".", agents: { project: "", workers: [] }, verification: { required: false }, defaults: { maxRetries: 3, priority: "P2" } })),
+  initProject: vi.fn(),
+}));
 vi.mock("../src/db.js", () => ({
   setProjectsDir: vi.fn(),
   closeAllDbs: vi.fn(),
@@ -22,6 +37,10 @@ vi.mock("../src/sweep/actions.js", () => ({
   ),
 }));
 
+const fsMod = await import("node:fs");
+const fsMock = fsMod.default as unknown as { existsSync: ReturnType<typeof vi.fn>; readdirSync: ReturnType<typeof vi.fn> };
+const { initializeAllDomains } = await import("../src/config/init.js");
+const { loadWorkforceConfig, registerWorkforceConfig, loadProject, initProject } = await import("../src/project.js");
 const { setProjectsDir, closeAllDbs } = await import("../src/db.js");
 const { sweep } = await import("../src/sweep/actions.js");
 const {
@@ -47,6 +66,8 @@ describe("lifecycle", () => {
   afterEach(() => {
     shutdownClawforce();
     vi.clearAllMocks();
+    fsMock.existsSync.mockImplementation(() => false);
+    fsMock.readdirSync.mockImplementation(() => []);
   });
 
   // ---------- initClawforce ----------
@@ -74,6 +95,34 @@ describe("lifecycle", () => {
       initClawforce({ ...BASE_CONFIG, enabled: false });
       expect(isClawforceInitialized()).toBe(false);
       expect(setProjectsDir).not.toHaveBeenCalled();
+    });
+
+    it("auto-initializes domain config at startup", () => {
+      initClawforce(BASE_CONFIG);
+      expect(initializeAllDomains).toHaveBeenCalledWith("/tmp/test-projects");
+    });
+
+    it("auto-activates legacy project.yaml directories at startup", () => {
+      fsMock.existsSync.mockImplementation((p: unknown) => String(p) === "/tmp/test-projects" || String(p).endsWith("/legacy-a/project.yaml"));
+      fsMock.readdirSync.mockReturnValue([{ name: "legacy-a", isDirectory: () => true }] as unknown[]);
+      (loadWorkforceConfig as ReturnType<typeof vi.fn>).mockReturnValue({ name: "legacy-a", agents: {} });
+
+      initClawforce(BASE_CONFIG);
+
+      expect(loadWorkforceConfig).toHaveBeenCalledWith("/tmp/test-projects/legacy-a/project.yaml");
+      expect(registerWorkforceConfig).toHaveBeenCalledWith("legacy-a", { name: "legacy-a", agents: {} }, "/tmp/test-projects/legacy-a");
+      expect(initProject).not.toHaveBeenCalled();
+    });
+
+    it("falls back to legacy initProject when no workforce config is present", () => {
+      fsMock.existsSync.mockImplementation((p: unknown) => String(p) === "/tmp/test-projects" || String(p).endsWith("/legacy-b/project.yaml"));
+      fsMock.readdirSync.mockReturnValue([{ name: "legacy-b", isDirectory: () => true }] as unknown[]);
+      (loadWorkforceConfig as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+      initClawforce(BASE_CONFIG);
+
+      expect(loadProject).toHaveBeenCalledWith("/tmp/test-projects/legacy-b/project.yaml");
+      expect(initProject).toHaveBeenCalled();
     });
 
     it("starts the sweep timer when sweepIntervalMs > 0", () => {

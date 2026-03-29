@@ -47,6 +47,11 @@ import {
   queryOnboardingState,
   queryTrackedSessions,
   queryWorkerAssignments,
+  queryQueueStatus,
+  queryExperiments,
+  queryKnowledge,
+  queryKnowledgeFlags,
+  queryPromotionCandidates,
 } from "./queries.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
@@ -422,6 +427,30 @@ function routeRead(
 
     case "worker-assignments":
       return ok(queryWorkerAssignments(domain));
+
+    case "queue":
+      return ok(queryQueueStatus(domain));
+
+    case "experiments":
+      return ok(queryExperiments(domain));
+
+    case "knowledge":
+      return ok(queryKnowledge(domain, {
+        limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
+        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+      }));
+
+    case "knowledge-flags":
+      return ok(queryKnowledgeFlags(domain, {
+        limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
+        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+      }));
+
+    case "promotion-candidates":
+      return ok(queryPromotionCandidates(domain, {
+        limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
+        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+      }));
 
     default:
       return notFound(`Unknown resource: ${topResource}`);

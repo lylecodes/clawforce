@@ -5,10 +5,14 @@
  * Called from gateway server.impl.ts.
  */
 
+import fs from "node:fs";
+import path from "node:path";
 import type { ClawforceConfig } from "./types.js";
 import { closeAllDbs, setProjectsDir } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import { sweep } from "./sweep/actions.js";
+import { initializeAllDomains } from "./config/init.js";
+import { loadProject, loadWorkforceConfig, initProject, registerWorkforceConfig } from "./project.js";
 
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 let initialized = false;
@@ -20,6 +24,8 @@ export function initClawforce(config: ClawforceConfig): void {
   if (initialized) return;
 
   setProjectsDir(config.projectsDir);
+
+  autoActivateProjects(config.projectsDir);
 
   if (config.sweepIntervalMs > 0) {
     sweepTimer = setInterval(() => {
@@ -41,6 +47,46 @@ export function initClawforce(config: ClawforceConfig): void {
   }
 
   initialized = true;
+}
+
+function autoActivateProjects(projectsDir: string): void {
+  // 1) Prefer domain-based config initialization (config.yaml + domains/*.yaml)
+  try {
+    initializeAllDomains(projectsDir);
+  } catch (err) {
+    safeLog("lifecycle.autoActivate.initializeAllDomains", err);
+  }
+
+  // 2) Backward compatibility: auto-activate legacy project.yaml projects
+  try {
+    if (!fs.existsSync(projectsDir)) return;
+    const entries = fs.readdirSync(projectsDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const projectId = entry.name;
+      const projectDir = path.join(projectsDir, projectId);
+      const configPath = path.join(projectDir, "project.yaml");
+      if (!fs.existsSync(configPath)) continue;
+
+      try {
+        const wfConfig = loadWorkforceConfig(configPath);
+        if (wfConfig) {
+          registerWorkforceConfig(projectId, wfConfig, projectDir);
+          continue;
+        }
+
+        // Legacy project format without workforce agents
+        const projectConfig = loadProject(configPath);
+        initProject(projectConfig);
+      } catch (err) {
+        safeLog(`lifecycle.autoActivate.${projectId}`, err);
+      }
+    }
+  } catch (err) {
+    safeLog("lifecycle.autoActivate.scan", err);
+  }
 }
 
 export async function shutdownClawforce(): Promise<void> {

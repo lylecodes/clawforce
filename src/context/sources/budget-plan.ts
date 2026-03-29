@@ -26,7 +26,7 @@ export function resolveBudgetPlanSource(
     ).get(projectId) as { daily_limit_cents: number | null; daily_spent_cents: number; hourly_spent_cents: number } | undefined;
 
     if (!budgetRow || !budgetRow.daily_limit_cents || budgetRow.daily_limit_cents <= 0) {
-      return null;
+      return "No daily budget configured — spending is unlimited. Set a budget with: pnpm cf config set budget.project.daily.cents <amount>";
     }
 
     const dailyLimit = budgetRow.daily_limit_cents;

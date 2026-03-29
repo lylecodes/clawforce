@@ -39,10 +39,10 @@ describe("budget_plan briefing source", () => {
     try { db.close(); } catch { /* already closed */ }
   });
 
-  it("returns null when no budget is configured", () => {
+  it("returns helpful message when no budget is configured", () => {
     const dbNoBudget = getMemoryDb();
     const result = resolveBudgetPlanSource("no-budget-project", dbNoBudget);
-    expect(result).toBeNull();
+    expect(result).toBe("No daily budget configured — spending is unlimited. Set a budget with: pnpm cf config set budget.project.daily.cents <amount>");
     dbNoBudget.close();
   });
 

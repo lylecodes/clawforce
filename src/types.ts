@@ -202,6 +202,8 @@ export type DispatchConfig = {
   }>;
   /** Budget pacing — spread budget across the day. */
   budget_pacing?: BudgetPacingConfig;
+  /** Per-team dispatch configuration overrides. */
+  teams?: Record<string, { budget_pacing?: BudgetPacingConfig }>;
   /** Lead agent scheduling — planning sessions + reactive wake events. */
   lead_schedule?: LeadScheduleConfig;
   /** Worker dispatch — session loop, task limits, wake events. */
