@@ -120,6 +120,8 @@ import {
   getExtendedProjectConfig,
   getRegisteredAgentIds,
   resolveProjectDir,
+  loadWorkforceConfig,
+  registerWorkforceConfig,
 } from "../src/project.js";
 import { getEffectiveLifecycleConfig, getSafetyConfig } from "../src/safety.js";
 import { syncAgentsToOpenClaw, toNamespacedAgentId } from "../src/agent-sync.js";
@@ -2154,6 +2156,47 @@ const clawforcePlugin = {
         }
         for (const err of domainResult.errors) {
           api.logger.info(`Clawforce DOMAIN-ERROR: ${err}`);
+        }
+
+        // --- Auto-activate project.yaml subdirectories ---
+        // Scan ~/.clawforce/<project-id>/project.yaml for flat project configs
+        // that aren't picked up by the domain-based initializeAllDomains path.
+        try {
+          const subdirs = fs.readdirSync(defaultConfigDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name);
+
+          for (const subdir of subdirs) {
+            const projectYaml = path.join(defaultConfigDir, subdir, "project.yaml");
+            if (!fs.existsSync(projectYaml)) continue;
+
+            // Skip if already registered by initializeAllDomains
+            const alreadyRegistered = getRegisteredAgentIds().some((aid) => {
+              const entry = getAgentConfig(aid);
+              return entry?.projectId === subdir;
+            });
+            if (alreadyRegistered) continue;
+
+            try {
+              const wfConfig = loadWorkforceConfig(projectYaml);
+              if (wfConfig && Object.keys(wfConfig.agents).length > 0) {
+                const projectDir = (wfConfig as Record<string, unknown>).project_dir as string | undefined
+                  ?? path.join(defaultConfigDir, subdir);
+                registerWorkforceConfig(subdir, wfConfig, projectDir);
+                const agentCount = Object.keys(wfConfig.agents).length;
+                api.logger.info(`Clawforce: auto-activated project "${subdir}" (${agentCount} agent(s))`);
+
+                // Ensure domain result includes this project for recovery
+                if (!domainResult.domains.includes(subdir)) {
+                  domainResult.domains.push(subdir);
+                }
+              }
+            } catch (err) {
+              api.logger.warn(`Clawforce: failed to auto-activate "${subdir}": ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        } catch (err) {
+          api.logger.warn(`Clawforce: project scan failed: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         // --- Restart recovery: clean up orphaned state from before restart ---
