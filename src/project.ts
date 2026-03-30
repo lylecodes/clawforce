@@ -1616,7 +1616,7 @@ export function registerWorkforceConfig(
   let effectiveEventHandlers = wfConfig.event_handlers;
   if (wfConfig.dispatch?.mode === "event-driven") {
     const defaults: Record<string, EventHandlerConfig> = {
-      task_review_ready: { actions: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }] },
+      task_review_ready: { actions: [{ action: "dispatch_agent", agent_role: "verifier", session_type: "reactive" }] },
       task_failed: { actions: [{ action: "dispatch_agent", agent_role: "lead", session_type: "reactive" }] },
       budget_changed: { actions: [{ action: "dispatch_agent", agent_role: "lead", session_type: "planning" }] },
     };
