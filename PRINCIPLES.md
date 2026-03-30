@@ -18,15 +18,15 @@ to type. The system guides them.
 
 **The primary loop:**
 ```
-User provides feature → Lead plans breakdown → User sees plan →
-User approves → Workers execute → Lead reviews → User sees results → Repeat
+User + lead collaborate on what to build → Lead creates task plan →
+Workers execute → Lead reviews → User sees results → Repeat
 ```
 
 **What the user sees in the dashboard:**
 1. "What's happening right now?" — agents working, costs ticking, tasks progressing
-2. "What's the plan?" — lead's breakdown of approved features, what's next
-3. "Do I need to do anything?" — proposals waiting for approval, work ready for review
-4. "I want X built" — user tells the lead, lead breaks it down, user sees the plan
+2. "What's the plan?" — lead's breakdown of agreed work, what's next
+3. "Do I need to do anything?" — proposals waiting, work ready for review, agent questions
+4. "Let's build X" — user starts a conversation with the lead, they define it together
 
 The user is never surprised. They always know what's coming and what it'll cost.
 
@@ -37,9 +37,12 @@ and the user controls the pipeline.
 
 **How tasks enter the system:**
 
-1. **User-initiated** — User provides a feature or request (via dashboard conversation
-   with lead). Lead breaks it into a task plan. User sees the breakdown and approves
-   before workers start. Full autonomy on execution within approved scope.
+1. **User-initiated** — User collaborates with the lead via dashboard messaging to
+   define work. This is a conversation, not a handoff — the lead asks clarifying
+   questions, the user provides direction, they iterate together. The user can be
+   deeply involved (co-designing details) or hands-off ("just build it, you figure
+   it out"). The conversation IS the spec. Once aligned, the lead creates a task
+   plan. Full autonomy on execution within the agreed scope.
 
 2. **Lead-proposed** — Lead compares current state against DIRECTION, spots gaps, and
    proposes features with reasoning. Proposals go to an approval queue. User approves →
