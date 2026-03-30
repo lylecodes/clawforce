@@ -15,13 +15,15 @@ import path from "node:path";
 import { handleRequest } from "./routes.js";
 import { createDashboardHandler } from "./gateway-routes.js";
 import type { DashboardHandlerOptions } from "./gateway-routes.js";
+import { checkAuth, setCorsHeaders, checkRateLimit, isLocalhost } from "./auth.js";
+import { safeLog } from "../diagnostics.js";
 
 export type DashboardOptions = {
   /** Port to listen on (default 3117). */
   port?: number;
   /** Optional bearer token for authentication. */
   token?: string;
-  /** Allowed CORS origins (default "*"). */
+  /** Comma-separated allowed CORS origins (default: localhost only). Also configurable via CLAWFORCE_CORS_ORIGINS env var. */
   corsOrigin?: string;
   /** Hostname to bind (default "127.0.0.1"). */
   host?: string;
@@ -58,8 +60,21 @@ export function createDashboardServer(options?: DashboardOptions) {
   const host = options?.host
     ?? process.env.CLAWFORCE_DASHBOARD_HOST
     ?? "127.0.0.1";
-  const corsOrigin = options?.corsOrigin ?? "*";
-  const token = options?.token;
+  const token = options?.token ?? process.env.CLAWFORCE_DASHBOARD_TOKEN;
+  const allowedOrigins = options?.corsOrigin
+    ? options.corsOrigin.split(",").map((o) => o.trim()).filter(Boolean)
+    : undefined;
+
+  // Security check: refuse to start on non-localhost without a token
+  if (!token && !isLocalhost(host)) {
+    throw new Error(
+      `Refusing to start dashboard server on non-localhost host "${host}" without authentication. ` +
+      `Set CLAWFORCE_DASHBOARD_TOKEN or pass options.token to enable auth.`
+    );
+  }
+  if (!token && isLocalhost(host)) {
+    console.warn("[clawforce-dashboard] WARNING: Starting without authentication on localhost. Set CLAWFORCE_DASHBOARD_TOKEN for production use.");
+  }
 
   // Resolve static dir — use the provided dashboardDir or look for
   // clawforce-dashboard/dist as a sibling project (the extracted dashboard repo)
@@ -74,16 +89,17 @@ export function createDashboardServer(options?: DashboardOptions) {
   // Create the gateway-routes handler for /api/* requests.
   // The gateway-routes handler expects paths prefixed with /clawforce/api/,
   // so we'll rewrite /api/* → /clawforce/api/* before delegating.
+  // Auth is handled at this server layer, so skip it in the gateway handler.
   const gatewayHandler = createDashboardHandler({
     staticDir,
     injectAgentMessage: options?.injectAgentMessage,
+    auth: { token, skipAuth: true },
+    allowedOrigins,
   });
 
   const server = http.createServer(async (req, res) => {
-    // CORS headers
-    res.setHeader("Access-Control-Allow-Origin", corsOrigin);
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    // CORS — origin-validated
+    setCorsHeaders(req, res, allowedOrigins);
 
     // Preflight
     if (req.method === "OPTIONS") {
@@ -92,17 +108,16 @@ export function createDashboardServer(options?: DashboardOptions) {
       return;
     }
 
-    // Auth check
-    if (token) {
-      const auth = req.headers.authorization;
-      if (!auth || auth !== `Bearer ${token}`) {
-        respondJson(res, 401, { error: "Unauthorized" });
-        return;
-      }
-    }
-
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const pathname = url.pathname;
+    const isApi = pathname.startsWith("/clawforce/api/") || pathname === "/clawforce/api"
+      || pathname.startsWith("/api/") || pathname === "/api";
+
+    // Auth & rate limiting for API requests only (static files are exempt)
+    if (isApi) {
+      if (!checkRateLimit(req, res)) return;
+      if (!checkAuth(req, res, { token })) return;
+    }
 
     // --- API routes: /clawforce/api/* or /api/* → delegate to gateway handler ---
     if (pathname.startsWith("/clawforce/api/") || pathname === "/clawforce/api") {
@@ -110,11 +125,9 @@ export function createDashboardServer(options?: DashboardOptions) {
       try {
         await gatewayHandler(req, res);
       } catch (err) {
+        safeLog("dashboard-server", err);
         if (!res.headersSent) {
-          respondJson(res, 500, {
-            error: "Internal server error",
-            message: err instanceof Error ? err.message : String(err),
-          });
+          respondJson(res, 500, { error: "Internal server error" });
         }
       }
       return;
@@ -126,11 +139,9 @@ export function createDashboardServer(options?: DashboardOptions) {
       try {
         await gatewayHandler(req, res);
       } catch (err) {
+        safeLog("dashboard-server", err);
         if (!res.headersSent) {
-          respondJson(res, 500, {
-            error: "Internal server error",
-            message: err instanceof Error ? err.message : String(err),
-          });
+          respondJson(res, 500, { error: "Internal server error" });
         }
       }
       return;

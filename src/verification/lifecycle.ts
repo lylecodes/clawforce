@@ -21,6 +21,7 @@ export function getEffectiveVerificationConfig(projectId: string): VerificationC
     total_timeout_seconds: vc?.total_timeout_seconds ?? 300,
     parallel: vc?.parallel ?? false,
     git: vc?.git,
+    defaultGateTimeoutSeconds: vc?.defaultGateTimeoutSeconds ?? 120,
   };
 }
 
@@ -38,6 +39,7 @@ export function runVerificationIfConfigured(
 
   const result = runVerificationGates(config.gates, projectDir, {
     totalTimeoutMs: (config.total_timeout_seconds ?? 300) * 1000,
+    defaultGateTimeoutSeconds: config.defaultGateTimeoutSeconds,
   });
   const formatted = formatGateResults(result);
   return { result, formatted };

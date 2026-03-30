@@ -67,6 +67,10 @@ import type {
   GitIsolationConfig,
   ObserveEntry,
   WorkforceConfig,
+  SweepConfig,
+  TrustConfig,
+  ContextConfig,
+  MemoryConfig,
 } from "./types.js";
 import { EVENT_ACTION_TYPES, TRIGGER_SOURCES } from "./types.js";
 
@@ -283,6 +287,26 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   const rawBootstrapDefaults = raw.bootstrap_defaults ?? raw.bootstrapDefaults;
   if (rawBootstrapDefaults && typeof rawBootstrapDefaults === "object") {
     result.bootstrapDefaults = normalizeBootstrapConfig(rawBootstrapDefaults);
+  }
+
+  // Parse sweep config
+  if (raw.sweep && typeof raw.sweep === "object") {
+    result.sweep = normalizeSweepConfig(raw.sweep as Record<string, unknown>);
+  }
+
+  // Parse trust config
+  if (raw.trust && typeof raw.trust === "object") {
+    result.trust = normalizeTrustConfig(raw.trust as Record<string, unknown>);
+  }
+
+  // Parse context config
+  if (raw.context && typeof raw.context === "object") {
+    result.context = normalizeContextConfig(raw.context as Record<string, unknown>);
+  }
+
+  // Parse memory config
+  if (raw.memory && typeof raw.memory === "object") {
+    result.memory = normalizeMemorySystemConfig(raw.memory as Record<string, unknown>);
   }
 
   return result;
@@ -1121,6 +1145,36 @@ function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
     };
   }
 
+  // Global max concurrency
+  if (typeof (raw.global_max_concurrency ?? raw.globalMaxConcurrency) === "number") {
+    result.globalMaxConcurrency = (raw.global_max_concurrency ?? raw.globalMaxConcurrency) as number;
+  }
+
+  // Task lease duration
+  if (typeof (raw.task_lease_ms ?? raw.taskLeaseMs) === "number") {
+    result.taskLeaseMs = (raw.task_lease_ms ?? raw.taskLeaseMs) as number;
+  }
+
+  // Queue lease duration
+  if (typeof (raw.queue_lease_ms ?? raw.queueLeaseMs) === "number") {
+    result.queueLeaseMs = (raw.queue_lease_ms ?? raw.queueLeaseMs) as number;
+  }
+
+  // Max dispatch attempts
+  if (typeof (raw.max_dispatch_attempts ?? raw.maxDispatchAttempts) === "number") {
+    result.maxDispatchAttempts = (raw.max_dispatch_attempts ?? raw.maxDispatchAttempts) as number;
+  }
+
+  // Role aliases
+  if ((raw.role_aliases ?? raw.roleAliases) && typeof (raw.role_aliases ?? raw.roleAliases) === "object") {
+    const aliases = (raw.role_aliases ?? raw.roleAliases) as Record<string, unknown>;
+    result.roleAliases = {};
+    for (const [alias, target] of Object.entries(aliases)) {
+      if (typeof target === "string") result.roleAliases[alias] = target;
+    }
+    if (Object.keys(result.roleAliases).length === 0) delete result.roleAliases;
+  }
+
   return result;
 }
 
@@ -1336,6 +1390,13 @@ function normalizeLifecycleConfig(raw: Record<string, unknown>): LifecycleConfig
   if (typeof raw.immediate_review_dispatch === "boolean" || typeof raw.immediateReviewDispatch === "boolean") {
     result.immediateReviewDispatch = (raw.immediate_review_dispatch ?? raw.immediateReviewDispatch) as boolean;
   }
+  const complianceAction = raw.worker_non_compliance_action ?? raw.workerNonComplianceAction;
+  if (typeof complianceAction === "string") {
+    const valid = ["BLOCKED", "REVIEW", "FAILED", "alert_only"] as const;
+    if ((valid as readonly string[]).includes(complianceAction)) {
+      result.workerNonComplianceAction = complianceAction as LifecycleConfig["workerNonComplianceAction"];
+    }
+  }
   return result;
 }
 
@@ -1428,6 +1489,9 @@ function normalizeVerificationConfig(raw: unknown): VerificationConfig | undefin
   }
   if (typeof r.total_timeout_seconds === "number") config.total_timeout_seconds = r.total_timeout_seconds;
   if (typeof r.parallel === "boolean") config.parallel = r.parallel;
+  if (typeof (r.default_gate_timeout_seconds ?? r.defaultGateTimeoutSeconds) === "number") {
+    config.defaultGateTimeoutSeconds = (r.default_gate_timeout_seconds ?? r.defaultGateTimeoutSeconds) as number;
+  }
   if (r.git && typeof r.git === "object") {
     const git = r.git as Record<string, unknown>;
     config.git = {} as GitIsolationConfig;
@@ -1485,6 +1549,57 @@ function normalizeChannelsConfig(raw: unknown[]): ChannelConfig[] {
   return result.length > 0 ? result : [];
 }
 
+function normalizeSweepConfig(raw: Record<string, unknown>): SweepConfig {
+  const result: SweepConfig = {};
+  if (typeof (raw.stale_threshold_ms ?? raw.staleThresholdMs) === "number") {
+    result.staleThresholdMs = (raw.stale_threshold_ms ?? raw.staleThresholdMs) as number;
+  }
+  if (typeof (raw.proposal_ttl_ms ?? raw.proposalTtlMs) === "number") {
+    result.proposalTtlMs = (raw.proposal_ttl_ms ?? raw.proposalTtlMs) as number;
+  }
+  if (typeof (raw.stale_dispatch_timeout_ms ?? raw.staleDispatchTimeoutMs) === "number") {
+    result.staleDispatchTimeoutMs = (raw.stale_dispatch_timeout_ms ?? raw.staleDispatchTimeoutMs) as number;
+  }
+  return result;
+}
+
+function normalizeTrustConfig(raw: Record<string, unknown>): TrustConfig {
+  const result: TrustConfig = {};
+  const thresholds = raw.tier_thresholds ?? raw.tierThresholds;
+  if (thresholds && typeof thresholds === "object") {
+    const t = thresholds as Record<string, unknown>;
+    if (typeof t.high === "number") result.tierThresholdHigh = t.high;
+    if (typeof t.medium === "number") result.tierThresholdMedium = t.medium;
+  }
+  if (Array.isArray(raw.protected_categories ?? raw.protectedCategories)) {
+    result.protectedCategories = ((raw.protected_categories ?? raw.protectedCategories) as unknown[])
+      .filter((c): c is string => typeof c === "string");
+  }
+  if (typeof (raw.min_decisions_for_suggestion ?? raw.minDecisionsForSuggestion) === "number") {
+    result.minDecisionsForSuggestion = (raw.min_decisions_for_suggestion ?? raw.minDecisionsForSuggestion) as number;
+  }
+  if (typeof (raw.min_approval_rate ?? raw.minApprovalRate) === "number") {
+    result.minApprovalRate = (raw.min_approval_rate ?? raw.minApprovalRate) as number;
+  }
+  return result;
+}
+
+function normalizeContextConfig(raw: Record<string, unknown>): ContextConfig {
+  const result: ContextConfig = {};
+  if (typeof (raw.default_budget_chars ?? raw.defaultBudgetChars) === "number") {
+    result.defaultBudgetChars = (raw.default_budget_chars ?? raw.defaultBudgetChars) as number;
+  }
+  return result;
+}
+
+function normalizeMemorySystemConfig(raw: Record<string, unknown>): MemoryConfig {
+  const result: MemoryConfig = {};
+  if (typeof (raw.review_transcript_max_chars ?? raw.reviewTranscriptMaxChars) === "number") {
+    result.reviewTranscriptMaxChars = (raw.review_transcript_max_chars ?? raw.reviewTranscriptMaxChars) as number;
+  }
+  return result;
+}
+
 // --- Agent config registry ---
 // Maps agentId → { projectId, config } for runtime lookups by hooks
 
@@ -1527,6 +1642,10 @@ export type ExtendedProjectConfig = {
   telemetry?: TelemetryConfig;
   contextOwnership?: ContextOwnershipConfig;
   verification?: VerificationConfig;
+  sweep?: WorkforceConfig["sweep"];
+  trust?: WorkforceConfig["trust"];
+  context?: WorkforceConfig["context"];
+  memory?: WorkforceConfig["memory"];
 };
 const projectExtendedConfig = new Map<string, ExtendedProjectConfig>();
 
@@ -1624,7 +1743,7 @@ export function registerWorkforceConfig(
   }
 
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || effectiveEventHandlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification) {
+  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || effectiveEventHandlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification || wfConfig.sweep || wfConfig.trust || wfConfig.context || wfConfig.memory) {
     projectExtendedConfig.set(projectId, {
       policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
@@ -1643,6 +1762,10 @@ export function registerWorkforceConfig(
       telemetry: wfConfig.telemetry,
       contextOwnership: wfConfig.contextOwnership,
       verification: wfConfig.verification,
+      sweep: wfConfig.sweep,
+      trust: wfConfig.trust,
+      context: wfConfig.context,
+      memory: wfConfig.memory,
     });
   }
 }

@@ -72,18 +72,57 @@ export type TrustOverride = {
   status: "active" | "decayed" | "revoked";
 };
 
-// Categories that should NEVER auto-evolve without explicit opt-in
-const PROTECTED_CATEGORIES = new Set([
+// Default categories that should NEVER auto-evolve without explicit opt-in
+const DEFAULT_PROTECTED_CATEGORIES = new Set([
   "financial", "purchase", "transfer", "subscribe", "pay_bill",
   "security", "permission_change", "delete",
   "code:merge_pr", "code:deploy", "code:release",
 ]);
 
-// Minimum decisions before suggesting a tier adjustment
-const MIN_DECISIONS_FOR_SUGGESTION = 10;
+// Default minimum decisions before suggesting a tier adjustment
+const DEFAULT_MIN_DECISIONS_FOR_SUGGESTION = 10;
 
-// Minimum approval rate to suggest downgrade
-const MIN_APPROVAL_RATE = 0.95;
+// Default minimum approval rate to suggest downgrade
+const DEFAULT_MIN_APPROVAL_RATE = 0.95;
+
+// Default tier thresholds
+const DEFAULT_TIER_THRESHOLD_HIGH = 0.8;
+const DEFAULT_TIER_THRESHOLD_MEDIUM = 0.5;
+
+/** Resolve trust config from project config, falling back to defaults. */
+function getTrustDefaults(projectId?: string): {
+  protectedCategories: Set<string>;
+  minDecisions: number;
+  minApprovalRate: number;
+  tierThresholdHigh: number;
+  tierThresholdMedium: number;
+} {
+  try {
+    if (projectId) {
+      const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
+      const extConfig = getExtendedProjectConfig(projectId);
+      const trustConfig = extConfig?.trust;
+      if (trustConfig) {
+        return {
+          protectedCategories: trustConfig.protectedCategories
+            ? new Set(trustConfig.protectedCategories)
+            : DEFAULT_PROTECTED_CATEGORIES,
+          minDecisions: trustConfig.minDecisionsForSuggestion ?? DEFAULT_MIN_DECISIONS_FOR_SUGGESTION,
+          minApprovalRate: trustConfig.minApprovalRate ?? DEFAULT_MIN_APPROVAL_RATE,
+          tierThresholdHigh: trustConfig.tierThresholdHigh ?? DEFAULT_TIER_THRESHOLD_HIGH,
+          tierThresholdMedium: trustConfig.tierThresholdMedium ?? DEFAULT_TIER_THRESHOLD_MEDIUM,
+        };
+      }
+    }
+  } catch { /* project module may not be available */ }
+  return {
+    protectedCategories: DEFAULT_PROTECTED_CATEGORIES,
+    minDecisions: DEFAULT_MIN_DECISIONS_FOR_SUGGESTION,
+    minApprovalRate: DEFAULT_MIN_APPROVAL_RATE,
+    tierThresholdHigh: DEFAULT_TIER_THRESHOLD_HIGH,
+    tierThresholdMedium: DEFAULT_TIER_THRESHOLD_MEDIUM,
+  };
+}
 
 // --- Core functions ---
 
@@ -142,7 +181,8 @@ export function recordTrustDecision(
   // Telemetry: snapshot trust score after this decision
   try {
     const { snapshotTrustScore } = require("../telemetry/trust-history.js") as typeof import("../telemetry/trust-history.js");
-    const tier = trustAfter > 0.8 ? "high" : trustAfter > 0.5 ? "medium" : "low";
+    const trustDefaults = getTrustDefaults(params.projectId);
+    const tier = trustAfter > trustDefaults.tierThresholdHigh ? "high" : trustAfter > trustDefaults.tierThresholdMedium ? "medium" : "low";
     snapshotTrustScore({
       projectId: params.projectId,
       agentId: params.agentId,
@@ -273,16 +313,17 @@ export function suggestTierAdjustments(
 ): TierSuggestion[] {
   const stats = getAllCategoryStats(projectId, dbOverride);
   const suggestions: TierSuggestion[] = [];
+  const trustDefaults = getTrustDefaults(projectId);
 
   for (const stat of stats) {
     // Skip protected categories
-    if (isProtectedCategory(stat.category)) continue;
+    if (isProtectedCategory(stat.category, projectId)) continue;
 
     // Skip categories with too few decisions
-    if (stat.totalDecisions < MIN_DECISIONS_FOR_SUGGESTION) continue;
+    if (stat.totalDecisions < trustDefaults.minDecisions) continue;
 
     // Skip categories with low approval rate
-    if (stat.approvalRate < MIN_APPROVAL_RATE) continue;
+    if (stat.approvalRate < trustDefaults.minApprovalRate) continue;
 
     const currentTier = currentTiers[stat.category];
     if (!currentTier) continue;
@@ -306,10 +347,11 @@ export function suggestTierAdjustments(
 /**
  * Check if a category is protected from auto-evolution.
  */
-export function isProtectedCategory(category: string): boolean {
-  if (PROTECTED_CATEGORIES.has(category)) return true;
+export function isProtectedCategory(category: string, projectId?: string): boolean {
+  const { protectedCategories } = getTrustDefaults(projectId);
+  if (protectedCategories.has(category)) return true;
   // Also protect any category starting with a protected prefix
-  for (const p of PROTECTED_CATEGORIES) {
+  for (const p of protectedCategories) {
     if (category.startsWith(p + ":")) return true;
   }
   return false;
@@ -477,7 +519,7 @@ export function renderTrustSummary(
     const pct = Math.round(stat.approvalRate * 100);
     const override = overrideMap.get(stat.category);
     const overrideTag = override ? ` (override: ${override.originalTier} -> ${override.overrideTier})` : "";
-    const protectedTag = isProtectedCategory(stat.category) ? " [protected]" : "";
+    const protectedTag = isProtectedCategory(stat.category, projectId) ? " [protected]" : "";
 
     lines.push(
       `- **${stat.category}**: ${pct}% approval (${stat.approved}/${stat.totalDecisions})${overrideTag}${protectedTag}`,

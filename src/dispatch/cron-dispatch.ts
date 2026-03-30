@@ -6,8 +6,12 @@
  * tracking, enforcement). Replaces the old CLI-spawn path.
  */
 
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import { safeLog } from "../diagnostics.js";
 import { getCronService, toCronJobCreate, type ManagerCronJob } from "../manager-cron.js";
+
+const execFile = promisify(execFileCb);
 
 export type CronDispatchResult = {
   ok: boolean;
@@ -20,11 +24,25 @@ export type CronDispatchResult = {
  * gateway method via WebSocket RPC. The gateway method handler has access
  * to context.cron and will call setCronService().
  *
- * Returns true if cron service is now available.
+ * This is needed because worker sessions run in isolated processes where
+ * setCronService() has never been called — only the main gateway process
+ * has context.cron. The gateway RPC handler captures it and makes it
+ * available in-process.
+ *
+ * Returns true if cron service is now available after the bootstrap call.
  */
 async function tryBootstrapCron(): Promise<boolean> {
-  // Cron is now auto-captured on gateway_start via clawforce.dispatch RPC.
-  // This function just checks if it's available yet.
+  // Already available — no bootstrap needed
+  if (getCronService() !== null) return true;
+
+  try {
+    await execFile("openclaw", ["gateway", "call", "clawforce.bootstrap"], { timeout: 10_000 });
+    // Brief wait for the gateway handler to execute setCronService()
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } catch (err) {
+    safeLog("cron-dispatch.tryBootstrapCron", err);
+  }
+
   return getCronService() !== null;
 }
 

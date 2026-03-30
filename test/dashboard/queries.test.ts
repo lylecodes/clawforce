@@ -1,4 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // Mock all downstream dependencies
 vi.mock("../../src/lifecycle.js", () => ({
@@ -134,6 +137,7 @@ const {
   queryPolicies, querySlos, queryAlerts, queryOrgChart, queryHealth,
   queryAuditLog, queryAuditRuns, queryEnforcementRetries,
   queryOnboardingState, queryTrackedSessions, queryWorkerAssignments,
+  readContextFile, writeContextFile,
 } = await import("../../src/dashboard/queries.js");
 
 describe("queryProjects", () => {
@@ -424,5 +428,31 @@ describe("queryWorkerAssignments", () => {
     expect(result.assignments).toHaveLength(1);
     expect(result.count).toBe(1);
     expect(result.assignments[0]).toMatchObject({ agentId: "agent-dev", taskId: "t1" });
+  });
+});
+
+describe("context file queries", () => {
+  it("writes then reads a context file (round-trip)", () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-context-"));
+    const relativePath = "DIRECTION.md";
+
+    writeContextFile(projectDir, relativePath, "# direction\nship it");
+    const result = readContextFile(projectDir, relativePath);
+
+    expect(result.path).toBe(relativePath);
+    expect(result.content).toBe("# direction\nship it");
+    expect(result.lastModified).toBeGreaterThan(0);
+  });
+
+  it("rejects path traversal attempts", () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-context-"));
+
+    expect(() => readContextFile(projectDir, "../etc/passwd")).toThrow(/Path traversal/i);
+    expect(() => writeContextFile(projectDir, "../etc/passwd", "nope")).toThrow(/Path traversal/i);
+  });
+
+  it("throws when reading a non-existent file", () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-context-"));
+    expect(() => readContextFile(projectDir, "MISSING.md")).toThrow(/File not found/i);
   });
 });

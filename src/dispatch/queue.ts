@@ -83,10 +83,21 @@ export function enqueue(
   const now = Date.now();
 
   const prio = priority ?? 2;
+
+  // Read max dispatch attempts from config, fall back to default 3
+  let effectiveMaxDispatchAttempts = 3;
+  try {
+    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
+    const extConfig = getExtendedProjectConfig(projectId);
+    if (extConfig?.dispatch?.maxDispatchAttempts != null) {
+      effectiveMaxDispatchAttempts = extConfig.dispatch.maxDispatchAttempts;
+    }
+  } catch { /* project module may not be available during bootstrap */ }
+
   db.prepare(`
     INSERT INTO dispatch_queue (id, project_id, task_id, priority, payload, status, dispatch_attempts, max_dispatch_attempts, risk_tier, created_at)
-    VALUES (?, ?, ?, ?, ?, 'queued', 0, 3, ?, ?)
-  `).run(id, projectId, taskId, prio, payload ? JSON.stringify(payload) : null, riskTier ?? null, now);
+    VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
+  `).run(id, projectId, taskId, prio, payload ? JSON.stringify(payload) : null, effectiveMaxDispatchAttempts, riskTier ?? null, now);
 
   try {
     recordMetric({ projectId, type: "dispatch", subject: taskId, key: "queue_enqueue", value: 1, tags: { priority: prio, queueItemId: id } }, db);
@@ -119,7 +130,17 @@ export function claimNext(
 ): DispatchQueueItem | null {
   const db = dbOverride ?? getDb(projectId);
   const now = Date.now();
-  const expiresAt = now + (leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS);
+
+  // Read queue lease from config, fall back to parameter, then default
+  let effectiveLeaseDuration = leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
+  try {
+    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
+    const extConfig = getExtendedProjectConfig(projectId);
+    if (extConfig?.dispatch?.queueLeaseMs != null && leaseDurationMs == null) {
+      effectiveLeaseDuration = extConfig.dispatch.queueLeaseMs;
+    }
+  } catch { /* project module may not be available during bootstrap */ }
+  const expiresAt = now + effectiveLeaseDuration;
   const holder = leasedBy ?? `dispatcher:${process.pid}`;
 
   // Find the next queued item

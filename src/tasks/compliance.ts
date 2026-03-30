@@ -115,13 +115,29 @@ export function enforceWorkerCompliance(
     return false;
   }
 
+  // Read non-compliance action from config, default to BLOCKED
+  let nonComplianceAction: "BLOCKED" | "REVIEW" | "FAILED" | "alert_only" = "BLOCKED";
+  try {
+    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
+    const extConfig = getExtendedProjectConfig(entry.projectId);
+    if (extConfig?.lifecycle?.workerNonComplianceAction) {
+      nonComplianceAction = extConfig.lifecycle.workerNonComplianceAction;
+    }
+  } catch { /* project module may not be available */ }
+
+  if (nonComplianceAction === "alert_only") {
+    // Just clean up tracking — no state transition
+    trackedWorkers.delete(sessionKey);
+    return true;
+  }
+
   const result = transitionTask(
     {
       projectId: entry.projectId,
       taskId: entry.taskId,
-      toState: "BLOCKED",
+      toState: nonComplianceAction,
       actor: "system:compliance",
-      reason: "Worker completed without transitioning task",
+      reason: `Worker completed without transitioning task (action: ${nonComplianceAction})`,
       verificationRequired: false,
     },
     dbOverride,

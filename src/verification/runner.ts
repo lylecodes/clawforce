@@ -33,17 +33,18 @@ export type VerificationRunResult = {
 export function runVerificationGates(
   gates: VerificationGate[],
   workingDir: string,
-  options?: { totalTimeoutMs?: number },
+  options?: { totalTimeoutMs?: number; defaultGateTimeoutSeconds?: number },
 ): VerificationRunResult {
   const startTime = Date.now();
   const totalTimeout = options?.totalTimeoutMs ?? 300_000;
+  const defaultGateTimeout = options?.defaultGateTimeoutSeconds ?? 120;
   const results: GateResult[] = [];
 
   for (const gate of gates) {
     if (Date.now() - startTime > totalTimeout) break;
 
     const gateStart = Date.now();
-    const timeoutMs = (gate.timeout_seconds ?? 120) * 1000;
+    const timeoutMs = (gate.timeout_seconds ?? defaultGateTimeout) * 1000;
     const required = gate.required !== false;
     let stdout = "";
     let stderr = "";

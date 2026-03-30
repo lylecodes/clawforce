@@ -88,9 +88,13 @@ function sweepDedupKey(prefix: string, id: string, now: number): string {
 export async function sweep(options: SweepOptions): Promise<SweepResult> {
   const { projectId, dbOverride } = options;
   const db = dbOverride ?? getDb(projectId);
-  const staleThreshold = options.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
-  const proposalTtl = options.proposalTtlMs ?? DEFAULT_PROPOSAL_TTL_MS;
-  const staleDispatchTimeout = options.staleDispatchTimeoutMs ?? DEFAULT_STALE_DISPATCH_TIMEOUT_MS;
+
+  // Read sweep config from domain yaml, falling back to options, then defaults
+  const extConfig = getExtendedProjectConfig(projectId);
+  const sweepConfig = extConfig?.sweep;
+  const staleThreshold = options.staleThresholdMs ?? sweepConfig?.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
+  const proposalTtl = options.proposalTtlMs ?? sweepConfig?.proposalTtlMs ?? DEFAULT_PROPOSAL_TTL_MS;
+  const staleDispatchTimeout = options.staleDispatchTimeoutMs ?? sweepConfig?.staleDispatchTimeoutMs ?? DEFAULT_STALE_DISPATCH_TIMEOUT_MS;
   const now = Date.now();
 
   let stale = 0;

@@ -239,6 +239,15 @@ function executeDispatchAgent(
 /** Find an agent by role (extends preset) for a project. */
 export function findAgentByRole(projectId: string, role: string): string | undefined {
   try {
+    // Read configurable role aliases, merge with built-in defaults
+    const extConfig = getExtendedProjectConfig(projectId);
+    const BUILTIN_ALIASES: Record<string, string> = { lead: "manager", worker: "employee" };
+    const configAliases = extConfig?.dispatch?.roleAliases ?? {};
+    const roleAliases = { ...BUILTIN_ALIASES, ...configAliases };
+
+    // Resolve the role through aliases (e.g. "lead" → "manager", "supervisor" → "manager")
+    const resolvedRole = roleAliases[role] ?? role;
+
     const agentIds = getRegisteredAgentIds();
     for (const agentId of agentIds) {
       const entry = getAgentConfig(agentId);
@@ -246,15 +255,13 @@ export function findAgentByRole(projectId: string, role: string): string | undef
 
       // Match by extends preset (e.g., "lead" maps to "manager", "worker" maps to "employee")
       const preset = entry.config.extends;
-      if (preset === role) return agentId;
+      if (preset === resolvedRole) return agentId;
 
-      // Common role aliases
-      if (role === "lead" && (preset === "manager" || entry.config.coordination?.enabled)) return agentId;
-      if (role === "worker" && preset === "employee") return agentId;
-      if (role === "verifier" && preset === "verifier") return agentId;
+      // Also match original role name against coordination-enabled agents
+      if (resolvedRole === "manager" && entry.config.coordination?.enabled) return agentId;
 
       // Match by explicit role field if present
-      if ((entry.config as Record<string, unknown>).role === role) return agentId;
+      if ((entry.config as Record<string, unknown>).role === resolvedRole) return agentId;
     }
   } catch { /* project module not available */ }
   return undefined;

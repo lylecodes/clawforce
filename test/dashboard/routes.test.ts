@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleRequest } from "../../src/dashboard/routes.js";
+import { readContextFile, writeContextFile, updateBudgetLimit, ContextFileError } from "../../src/dashboard/queries.js";
 
 // Mock all the query dependencies to avoid needing a real database
 vi.mock("../../src/dashboard/queries.js", () => ({
@@ -38,6 +39,34 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryOnboardingState: vi.fn(() => ({ entries: [], count: 0 })),
   queryTrackedSessions: vi.fn(() => ({ sessions: [], total: 0, count: 0, limit: 50, offset: 0 })),
   queryWorkerAssignments: vi.fn(() => ({ assignments: [], count: 0 })),
+  queryExperiments: vi.fn(() => ({ experiments: [], count: 0 })),
+  queryKnowledge: vi.fn(() => ({ knowledge: [], count: 0, total: 0 })),
+  queryKnowledgeFlags: vi.fn(() => ({ flags: [], count: 0, total: 0 })),
+  queryPromotionCandidates: vi.fn(() => ({ candidates: [], count: 0, total: 0 })),
+  queryQueueStatus: vi.fn(() => ({ queued: 0 })),
+  queryToolCalls: vi.fn(() => ({ toolCalls: [], count: 0, hasMore: false })),
+  queryConfigVersions: vi.fn(() => ({ versions: [], count: 0 })),
+  queryManagerReviews: vi.fn(() => ({ reviews: [], count: 0 })),
+  queryTrustDecisions: vi.fn(() => ({ decisions: [], count: 0 })),
+  queryPolicyViolations: vi.fn(() => ({ violations: [], count: 0 })),
+  queryWorkStreams: vi.fn(() => ({ workStreams: [], count: 0 })),
+  queryUserInbox: vi.fn(() => ({ messages: [], count: 0 })),
+  readContextFile: vi.fn(() => ({ content: "hello", path: "DIRECTION.md", lastModified: 123 })),
+  writeContextFile: vi.fn(() => ({ ok: true })),
+  updateBudgetLimit: vi.fn(() => ({ ok: true, previousLimit: 25000, newLimit: 50000 })),
+  ContextFileError: class ContextFileError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.status = status;
+    }
+  },
+}));
+
+vi.mock("../../src/project.js", () => ({
+  getExtendedProjectConfig: vi.fn(() => null),
+  getRegisteredAgentIds: vi.fn(() => ["agent1"]),
+  getAgentConfig: vi.fn(() => ({ projectId: "proj1", projectDir: "/tmp/proj1" })),
 }));
 
 describe("dashboard routes", () => {
@@ -168,5 +197,67 @@ describe("dashboard routes", () => {
   it("GET /api/projects/:id/worker-assignments returns assignments", () => {
     const result = handleRequest("/api/projects/proj1/worker-assignments", {});
     expect(result.status).toBe(200);
+  });
+
+  it("GET /api/projects/:id/context-files returns file content", () => {
+    const result = handleRequest("/api/projects/proj1/context-files", { path: "DIRECTION.md" });
+    expect(result.status).toBe(200);
+    expect(readContextFile).toHaveBeenCalledWith("/tmp/proj1", "DIRECTION.md");
+    expect(result.body).toEqual({ content: "hello", path: "DIRECTION.md", lastModified: 123 });
+  });
+
+  it("POST /api/projects/:id/context-files writes file", () => {
+    const result = handleRequest(
+      "/api/projects/proj1/context-files",
+      {},
+      "POST",
+      { path: "SOUL.md", content: "updated" },
+    );
+
+    expect(result.status).toBe(200);
+    expect(writeContextFile).toHaveBeenCalledWith("/tmp/proj1", "SOUL.md", "updated");
+    expect(result.body).toEqual({ ok: true });
+  });
+
+  it("GET /api/projects/:id/context-files returns 403 on traversal", () => {
+    vi.mocked(readContextFile).mockImplementationOnce(() => {
+      throw new ContextFileError("Path traversal is not allowed", 403);
+    });
+
+    const result = handleRequest("/api/projects/proj1/context-files", { path: "../etc/passwd" });
+    expect(result.status).toBe(403);
+  });
+
+  it("GET /api/projects/:id/context-files returns 404 for missing file", () => {
+    vi.mocked(readContextFile).mockImplementationOnce(() => {
+      throw new ContextFileError("File not found", 404);
+    });
+
+    const result = handleRequest("/api/projects/proj1/context-files", { path: "MISSING.md" });
+    expect(result.status).toBe(404);
+  });
+
+  it("POST /api/projects/:id/budget updates daily budget limit", () => {
+    const result = handleRequest(
+      "/api/projects/proj1/budget",
+      {},
+      "POST",
+      { dailyLimitCents: 50000 },
+    );
+
+    expect(result.status).toBe(200);
+    expect(updateBudgetLimit).toHaveBeenCalledWith("proj1", 50000);
+    expect(result.body).toEqual({ ok: true, previousLimit: 25000, newLimit: 50000 });
+  });
+
+  it("POST /api/projects/:id/budget rejects invalid limits", () => {
+    const zero = handleRequest("/api/projects/proj1/budget", {}, "POST", { dailyLimitCents: 0 });
+    expect(zero.status).toBe(400);
+
+    const negative = handleRequest("/api/projects/proj1/budget", {}, "POST", { dailyLimitCents: -1 });
+    expect(negative.status).toBe(400);
+
+    const tooLarge = handleRequest("/api/projects/proj1/budget", {}, "POST", { dailyLimitCents: 100001 });
+    expect(tooLarge.status).toBe(400);
   });
 });

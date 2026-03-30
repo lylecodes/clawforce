@@ -52,6 +52,11 @@ vi.mock("../../src/dashboard/sse.js", () => ({
   })),
 }));
 
+vi.mock("../../src/diagnostics.js", () => ({
+  safeLog: vi.fn(),
+  emitDiagnosticEvent: vi.fn(),
+}));
+
 const { createDashboardHandler } = await import("../../src/dashboard/gateway-routes.js");
 const {
   queryAgents, queryDashboardSummary, querySessions,
@@ -61,7 +66,7 @@ const {
 const { handleAction } = await import("../../src/dashboard/actions.js");
 const { getSSEManager } = await import("../../src/dashboard/sse.js");
 
-function createMockRequest(method: string, urlStr: string, body?: Record<string, unknown>): {
+function createMockRequest(method: string, urlStr: string, body?: Record<string, unknown>, extraHeaders?: Record<string, string>): {
   req: IncomingMessage;
   res: ServerResponse & { statusCode: number; bodyData: string };
 } {
@@ -69,7 +74,8 @@ function createMockRequest(method: string, urlStr: string, body?: Record<string,
   const req = {
     method,
     url: urlStr,
-    headers: { host: "localhost" },
+    headers: { host: "localhost", ...extraHeaders },
+    socket: { remoteAddress: "127.0.0.1" },
     on(event: string, handler: Function) {
       if (!handlers[event]) handlers[event] = [];
       handlers[event]!.push(handler);
@@ -124,14 +130,14 @@ describe("createDashboardHandler", () => {
   });
 
   it("handles OPTIONS preflight", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("OPTIONS", "/clawforce/api/test/agents");
     await handler(req, res);
     expect(res.writeHead).toHaveBeenCalledWith(204);
   });
 
   it("routes GET /clawforce/api/:domain/agents to queryAgents", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents");
     await handler(req, res);
     expect(queryAgents).toHaveBeenCalledWith("test-project");
@@ -139,7 +145,7 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain to dashboard summary", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project");
     await handler(req, res);
     expect(queryDashboardSummary).toHaveBeenCalledWith("test-project");
@@ -147,35 +153,35 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain/dashboard to dashboard summary", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/dashboard");
     await handler(req, res);
     expect(queryDashboardSummary).toHaveBeenCalledWith("test-project");
   });
 
   it("routes POST /clawforce/api/:domain/approvals/p1/approve to action handler", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/approvals/p1/approve", {});
     await handler(req, res);
     expect(handleAction).toHaveBeenCalledWith("test-project", "approvals/p1/approve", {});
   });
 
   it("routes GET /clawforce/api/sse?domain=test-project to SSE handler", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/sse?domain=test-project");
     await handler(req, res);
     expect(getSSEManager).toHaveBeenCalled();
   });
 
   it("returns 400 for SSE without domain", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/sse");
     await handler(req, res);
     expect(res.statusCode).toBe(400);
   });
 
   it("routes GET /clawforce/api/:domain/sessions with pagination", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/sessions?limit=25&offset=10");
     await handler(req, res);
     expect(querySessions).toHaveBeenCalledWith("test-project", { limit: 25, offset: 10 });
@@ -183,49 +189,49 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain/budget to budget status", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/budget");
     await handler(req, res);
     expect(res.statusCode).toBe(200);
   });
 
   it("routes GET /clawforce/api/:domain/budget/forecast to budget forecast", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/budget/forecast");
     await handler(req, res);
     expect(res.statusCode).toBe(200);
   });
 
   it("routes GET /clawforce/api/:domain/trust to trust scores", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/trust");
     await handler(req, res);
     expect(res.statusCode).toBe(200);
   });
 
   it("routes GET /clawforce/api/:domain/config to queryConfig", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/config");
     await handler(req, res);
     expect(res.statusCode).toBe(200);
   });
 
   it("routes GET /clawforce/api/:domain/approvals to queryApprovals", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/approvals?status=pending");
     await handler(req, res);
     expect(res.statusCode).toBe(200);
   });
 
   it("routes GET /clawforce/api/:domain/meetings to queryMeetings", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/meetings");
     await handler(req, res);
     expect(res.statusCode).toBe(200);
   });
 
   it("routes GET /clawforce/api/:domain/audit-log to queryAuditLog", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/audit-log?limit=25&offset=0");
     await handler(req, res);
     expect(queryAuditLog).toHaveBeenCalledWith("test-project", { actor: undefined, action: undefined, targetType: undefined }, { limit: 25, offset: 0 });
@@ -233,7 +239,7 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain/audit-runs to queryAuditRuns", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/audit-runs?agent=bot1");
     await handler(req, res);
     expect(queryAuditRuns).toHaveBeenCalledWith("test-project", { agentId: "bot1", status: undefined }, { limit: undefined, offset: undefined });
@@ -241,7 +247,7 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain/enforcement-retries to queryEnforcementRetries", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/enforcement-retries");
     await handler(req, res);
     expect(queryEnforcementRetries).toHaveBeenCalledWith("test-project", { agentId: undefined }, { limit: undefined, offset: undefined });
@@ -249,7 +255,7 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain/onboarding to queryOnboardingState", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/onboarding");
     await handler(req, res);
     expect(queryOnboardingState).toHaveBeenCalledWith("test-project");
@@ -257,7 +263,7 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain/tracked-sessions to queryTrackedSessions", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/tracked-sessions");
     await handler(req, res);
     expect(queryTrackedSessions).toHaveBeenCalledWith("test-project", { limit: undefined, offset: undefined });
@@ -265,7 +271,7 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/:domain/worker-assignments to queryWorkerAssignments", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/worker-assignments");
     await handler(req, res);
     expect(queryWorkerAssignments).toHaveBeenCalledWith("test-project");
@@ -273,23 +279,77 @@ describe("createDashboardHandler", () => {
   });
 
   it("returns 404 for unknown resource", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/unknown");
     await handler(req, res);
     expect(res.statusCode).toBe(404);
   });
 
   it("returns 404 for non-clawforce path when no static dir", async () => {
-    const handler = createDashboardHandler({});
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce");
     await handler(req, res);
     expect(res.statusCode).toBe(404);
   });
 
-  it("sets CORS headers", async () => {
-    const handler = createDashboardHandler({});
+  it("sets CORS method and header headers", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents");
     await handler(req, res);
-    expect(res.setHeader).toHaveBeenCalledWith("Access-Control-Allow-Origin", "*");
+    expect(res.setHeader).toHaveBeenCalledWith("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    expect(res.setHeader).toHaveBeenCalledWith("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  });
+
+  it("reflects localhost origin in CORS", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents", undefined, { origin: "http://localhost:5173" });
+    await handler(req, res);
+    expect(res.setHeader).toHaveBeenCalledWith("Access-Control-Allow-Origin", "http://localhost:5173");
+  });
+
+  it("does not set CORS Allow-Origin for external origins", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents", undefined, { origin: "https://evil.com" });
+    await handler(req, res);
+    // Should not have set Allow-Origin for evil.com
+    const setHeaderCalls = (res.setHeader as ReturnType<typeof vi.fn>).mock.calls;
+    const originCalls = setHeaderCalls.filter((c: unknown[]) => c[0] === "Access-Control-Allow-Origin");
+    expect(originCalls).toHaveLength(0);
+  });
+
+  it("allows configured CORS origins", async () => {
+    const handler = createDashboardHandler({
+      auth: { skipAuth: true },
+      allowedOrigins: ["https://my-app.example.com"],
+    });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents", undefined, { origin: "https://my-app.example.com" });
+    await handler(req, res);
+    expect(res.setHeader).toHaveBeenCalledWith("Access-Control-Allow-Origin", "https://my-app.example.com");
+  });
+
+  it("enforces auth when not skipped — rejects non-localhost without token", async () => {
+    const handler = createDashboardHandler({});
+    const handlers: Record<string, Function[]> = {};
+    const req = {
+      method: "GET",
+      url: "/clawforce/api/test-project/agents",
+      headers: { host: "localhost" },
+      socket: { remoteAddress: "192.168.1.50" },
+      on(event: string, handler: Function) {
+        if (!handlers[event]) handlers[event] = [];
+        handlers[event]!.push(handler);
+        return req;
+      },
+    } as unknown as IncomingMessage;
+    const { res } = createMockRequest("GET", "/clawforce/api/test-project/agents");
+    await handler(req, res);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("enforces auth when not skipped — allows with valid token", async () => {
+    const handler = createDashboardHandler({ auth: { token: "mytoken" } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents", undefined, { authorization: "Bearer mytoken" });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
   });
 });

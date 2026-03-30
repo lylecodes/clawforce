@@ -71,7 +71,19 @@ export function assembleContext(
   opts?: { projectId?: string; projectDir?: string; budgetChars?: number; sessionKey?: string },
 ): string {
   const ctx: AssemblerContext = { agentId, config, projectId: opts?.projectId, projectDir: opts?.projectDir };
-  const budgetChars = opts?.budgetChars ?? config.contextBudgetChars ?? 15_000;
+
+  // Read default budget from project config, fall back to agent config, then hardcoded default
+  let defaultBudgetChars = 15_000;
+  if (opts?.projectId) {
+    try {
+      const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
+      const extConfig = getExtendedProjectConfig(opts.projectId);
+      if (extConfig?.context?.defaultBudgetChars != null) {
+        defaultBudgetChars = extConfig.context.defaultBudgetChars;
+      }
+    } catch { /* project module may not be available */ }
+  }
+  const budgetChars = opts?.budgetChars ?? config.contextBudgetChars ?? defaultBudgetChars;
   const sessionKey = opts?.sessionKey;
   const sections: string[] = [];
 

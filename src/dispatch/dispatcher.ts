@@ -204,6 +204,9 @@ export async function dispatchLoop(
   const extConfig = getExtendedProjectConfig(projectId);
   const dispatchConfig = extConfig?.dispatch;
 
+  // Apply global max concurrency from config if set
+  const effectiveMaxConcurrency = dispatchConfig?.globalMaxConcurrency ?? globalMaxConcurrency;
+
   // Use DB-based active count for global ceiling (resilient to process restarts)
   const getGlobalActiveCount = () => {
     const row = db.prepare(
@@ -212,7 +215,7 @@ export async function dispatchLoop(
     return (row.cnt as number) ?? 0;
   };
 
-  while (getGlobalActiveCount() < globalMaxConcurrency) {
+  while (getGlobalActiveCount() < effectiveMaxConcurrency) {
     // Check project-level limits before claiming
     const projectLimitReason = checkProjectLimits(projectId, dispatchConfig, db);
     if (projectLimitReason) {
@@ -550,7 +553,9 @@ async function dispatchItem(
 
   // Acquire task lease (long lease — released in agent_end hook)
   const holder = `dispatch:${item.id}`;
-  const leaseOk = acquireTaskLease(projectId, item.taskId, holder, TASK_LEASE_MS, db);
+  const itemDispatchConfig = getExtendedProjectConfig(projectId)?.dispatch;
+  const effectiveTaskLeaseMs = itemDispatchConfig?.taskLeaseMs ?? TASK_LEASE_MS;
+  const leaseOk = acquireTaskLease(projectId, item.taskId, holder, effectiveTaskLeaseMs, db);
   if (!leaseOk) {
     failItem(item.id, "Could not acquire task lease — another agent holds it", db, projectId);
     emitDispatchEvent(projectId, "dispatch_failed", item, { error: "Could not acquire task lease" }, db);

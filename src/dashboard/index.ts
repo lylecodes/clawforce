@@ -35,3 +35,5 @@ export type { SSEEventType } from "./sse.js";
 export { handleAction } from "./actions.js";
 export { createDashboardHandler } from "./gateway-routes.js";
 export type { DashboardHandlerOptions } from "./gateway-routes.js";
+export { checkAuth, setCorsHeaders, checkRateLimit, resetRateLimits, isLocalhost } from "./auth.js";
+export type { AuthOptions } from "./auth.js";

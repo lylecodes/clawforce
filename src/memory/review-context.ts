@@ -29,8 +29,19 @@ const AGGRESSIVENESS_GUIDANCE: Record<string, string> = {
 /**
  * Build the full review context for the memory review job.
  */
-export function buildReviewContext(opts: ReviewContextOpts): string {
-  const maxChars = opts.maxTranscriptChars ?? 50_000;
+export function buildReviewContext(opts: ReviewContextOpts & { projectId?: string }): string {
+  // Read memory config for review transcript budget
+  let defaultMaxChars = 50_000;
+  if (opts.projectId) {
+    try {
+      const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
+      const extConfig = getExtendedProjectConfig(opts.projectId);
+      if (extConfig?.memory?.reviewTranscriptMaxChars != null) {
+        defaultMaxChars = extConfig.memory.reviewTranscriptMaxChars;
+      }
+    } catch { /* project module may not be available */ }
+  }
+  const maxChars = opts.maxTranscriptChars ?? defaultMaxChars;
   const sections: string[] = [];
 
   // Header

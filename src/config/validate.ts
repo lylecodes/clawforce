@@ -35,6 +35,13 @@ const KNOWN_GLOBAL_KEYS = new Set([
   "version", "project_id", "name", "description", "project_dir",
   "agents", "domains", "defaults", "budget", "telemetry", "profiles",
   "team_templates", "mixins",
+  "sweep", "trust", "context", "memory",
+  "dispatch", "lifecycle", "verification",
+  "approval", "budgets", "policies", "monitoring", "risk_tiers",
+  "skills", "skill_packs", "assignment", "event_handlers", "triggers",
+  "review", "channels", "safety", "goals", "knowledge",
+  "bootstrap_defaults", "manager", "orchestrator",
+  "manager_behavior", "context_ownership",
 ]);
 
 const KNOWN_AGENT_KEYS = new Set([
@@ -50,6 +57,8 @@ const KNOWN_DOMAIN_KEYS = new Set([
   "agents", "manager", "worker_agents", "paths", "defaults",
   "manager_overrides", "orchestrator", "dispatch", "verification",
   "role_defaults", "team_templates",
+  "sweep", "trust", "context", "memory",
+  "lifecycle",
 ]);
 
 // --- Core ---

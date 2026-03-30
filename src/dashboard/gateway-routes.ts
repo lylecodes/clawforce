@@ -14,6 +14,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { handleAction, handleDemoCreate } from "./actions.js";
 import { getSSEManager } from "./sse.js";
+import { checkAuth, setCorsHeaders, checkRateLimit } from "./auth.js";
+import type { AuthOptions } from "./auth.js";
+import { safeLog } from "../diagnostics.js";
 import {
   queryAgents,
   queryAgentDetail,
@@ -81,6 +84,10 @@ export type DashboardHandlerOptions = {
   staticDir?: string;
   /** Function to inject a message into an agent session */
   injectAgentMessage?: (params: { sessionKey: string; message: string }) => Promise<{ runId?: string }>;
+  /** Authentication options. When used inside a gateway plugin, set skipAuth=true to let the gateway handle auth. */
+  auth?: AuthOptions & { skipAuth?: boolean };
+  /** Allowed CORS origins. Defaults to localhost-only. */
+  allowedOrigins?: string[];
 };
 
 /**
@@ -91,15 +98,25 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
 
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    // CORS — origin-validated (localhost by default, configurable)
+    setCorsHeaders(req, res, options.allowedOrigins);
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
       return;
+    }
+
+    // Determine if we need to apply auth / rate-limiting.
+    // Static file serving (non-API) is exempt from auth.
+    const isApiRequest = url.pathname.startsWith("/clawforce/api/");
+
+    if (isApiRequest && !options.auth?.skipAuth) {
+      // Rate limit check
+      if (!checkRateLimit(req, res)) return;
+
+      // Auth check
+      if (!checkAuth(req, res, options.auth ?? {})) return;
     }
 
     // SSE endpoint: /clawforce/api/sse?domain=<id>
@@ -485,7 +502,7 @@ function routeRead(
     }
 
     default:
-      return notFound(`Unknown resource: ${topResource}`);
+      return notFound("Unknown resource");
   }
 }
 

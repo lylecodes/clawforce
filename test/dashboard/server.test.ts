@@ -1,5 +1,11 @@
-import { describe, expect, it, vi, afterAll } from "vitest";
+import { describe, expect, it, vi, afterAll, beforeEach } from "vitest";
 import { createDashboardServer } from "../../src/dashboard/server.js";
+import { resetRateLimits } from "../../src/dashboard/auth.js";
+
+vi.mock("../../src/diagnostics.js", () => ({
+  safeLog: vi.fn(),
+  emitDiagnosticEvent: vi.fn(),
+}));
 
 // Mock gateway-routes handler so we don't need a real database
 vi.mock("../../src/dashboard/gateway-routes.js", () => ({
@@ -32,7 +38,12 @@ function fetch(url: string, opts?: RequestInit) {
 describe("createDashboardServer", () => {
   const instances: Array<{ stop(): Promise<void> }> = [];
 
+  beforeEach(() => {
+    resetRateLimits();
+  });
+
   afterAll(async () => {
+    resetRateLimits();
     for (const inst of instances) {
       await inst.stop();
     }
@@ -55,10 +66,28 @@ describe("createDashboardServer", () => {
     expect(body.tier).toBe("GREEN");
   });
 
-  it("sets CORS headers", async () => {
+  it("sets CORS headers for localhost origin", async () => {
+    const { port } = await startServer({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { Origin: `http://127.0.0.1:${port}` },
+    });
+    expect(res.headers.get("access-control-allow-origin")).toBe(`http://127.0.0.1:${port}`);
+  });
+
+  it("sets CORS headers for configured origin", async () => {
     const { port } = await startServer({ port: 0, corsOrigin: "https://example.com" });
-    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { Origin: "https://example.com" },
+    });
     expect(res.headers.get("access-control-allow-origin")).toBe("https://example.com");
+  });
+
+  it("rejects non-configured CORS origins", async () => {
+    const { port } = await startServer({ port: 0, corsOrigin: "https://example.com" });
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { Origin: "https://evil.com" },
+    });
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
 
   it("handles OPTIONS preflight", async () => {
@@ -94,12 +123,26 @@ describe("createDashboardServer", () => {
     expect(goodAuth.status).toBe(200);
   });
 
-  it("returns 500 on route handler error", async () => {
+  it("returns 500 on route handler error without leaking details", async () => {
     const { port } = await startServer({ port: 0 });
     const res = await fetch(`http://127.0.0.1:${port}/api/error`);
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toBe("Internal server error");
+    // Should NOT include the detailed error message
+    expect(body.message).toBeUndefined();
+  });
+
+  it("refuses to start on non-localhost without token", () => {
+    expect(() => createDashboardServer({ port: 0, host: "0.0.0.0" })).toThrow(
+      /Refusing to start.*without authentication/
+    );
+  });
+
+  it("starts on non-localhost with token", async () => {
+    const { port, inst } = await startServer({ port: 0, host: "0.0.0.0", token: "test-token" });
+    expect(port).toBeGreaterThan(0);
+    await inst.stop();
   });
 
   it("stops cleanly", async () => {

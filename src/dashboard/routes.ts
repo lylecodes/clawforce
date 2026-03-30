@@ -16,6 +16,17 @@ function safeParseInt(value: string, defaultValue: number): number {
   return isNaN(parsed) ? defaultValue : parsed;
 }
 
+function resolveProjectDir(projectId: string): string | null {
+  const agentIds = getRegisteredAgentIds();
+  for (const agentId of agentIds) {
+    const entry = getAgentConfig(agentId);
+    if (entry?.projectId === projectId && entry.projectDir) {
+      return entry.projectDir;
+    }
+  }
+  return null;
+}
+
 const VALID_MESSAGE_STATUSES: readonly string[] = ["queued", "delivered", "read", "failed"];
 const VALID_PROTOCOL_STATUSES: readonly string[] = [
   "awaiting_response", "resolved", "pending_acceptance", "in_progress",
@@ -61,10 +72,14 @@ import {
   queryPolicyViolations,
   queryWorkStreams,
   queryUserInbox,
+  readContextFile,
+  writeContextFile,
+  updateBudgetLimit,
+  ContextFileError,
 } from "./queries.js";
 import { ingestEvent } from "../events/store.js";
 import { getDb } from "../db.js";
-import { getExtendedProjectConfig } from "../project.js";
+import { getExtendedProjectConfig, getAgentConfig, getRegisteredAgentIds } from "../project.js";
 
 export type RouteResult = {
   status: number;
@@ -204,6 +219,23 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           until: params.until ? safeParseInt(params.until, Date.now()) : undefined,
           days: params.days,
         }));
+      }
+
+      case "budget": {
+        // POST /api/projects/:id/budget { dailyLimitCents: number }
+        if (method !== "POST") {
+          return { status: 405, body: { error: "Method not allowed" } };
+        }
+
+        const rawLimit = body?.dailyLimitCents;
+        if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || !Number.isInteger(rawLimit)) {
+          return { status: 400, body: { error: "dailyLimitCents must be an integer number" } };
+        }
+        if (rawLimit <= 0 || rawLimit > 100_000) {
+          return { status: 400, body: { error: "dailyLimitCents must be > 0 and <= 100000" } };
+        }
+
+        return ok(updateBudgetLimit(projectId, rawLimit));
       }
 
       case "policies": {
@@ -404,6 +436,40 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
           since: params.since ? safeParseInt(params.since, 0) : undefined,
         }));
+      }
+
+      case "context-files": {
+        const projectDir = resolveProjectDir(projectId);
+        if (!projectDir) return notFound("Project directory not found");
+
+        if (method === "POST") {
+          if (!body || typeof body.path !== "string" || typeof body.content !== "string") {
+            return { status: 400, body: { error: "Missing required fields: path, content" } };
+          }
+
+          try {
+            return ok(writeContextFile(projectDir, body.path, body.content));
+          } catch (error) {
+            if (error instanceof ContextFileError) {
+              return { status: error.status, body: { error: error.message } };
+            }
+            return { status: 500, body: { error: "Failed to write context file" } };
+          }
+        }
+
+        const requestedPath = params.path;
+        if (!requestedPath) {
+          return { status: 400, body: { error: "Missing required query param: path" } };
+        }
+
+        try {
+          return ok(readContextFile(projectDir, requestedPath));
+        } catch (error) {
+          if (error instanceof ContextFileError) {
+            return { status: error.status, body: { error: error.message } };
+          }
+          return { status: 500, body: { error: "Failed to read context file" } };
+        }
       }
 
       default:

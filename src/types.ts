@@ -169,6 +169,42 @@ export type ClawforceConfig = {
   verificationRequired: boolean;
 };
 
+/** Sweep timing configuration — controls stale detection and proposal expiry thresholds. */
+export type SweepConfig = {
+  /** How long (ms) before a task is considered stale. Default: 14400000 (4 hours). */
+  staleThresholdMs?: number;
+  /** How long (ms) before a pending proposal is auto-expired. Default: 86400000 (24 hours). */
+  proposalTtlMs?: number;
+  /** How long (ms) a dispatched queue item can sit with no active session before recovery. Default: 600000 (10 minutes). */
+  staleDispatchTimeoutMs?: number;
+};
+
+/** Trust evolution configuration — controls tier thresholds and protected categories. */
+export type TrustConfig = {
+  /** Trust score threshold for "high" tier. Default: 0.8. */
+  tierThresholdHigh?: number;
+  /** Trust score threshold for "medium" tier. Default: 0.5. */
+  tierThresholdMedium?: number;
+  /** Categories that should never auto-evolve without explicit opt-in. */
+  protectedCategories?: string[];
+  /** Minimum number of decisions before suggesting a tier adjustment. Default: 10. */
+  minDecisionsForSuggestion?: number;
+  /** Minimum approval rate to suggest a tier downgrade. Default: 0.95. */
+  minApprovalRate?: number;
+};
+
+/** Context assembly configuration. */
+export type ContextConfig = {
+  /** Default budget in characters for context assembly when not specified per-agent. Default: 15000. */
+  defaultBudgetChars?: number;
+};
+
+/** Memory system configuration. */
+export type MemoryConfig = {
+  /** Maximum characters for review transcript content. Default: 50000. */
+  reviewTranscriptMaxChars?: number;
+};
+
 // --- Dispatch throttle types ---
 
 /** Budget pacing configuration — controls how budget is spread across the day. */
@@ -218,6 +254,16 @@ export type DispatchConfig = {
   worker?: WorkerDispatchConfig;
   /** Verifier dispatch — wake events. */
   verifier?: { wake_on?: string[] };
+  /** Global max concurrent dispatches across all projects. Default: 3. */
+  globalMaxConcurrency?: number;
+  /** Task lease duration in milliseconds. Default: 7500000 (2h 5min). */
+  taskLeaseMs?: number;
+  /** Queue lease duration in milliseconds. Default: 900000 (15 min). */
+  queueLeaseMs?: number;
+  /** Max dispatch attempts before a queue item is permanently failed. Default: 3. */
+  maxDispatchAttempts?: number;
+  /** Role aliases for agent lookup (e.g. { lead: "manager", worker: "employee" }). */
+  roleAliases?: Record<string, string>;
 };
 
 /** Strategy for automatic task assignment. */
@@ -502,6 +548,8 @@ export type LifecycleConfig = {
   evidenceTruncationLimit?: number;
   /** Trigger manager review immediately on REVIEW transition. Default: true. */
   immediateReviewDispatch?: boolean;
+  /** Action taken when a worker finishes without transitioning its task. Default: "BLOCKED". */
+  workerNonComplianceAction?: "BLOCKED" | "REVIEW" | "FAILED" | "alert_only";
 };
 
 /** Manager behavior configuration. */
@@ -565,6 +613,8 @@ export type VerificationConfig = {
   total_timeout_seconds?: number;
   parallel?: boolean;
   git?: GitIsolationConfig;
+  /** Default timeout in seconds for individual gates that don't specify their own. Default: 120. */
+  defaultGateTimeoutSeconds?: number;
 };
 
 /** Full project config with workforce management. */
@@ -657,6 +707,14 @@ export type WorkforceConfig = {
     cronSchedule?: string;
     projectDir?: string;
   };
+  /** Sweep timing configuration — stale thresholds, proposal TTL. */
+  sweep?: SweepConfig;
+  /** Trust evolution configuration — tier thresholds, protected categories. */
+  trust?: TrustConfig;
+  /** Context assembly configuration. */
+  context?: ContextConfig;
+  /** Memory system configuration. */
+  memory?: MemoryConfig;
 };
 
 // --- Goal config types ---

@@ -33,11 +33,69 @@ import { listChannels, getChannel, getChannelMessages } from "../channels/store.
 import { buildChannelTranscript } from "../channels/messages.js";
 import { getMeetingStatus } from "../channels/meeting.js";
 import { getDb } from "../db.js";
+import { writeAuditEntry } from "../audit.js";
+import fs from "node:fs";
+import path from "node:path";
 
 export type PaginationParams = {
   limit?: number;
   offset?: number;
 };
+
+export class ContextFileError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ContextFileError";
+    this.status = status;
+  }
+}
+
+function resolveContextFilePath(projectDir: string, relativePath: string): string {
+  if (!relativePath || typeof relativePath !== "string") {
+    throw new ContextFileError("Invalid path", 400);
+  }
+
+  if (path.isAbsolute(relativePath)) {
+    throw new ContextFileError("Path must be relative", 403);
+  }
+
+  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
+  if (segments.length === 0 || segments.includes("..")) {
+    throw new ContextFileError("Path traversal is not allowed", 403);
+  }
+
+  const resolvedPath = path.resolve(projectDir, relativePath);
+  const normalizedProjectDir = path.resolve(projectDir);
+  if (!resolvedPath.startsWith(normalizedProjectDir + path.sep) && resolvedPath !== normalizedProjectDir) {
+    throw new ContextFileError("Path traversal is not allowed", 403);
+  }
+
+  return resolvedPath;
+}
+
+export function readContextFile(projectDir: string, relativePath: string) {
+  const filePath = resolveContextFilePath(projectDir, relativePath);
+
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new ContextFileError("File not found", 404);
+  }
+
+  const stat = fs.statSync(filePath);
+  const content = fs.readFileSync(filePath, "utf8");
+  return {
+    content,
+    path: relativePath,
+    lastModified: stat.mtimeMs,
+  };
+}
+
+export function writeContextFile(projectDir: string, relativePath: string, content: string) {
+  const filePath = resolveContextFilePath(projectDir, relativePath);
+  fs.writeFileSync(filePath, content, "utf8");
+  return { ok: true as const };
+}
 
 /** List all active projects. */
 export function queryProjects() {
@@ -791,6 +849,47 @@ export function queryBudgetStatus(projectId: string) {
   } catch {
     return { windows: [], alerts: [] };
   }
+}
+
+/** Update the project-level daily budget limit (cents). */
+export function updateBudgetLimit(projectId: string, newLimitCents: number, actor = "dashboard:api") {
+  const db = getDb(projectId);
+  const now = Date.now();
+
+  const existing = db.prepare(
+    "SELECT id, daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+  ).get(projectId) as { id: string; daily_limit_cents: number | null } | undefined;
+
+  const previousLimit = existing?.daily_limit_cents ?? null;
+
+  if (existing?.id) {
+    db.prepare(
+      "UPDATE budgets SET daily_limit_cents = ?, updated_at = ? WHERE id = ?",
+    ).run(newLimitCents, now, existing.id);
+  } else {
+    db.prepare(
+      `INSERT INTO budgets (
+        id, project_id, agent_id,
+        daily_limit_cents, daily_spent_cents, daily_reset_at,
+        created_at, updated_at
+      ) VALUES (?, ?, NULL, ?, 0, ?, ?, ?)`,
+    ).run(`budget-project-${now}`, projectId, newLimitCents, now + 86_400_000, now, now);
+  }
+
+  writeAuditEntry({
+    projectId,
+    actor,
+    action: "budget.update_limit",
+    targetType: "budget",
+    targetId: "project",
+    detail: JSON.stringify({ previousLimit, newLimit: newLimitCents }),
+  }, db);
+
+  return {
+    ok: true as const,
+    previousLimit,
+    newLimit: newLimitCents,
+  };
 }
 
 /** Query budget forecast (daily snapshot, weekly trend, monthly projection). */

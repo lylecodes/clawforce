@@ -461,6 +461,7 @@ const LIFECYCLE_DEFAULTS: Required<LifecycleConfig> = {
   significantTools: ["Bash", "Write", "Edit", "Read"],
   evidenceTruncationLimit: 2000,
   immediateReviewDispatch: true,
+  workerNonComplianceAction: "BLOCKED",
 };
 
 /**
@@ -477,6 +478,7 @@ export function getEffectiveLifecycleConfig(projectId: string): Required<Lifecyc
     significantTools: lc.significantTools ?? LIFECYCLE_DEFAULTS.significantTools,
     evidenceTruncationLimit: lc.evidenceTruncationLimit ?? LIFECYCLE_DEFAULTS.evidenceTruncationLimit,
     immediateReviewDispatch: lc.immediateReviewDispatch ?? LIFECYCLE_DEFAULTS.immediateReviewDispatch,
+    workerNonComplianceAction: lc.workerNonComplianceAction ?? LIFECYCLE_DEFAULTS.workerNonComplianceAction,
   };
 }
 
