@@ -118,6 +118,9 @@ export function enqueue(
 
 const DEFAULT_LEASE_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
+/** How long a dispatched item can sit before being considered stale (orphaned session). */
+export const STALE_DISPATCHED_MS = 20 * 60 * 1000; // 20 minutes
+
 /**
  * Atomically claim the next queued item, ordered by priority (ascending) then FIFO.
  * Sets status='leased' and assigns a lease expiration.
@@ -245,11 +248,11 @@ export function reclaimExpiredLeases(
   }
 
   // Also clean up stale dispatched items (sessions that never completed)
-  const STALE_DISPATCH_MS = 2 * 60 * 60 * 1000; // 2 hours
   const staleDispatched = db.prepare(
     `SELECT id, task_id FROM dispatch_queue
-     WHERE project_id = ? AND status = 'dispatched' AND created_at < ?`,
-  ).all(projectId, now - STALE_DISPATCH_MS) as Record<string, unknown>[];
+     WHERE project_id = ? AND status = 'dispatched'
+       AND dispatched_at IS NOT NULL AND dispatched_at < ?`,
+  ).all(projectId, now - STALE_DISPATCHED_MS) as Record<string, unknown>[];
 
   for (const row of staleDispatched) {
     const itemId = row.id as string;

@@ -18,7 +18,7 @@ vi.mock("../../src/identity.js", () => ({
 
 const { getMemoryDb } = await import("../../src/db.js");
 const { createTask } = await import("../../src/tasks/ops.js");
-const { enqueue, claimNext, reclaimExpiredLeases, completeItem, failItem, cancelItem, getQueueStatus } =
+const { enqueue, claimNext, reclaimExpiredLeases, completeItem, failItem, cancelItem, getQueueStatus, markDispatched, STALE_DISPATCHED_MS } =
   await import("../../src/dispatch/queue.js");
 const { listEvents } = await import("../../src/events/store.js");
 const { queryMetrics } = await import("../../src/metrics.js");
@@ -289,5 +289,53 @@ describe("dispatch/queue", () => {
     const audits = queryAuditLog({ projectId: PROJECT, action: "queue.fail" }, db);
     expect(audits).toHaveLength(1);
     expect(audits[0]!.detail).toBe("test error");
+  });
+
+  // --- Stale dispatched item reclaim ---
+
+  it("reclaims stale dispatched items using dispatched_at (not created_at)", () => {
+    const task = createTask({ projectId: PROJECT, title: "Stale dispatch task", createdBy: "agent:pm" }, db);
+    const item = enqueue(PROJECT, task.id, undefined, undefined, db)!;
+
+    // Mark as dispatched, then backdate dispatched_at to be stale
+    markDispatched(item.id, db, PROJECT);
+    const staleTime = Date.now() - STALE_DISPATCHED_MS - 60_000; // 1 min past threshold
+    db.prepare("UPDATE dispatch_queue SET dispatched_at = ? WHERE id = ?").run(staleTime, item.id);
+
+    const reclaimed = reclaimExpiredLeases(PROJECT, db);
+    expect(reclaimed).toBe(1);
+
+    const status = getQueueStatus(PROJECT, db);
+    expect(status.failed).toBe(1);
+    expect(status.recentItems[0]!.lastError).toBe("Dispatched session never completed");
+  });
+
+  it("does NOT reclaim recently dispatched items", () => {
+    const task = createTask({ projectId: PROJECT, title: "Recent dispatch task", createdBy: "agent:pm" }, db);
+    const item = enqueue(PROJECT, task.id, undefined, undefined, db)!;
+
+    // Mark as dispatched just now — should NOT be reclaimed
+    markDispatched(item.id, db, PROJECT);
+
+    const reclaimed = reclaimExpiredLeases(PROJECT, db);
+    expect(reclaimed).toBe(0);
+
+    const status = getQueueStatus(PROJECT, db);
+    expect(status.failed).toBe(0);
+  });
+
+  it("does NOT reclaim dispatched items with NULL dispatched_at", () => {
+    const task = createTask({ projectId: PROJECT, title: "Null dispatched_at task", createdBy: "agent:pm" }, db);
+    const item = enqueue(PROJECT, task.id, undefined, undefined, db)!;
+
+    // Manually set status to dispatched but leave dispatched_at NULL
+    db.prepare("UPDATE dispatch_queue SET status = 'dispatched' WHERE id = ?").run(item.id);
+
+    const reclaimed = reclaimExpiredLeases(PROJECT, db);
+    expect(reclaimed).toBe(0);
+  });
+
+  it("uses STALE_DISPATCHED_MS (20 min) not 2 hours", () => {
+    expect(STALE_DISPATCHED_MS).toBe(20 * 60 * 1000);
   });
 });
