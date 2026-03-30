@@ -28,7 +28,7 @@ Workers execute → Lead reviews → User sees results → Repeat
 3. "Do I need to do anything?" — proposals waiting, work ready for review, agent questions
 4. "Let's build X" — user starts a conversation with the lead, they define it together
 
-The user is never surprised. They always know what's coming and what it'll cost.
+The user defined the work — the dashboard shows it executing and what it costs.
 
 ## Task Sourcing
 
