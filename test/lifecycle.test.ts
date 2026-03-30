@@ -114,6 +114,24 @@ describe("lifecycle", () => {
       expect(initProject).not.toHaveBeenCalled();
     });
 
+    it("registers workforce projects in getActiveProjectIds() after auto-activation", () => {
+      // This is the core regression test: registerWorkforceConfig() does NOT call
+      // registerProject(), so autoActivateProjects() must call it explicitly.
+      fsMock.existsSync.mockImplementation((p: unknown) =>
+        String(p) === "/tmp/test-projects" || String(p).endsWith("/my-project/project.yaml")
+      );
+      fsMock.readdirSync.mockReturnValue([{ name: "my-project", isDirectory: () => true }] as unknown[]);
+      (loadWorkforceConfig as ReturnType<typeof vi.fn>).mockReturnValue({
+        name: "my-project",
+        agents: { "my-agent": { extends: "employee", expectations: [], briefing: [], performance_policy: {} } },
+      });
+
+      initClawforce(BASE_CONFIG);
+
+      // getActiveProjectIds() must include the workforce project
+      expect(getActiveProjectIds()).toContain("my-project");
+    });
+
     it("falls back to legacy initProject when no workforce config is present", () => {
       fsMock.existsSync.mockImplementation((p: unknown) => String(p) === "/tmp/test-projects" || String(p).endsWith("/legacy-b/project.yaml"));
       fsMock.readdirSync.mockReturnValue([{ name: "legacy-b", isDirectory: () => true }] as unknown[]);

@@ -74,6 +74,9 @@ function autoActivateProjects(projectsDir: string): void {
         const wfConfig = loadWorkforceConfig(configPath);
         if (wfConfig) {
           registerWorkforceConfig(projectId, wfConfig, projectDir);
+          // Register in the active-project set so getActiveProjectIds() returns
+          // this project without requiring a separate initProject() call.
+          registerProject(projectId);
           continue;
         }
 

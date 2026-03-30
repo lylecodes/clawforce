@@ -114,7 +114,7 @@ import { countRecentRetries } from "../src/enforcement/retry-store.js";
 import { resolveEscalationTarget, routeEscalation } from "../src/enforcement/escalation-router.js";
 import { endSession, getSession, recordToolCall, recordSignificantResult, recoverOrphanedSessions, setDispatchContext, startTracking } from "../src/enforcement/tracker.js";
 import { emitDiagnosticEvent, setDiagnosticEmitter } from "../src/diagnostics.js";
-import { getActiveProjectIds, initClawforce, shutdownClawforce } from "../src/lifecycle.js";
+import { getActiveProjectIds, initClawforce, registerProject, shutdownClawforce } from "../src/lifecycle.js";
 import {
   getAgentConfig,
   getExtendedProjectConfig,
@@ -2194,6 +2194,9 @@ const clawforcePlugin = {
                 const projectDir = (wfConfig as Record<string, unknown>).project_dir as string | undefined
                   ?? path.join(defaultConfigDir, subdir);
                 registerWorkforceConfig(subdir, wfConfig, projectDir);
+                // Register in the active-project set so getActiveProjectIds() returns
+                // this project after restart, without requiring a manual activate call.
+                registerProject(subdir);
                 const agentCount = Object.keys(wfConfig.agents).length;
                 api.logger.info(`Clawforce: auto-activated project "${subdir}" (${agentCount} agent(s))`);
 
