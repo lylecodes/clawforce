@@ -1032,11 +1032,14 @@ function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilte
 
   let sql = `
     SELECT sa.session_key, sa.agent_id, sa.started_at, sa.ended_at, sa.duration_ms,
-           sa.total_cost_cents, sa.outcome, sa.tool_call_count
+           COALESCE(cr.cost, 0) as session_cost, sa.outcome, sa.tool_call_count,
+           (SELECT COUNT(*) FROM transitions t WHERE t.actor = sa.session_key AND t.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as transitions,
+           (SELECT COUNT(*) FROM proposals p WHERE p.proposed_by = sa.session_key AND p.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as proposals
     FROM session_archives sa
+    LEFT JOIN (SELECT session_key, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY session_key) cr ON cr.session_key = sa.session_key
     WHERE sa.project_id = ? AND sa.started_at > ?
   `;
-  const params: (string | number)[] = [projectId, since];
+  const params: (string | number)[] = [Date.now(), Date.now(), projectId, since, projectId, since];
 
   if (agentFilter) {
     sql += " AND sa.agent_id = ?";
@@ -1058,9 +1061,14 @@ function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilte
     const displayKey = `${flowParsed.agent} (${flowParsed.type})`;
     const duration = s.duration_ms ? fmtAge(s.duration_ms as number) : "?";
     const startTime = fmtTime(s.started_at as number);
-    const cost = fmt$(s.total_cost_cents as number);
+    const cost = fmt$(s.session_cost as number);
+    const trans = s.transitions as number;
+    const props = s.proposals as number;
+    const outputSummary = (trans > 0 || props > 0)
+      ? `${trans} transitions, ${props} proposals`
+      : "no output";
 
-    console.log(`--- ${displayKey} | ${startTime} | ${duration} | ${cost} | ${s.outcome} ---`);
+    console.log(`--- ${displayKey} | ${startTime} | ${duration} | ${cost} | ${outputSummary} ---`);
 
     if (expand) {
       // Full tool call list
@@ -1068,7 +1076,7 @@ function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilte
         SELECT tool_name, action, sequence_number, created_at, duration_ms, success
         FROM tool_call_details
         WHERE session_key = ? AND project_id = ?
-        ORDER BY sequence_number
+        ORDER BY created_at, sequence_number
       `).all(s.session_key as string, projectId) as Array<Record<string, unknown>>;
 
       for (const tc of toolCalls) {
@@ -1107,7 +1115,7 @@ function cmdMetrics(db: DatabaseSync, projectId: string, hours: number): void {
     SELECT sa.agent_id,
            COUNT(*) as sessions,
            COALESCE(SUM(cr.cost), 0) as total_cost,
-           AVG(sa.duration_ms) as avg_duration_ms,
+           AVG(COALESCE(sa.duration_ms, sa.ended_at - sa.started_at)) as avg_duration_ms,
            AVG(sa.tool_call_count) as avg_tool_calls,
            SUM(sa.tool_call_count) as total_tool_calls
     FROM session_archives sa
@@ -1232,38 +1240,43 @@ function cmdBudget(db: DatabaseSync, projectId: string): void {
 function cmdTrust(db: DatabaseSync, projectId: string): void {
   console.log("## Trust Overview\n");
 
-  // Get latest trust score per agent
-  const agents = db.prepare(`
+  // Get all trust scores, then deduplicate by extracted agent name (latest per name)
+  const allScores = db.prepare(`
     SELECT agent_id, score, tier, trigger_type, created_at
     FROM trust_score_history
-    WHERE project_id = ? AND id IN (
-      SELECT id FROM trust_score_history t2
-      WHERE t2.project_id = ? AND t2.agent_id = trust_score_history.agent_id
-      ORDER BY t2.created_at DESC LIMIT 1
-    )
-    ORDER BY agent_id
-  `).all(projectId, projectId) as Array<Record<string, unknown>>;
+    WHERE project_id = ?
+    ORDER BY created_at DESC
+  `).all(projectId) as Array<Record<string, unknown>>;
 
-  if (agents.length === 0) {
+  if (allScores.length === 0) {
     console.log("  No trust history recorded.");
     return;
   }
 
+  // Deduplicate: keep latest score per extracted agent name
+  const latestByName = new Map<string, Record<string, unknown>>();
+  for (const row of allScores) {
+    const name = extractAgentName(row.agent_id as string);
+    if (!latestByName.has(name)) {
+      latestByName.set(name, row);
+    }
+  }
+
   const dayAgo = Date.now() - 24 * 3600_000;
 
-  for (const a of agents) {
-    const agent = a.agent_id as string;
+  for (const [name, a] of latestByName) {
+    const rawAgent = a.agent_id as string;
     const score = (a.score as number).toFixed(2);
     const tier = a.tier as string;
     const lastChange = fmtAgo(a.created_at as number);
     const trigger = a.trigger_type as string;
 
-    // Trend: compare to 24h ago
+    // Trend: compare to 24h ago (match any agent_id that maps to this name)
     const oldScore = db.prepare(`
       SELECT score FROM trust_score_history
       WHERE project_id = ? AND agent_id = ? AND created_at <= ?
       ORDER BY created_at DESC LIMIT 1
-    `).get(projectId, agent, dayAgo) as { score: number } | undefined;
+    `).get(projectId, rawAgent, dayAgo) as { score: number } | undefined;
 
     let trend = "stable";
     if (oldScore) {
@@ -1272,7 +1285,7 @@ function cmdTrust(db: DatabaseSync, projectId: string): void {
       else if (diff < -0.05) trend = `\u2193 down (${diff.toFixed(2)})`;
     }
 
-    console.log(`  ${pad(agent, 20)} score: ${score}  tier: ${pad(tier, 12)} last change: ${lastChange} (${trigger})  trend: ${trend}`);
+    console.log(`  ${pad(name, 20)} score: ${score}  tier: ${pad(tier, 12)} last change: ${lastChange} (${trigger})  trend: ${trend}`);
   }
 }
 
