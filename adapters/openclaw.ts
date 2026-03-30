@@ -1190,6 +1190,14 @@ const clawforcePlugin = {
           db,
         );
 
+        // Aggregate cost from cost_records for this session
+        const costRow = db.prepare(
+          `SELECT COALESCE(SUM(cost_cents), 0) as total,
+                  COALESCE(SUM(input_tokens), 0) as inputTokens,
+                  COALESCE(SUM(output_tokens), 0) as outputTokens
+           FROM cost_records WHERE project_id = ? AND session_key = ?`
+        ).get(session.projectId, ctx.sessionKey) as { total: number; inputTokens: number; outputTokens: number } | undefined;
+
         // Archive the completed session
         const messages = (event as Record<string, unknown>).messages as unknown[] | undefined;
         archiveSession({
@@ -1206,6 +1214,9 @@ const clawforcePlugin = {
           endedAt: Date.now(),
           taskId,
           jobName: session.jobName,
+          totalCostCents: costRow?.total ?? 0,
+          totalInputTokens: costRow?.inputTokens ?? 0,
+          totalOutputTokens: costRow?.outputTokens ?? 0,
         }, db);
       } catch { /* telemetry must never break the main flow */ }
 
