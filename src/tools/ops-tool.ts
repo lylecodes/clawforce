@@ -20,7 +20,7 @@ import { detectStuckAgents } from "../audit/stuck-detector.js";
 import { killStuckAgent } from "../audit/auto-kill.js";
 import { writeAuditEntry, queryAuditLog } from "../audit.js";
 import { getDb } from "../db.js";
-import { getTask, reassignTask } from "../tasks/ops.js";
+import { getTask, reassignTask, transitionTask } from "../tasks/ops.js";
 import { sweep } from "../sweep/actions.js";
 import { buildTaskPrompt } from "../dispatch/spawn.js";
 import { assembleContext } from "../context/assembler.js";
@@ -640,6 +640,24 @@ export function createClawforceOpsTool(options?: {
               return jsonResult({ ok: false, reason: "Task not found" });
             }
 
+            // Auto-transition OPEN → ASSIGNED so the dispatcher can claim the task.
+            // Without this, every enqueue on an OPEN task fails with
+            // "Task in non-dispatchable state: OPEN".
+            let autoTransitioned = false;
+            if (task.state === "OPEN") {
+              const tr = transitionTask({
+                projectId,
+                taskId,
+                toState: "ASSIGNED",
+                actor: "system:dispatch",
+                reason: "Auto-transitioned OPEN→ASSIGNED by enqueue_work",
+              });
+              if (!tr.ok) {
+                return jsonResult({ ok: false, reason: `Failed to auto-transition task to ASSIGNED: ${tr.reason}` });
+              }
+              autoTransitioned = true;
+            }
+
             const item = enqueue(projectId, taskId, payload, priority ?? undefined);
             if (!item) {
               return jsonResult({ ok: false, reason: "Task already has a non-terminal queue item" });
@@ -651,10 +669,10 @@ export function createClawforceOpsTool(options?: {
               action: "enqueue_work",
               targetType: "dispatch_queue",
               targetId: item.id,
-              detail: JSON.stringify({ taskId, priority: item.priority }),
+              detail: JSON.stringify({ taskId, priority: item.priority, autoTransitioned }),
             });
 
-            return jsonResult({ ok: true, queueItemId: item.id, taskId, priority: item.priority });
+            return jsonResult({ ok: true, queueItemId: item.id, taskId, priority: item.priority, autoTransitioned });
           }
 
           case "queue_status": {
