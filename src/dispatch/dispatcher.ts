@@ -614,16 +614,15 @@ async function dispatchItem(
     }
 
     // Namespace the agent ID at the OpenClaw dispatch boundary.
-    // Internal tracking (concurrency, budgets) uses the short ID;
-    // OpenClaw needs the namespaced form to address the correct agent.
-    const namespacedAgentId = toNamespacedAgentId(projectId, resolvedAgentId);
-
+    // Use bare agent ID for dispatch — OpenClaw resolves agents by their registered ID.
+    // Namespace prefixing is handled at the agent-sync boundary (when writing to openclaw.json),
+    // not at dispatch time.
     const result = await dispatchViaInject({
       queueItemId: item.id,
       taskId: item.taskId,
       projectId,
       prompt: fullPrompt,
-      agentId: namespacedAgentId,
+      agentId: resolvedAgentId,
     });
 
     if (result.ok) {
