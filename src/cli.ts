@@ -15,6 +15,21 @@
  *   streams         List available data streams
  *   query           Raw SQL query against the project DB
  *
+ * Visibility Suite:
+ *   dashboard       Single-command overview with anomaly detection
+ *   sessions        List recent sessions with cost/output summary
+ *   session <key>   Drill into one session — tool calls, transitions, cost
+ *   proposals       List proposals with status and reasoning preview
+ *   flows           Per-session action timeline
+ *   metrics         Per-agent efficiency metrics
+ *   budget          Budget pacing status and projections
+ *   trust           Per-agent trust overview
+ *   inbox           User messages from/to agents
+ *   approve <id>    Approve a pending proposal
+ *   reject <id>     Reject a pending proposal with optional feedback
+ *   message <agent> Send a message to an agent
+ *   replay <key>    Replay session tool calls with full input/output
+ *
  * Runtime Control:
  *   disable         Disable domain via DB (blocks new dispatches)
  *   enable          Enable domain via DB (resume dispatches)
@@ -66,6 +81,32 @@ function fmtAge(ms: number): string {
 
 function fmtDate(epochMs: number): string {
   return new Date(epochMs).toISOString().replace("T", " ").slice(0, 19);
+}
+
+function fmtAgo(epochMs: number): string {
+  const diff = Date.now() - epochMs;
+  if (diff < 0) return "just now";
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ${min % 60}m ago`;
+  const days = Math.floor(hr / 24);
+  return `${days}d ago`;
+}
+
+function fmtTime(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString("en-US", { hour12: false });
+}
+
+function truncate(s: string, len: number): string {
+  if (s.length <= len) return s;
+  return s.slice(0, len - 1) + "\u2026";
+}
+
+function pad(s: string, len: number): string {
+  return s.padEnd(len);
 }
 
 // ─── Commands ────────────────────────────────────────────────────────
@@ -408,6 +449,886 @@ function cmdQuery(db: DatabaseSync, sql: string) {
     }
   } catch (err) {
     console.error(`SQL error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ─── Visibility Suite ────────────────────────────────────────────────
+
+function detectAnomalies(db: DatabaseSync, projectId: string, hours: number): string[] {
+  const anomalies: string[] = [];
+  const since = Date.now() - hours * 3600_000;
+
+  // 1. Agent ran sessions but produced 0 output (low efficiency)
+  try {
+    const sessions = db.prepare(`
+      SELECT sa.agent_id, COUNT(*) as session_count,
+             (SELECT COUNT(*) FROM transitions t WHERE t.actor = sa.agent_id AND t.created_at > ?) as transition_count,
+             (SELECT COUNT(*) FROM proposals p WHERE p.proposed_by = sa.agent_id AND p.created_at > ?) as proposal_count
+      FROM session_archives sa
+      WHERE sa.project_id = ? AND sa.started_at > ?
+      GROUP BY sa.agent_id
+    `).all(since, since, projectId, since) as Array<Record<string, unknown>>;
+
+    for (const s of sessions) {
+      const tc = (s.transition_count as number) ?? 0;
+      const pc = (s.proposal_count as number) ?? 0;
+      const sc = s.session_count as number;
+      if (sc >= 2 && tc === 0 && pc === 0) {
+        anomalies.push(`${s.agent_id} ran ${sc} sessions but produced 0 transitions and 0 proposals`);
+      }
+    }
+  } catch { /* table may not exist */ }
+
+  // 2. Items stuck in queue for >30min
+  try {
+    const stuck = db.prepare(`
+      SELECT COUNT(*) as cnt FROM dispatch_queue
+      WHERE project_id = ? AND status = 'queued' AND created_at < ?
+    `).get(projectId, Date.now() - 30 * 60_000) as { cnt: number };
+
+    if (stuck.cnt > 0) {
+      anomalies.push(`${stuck.cnt} item(s) stuck in queue for >30min (dispatch may be broken)`);
+    }
+  } catch { /* ignore */ }
+
+  // 3. Workers haven't run despite assigned tasks
+  try {
+    const assignedWorkerTasks = db.prepare(`
+      SELECT t.assigned_to, COUNT(*) as cnt
+      FROM tasks t
+      WHERE t.project_id = ? AND t.state IN ('ASSIGNED', 'IN_PROGRESS')
+        AND t.assigned_to LIKE '%worker%'
+        AND t.updated_at < ?
+      GROUP BY t.assigned_to
+    `).all(projectId, Date.now() - 60 * 60_000) as Array<Record<string, unknown>>;
+
+    for (const wt of assignedWorkerTasks) {
+      anomalies.push(`${wt.assigned_to} has ${wt.cnt} assigned task(s) but hasn't run in >1h`);
+    }
+  } catch { /* ignore */ }
+
+  // 4. Budget burn rate will exhaust before end of day
+  try {
+    const budget = db.prepare(
+      "SELECT daily_limit_cents, daily_spent_cents, daily_reset_at FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+    ).get(projectId) as Record<string, number> | undefined;
+
+    if (budget && budget.daily_limit_cents > 0) {
+      const remaining = budget.daily_limit_cents - budget.daily_spent_cents;
+      const hourCost = db.prepare(
+        "SELECT COALESCE(SUM(cost_cents), 0) as cost FROM cost_records WHERE project_id = ? AND created_at > ?",
+      ).get(projectId, Date.now() - 3600_000) as { cost: number };
+
+      if (hourCost.cost > 0) {
+        const hoursLeft = remaining / hourCost.cost;
+        const now = new Date();
+        const hoursUntilMidnight = 24 - now.getHours() - (now.getMinutes() / 60);
+        if (hoursLeft < hoursUntilMidnight && hoursLeft < 4) {
+          anomalies.push(`Budget burn rate (${fmt$(hourCost.cost)}/hr) will exhaust in ~${hoursLeft.toFixed(1)}h — before end of day`);
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 5. Lead spawned subagents instead of using workers
+  try {
+    const leadSubagents = db.prepare(`
+      SELECT sa.agent_id, COUNT(*) as cnt
+      FROM session_archives sa
+      WHERE sa.project_id = ? AND sa.started_at > ?
+        AND sa.agent_id LIKE '%lead%'
+        AND EXISTS (
+          SELECT 1 FROM tool_call_details tc
+          WHERE tc.session_key = sa.session_key
+            AND tc.tool_name IN ('spawn_subagent', 'Bash')
+            AND tc.input LIKE '%agent%'
+        )
+      GROUP BY sa.agent_id
+    `).all(projectId, since) as Array<Record<string, unknown>>;
+
+    for (const ls of leadSubagents) {
+      if ((ls.cnt as number) >= 1) {
+        anomalies.push(`${ls.agent_id} may be spawning subagents instead of using workers (${ls.cnt} instance(s))`);
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 6. Same task re-assigned multiple times
+  try {
+    const reassigned = db.prepare(`
+      SELECT t.task_id, tk.title, COUNT(*) as cnt
+      FROM transitions t
+      LEFT JOIN tasks tk ON t.task_id = tk.id
+      WHERE t.created_at > ?
+        AND t.to_state = 'ASSIGNED'
+      GROUP BY t.task_id HAVING cnt >= 3
+    `).all(since) as Array<Record<string, unknown>>;
+
+    for (const r of reassigned) {
+      const title = r.title ? ` "${truncate(r.title as string, 40)}"` : "";
+      anomalies.push(`Task${title} re-assigned ${r.cnt} times — may be bouncing`);
+    }
+  } catch { /* ignore */ }
+
+  return anomalies;
+}
+
+function cmdDashboard(db: DatabaseSync, projectId: string, hours: number): void {
+  const since = Date.now() - hours * 3600_000;
+
+  // Anomaly detection — show at top
+  const anomalies = detectAnomalies(db, projectId, hours);
+  if (anomalies.length > 0) {
+    console.log("## Anomalies\n");
+    for (const a of anomalies) {
+      console.log(`  \u26A0\uFE0F  ${a}`);
+    }
+    console.log("");
+  }
+
+  // --- Agent Status ---
+  console.log("## Agent Status\n");
+  try {
+    const agents = db.prepare(`
+      SELECT agent_id,
+             COUNT(*) as sessions,
+             SUM(total_cost_cents) as cost,
+             MAX(started_at) as last_active,
+             SUM(tool_call_count) as tool_calls
+      FROM session_archives
+      WHERE project_id = ? AND started_at > ?
+      GROUP BY agent_id ORDER BY last_active DESC
+    `).all(projectId, since) as Array<Record<string, unknown>>;
+
+    if (agents.length === 0) {
+      console.log("  No agent activity.\n");
+    } else {
+      for (const a of agents) {
+        const lastAge = fmtAgo(a.last_active as number);
+        console.log(`  ${pad(a.agent_id as string, 20)} ${(a.sessions as number).toString().padStart(3)} sessions  ${fmt$(a.cost as number).padStart(8)}  ${(a.tool_calls as number).toString().padStart(4)} tools  last: ${lastAge}`);
+      }
+      console.log("");
+    }
+  } catch {
+    console.log("  (session_archives table not available)\n");
+  }
+
+  // --- Pending Proposals ---
+  console.log("## Pending Proposals\n");
+  try {
+    const proposals = db.prepare(
+      "SELECT id, title, proposed_by, created_at, origin FROM proposals WHERE project_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 10",
+    ).all(projectId) as Array<Record<string, unknown>>;
+
+    if (proposals.length === 0) {
+      console.log("  None.\n");
+    } else {
+      for (const p of proposals) {
+        const age = fmtAgo(p.created_at as number);
+        const origin = p.origin ? ` [${p.origin}]` : "";
+        console.log(`  ${(p.id as string).slice(0, 8)}  ${truncate(p.title as string, 50).padEnd(52)} by ${p.proposed_by}${origin}  ${age}`);
+      }
+      console.log("");
+    }
+  } catch {
+    console.log("  (proposals table not available)\n");
+  }
+
+  // --- Queue Health ---
+  console.log("## Queue Health\n");
+  try {
+    const queueCounts = db.prepare(
+      "SELECT status, COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? GROUP BY status",
+    ).all(projectId) as Array<{ status: string; cnt: number }>;
+
+    if (queueCounts.length === 0) {
+      console.log("  Empty.\n");
+    } else {
+      const parts = queueCounts.map(r => `${r.status}: ${r.cnt}`);
+      console.log(`  ${parts.join("  |  ")}\n`);
+    }
+  } catch {
+    console.log("  (dispatch_queue not available)\n");
+  }
+
+  // --- Recent Transitions ---
+  console.log("## Recent Transitions\n");
+  try {
+    const transitions = db.prepare(`
+      SELECT t.task_id, tk.title, t.from_state, t.to_state, t.actor,
+             t.created_at as ts
+      FROM transitions t LEFT JOIN tasks tk ON t.task_id = tk.id
+      WHERE t.created_at > ?
+      ORDER BY t.created_at DESC LIMIT 8
+    `).all(since) as Array<Record<string, unknown>>;
+
+    if (transitions.length === 0) {
+      console.log("  None.\n");
+    } else {
+      for (const r of transitions) {
+        const title = r.title ? ` "${truncate(r.title as string, 35)}"` : "";
+        console.log(`  ${fmtTime(r.ts as number)}  ${r.from_state} \u2192 ${r.to_state}  by ${r.actor}${title}`);
+      }
+      console.log("");
+    }
+  } catch {
+    console.log("  (transitions not available)\n");
+  }
+
+  // --- Budget Pacing ---
+  console.log("## Budget\n");
+  try {
+    const budget = db.prepare(
+      "SELECT daily_limit_cents, daily_spent_cents, monthly_spent_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+    ).get(projectId) as Record<string, number> | undefined;
+
+    if (!budget) {
+      console.log("  Not configured.\n");
+    } else {
+      const pct = budget.daily_limit_cents > 0 ? Math.round((budget.daily_spent_cents / budget.daily_limit_cents) * 100) : 0;
+      const remaining = Math.max(0, budget.daily_limit_cents - budget.daily_spent_cents);
+
+      const hourCost = db.prepare(
+        "SELECT COALESCE(SUM(cost_cents), 0) as cost FROM cost_records WHERE project_id = ? AND created_at > ?",
+      ).get(projectId, Date.now() - 3600_000) as { cost: number };
+
+      const burnRate = hourCost.cost;
+      const hoursLeft = burnRate > 0 ? (remaining / burnRate).toFixed(1) : "\u221E";
+
+      console.log(`  Daily:  ${fmt$(budget.daily_spent_cents)} / ${fmt$(budget.daily_limit_cents)} (${pct}%)  |  Remaining: ${fmt$(remaining)}`);
+      console.log(`  Burn:   ${fmt$(burnRate)}/hr  |  Hours left: ${hoursLeft}`);
+      if (budget.monthly_spent_cents > 0) {
+        console.log(`  Monthly: ${fmt$(budget.monthly_spent_cents)}`);
+      }
+      console.log("");
+    }
+  } catch {
+    console.log("  (budget data not available)\n");
+  }
+
+  // Summary line
+  const taskCounts = db.prepare(
+    "SELECT state, COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state NOT IN ('DONE', 'CANCELLED') GROUP BY state",
+  ).all(projectId) as Array<{ state: string; cnt: number }>;
+  const taskSummary = taskCounts.map(r => `${r.state}: ${r.cnt}`).join(", ");
+  if (taskSummary) {
+    console.log(`Active tasks: ${taskSummary}`);
+  }
+}
+
+function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string): void {
+  const since = Date.now() - hours * 3600_000;
+
+  let sql = `
+    SELECT sa.session_key, sa.agent_id, sa.started_at, sa.duration_ms,
+           sa.tool_call_count, sa.total_cost_cents, sa.outcome, sa.task_id,
+           (SELECT COUNT(*) FROM transitions t WHERE t.actor = sa.agent_id AND t.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as transitions,
+           (SELECT COUNT(*) FROM proposals p WHERE p.proposed_by = sa.agent_id AND p.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as proposals
+    FROM session_archives sa
+    WHERE sa.project_id = ? AND sa.started_at > ?
+  `;
+  const params: (string | number)[] = [Date.now(), Date.now(), projectId, since];
+
+  if (agentFilter) {
+    sql += " AND sa.agent_id = ?";
+    params.push(agentFilter);
+  }
+  sql += " ORDER BY sa.started_at DESC LIMIT 50";
+
+  const sessions = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+
+  console.log(`## Sessions (last ${hours}h${agentFilter ? `, agent: ${agentFilter}` : ""})\n`);
+
+  if (sessions.length === 0) {
+    console.log("No sessions found.");
+    return;
+  }
+
+  for (const s of sessions) {
+    const key = (s.session_key as string).slice(0, 8);
+    const duration = s.duration_ms ? fmtAge(s.duration_ms as number) : "?";
+    const tools = s.tool_call_count ?? 0;
+    const cost = fmt$(s.total_cost_cents as number);
+    const trans = s.transitions as number;
+    const props = s.proposals as number;
+    const started = fmtTime(s.started_at as number);
+    const produced: string[] = [];
+    if (trans > 0) produced.push(`${trans} transitions`);
+    if (props > 0) produced.push(`${props} proposals`);
+    const output = produced.length > 0 ? produced.join(", ") : "no output";
+
+    console.log(`  ${key}  ${pad(s.agent_id as string, 18)} ${started}  ${duration.padStart(6)}  ${(tools as number).toString().padStart(3)} tools  ${cost.padStart(7)}  ${output}`);
+  }
+}
+
+function cmdSessionDetail(db: DatabaseSync, projectId: string, sessionKey: string): void {
+  // Find matching session
+  const session = db.prepare(`
+    SELECT * FROM session_archives WHERE project_id = ? AND session_key LIKE ?
+    ORDER BY started_at DESC LIMIT 1
+  `).get(projectId, `${sessionKey}%`) as Record<string, unknown> | undefined;
+
+  if (!session) {
+    console.error(`No session found matching "${sessionKey}"`);
+    process.exit(1);
+  }
+
+  const fullKey = session.session_key as string;
+  console.log(`## Session: ${(fullKey).slice(0, 8)}\n`);
+  console.log(`  Agent:      ${session.agent_id}`);
+  console.log(`  Outcome:    ${session.outcome}`);
+  console.log(`  Started:    ${fmtDate(session.started_at as number)}`);
+  if (session.ended_at) console.log(`  Ended:      ${fmtDate(session.ended_at as number)}`);
+  if (session.duration_ms) console.log(`  Duration:   ${fmtAge(session.duration_ms as number)}`);
+  console.log(`  Cost:       ${fmt$(session.total_cost_cents as number)}`);
+  console.log(`  Tool calls: ${session.tool_call_count}`);
+  if (session.model) console.log(`  Model:      ${session.model}`);
+  if (session.task_id) console.log(`  Task:       ${(session.task_id as string).slice(0, 8)}`);
+  console.log("");
+
+  // Tool call sequence
+  const toolCalls = db.prepare(`
+    SELECT tool_name, action, sequence_number, duration_ms, success, error_message, created_at
+    FROM tool_call_details
+    WHERE session_key = ? AND project_id = ?
+    ORDER BY sequence_number
+  `).all(fullKey, projectId) as Array<Record<string, unknown>>;
+
+  if (toolCalls.length > 0) {
+    console.log("  Tool Call Sequence:");
+    for (const tc of toolCalls) {
+      const actionStr = tc.action ? `:${tc.action}` : "";
+      const durStr = tc.duration_ms ? `${tc.duration_ms}ms` : "";
+      const status = (tc.success as number) ? "\u2713" : `\u2717 ${tc.error_message ?? ""}`;
+      console.log(`    ${(tc.sequence_number as number).toString().padStart(3)}. ${fmtTime(tc.created_at as number)}  ${tc.tool_name}${actionStr}  ${durStr.padStart(6)}  ${status}`);
+    }
+    console.log("");
+  }
+
+  // Transitions during session
+  const startedAt = session.started_at as number;
+  const endedAt = (session.ended_at as number) ?? Date.now();
+  const transitions = db.prepare(`
+    SELECT t.task_id, tk.title, t.from_state, t.to_state, t.actor, t.created_at
+    FROM transitions t LEFT JOIN tasks tk ON t.task_id = tk.id
+    WHERE t.actor = ? AND t.created_at BETWEEN ? AND ?
+    ORDER BY t.created_at
+  `).all(session.agent_id, startedAt, endedAt) as Array<Record<string, unknown>>;
+
+  if (transitions.length > 0) {
+    console.log("  Transitions:");
+    for (const tr of transitions) {
+      const title = tr.title ? ` "${truncate(tr.title as string, 35)}"` : "";
+      console.log(`    ${fmtTime(tr.created_at as number)}  ${tr.from_state} \u2192 ${tr.to_state}${title}`);
+    }
+    console.log("");
+  }
+
+  // Proposals during session
+  const proposals = db.prepare(`
+    SELECT id, title, status, risk_tier, created_at
+    FROM proposals
+    WHERE proposed_by = ? AND project_id = ? AND created_at BETWEEN ? AND ?
+    ORDER BY created_at
+  `).all(session.agent_id, projectId, startedAt, endedAt) as Array<Record<string, unknown>>;
+
+  if (proposals.length > 0) {
+    console.log("  Proposals Created:");
+    for (const p of proposals) {
+      const risk = p.risk_tier ? ` [${p.risk_tier}]` : "";
+      console.log(`    ${(p.id as string).slice(0, 8)}  ${p.status}  "${truncate(p.title as string, 40)}"${risk}`);
+    }
+    console.log("");
+  }
+
+  // Cost breakdown
+  const costRecords = db.prepare(`
+    SELECT model, SUM(cost_cents) as cost, SUM(input_tokens) as input_tok,
+           SUM(output_tokens) as output_tok, SUM(cache_read_tokens) as cache_read,
+           COUNT(*) as calls
+    FROM cost_records
+    WHERE session_key = ? AND project_id = ?
+    GROUP BY model
+  `).all(fullKey, projectId) as Array<Record<string, unknown>>;
+
+  if (costRecords.length > 0) {
+    console.log("  Cost Breakdown:");
+    for (const c of costRecords) {
+      console.log(`    ${c.model}: ${fmt$(c.cost as number)}  (${c.calls} calls, ${c.output_tok} output tok, ${c.cache_read} cache read)`);
+    }
+    console.log("");
+  }
+
+  // Subagent spawns (sessions with matching parent pattern)
+  try {
+    const subagents = db.prepare(`
+      SELECT session_key, agent_id, started_at, total_cost_cents, outcome
+      FROM session_archives
+      WHERE project_id = ? AND session_key LIKE ? AND session_key != ?
+      ORDER BY started_at
+    `).all(projectId, `${fullKey.split("-").slice(0, 3).join("-")}%`, fullKey) as Array<Record<string, unknown>>;
+
+    if (subagents.length > 0) {
+      console.log("  Subagent Sessions:");
+      for (const sa of subagents) {
+        console.log(`    ${(sa.session_key as string).slice(0, 8)}  ${sa.agent_id}  ${fmt$(sa.total_cost_cents as number)}  ${sa.outcome}`);
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: string): void {
+  let where = "WHERE project_id = ?";
+  const params: (string | number)[] = [projectId];
+
+  if (statusFilter && statusFilter !== "all") {
+    where += " AND status = ?";
+    params.push(statusFilter);
+  }
+
+  const proposals = db.prepare(`
+    SELECT id, title, proposed_by, status, origin, reasoning, created_at, resolved_at
+    FROM proposals ${where}
+    ORDER BY created_at DESC LIMIT 50
+  `).all(...params) as Array<Record<string, unknown>>;
+
+  console.log(`## Proposals (${statusFilter || "all"})\n`);
+
+  if (proposals.length === 0) {
+    console.log("No proposals found.");
+    return;
+  }
+
+  for (const p of proposals) {
+    const id = (p.id as string).slice(0, 8);
+    const title = truncate(p.title as string, 45);
+    const origin = p.origin ? `[${p.origin}]` : "";
+    const age = fmtAgo(p.created_at as number);
+    const reasoning = p.reasoning ? `  ${truncate(p.reasoning as string, 80)}` : "";
+    console.log(`  ${id}  ${p.status?.toString().padEnd(10)}  ${title.padEnd(47)} by ${p.proposed_by}  ${origin.padEnd(12)} ${age}`);
+    if (reasoning) {
+      console.log(`           ${reasoning}`);
+    }
+  }
+}
+
+function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string, expand?: boolean): void {
+  const since = Date.now() - hours * 3600_000;
+
+  let sql = `
+    SELECT sa.session_key, sa.agent_id, sa.started_at, sa.ended_at, sa.duration_ms,
+           sa.total_cost_cents, sa.outcome, sa.tool_call_count
+    FROM session_archives sa
+    WHERE sa.project_id = ? AND sa.started_at > ?
+  `;
+  const params: (string | number)[] = [projectId, since];
+
+  if (agentFilter) {
+    sql += " AND sa.agent_id = ?";
+    params.push(agentFilter);
+  }
+  sql += " ORDER BY sa.started_at DESC LIMIT 30";
+
+  const sessions = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+
+  console.log(`## Flows (last ${hours}h${agentFilter ? `, agent: ${agentFilter}` : ""})\n`);
+
+  if (sessions.length === 0) {
+    console.log("No sessions found.");
+    return;
+  }
+
+  for (const s of sessions) {
+    const key = (s.session_key as string).slice(0, 8);
+    const duration = s.duration_ms ? fmtAge(s.duration_ms as number) : "?";
+    const startTime = fmtTime(s.started_at as number);
+    const cost = fmt$(s.total_cost_cents as number);
+
+    console.log(`--- ${key} | ${s.agent_id} | ${startTime} | ${duration} | ${cost} | ${s.outcome} ---`);
+
+    if (expand) {
+      // Full tool call list
+      const toolCalls = db.prepare(`
+        SELECT tool_name, action, sequence_number, created_at, duration_ms, success
+        FROM tool_call_details
+        WHERE session_key = ? AND project_id = ?
+        ORDER BY sequence_number
+      `).all(s.session_key as string, projectId) as Array<Record<string, unknown>>;
+
+      for (const tc of toolCalls) {
+        const actionStr = tc.action ? `:${tc.action}` : "";
+        const status = (tc.success as number) ? "\u2713" : "\u2717";
+        console.log(`    ${fmtTime(tc.created_at as number)}  ${status} ${tc.tool_name}${actionStr}`);
+      }
+    } else {
+      // Collapsed: group tool calls by type
+      const toolGroups = db.prepare(`
+        SELECT tool_name, COUNT(*) as cnt
+        FROM tool_call_details
+        WHERE session_key = ? AND project_id = ?
+        GROUP BY tool_name ORDER BY cnt DESC
+      `).all(s.session_key as string, projectId) as Array<{ tool_name: string; cnt: number }>;
+
+      const transitions = db.prepare(`
+        SELECT COUNT(*) as cnt FROM transitions
+        WHERE actor = ? AND created_at BETWEEN ? AND ?
+      `).get(s.agent_id, s.started_at, (s.ended_at as number) ?? Date.now()) as { cnt: number };
+
+      const toolSummary = toolGroups.map(g => `${g.tool_name}(${g.cnt})`).join(" ");
+      const transSummary = transitions.cnt > 0 ? ` \u2192 ${transitions.cnt} transitions` : "";
+      if (toolSummary || transSummary) {
+        console.log(`    ${toolSummary}${transSummary}`);
+      }
+    }
+    console.log("");
+  }
+}
+
+function cmdMetrics(db: DatabaseSync, projectId: string, hours: number): void {
+  const since = Date.now() - hours * 3600_000;
+
+  const agents = db.prepare(`
+    SELECT sa.agent_id,
+           COUNT(*) as sessions,
+           SUM(sa.total_cost_cents) as total_cost,
+           AVG(sa.duration_ms) as avg_duration_ms,
+           AVG(sa.tool_call_count) as avg_tool_calls,
+           SUM(sa.tool_call_count) as total_tool_calls
+    FROM session_archives sa
+    WHERE sa.project_id = ? AND sa.started_at > ?
+    GROUP BY sa.agent_id ORDER BY total_cost DESC
+  `).all(projectId, since) as Array<Record<string, unknown>>;
+
+  console.log(`## Per-Agent Metrics (last ${hours}h)\n`);
+
+  if (agents.length === 0) {
+    console.log("No session data available.");
+    return;
+  }
+
+  for (const a of agents) {
+    const agent = a.agent_id as string;
+    const sessions = a.sessions as number;
+    const totalCost = a.total_cost as number;
+    const avgDur = a.avg_duration_ms ? fmtAge(a.avg_duration_ms as number) : "?";
+    const avgTools = Math.round(a.avg_tool_calls as number);
+
+    // Proposals created by this agent
+    const proposalCount = (db.prepare(
+      "SELECT COUNT(*) as cnt FROM proposals WHERE proposed_by = ? AND project_id = ? AND created_at > ?",
+    ).get(agent, projectId, since) as { cnt: number }).cnt;
+
+    // Completed tasks by this agent
+    const completedTasks = (db.prepare(`
+      SELECT COUNT(DISTINCT task_id) as cnt FROM transitions
+      WHERE actor = ? AND to_state = 'DONE' AND created_at > ?
+    `).get(agent, since) as { cnt: number }).cnt;
+
+    const costPerProposal = proposalCount > 0 ? fmt$(Math.round(totalCost / proposalCount)) : "n/a";
+    const costPerTask = completedTasks > 0 ? fmt$(Math.round(totalCost / completedTasks)) : "n/a";
+
+    console.log(`  ${agent}`);
+    console.log(`    Sessions: ${sessions}  |  Total cost: ${fmt$(totalCost)}  |  Avg duration: ${avgDur}`);
+    console.log(`    Tools/session: ${avgTools}  |  Cost/proposal: ${costPerProposal} (${proposalCount})  |  Cost/completed task: ${costPerTask} (${completedTasks})`);
+    console.log("");
+  }
+}
+
+function cmdBudget(db: DatabaseSync, projectId: string): void {
+  const budget = db.prepare(
+    "SELECT daily_limit_cents, daily_spent_cents, monthly_spent_cents, daily_reset_at FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+  ).get(projectId) as Record<string, number> | undefined;
+
+  console.log("## Budget Pacing\n");
+
+  if (!budget) {
+    console.log("No budget configured.");
+    return;
+  }
+
+  const dailyRemaining = Math.max(0, budget.daily_limit_cents - budget.daily_spent_cents);
+  const dailyPct = budget.daily_limit_cents > 0 ? Math.round((budget.daily_spent_cents / budget.daily_limit_cents) * 100) : 0;
+
+  console.log(`  Daily:     ${fmt$(budget.daily_spent_cents)} / ${fmt$(budget.daily_limit_cents)} (${dailyPct}%)`);
+
+  // Hourly burn rate (last hour)
+  const hourCost = db.prepare(
+    "SELECT COALESCE(SUM(cost_cents), 0) as cost FROM cost_records WHERE project_id = ? AND created_at > ?",
+  ).get(projectId, Date.now() - 3600_000) as { cost: number };
+
+  const burnRate = hourCost.cost;
+  console.log(`  Burn rate: ${fmt$(burnRate)}/hr`);
+
+  // Hours remaining
+  const hoursRemaining = burnRate > 0 ? dailyRemaining / burnRate : Infinity;
+  console.log(`  Hours remaining at current rate: ${hoursRemaining === Infinity ? "\u221E" : hoursRemaining.toFixed(1)}`);
+
+  // Monthly
+  if (budget.monthly_spent_cents > 0) {
+    console.log(`  Monthly:   ${fmt$(budget.monthly_spent_cents)}`);
+  }
+
+  // Compute pacing recommendation
+  const now = new Date();
+  const hoursUntilMidnight = 24 - now.getHours() - (now.getMinutes() / 60);
+
+  try {
+    // Use computeBudgetPacing inline (same logic, avoid import issues in CLI context)
+    const remaining = dailyRemaining;
+    const reserve = Math.round(remaining * 0.2);
+    const allocatable = remaining - reserve;
+    const hourlyRate = hoursUntilMidnight > 0 ? Math.round(allocatable / hoursUntilMidnight) : 0;
+    const pctRemaining = budget.daily_limit_cents > 0 ? (remaining / budget.daily_limit_cents) * 100 : 0;
+
+    console.log("");
+    console.log(`  Pacing:`);
+    console.log(`    Allocatable: ${fmt$(allocatable)}  |  Reserve: ${fmt$(reserve)}`);
+    console.log(`    Target rate: ${fmt$(hourlyRate)}/hr`);
+
+    if (pctRemaining <= 5) {
+      console.log(`    Status: CRITICAL (${pctRemaining.toFixed(1)}% remaining) — all dispatch blocked`);
+    } else if (pctRemaining <= 10) {
+      console.log(`    Status: LOW (${pctRemaining.toFixed(1)}% remaining) — workers blocked, leads allowed`);
+    } else if (burnRate > hourlyRate && hourlyRate > 0) {
+      console.log(`    Status: THROTTLED (burning ${fmt$(burnRate)}/hr vs ${fmt$(hourlyRate)}/hr target)`);
+    } else {
+      console.log(`    Status: Normal (${pctRemaining.toFixed(1)}% remaining)`);
+    }
+  } catch { /* ignore */ }
+
+  // Per-agent budget overrides
+  const agentBudgets = db.prepare(
+    "SELECT agent_id, daily_limit_cents, daily_spent_cents, session_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NOT NULL",
+  ).all(projectId) as Array<Record<string, unknown>>;
+
+  if (agentBudgets.length > 0) {
+    console.log("\n  Per-Agent:");
+    for (const ab of agentBudgets) {
+      const agentPct = (ab.daily_limit_cents as number) > 0
+        ? Math.round(((ab.daily_spent_cents as number) / (ab.daily_limit_cents as number)) * 100)
+        : 0;
+      console.log(`    ${pad(ab.agent_id as string, 20)} ${fmt$(ab.daily_spent_cents as number)} / ${fmt$(ab.daily_limit_cents as number)} (${agentPct}%)  session limit: ${ab.session_limit_cents ? fmt$(ab.session_limit_cents as number) : "none"}`);
+    }
+  }
+}
+
+function cmdTrust(db: DatabaseSync, projectId: string): void {
+  console.log("## Trust Overview\n");
+
+  // Get latest trust score per agent
+  const agents = db.prepare(`
+    SELECT agent_id, score, tier, trigger_type, created_at
+    FROM trust_score_history
+    WHERE project_id = ? AND id IN (
+      SELECT id FROM trust_score_history t2
+      WHERE t2.project_id = ? AND t2.agent_id = trust_score_history.agent_id
+      ORDER BY t2.created_at DESC LIMIT 1
+    )
+    ORDER BY agent_id
+  `).all(projectId, projectId) as Array<Record<string, unknown>>;
+
+  if (agents.length === 0) {
+    console.log("  No trust history recorded.");
+    return;
+  }
+
+  const dayAgo = Date.now() - 24 * 3600_000;
+
+  for (const a of agents) {
+    const agent = a.agent_id as string;
+    const score = (a.score as number).toFixed(2);
+    const tier = a.tier as string;
+    const lastChange = fmtAgo(a.created_at as number);
+    const trigger = a.trigger_type as string;
+
+    // Trend: compare to 24h ago
+    const oldScore = db.prepare(`
+      SELECT score FROM trust_score_history
+      WHERE project_id = ? AND agent_id = ? AND created_at <= ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(projectId, agent, dayAgo) as { score: number } | undefined;
+
+    let trend = "stable";
+    if (oldScore) {
+      const diff = (a.score as number) - oldScore.score;
+      if (diff > 0.05) trend = `\u2191 up (+${diff.toFixed(2)})`;
+      else if (diff < -0.05) trend = `\u2193 down (${diff.toFixed(2)})`;
+    }
+
+    console.log(`  ${pad(agent, 20)} score: ${score}  tier: ${pad(tier, 12)} last change: ${lastChange} (${trigger})  trend: ${trend}`);
+  }
+}
+
+function cmdInbox(db: DatabaseSync, projectId: string): void {
+  console.log("## Inbox\n");
+
+  // Messages to/from user
+  const messages = db.prepare(`
+    SELECT id, from_agent, to_agent, content, status, created_at, read_at, type
+    FROM messages
+    WHERE project_id = ? AND (to_agent = 'user' OR from_agent = 'user')
+    ORDER BY created_at DESC LIMIT 30
+  `).all(projectId) as Array<Record<string, unknown>>;
+
+  if (messages.length === 0) {
+    console.log("  No messages.");
+    return;
+  }
+
+  for (const m of messages) {
+    const direction = (m.from_agent as string) === "user" ? "\u2192" : "\u2190";
+    const other = (m.from_agent as string) === "user" ? m.to_agent : m.from_agent;
+    const preview = truncate(m.content as string, 60);
+    const age = fmtAgo(m.created_at as number);
+    const readStatus = m.read_at ? "" : " [unread]";
+    console.log(`  ${direction} ${pad(other as string, 18)} ${preview.padEnd(62)} ${age}${readStatus}`);
+  }
+}
+
+function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): void {
+  // Find proposal by prefix
+  const proposal = db.prepare(
+    "SELECT id, title, status FROM proposals WHERE project_id = ? AND id LIKE ?",
+  ).get(projectId, `${proposalId}%`) as Record<string, unknown> | undefined;
+
+  if (!proposal) {
+    console.error(`No proposal found matching "${proposalId}"`);
+    process.exit(1);
+  }
+
+  if (proposal.status !== "pending") {
+    console.error(`Proposal "${(proposal.id as string).slice(0, 8)}" is already ${proposal.status}`);
+    process.exit(1);
+  }
+
+  const now = Date.now();
+  db.prepare(
+    "UPDATE proposals SET status = 'approved', user_feedback = ?, resolved_at = ? WHERE id = ?",
+  ).run("Approved via CLI", now, proposal.id);
+
+  // Emit approval event
+  try {
+    const id = crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
+      VALUES (?, ?, 'proposal_approved', 'cli', ?, ?, 'pending', ?)
+    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id }), `proposal-approved:${proposal.id}`, now);
+  } catch { /* ignore */ }
+
+  console.log(`Approved: "${truncate(proposal.title as string, 60)}" (${(proposal.id as string).slice(0, 8)})`);
+}
+
+function cmdReject(db: DatabaseSync, projectId: string, proposalId: string, feedback?: string): void {
+  const proposal = db.prepare(
+    "SELECT id, title, status FROM proposals WHERE project_id = ? AND id LIKE ?",
+  ).get(projectId, `${proposalId}%`) as Record<string, unknown> | undefined;
+
+  if (!proposal) {
+    console.error(`No proposal found matching "${proposalId}"`);
+    process.exit(1);
+  }
+
+  if (proposal.status !== "pending") {
+    console.error(`Proposal "${(proposal.id as string).slice(0, 8)}" is already ${proposal.status}`);
+    process.exit(1);
+  }
+
+  const now = Date.now();
+  db.prepare(
+    "UPDATE proposals SET status = 'rejected', user_feedback = ?, resolved_at = ? WHERE id = ?",
+  ).run(feedback ?? "Rejected via CLI", now, proposal.id);
+
+  // Emit rejection event
+  try {
+    const id = crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
+      VALUES (?, ?, 'proposal_rejected', 'cli', ?, ?, 'pending', ?)
+    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id, feedback }), `proposal-rejected:${proposal.id}`, now);
+  } catch { /* ignore */ }
+
+  console.log(`Rejected: "${truncate(proposal.title as string, 60)}" (${(proposal.id as string).slice(0, 8)})`);
+  if (feedback) console.log(`Feedback: ${feedback}`);
+}
+
+function cmdMessage(db: DatabaseSync, projectId: string, toAgent: string, content: string): void {
+  const id = crypto.randomUUID();
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO messages (id, from_agent, to_agent, project_id, type, priority, content, status, created_at)
+    VALUES (?, 'user', ?, ?, 'direct', 'normal', ?, 'queued', ?)
+  `).run(id, toAgent, projectId, content, now);
+
+  // Emit user_message event
+  try {
+    const eventId = crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
+      VALUES (?, ?, 'user_message', 'cli', ?, ?, 'pending', ?)
+    `).run(eventId, projectId, JSON.stringify({ messageId: id, toAgent, content }), `user-msg:${id}`, now);
+  } catch { /* ignore */ }
+
+  console.log(`Message sent to ${toAgent}: "${truncate(content, 60)}"`);
+}
+
+function cmdReplay(db: DatabaseSync, projectId: string, sessionKey: string): void {
+  // Find matching session
+  const session = db.prepare(`
+    SELECT session_key, agent_id, started_at, ended_at, outcome
+    FROM session_archives WHERE project_id = ? AND session_key LIKE ?
+    ORDER BY started_at DESC LIMIT 1
+  `).get(projectId, `${sessionKey}%`) as Record<string, unknown> | undefined;
+
+  if (!session) {
+    console.error(`No session found matching "${sessionKey}"`);
+    process.exit(1);
+  }
+
+  const fullKey = session.session_key as string;
+  console.log(`## Replay: ${fullKey.slice(0, 8)} (${session.agent_id})\n`);
+  console.log(`  Started: ${fmtDate(session.started_at as number)}  Outcome: ${session.outcome}\n`);
+
+  const toolCalls = db.prepare(`
+    SELECT tool_name, action, input, output, sequence_number, duration_ms,
+           success, error_message, created_at
+    FROM tool_call_details
+    WHERE session_key = ? AND project_id = ?
+    ORDER BY sequence_number
+  `).all(fullKey, projectId) as Array<Record<string, unknown>>;
+
+  if (toolCalls.length === 0) {
+    console.log("  No tool call details recorded for this session.");
+    return;
+  }
+
+  for (const tc of toolCalls) {
+    const seq = (tc.sequence_number as number).toString().padStart(3);
+    const time = fmtTime(tc.created_at as number);
+    const actionStr = tc.action ? `.${tc.action}` : "";
+    const durStr = tc.duration_ms ? `(${tc.duration_ms}ms)` : "";
+    const status = (tc.success as number) ? "\u2713" : "\u2717";
+
+    console.log(`  ${seq}. [${time}] ${status} ${tc.tool_name}${actionStr} ${durStr}`);
+
+    // Input (truncated)
+    if (tc.input) {
+      const inputStr = typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input);
+      console.log(`       Input:  ${truncate(inputStr, 120)}`);
+    }
+
+    // Output (truncated)
+    if (tc.output) {
+      const outputStr = typeof tc.output === "string" ? tc.output : JSON.stringify(tc.output);
+      console.log(`       Output: ${truncate(outputStr, 120)}`);
+    }
+
+    // Error
+    if (tc.error_message) {
+      console.log(`       Error:  ${truncate(tc.error_message as string, 120)}`);
+    }
+
+    console.log("");
   }
 }
 
@@ -1021,6 +1942,21 @@ Diagnostics:
   streams                   List available data streams
   query "SQL"               Raw SQL query against the project DB
 
+Visibility Suite:
+  dashboard [--hours=N]     THE single-command answer — anomalies, status, budget
+  sessions [--hours=N] [--agent=X]  List recent sessions with cost/output summary
+  session <key>             Drill into one session — tool calls, transitions, cost
+  proposals [--status=pending|approved|rejected|all]  List proposals
+  flows [--hours=N] [--agent=X] [--expand]  Per-session action timeline
+  metrics [--hours=N]       Per-agent efficiency metrics
+  budget                    Budget pacing status and projections
+  trust                     Per-agent trust overview
+  inbox                     User messages from/to agents
+  approve <id>              Approve a pending proposal
+  reject <id> [--feedback="reason"]  Reject a pending proposal
+  message <agent> "text"    Send a user message to an agent
+  replay <key>              Replay session tool calls with full I/O
+
 Runtime Control:
   disable [--reason=MSG]    Disable domain via DB (blocks new dispatches)
   enable                    Enable domain via DB (resume dispatches)
@@ -1055,6 +1991,13 @@ const hoursArg = args.find(a => a.startsWith("--hours="));
 const hours = hoursArg ? parseInt(hoursArg.split("=")[1]!, 10) : undefined;
 const byArg = args.find(a => a.startsWith("--by="));
 const groupBy = byArg?.split("=")[1];
+const agentArg = args.find(a => a.startsWith("--agent="));
+const agentFilter = agentArg?.split("=")[1];
+const statusArg = args.find(a => a.startsWith("--status="));
+const statusFilter = statusArg?.split("=")[1];
+const feedbackArg = args.find(a => a.startsWith("--feedback="));
+const feedbackValue = feedbackArg?.split("=").slice(1).join("=");
+const expandFlag = args.includes("--expand");
 
 switch (command) {
   case "status":
@@ -1085,6 +2028,76 @@ switch (command) {
     const sql = args.slice(1).filter(a => !a.startsWith("--")).join(" ");
     if (!sql) { console.error("Usage: query \"SQL statement\""); process.exit(1); }
     cmdQuery(db, sql);
+    break;
+  }
+  case "dashboard":
+    cmdDashboard(db, projectId, hours ?? 4);
+    break;
+  case "sessions":
+    cmdSessions(db, projectId, hours ?? 4, agentFilter);
+    break;
+  case "session": {
+    const sessionKey = args[1];
+    if (!sessionKey || sessionKey.startsWith("--")) {
+      console.error("Usage: cf session <session_key>");
+      process.exit(1);
+    }
+    cmdSessionDetail(db, projectId, sessionKey);
+    break;
+  }
+  case "proposals":
+    cmdProposals(db, projectId, statusFilter ?? "pending");
+    break;
+  case "flows":
+    cmdFlows(db, projectId, hours ?? 4, agentFilter, expandFlag);
+    break;
+  case "metrics":
+    cmdMetrics(db, projectId, hours ?? 24);
+    break;
+  case "budget":
+    cmdBudget(db, projectId);
+    break;
+  case "trust":
+    cmdTrust(db, projectId);
+    break;
+  case "inbox":
+    cmdInbox(db, projectId);
+    break;
+  case "approve": {
+    const approveId = args[1];
+    if (!approveId || approveId.startsWith("--")) {
+      console.error("Usage: cf approve <proposal_id>");
+      process.exit(1);
+    }
+    cmdApprove(db, projectId, approveId);
+    break;
+  }
+  case "reject": {
+    const rejectId = args[1];
+    if (!rejectId || rejectId.startsWith("--")) {
+      console.error("Usage: cf reject <proposal_id> [--feedback=\"reason\"]");
+      process.exit(1);
+    }
+    cmdReject(db, projectId, rejectId, feedbackValue);
+    break;
+  }
+  case "message": {
+    const toAgent = args[1];
+    const msgContent = args.slice(2).filter(a => !a.startsWith("--")).join(" ");
+    if (!toAgent || toAgent.startsWith("--") || !msgContent) {
+      console.error('Usage: cf message <agent> "text"');
+      process.exit(1);
+    }
+    cmdMessage(db, projectId, toAgent, msgContent);
+    break;
+  }
+  case "replay": {
+    const replayKey = args[1];
+    if (!replayKey || replayKey.startsWith("--")) {
+      console.error("Usage: cf replay <session_key>");
+      process.exit(1);
+    }
+    cmdReplay(db, projectId, replayKey);
     break;
   }
   case "disable":
