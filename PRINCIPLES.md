@@ -88,9 +88,9 @@ remaining budget and remaining time.
 ## Agent Roles
 
 **Leads** execute within approved scope. They break down features into tasks, assign
-workers, and triage failures. They wake on events (task completed, task failed) and
-scheduled planning sessions. They do NOT review work (verifiers do that) and do NOT
-invent work unless configured to suggest (with approval gate).
+workers, review completed work, and triage failures. They wake on events (task completed,
+task failed, review ready) and scheduled planning sessions. They do NOT invent work
+unless configured to suggest (with approval gate).
 
 **Workers** implement tasks. They fire on assignment events, loop through their task board
 in a single session, and submit evidence for review. They are cheap, fast, and autonomous
@@ -164,11 +164,6 @@ Experiment: compare approval-gated vs autonomous feature quality.
 Current observation: generic prompts produce busywork. But locked-in, highly optimized
 prompts might work. This is the core Phase 2 experiment — prompt evolution for
 autonomous work selection.
-
-**Should leads review work or only verifiers?**
-Current default: verifier-only review. Leads plan and triage, verifiers review.
-But maybe leads should do high-level review (does this meet the goal?) while
-verifiers do technical review. Experiment: compare lead+verifier vs verifier-only.
 
 **Should workers loop or single-task?**
 Current default: session loop (max 5 tasks). Might be better to single-task for
