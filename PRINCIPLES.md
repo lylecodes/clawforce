@@ -150,8 +150,30 @@ measure, adapt, and scale themselves.
 
 **One-liner:** "Set the direction. Set the budget. Your AI team handles the rest."
 
+## Open Questions (resolve through experiments, not debate)
+
+These questions keep coming up. Stop debating them — build the system to support both
+options configurably, then run experiments to find what works.
+
+**Should leads need approval for feature proposals?**
+Current default: yes (approval-gated). But maybe for well-prompted leads with a clear
+DIRECTION, autonomous feature creation is fine. Configurable via `lead_proposals.require_approval`.
+Experiment: compare approval-gated vs autonomous feature quality.
+
+**How autonomous can leads be with the right prompt?**
+Current observation: generic prompts produce busywork. But locked-in, highly optimized
+prompts might work. This is the core Phase 2 experiment — prompt evolution for
+autonomous work selection.
+
+**Should workers loop or single-task?**
+Current default: session loop (max 5 tasks). Might be better to single-task for
+isolation. Configurable via `worker.session_loop`. Experiment: compare cost/quality.
+
+**When something comes up repeatedly in conversation, add it here instead of
+re-discussing it.** If it's configurable, make it configurable and move on.
+
 ## What's Next
 
-Phase 2 experiments will test whether optimized prompts can make AI good at choosing
-work autonomously. If yes, ClawForce becomes truly autonomous. If no, human-drives-what
-is the ceiling and we optimize for that model.
+Phase 2 experiments will test these open questions with real data. The experiment
+framework is built. The telemetry is in place. The config system supports both sides
+of each question. Run the experiments, measure, ship the winning defaults.
