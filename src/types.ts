@@ -41,6 +41,8 @@ export type Evidence = {
 
 export type TaskOrigin = "user_request" | "lead_proposal" | "reactive";
 
+export const TASK_ORIGINS: readonly TaskOrigin[] = ["user_request", "lead_proposal", "reactive"] as const;
+
 export type Task = {
   id: string;
   projectId: string;

@@ -898,6 +898,7 @@ export type ListTasksFilter = {
   team?: string;
   kind?: TaskKind;
   excludeKinds?: TaskKind[];
+  origin?: import("../types.js").TaskOrigin;
   limit?: number;
 };
 
@@ -941,6 +942,10 @@ export function listTasks(
   if (filter?.kind) {
     conditions.push("kind = ?");
     values.push(filter.kind);
+  }
+  if (filter?.origin) {
+    conditions.push("origin = ?");
+    values.push(filter.origin);
   }
   if (filter?.excludeKinds && filter.excludeKinds.length > 0) {
     const placeholders = filter.excludeKinds.map(() => "?").join(", ");

@@ -29,6 +29,7 @@
  *   reject <id>     Reject a pending proposal with optional feedback
  *   message <agent> Send a message to an agent
  *   replay <key>    Replay session tool calls with full input/output
+ *   watch           Curated feed — only what changed since last check
  *
  * Runtime Control:
  *   disable         Disable domain via DB (blocks new dispatches)
@@ -633,29 +634,29 @@ function cmdDashboard(db: DatabaseSync, projectId: string, hours: number): void 
   let totalSessions = 0;
   let totalCostCents = 0;
   try {
-    const summary = db.prepare(`
-      SELECT COUNT(*) as sessions, COALESCE(SUM(cr.cost), 0) as cost
-      FROM session_archives sa
-      LEFT JOIN (SELECT session_key, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY session_key) cr ON cr.session_key = sa.session_key
-      WHERE sa.project_id = ? AND sa.started_at > ?
-    `).get(projectId, since, projectId, since) as { sessions: number; cost: number };
-    totalSessions = summary.sessions;
-    totalCostCents = summary.cost;
+    const sessionCount = db.prepare(
+      "SELECT COUNT(*) as sessions FROM session_archives WHERE project_id = ? AND started_at > ?"
+    ).get(projectId, since) as { sessions: number };
+    const costSum = db.prepare(
+      "SELECT COALESCE(SUM(cost_cents), 0) as cost FROM cost_records WHERE project_id = ? AND created_at > ?"
+    ).get(projectId, since) as { cost: number };
+    totalSessions = sessionCount.sessions;
+    totalCostCents = costSum.cost;
   } catch { /* ignore */ }
   console.log(`## Dashboard (last ${hours}h)  |  ${totalSessions} sessions  |  ${fmt$(totalCostCents)} total cost\n`);
 
   // --- Agent Status ---
   console.log("## Agent Status\n");
   try {
-    // Get agents with sessions in the window, using cost_records for actual cost
+    // Get agents with sessions in the window; costs from cost_records directly by agent_id to avoid session_key duplication
     const activeAgents = db.prepare(`
       SELECT sa.agent_id,
              COUNT(*) as sessions,
-             COALESCE(SUM(cr.cost), 0) as cost,
+             COALESCE(MAX(ac.cost), 0) as cost,
              MAX(sa.started_at) as last_active,
              SUM(sa.tool_call_count) as tool_calls
       FROM session_archives sa
-      LEFT JOIN (SELECT session_key, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY session_key) cr ON cr.session_key = sa.session_key
+      LEFT JOIN (SELECT agent_id, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY agent_id) ac ON ac.agent_id = sa.agent_id
       WHERE sa.project_id = ? AND sa.started_at > ?
       GROUP BY sa.agent_id ORDER BY last_active DESC
     `).all(projectId, since, projectId, since) as Array<Record<string, unknown>>;
@@ -825,14 +826,13 @@ function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFi
   let sql = `
     SELECT sa.session_key, sa.agent_id, sa.started_at, sa.duration_ms,
            sa.tool_call_count, sa.outcome, sa.task_id,
-           COALESCE(cr.cost, 0) as session_cost,
+           (SELECT COALESCE(SUM(cost_cents), 0) FROM cost_records WHERE session_key = sa.session_key AND project_id = ? AND created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as session_cost,
            (SELECT COUNT(*) FROM transitions t WHERE t.actor = sa.session_key AND t.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as transitions,
            (SELECT COUNT(*) FROM proposals p WHERE p.proposed_by = sa.session_key AND p.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as proposals
     FROM session_archives sa
-    LEFT JOIN (SELECT session_key, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY session_key) cr ON cr.session_key = sa.session_key
     WHERE sa.project_id = ? AND sa.started_at > ?
   `;
-  const params: (string | number)[] = [Date.now(), Date.now(), projectId, since, projectId, since];
+  const params: (string | number)[] = [projectId, Date.now(), Date.now(), Date.now(), projectId, since];
 
   if (agentFilter) {
     sql += " AND sa.agent_id = ?";
@@ -948,15 +948,15 @@ function cmdSessionDetail(db: DatabaseSync, projectId: string, sessionKey: strin
     console.log("");
   }
 
-  // Cost breakdown
+  // Cost breakdown — scoped to session time window to avoid counting costs from other runs of the same session_key
   const costRecords = db.prepare(`
     SELECT model, SUM(cost_cents) as cost, SUM(input_tokens) as input_tok,
            SUM(output_tokens) as output_tok, SUM(cache_read_tokens) as cache_read,
            COUNT(*) as calls
     FROM cost_records
-    WHERE session_key = ? AND project_id = ?
+    WHERE session_key = ? AND project_id = ? AND created_at BETWEEN ? AND ?
     GROUP BY model
-  `).all(fullKey, projectId) as Array<Record<string, unknown>>;
+  `).all(fullKey, projectId, startedAt, endedAt) as Array<Record<string, unknown>>;
 
   if (costRecords.length > 0) {
     console.log("  Cost Breakdown:");
@@ -1032,14 +1032,14 @@ function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilte
 
   let sql = `
     SELECT sa.session_key, sa.agent_id, sa.started_at, sa.ended_at, sa.duration_ms,
-           COALESCE(cr.cost, 0) as session_cost, sa.outcome, sa.tool_call_count,
+           (SELECT COALESCE(SUM(cost_cents), 0) FROM cost_records WHERE session_key = sa.session_key AND project_id = ? AND created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as session_cost,
+           sa.outcome, sa.tool_call_count,
            (SELECT COUNT(*) FROM transitions t WHERE t.actor = sa.session_key AND t.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as transitions,
            (SELECT COUNT(*) FROM proposals p WHERE p.proposed_by = sa.session_key AND p.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as proposals
     FROM session_archives sa
-    LEFT JOIN (SELECT session_key, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY session_key) cr ON cr.session_key = sa.session_key
     WHERE sa.project_id = ? AND sa.started_at > ?
   `;
-  const params: (string | number)[] = [Date.now(), Date.now(), projectId, since, projectId, since];
+  const params: (string | number)[] = [projectId, Date.now(), Date.now(), Date.now(), projectId, since];
 
   if (agentFilter) {
     sql += " AND sa.agent_id = ?";
@@ -1114,12 +1114,12 @@ function cmdMetrics(db: DatabaseSync, projectId: string, hours: number): void {
   const agents = db.prepare(`
     SELECT sa.agent_id,
            COUNT(*) as sessions,
-           COALESCE(SUM(cr.cost), 0) as total_cost,
+           COALESCE(MAX(ac.cost), 0) as total_cost,
            AVG(COALESCE(sa.duration_ms, sa.ended_at - sa.started_at)) as avg_duration_ms,
            AVG(sa.tool_call_count) as avg_tool_calls,
            SUM(sa.tool_call_count) as total_tool_calls
     FROM session_archives sa
-    LEFT JOIN (SELECT session_key, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY session_key) cr ON cr.session_key = sa.session_key
+    LEFT JOIN (SELECT agent_id, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY agent_id) ac ON ac.agent_id = sa.agent_id
     WHERE sa.project_id = ? AND sa.started_at > ?
     GROUP BY sa.agent_id ORDER BY total_cost DESC
   `).all(projectId, since, projectId, since) as Array<Record<string, unknown>>;
@@ -2047,6 +2047,326 @@ Examples:
   }
 }
 
+// ─── Watch command ──────────────────────────────────────────────────
+
+const WATCH_STATE_FILE = path.join(DB_DIR, ".watch_state");
+
+interface WatchState {
+  lastCheckAt: number;
+}
+
+function readWatchState(): WatchState | null {
+  try {
+    if (!fs.existsSync(WATCH_STATE_FILE)) return null;
+    const raw = fs.readFileSync(WATCH_STATE_FILE, "utf-8");
+    return JSON.parse(raw) as WatchState;
+  } catch {
+    return null;
+  }
+}
+
+function writeWatchState(state: WatchState): void {
+  fs.writeFileSync(WATCH_STATE_FILE, JSON.stringify(state), "utf-8");
+}
+
+function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean): void {
+  const now = Date.now();
+
+  if (reset) {
+    writeWatchState({ lastCheckAt: 0 });
+    console.log("Watch state reset. Next run will show everything.");
+    return;
+  }
+
+  const state = readWatchState();
+  const since = state?.lastCheckAt ?? 0;
+  const isFirstRun = since === 0;
+
+  // For display — how long ago was the last check?
+  const sinceLabel = isFirstRun ? "the beginning" : fmtAgo(since);
+  const sinceTime = isFirstRun ? "" : ` (${fmtTime(since)})`;
+
+  // ── Gather deltas ──
+
+  // 1. New sessions since last check
+  let newSessions: Array<Record<string, unknown>> = [];
+  try {
+    newSessions = db.prepare(`
+      SELECT sa.session_key, sa.agent_id, sa.started_at, sa.duration_ms,
+             sa.outcome, sa.task_id,
+             (SELECT COALESCE(SUM(cost_cents), 0) FROM cost_records WHERE session_key = sa.session_key AND project_id = ? AND created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as session_cost,
+             (SELECT COUNT(*) FROM transitions t WHERE t.actor = sa.session_key AND t.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as transitions,
+             (SELECT COUNT(*) FROM proposals p WHERE p.proposed_by = sa.session_key AND p.created_at BETWEEN sa.started_at AND COALESCE(sa.ended_at, ?)) as proposals
+      FROM session_archives sa
+      WHERE sa.project_id = ? AND sa.started_at > ?
+      ORDER BY sa.started_at DESC LIMIT 20
+    `).all(projectId, now, now, now, projectId, since) as Array<Record<string, unknown>>;
+  } catch { /* table may not exist */ }
+
+  // 2. Tasks completed (transitioned to DONE)
+  let completedTasks: Array<Record<string, unknown>> = [];
+  try {
+    completedTasks = db.prepare(`
+      SELECT DISTINCT t.task_id, tk.title, t.actor, t.created_at,
+             (SELECT COALESCE(SUM(cost_cents), 0) FROM cost_records WHERE task_id = t.task_id AND project_id = ?) as task_cost,
+             tk.updated_at
+      FROM transitions t
+      LEFT JOIN tasks tk ON t.task_id = tk.id
+      WHERE t.to_state = 'DONE' AND t.created_at > ?
+      ORDER BY t.created_at DESC LIMIT 20
+    `).all(projectId, since) as Array<Record<string, unknown>>;
+  } catch { /* ignore */ }
+
+  // 3. Tasks failed
+  let failedTasks: Array<Record<string, unknown>> = [];
+  try {
+    failedTasks = db.prepare(`
+      SELECT DISTINCT t.task_id, tk.title, t.actor, t.created_at,
+             dq.last_error
+      FROM transitions t
+      LEFT JOIN tasks tk ON t.task_id = tk.id
+      LEFT JOIN dispatch_queue dq ON dq.task_id = t.task_id AND dq.project_id = ?
+      WHERE t.to_state = 'FAILED' AND t.created_at > ?
+      ORDER BY t.created_at DESC LIMIT 20
+    `).all(projectId, since) as Array<Record<string, unknown>>;
+  } catch { /* ignore */ }
+
+  // 4. New proposals
+  let newProposals: Array<Record<string, unknown>> = [];
+  try {
+    newProposals = db.prepare(`
+      SELECT id, title, proposed_by, reasoning, status, created_at
+      FROM proposals
+      WHERE project_id = ? AND created_at > ?
+      ORDER BY created_at DESC LIMIT 20
+    `).all(projectId, since) as Array<Record<string, unknown>>;
+  } catch { /* ignore */ }
+
+  // 5. State changes (transitions, excluding DONE/FAILED which are shown separately)
+  let stateChanges: Array<Record<string, unknown>> = [];
+  try {
+    stateChanges = db.prepare(`
+      SELECT t.task_id, tk.title, t.from_state, t.to_state, t.actor, t.created_at
+      FROM transitions t
+      LEFT JOIN tasks tk ON t.task_id = tk.id
+      WHERE t.created_at > ? AND t.to_state NOT IN ('DONE', 'FAILED')
+      ORDER BY t.created_at DESC LIMIT 20
+    `).all(since) as Array<Record<string, unknown>>;
+  } catch { /* ignore */ }
+
+  // 6. Anomalies (only new ones — run detection on the since-window)
+  const windowHours = Math.max(1, (now - since) / 3600_000);
+  const anomalies = isFirstRun ? detectAnomalies(db, projectId, 4) : detectAnomalies(db, projectId, windowHours);
+
+  // 7. New messages
+  let newMessages: Array<Record<string, unknown>> = [];
+  try {
+    newMessages = db.prepare(`
+      SELECT id, from_agent, to_agent, content, created_at, type
+      FROM messages
+      WHERE project_id = ? AND created_at > ? AND to_agent = 'user'
+      ORDER BY created_at DESC LIMIT 20
+    `).all(projectId, since) as Array<Record<string, unknown>>;
+  } catch { /* ignore */ }
+
+  // 8. Budget change check (only show if >5% change)
+  let budgetLine: string | null = null;
+  try {
+    const budget = db.prepare(
+      "SELECT daily_limit_cents, daily_spent_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+    ).get(projectId) as Record<string, number> | undefined;
+
+    if (budget && budget.daily_limit_cents > 0) {
+      const costSinceLastCheck = db.prepare(
+        "SELECT COALESCE(SUM(cost_cents), 0) as cost FROM cost_records WHERE project_id = ? AND created_at > ?",
+      ).get(projectId, since) as { cost: number };
+
+      const changePercent = (costSinceLastCheck.cost / budget.daily_limit_cents) * 100;
+      if (changePercent > 5) {
+        const pct = Math.round((budget.daily_spent_cents / budget.daily_limit_cents) * 100);
+        budgetLine = `Budget: ${fmt$(budget.daily_spent_cents)} / ${fmt$(budget.daily_limit_cents)} (${pct}%) — ${fmt$(costSinceLastCheck.cost)} spent since last check`;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 9. Currently active sessions (for "Active" section)
+  let activeSessions: Array<Record<string, unknown>> = [];
+  try {
+    activeSessions = db.prepare(`
+      SELECT session_key, agent_id, started_at
+      FROM tracked_sessions
+      WHERE project_id = ? AND ended_at IS NULL
+      ORDER BY started_at DESC
+    `).all(projectId) as Array<Record<string, unknown>>;
+  } catch { /* table may not exist */ }
+
+  // ── Check if anything changed ──
+
+  const hasChanges = newSessions.length > 0
+    || completedTasks.length > 0
+    || failedTasks.length > 0
+    || newProposals.length > 0
+    || stateChanges.length > 0
+    || anomalies.length > 0
+    || newMessages.length > 0
+    || budgetLine !== null
+    || activeSessions.length > 0;
+
+  if (!hasChanges) {
+    console.log(`## Since ${sinceLabel}${sinceTime} \u2014 No changes.`);
+    writeWatchState({ lastCheckAt: now });
+    return;
+  }
+
+  console.log(`## Since ${sinceLabel}${sinceTime}\n`);
+
+  // ── Render sections ──
+
+  // Anomalies first (most important)
+  if (anomalies.length > 0) {
+    console.log("Anomalies:");
+    for (const a of anomalies) {
+      console.log(`  \u26A0  ${a}`);
+    }
+    console.log("");
+  }
+
+  // New section: completed, failed, state changes, new sessions
+  const newLines: string[] = [];
+
+  for (const t of completedTasks) {
+    const who = extractAgentName(t.actor as string);
+    const cost = fmt$(t.task_cost as number);
+    newLines.push(`  \u2713 ${who} completed "${truncate(t.title as string, 45)}" (${cost})`);
+  }
+
+  for (const t of failedTasks) {
+    const reason = t.last_error ? ` \u2014 ${truncate(t.last_error as string, 50)}` : "";
+    newLines.push(`  \u2717 ${extractAgentName(t.actor as string)} failed "${truncate(t.title as string, 40)}"${reason}`);
+  }
+
+  for (const t of stateChanges) {
+    const title = t.title ? ` "${truncate(t.title as string, 40)}"` : "";
+    const actor = extractAgentName(t.actor as string);
+    newLines.push(`  \u2192 ${t.from_state} \u2192 ${t.to_state}${title} by ${actor}`);
+  }
+
+  // New sessions that didn't produce transitions/completions — show as one-liners
+  const sessionOnlyLines: string[] = [];
+  for (const s of newSessions) {
+    const parsed = parseSessionKey(s.session_key as string);
+    const duration = s.duration_ms ? fmtAge(s.duration_ms as number) : "?";
+    const cost = fmt$(s.session_cost as number);
+    const trans = s.transitions as number;
+    const props = s.proposals as number;
+    const output: string[] = [];
+    if (trans > 0) output.push(`${trans} transition${trans > 1 ? "s" : ""}`);
+    if (props > 0) output.push(`${props} proposal${props > 1 ? "s" : ""}`);
+    const outputStr = output.length > 0 ? output.join(", ") : "no output";
+    sessionOnlyLines.push(`  ${parsed.agent} (${parsed.type}) ${duration}, ${cost}, ${outputStr}`);
+  }
+
+  if (newLines.length > 0) {
+    console.log("New:");
+    for (const line of newLines) {
+      console.log(line);
+    }
+    console.log("");
+  }
+
+  if (sessionOnlyLines.length > 0 && newLines.length === 0) {
+    // Only show session lines when there are no transitions/completions to avoid redundancy
+    console.log("Sessions:");
+    for (const line of sessionOnlyLines) {
+      console.log(line);
+    }
+    console.log("");
+  } else if (sessionOnlyLines.length > 0) {
+    console.log(`Sessions: ${newSessions.length} new`);
+    for (const line of sessionOnlyLines) {
+      console.log(line);
+    }
+    console.log("");
+  }
+
+  // Proposals
+  const pendingProposals = newProposals.filter(p => p.status === "pending");
+  if (pendingProposals.length > 0) {
+    console.log("Proposals:");
+    for (const p of pendingProposals) {
+      const proposer = extractAgentName(p.proposed_by as string);
+      const reasoning = p.reasoning ? ` \u2014 ${truncate(p.reasoning as string, 60)}` : "";
+      console.log(`  [NEW] "${truncate(p.title as string, 45)}" by ${proposer}${reasoning}`);
+      console.log(`        approve? (cf approve ${(p.id as string).slice(0, 8)})`);
+    }
+    console.log("");
+  }
+
+  // Messages
+  if (newMessages.length > 0) {
+    console.log("Messages:");
+    for (const m of newMessages) {
+      const from = m.from_agent as string;
+      const preview = truncate(m.content as string, 60);
+      const age = fmtAgo(m.created_at as number);
+      console.log(`  \u2190 ${pad(from, 18)} ${preview}  ${age}`);
+    }
+    console.log("");
+  }
+
+  // Active sessions
+  if (activeSessions.length > 0) {
+    console.log("Active:");
+    for (const s of activeSessions) {
+      const age = fmtAge(now - (s.started_at as number));
+      // Get running cost
+      let runningCost = 0;
+      try {
+        const costRow = db.prepare(
+          "SELECT COALESCE(SUM(cost_cents), 0) as cost FROM cost_records WHERE session_key = ? AND project_id = ? AND created_at >= ?",
+        ).get(s.session_key as string, projectId, s.started_at as number) as { cost: number };
+        runningCost = costRow.cost;
+      } catch { /* ignore */ }
+      // Get task name if available
+      let taskInfo = "";
+      try {
+        const taskRow = db.prepare(`
+          SELECT tk.title FROM tracked_sessions ts
+          LEFT JOIN tasks tk ON ts.task_id = tk.id
+          WHERE ts.session_key = ? AND ts.project_id = ?
+        `).get(s.session_key as string, projectId) as { title: string | null } | undefined;
+        if (taskRow?.title) taskInfo = ` working on "${truncate(taskRow.title, 35)}"`;
+      } catch { /* ignore */ }
+      console.log(`  ${s.agent_id}${taskInfo} (${age}, ${fmt$(runningCost)} so far)`);
+    }
+    console.log("");
+  }
+
+  // Budget
+  if (budgetLine) {
+    console.log(budgetLine);
+    console.log("");
+  }
+
+  // Footer when some sections were empty
+  const shownSections = [
+    newLines.length > 0,
+    sessionOnlyLines.length > 0,
+    pendingProposals.length > 0,
+    newMessages.length > 0,
+    activeSessions.length > 0,
+    anomalies.length > 0,
+    budgetLine !== null,
+  ].filter(Boolean).length;
+
+  if (shownSections > 0 && shownSections < 3) {
+    console.log("Nothing else changed.");
+  }
+
+  // Update state
+  writeWatchState({ lastCheckAt: now });
+}
+
 // ─── Main ────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -2087,6 +2407,7 @@ Visibility Suite:
   reject <id> [--feedback="reason"]  Reject a pending proposal
   message <agent> "text"    Send a user message to an agent
   replay <key>              Replay session tool calls with full I/O
+  watch [--reset]           Curated feed — only what changed since last check
 
 Runtime Control:
   disable [--reason=MSG]    Disable domain via DB (blocks new dispatches)
@@ -2231,6 +2552,9 @@ switch (command) {
     cmdReplay(db, projectId, replayKey);
     break;
   }
+  case "watch":
+    cmdWatch(db, projectId, args.includes("--reset"));
+    break;
   case "disable":
     cmdDisable(db, projectId, args);
     break;

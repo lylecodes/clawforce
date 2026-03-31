@@ -98,6 +98,32 @@ describe("dashboard routes", () => {
     expect(result.status).toBe(200);
   });
 
+  it("GET /api/projects/:id/tasks?origin=user_request filters by origin", () => {
+    const result = handleRequest("/api/projects/proj1/tasks", { origin: "user_request" });
+    expect(result.status).toBe(200);
+    expect(result.body).toHaveProperty("tasks");
+    expect(result.body).toHaveProperty("hasMore");
+  });
+
+  it("GET /api/projects/:id/tasks?origin=lead_proposal filters by lead proposal origin", () => {
+    const result = handleRequest("/api/projects/proj1/tasks", { origin: "lead_proposal" });
+    expect(result.status).toBe(200);
+    expect(result.body).toHaveProperty("tasks");
+  });
+
+  it("GET /api/projects/:id/tasks?origin=reactive filters by reactive origin", () => {
+    const result = handleRequest("/api/projects/proj1/tasks", { origin: "reactive" });
+    expect(result.status).toBe(200);
+    expect(result.body).toHaveProperty("tasks");
+  });
+
+  it("GET /api/projects/:id/tasks?origin=invalid ignores invalid origin", () => {
+    const result = handleRequest("/api/projects/proj1/tasks", { origin: "invalid_origin" });
+    expect(result.status).toBe(200);
+    // Invalid origin should be ignored, not cause an error
+    expect(result.body).toHaveProperty("tasks");
+  });
+
   it("GET /api/projects/:id/tasks/:tid returns task detail", () => {
     const result = handleRequest("/api/projects/proj1/tasks/task1", {});
     expect(result.status).toBe(200);

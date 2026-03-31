@@ -17,7 +17,7 @@ import { computeHealthTier } from "../monitoring/health-tier.js";
 import { listEvents, countEvents } from "../events/store.js";
 import { searchMessages } from "../messaging/store.js";
 import { getActiveProtocols } from "../messaging/protocols.js";
-import type { MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
+import type { MessageType, MessageStatus, ProtocolStatus, GoalStatus, TaskOrigin } from "../types.js";
 import { listGoals, getGoal, getChildGoals, getGoalTasks } from "../goals/ops.js";
 import { computeGoalProgress } from "../goals/cascade.js";
 import { getDirectReports, getDepartmentAgents } from "../org.js";
@@ -218,6 +218,7 @@ export function queryTasks(
     team?: string;
     kind?: TaskKind;
     excludeKinds?: TaskKind[];
+    origin?: TaskOrigin;
   },
   pagination?: PaginationParams,
 ) {
@@ -234,6 +235,7 @@ export function queryTasks(
     team: filters?.team,
     kind: filters?.kind,
     excludeKinds: filters?.excludeKinds,
+    origin: filters?.origin,
     limit: limit + 1, // fetch one extra to determine hasMore
   });
 
