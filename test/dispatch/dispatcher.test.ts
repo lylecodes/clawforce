@@ -30,7 +30,7 @@ vi.mock("../../src/dispatch/spawn.js", () => ({
 const { getMemoryDb } = await import("../../src/db.js");
 const { createTask, transitionTask, attachEvidence, getTask } = await import("../../src/tasks/ops.js");
 const { enqueue, getQueueStatus } = await import("../../src/dispatch/queue.js");
-const { dispatchLoop, resetDispatcherForTest, getConcurrencyInfo, buildRetryContext } = await import("../../src/dispatch/dispatcher.js");
+const { dispatchLoop, resetDispatcherForTest, getConcurrencyInfo, buildRetryContext, hasAcceptanceCriteria } = await import("../../src/dispatch/dispatcher.js");
 const { listEvents } = await import("../../src/events/store.js");
 const { queryMetrics } = await import("../../src/metrics.js");
 const { queryAuditLog } = await import("../../src/audit.js");
@@ -371,6 +371,51 @@ describe("dispatch/dispatcher", () => {
 
     expect(capturedPrompt).toContain("Previous Attempt Context");
     expect(capturedPrompt).toContain("Build error");
+  });
+
+  // --- hasAcceptanceCriteria ---
+
+  describe("hasAcceptanceCriteria", () => {
+    it("detects markdown section header: ## Acceptance Criteria", () => {
+      expect(hasAcceptanceCriteria("## Acceptance Criteria\n1. It works")).toBe(true);
+    });
+
+    it("detects short markdown header: ## Acceptance", () => {
+      expect(hasAcceptanceCriteria("## Acceptance\nAll checks pass")).toBe(true);
+    });
+
+    it("detects inline prose format: Acceptance: …", () => {
+      expect(hasAcceptanceCriteria("Each stream card shows a narrative sentence.\nAcceptance: Each stream card shows a narrative sentence like 'dash-lead executed 3 tasks today'")).toBe(true);
+    });
+
+    it("detects inline label: acceptance criteria: …", () => {
+      expect(hasAcceptanceCriteria("Build the widget.\nAcceptance criteria: widget renders without errors, all 5 fields shown")).toBe(true);
+    });
+
+    it("detects numbered list described as acceptance criteria", () => {
+      expect(hasAcceptanceCriteria("## Problem\nFoo broken.\n\n## Acceptance Criteria\n1. foo is fixed\n2. tests pass")).toBe(true);
+    });
+
+    it("detects success criteria keyword", () => {
+      expect(hasAcceptanceCriteria("Fix the bug.\n\nSuccess criteria: the error no longer appears in logs")).toBe(true);
+    });
+
+    it("detects done when keyword", () => {
+      expect(hasAcceptanceCriteria("Implement feature X.\n\nDone when: all unit tests pass and CI is green")).toBe(true);
+    });
+
+    it("returns false for empty description", () => {
+      expect(hasAcceptanceCriteria("")).toBe(false);
+    });
+
+    it("returns false for description with no AC signal", () => {
+      expect(hasAcceptanceCriteria("Fix the bug in the login flow")).toBe(false);
+    });
+
+    it("returns false for description that only mentions acceptance in passing", () => {
+      // 'acceptance' in a non-label context should not trigger
+      expect(hasAcceptanceCriteria("The team needs to get acceptance from stakeholders")).toBe(false);
+    });
   });
 
   it("releases task lease when cron creation fails", async () => {

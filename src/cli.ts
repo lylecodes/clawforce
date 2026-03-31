@@ -1334,7 +1334,7 @@ function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): vo
   const now = Date.now();
   db.prepare(
     "UPDATE proposals SET status = 'approved', user_feedback = ?, resolved_at = ? WHERE id = ?",
-  ).run("Approved via CLI", now, proposal.id);
+  ).run("Approved via CLI", now, proposal.id as string);
 
   // Emit approval event
   try {
@@ -1342,7 +1342,7 @@ function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): vo
     db.prepare(`
       INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
       VALUES (?, ?, 'proposal_approved', 'cli', ?, ?, 'pending', ?)
-    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id }), `proposal-approved:${proposal.id}`, now);
+    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id }), `proposal-approved:${proposal.id as string}`, now);
   } catch { /* ignore */ }
 
   console.log(`Approved: "${truncate(proposal.title as string, 60)}" (${(proposal.id as string).slice(0, 8)})`);
@@ -1366,7 +1366,7 @@ function cmdReject(db: DatabaseSync, projectId: string, proposalId: string, feed
   const now = Date.now();
   db.prepare(
     "UPDATE proposals SET status = 'rejected', user_feedback = ?, resolved_at = ? WHERE id = ?",
-  ).run(feedback ?? "Rejected via CLI", now, proposal.id);
+  ).run(feedback ?? "Rejected via CLI", now, proposal.id as string);
 
   // Emit rejection event
   try {
@@ -1374,7 +1374,7 @@ function cmdReject(db: DatabaseSync, projectId: string, proposalId: string, feed
     db.prepare(`
       INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
       VALUES (?, ?, 'proposal_rejected', 'cli', ?, ?, 'pending', ?)
-    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id, feedback }), `proposal-rejected:${proposal.id}`, now);
+    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id as string, feedback }), `proposal-rejected:${proposal.id as string}`, now);
   } catch { /* ignore */ }
 
   console.log(`Rejected: "${truncate(proposal.title as string, 60)}" (${(proposal.id as string).slice(0, 8)})`);

@@ -286,6 +286,36 @@ export async function dispatchLoop(
   return dispatched;
 }
 
+/**
+ * Check whether a task description contains acceptance criteria.
+ *
+ * Recognises common formats:
+ *   - Section headers: ## Acceptance Criteria, ## Acceptance, # AC, etc.
+ *   - Inline label:    "Acceptance: …" or "Acceptance Criteria: …" anywhere in text
+ *   - Structured keywords: success criteria, done when, output format,
+ *     expected output, verify that, must include, required output
+ *
+ * Does NOT accept empty descriptions or descriptions without any of these
+ * signals — those still fail as missing_acceptance_criteria.
+ */
+export function hasAcceptanceCriteria(description: string): boolean {
+  const desc = description.toLowerCase();
+  return (
+    // Section header formats (markdown or plain)
+    /##?\s*acceptance(\s+criteria)?/.test(desc) ||
+    // Inline label format: "acceptance:" or "acceptance criteria:" anywhere
+    /acceptance(\s+criteria)?\s*:/.test(desc) ||
+    // Additional well-known phrases
+    desc.includes("output format") ||
+    desc.includes("expected output") ||
+    desc.includes("done when") ||
+    desc.includes("success criteria") ||
+    desc.includes("verify that") ||
+    desc.includes("must include") ||
+    desc.includes("required output")
+  );
+}
+
 async function dispatchItem(
   projectId: string,
   item: DispatchQueueItem,
@@ -533,22 +563,11 @@ async function dispatchItem(
   }
 
   // Task description validation gate — ensure task has acceptance criteria
-  if (task.description) {
-    const desc = task.description.toLowerCase();
-    const hasAcceptanceCriteria = desc.includes("acceptance criteria") ||
-      desc.includes("output format") ||
-      desc.includes("expected output") ||
-      desc.includes("done when") ||
-      desc.includes("success criteria") ||
-      desc.includes("verify that") ||
-      desc.includes("must include") ||
-      desc.includes("required output");
-    if (!hasAcceptanceCriteria) {
-      failItem(item.id, "Task description missing acceptance criteria — manager must define what 'done' looks like", db, projectId);
-      emitDispatchEvent(projectId, "dispatch_failed", item, { error: "missing_acceptance_criteria", safetyLimit: "task_validation" }, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "missing_acceptance_criteria" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
-      return;
-    }
+  if (task.description && !hasAcceptanceCriteria(task.description)) {
+    failItem(item.id, "Task description missing acceptance criteria — manager must define what 'done' looks like", db, projectId);
+    emitDispatchEvent(projectId, "dispatch_failed", item, { error: "missing_acceptance_criteria", safetyLimit: "task_validation" }, db);
+    try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "missing_acceptance_criteria" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+    return;
   }
 
   // Acquire task lease (long lease — released in agent_end hook)
