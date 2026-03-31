@@ -200,6 +200,12 @@ export function createClawforceTaskTool(options?: {
           const evidenceId = readStringParam(params, "evidence_id");
           const assignedTo = readStringParam(params, "assigned_to");
 
+          // No-op guard: skip transition if task is already in target state
+          const currentTask = getTask(projectId, taskId);
+          if (currentTask && currentTask.state === toState) {
+            return jsonResult({ ok: true, message: `Task is already in ${toState}` });
+          }
+
           const result = transitionTask({
             projectId,
             taskId,

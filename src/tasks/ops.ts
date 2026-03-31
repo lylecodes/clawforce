@@ -33,7 +33,7 @@ import { recordMetric, recordTaskCycleTime } from "../metrics.js";
 import { clearWorkerAssignment, registerWorkerAssignment } from "../worker-registry.js";
 import { ingestEvent } from "../events/store.js";
 import { validateEvidence } from "./evidence-schema.js";
-import { completeItem as completeQueueItem, failItem as failQueueItem } from "../dispatch/queue.js";
+import { completeItem as completeQueueItem, failItem as failQueueItem, cancelItem as cancelQueueItem } from "../dispatch/queue.js";
 import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 
 function rowToTask(row: Record<string, unknown>): Task {
@@ -499,6 +499,23 @@ export function transitionTask(
   // Update dispatch queue item when task leaves dispatchable states
   // This ensures the queue reflects completion even if the adapter hook doesn't fire
   try {
+    const isNonDispatchable = params.toState !== "ASSIGNED" && params.toState !== "IN_PROGRESS";
+
+    if (isNonDispatchable) {
+      // Cancel any pending (queued) items — they haven't started yet, don't let them
+      // reach the dispatcher only to fail with non_dispatchable_state.
+      const pendingItems = db.prepare(
+        `SELECT id FROM dispatch_queue
+         WHERE project_id = ? AND task_id = ? AND status = 'queued'`,
+      ).all(params.projectId, params.taskId) as Array<Record<string, unknown>>;
+      // eslint-disable-next-line no-console
+      console.debug("[ops] cancelPending", params.toState, pendingItems.length, params.projectId, params.taskId);
+      for (const item of pendingItems) {
+        cancelQueueItem(String(item["id"]), db);
+      }
+    }
+
+    // Also clean up any active (leased/dispatched) items
     const activeQueueItem = db.prepare(
       `SELECT id FROM dispatch_queue
        WHERE project_id = ? AND task_id = ? AND status IN ('dispatched', 'leased')

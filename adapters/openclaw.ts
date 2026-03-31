@@ -423,6 +423,11 @@ const clawforcePlugin = {
           return;
         }
 
+        if (!content || content.trim().length === 0) {
+          api.logger.warn(`Clawforce: empty context for ${agentId} — injecting fallback`);
+          content = `You are ${agentId}. Check your task board for assigned work using clawforce_task list.`;
+        }
+
         // Telemetry: detect config changes and store context hash
         try {
           const { detectConfigChange } = await import("../src/telemetry/config-tracker.js");
@@ -2304,7 +2309,7 @@ const clawforcePlugin = {
                 cleaned++;
               }
               // Remove enabled one-shot jobs that are >30min past due (stuck)
-              if (job.enabled && job.schedule?.kind === "at" && job.state?.nextRunAtMs && job.state.nextRunAtMs < now - 30 * 60_000) {
+              if (job.enabled && job.schedule?.kind === "at" && job.state?.nextRunAtMs && job.state.nextRunAtMs < now - 5 * 60_000) {
                 if (cronService.remove) {
                   await cronService.remove(job.id);
                   cleaned++;

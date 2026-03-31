@@ -22,6 +22,7 @@ const { createTask, transitionTask, attachEvidence, getTask, listTasks, getTaskE
   await import("../../src/tasks/ops.js");
 const { queryAuditLog } = await import("../../src/audit.js");
 const { listEvents, ingestEvent } = await import("../../src/events/store.js");
+const { enqueue } = await import("../../src/dispatch/queue.js");
 
 describe("clawforce/ops", () => {
   let db: DatabaseSync;
@@ -538,6 +539,29 @@ describe("clawforce/ops", () => {
     const second = ingestEvent(PROJECT, "task_completed", "internal", { test: true }, dedupKey, db);
     expect(second.deduplicated).toBe(true);
     expect(second.id).toBe(first.id);
+  });
+
+  it("cancels pending queue items when task transitions to non-dispatchable state", () => {
+    const task = createTask(
+      { projectId: PROJECT, title: "Queue cancel test", createdBy: "agent:pm", assignedTo: "agent:worker" },
+      db,
+    );
+
+    // Manually enqueue the task (simulating what the event router does)
+    const queueItem = enqueue(PROJECT, task.id, undefined, undefined, db);
+    expect(queueItem).not.toBeNull();
+
+    // Verify it's in queued status
+    const before = db.prepare("SELECT status FROM dispatch_queue WHERE id = ?").get(queueItem!.id) as Record<string, unknown>;
+    expect(before.status).toBe("queued");
+
+    // Transition task to REVIEW — should cancel the queued item
+    transitionTask({ projectId: PROJECT, taskId: task.id, toState: "IN_PROGRESS", actor: "agent:worker" }, db);
+    transitionTask({ projectId: PROJECT, taskId: task.id, toState: "REVIEW", actor: "agent:worker" }, db);
+
+    // The queued item should now be cancelled (not dispatched)
+    const after = db.prepare("SELECT status FROM dispatch_queue WHERE id = ?").get(queueItem!.id) as Record<string, unknown>;
+    expect(after.status).toBe("cancelled");
   });
 
   it("records task_cycle metric on DONE transition", () => {
