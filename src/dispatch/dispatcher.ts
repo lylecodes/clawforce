@@ -653,7 +653,7 @@ async function dispatchItem(
       // Session started — mark as dispatched (completion handled in agent_end hook)
       markDispatched(item.id, db, projectId);
       emitDispatchEvent(projectId, "dispatch_succeeded", item, { sessionKey: result.sessionKey }, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_injected", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_success", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
     } else {
       const error = result.error ?? "Unknown dispatch error";
       const isCronUnavailable = error.includes("Cron service not available");

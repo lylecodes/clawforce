@@ -234,14 +234,14 @@ describe("dispatch/dispatcher", () => {
 
   // --- Dispatch outcome metrics ---
 
-  it("records dispatch_injected metric on successful dispatch", async () => {
+  it("records dispatch_success metric on successful dispatch", async () => {
     const task = createTask({
       projectId: PROJECT, title: "Success metric", createdBy: "agent:pm", assignedTo: "agent:worker",
     }, db);
     enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
     await dispatchLoop(PROJECT, db);
 
-    const metrics = queryMetrics({ projectId: PROJECT, key: "dispatch_injected" }, db);
+    const metrics = queryMetrics({ projectId: PROJECT, key: "dispatch_success" }, db);
     expect(metrics).toHaveLength(1);
     expect(metrics[0]!.subject).toBe(task.id);
   });
