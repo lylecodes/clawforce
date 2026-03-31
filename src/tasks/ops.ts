@@ -119,7 +119,9 @@ export function createTask(
   const db = dbOverride ?? getDb(params.projectId);
   const id = crypto.randomUUID();
   const now = Date.now();
-  let state: TaskState = params.assignedTo ? "ASSIGNED" : "OPEN";
+  // Reject system/internal actors as assignees — tasks must be assigned to real agents
+  const assignedTo = params.assignedTo?.startsWith("system:") ? undefined : params.assignedTo;
+  let state: TaskState = assignedTo ? "ASSIGNED" : "OPEN";
 
   // Workflow phase gate: force OPEN if task is in a future phase
   if (state === "ASSIGNED" && params.workflowId && params.workflowPhase != null) {
@@ -143,7 +145,7 @@ export function createTask(
     params.description ?? null,
     state,
     params.priority ?? "P2",
-    params.assignedTo ?? null,
+    assignedTo ?? null,
     params.createdBy,
     now,
     now,
@@ -179,8 +181,8 @@ export function createTask(
   (task as Task & { duplicateWarning?: string }).duplicateWarning = duplicateWarning;
 
   // Track assignment so bootstrap hook can detect workers
-  if (params.assignedTo) {
-    registerWorkerAssignment(params.assignedTo, params.projectId, id);
+  if (assignedTo) {
+    registerWorkerAssignment(assignedTo, params.projectId, id);
   }
 
   try {
@@ -219,7 +221,7 @@ export function createTask(
       taskId: id,
       title: params.title,
       state,
-      assignedTo: params.assignedTo,
+      assignedTo,
       department: params.department,
       team: params.team,
     }, `task-created:${id}`, db);
