@@ -697,6 +697,7 @@ export function createClawforceOpsTool(options?: {
               ok: true,
               queued: status.queued,
               leased: status.leased,
+              dispatched: status.dispatched,
               completed: status.completed,
               failed: status.failed,
               cancelled: status.cancelled,

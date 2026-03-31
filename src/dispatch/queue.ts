@@ -387,6 +387,7 @@ export function getQueueStatus(
 ): {
   queued: number;
   leased: number;
+  dispatched: number;
   completed: number;
   failed: number;
   cancelled: number;
@@ -412,6 +413,10 @@ export function getQueueStatus(
   return {
     queued: countMap["queued"] ?? 0,
     leased: countMap["leased"] ?? 0,
+    // "dispatched" is items that have been handed to an agent session and are
+    // actively running. Previously this was miscounted as 0 since the DB uses
+    // "dispatched" but the return type only had "leased".
+    dispatched: countMap["dispatched"] ?? 0,
     completed: countMap["completed"] ?? 0,
     failed: countMap["failed"] ?? 0,
     cancelled: countMap["cancelled"] ?? 0,
