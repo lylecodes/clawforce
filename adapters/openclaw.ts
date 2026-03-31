@@ -2287,6 +2287,38 @@ const clawforcePlugin = {
           api.logger.warn(`Clawforce: config watcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
         }
 
+        // --- Periodic cron job cleanup ---
+        // One-shot dispatch jobs accumulate as disabled entries in OpenClaw's cron store.
+        // This prevents the cron timer from re-arming. Clean stale jobs every 5 minutes.
+        setInterval(async () => {
+          const cronService = getCronService();
+          if (!cronService) return;
+          try {
+            const allJobs = await cronService.list({ includeDisabled: true });
+            const now = Date.now();
+            let cleaned = 0;
+            for (const job of allJobs) {
+              // Remove disabled one-shot jobs (completed dispatches)
+              if (!job.enabled && job.deleteAfterRun && cronService.remove) {
+                await cronService.remove(job.id);
+                cleaned++;
+              }
+              // Remove enabled one-shot jobs that are >30min past due (stuck)
+              if (job.enabled && job.schedule?.kind === "at" && job.state?.nextRunAtMs && job.state.nextRunAtMs < now - 30 * 60_000) {
+                if (cronService.remove) {
+                  await cronService.remove(job.id);
+                  cleaned++;
+                }
+              }
+            }
+            if (cleaned > 0) {
+              api.logger.info(`Clawforce: cleaned ${cleaned} stale cron job(s)`);
+            }
+          } catch (err) {
+            // Non-fatal — cleanup is best-effort
+          }
+        }, 5 * 60_000); // Every 5 minutes
+
         // --- Capture cron service via self-dispatch ---
         // gateway_start doesn't provide cron context, but clawforce.dispatch does.
         // Schedule a CLI dispatch to the first lead agent — this routes through
