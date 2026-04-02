@@ -67,12 +67,13 @@ describe("getValidNextStates", () => {
     expect(states).toHaveLength(2);
   });
 
-  it("BLOCKED can go to OPEN, FAILED, or CANCELLED", () => {
+  it("BLOCKED can go to OPEN, ASSIGNED, FAILED, or CANCELLED", () => {
     const states = getValidNextStates("BLOCKED");
     expect(states).toContain("OPEN");
+    expect(states).toContain("ASSIGNED");
     expect(states).toContain("FAILED");
     expect(states).toContain("CANCELLED");
-    expect(states).toHaveLength(3);
+    expect(states).toHaveLength(4);
   });
 
   it("CANCELLED has no valid next states", () => {

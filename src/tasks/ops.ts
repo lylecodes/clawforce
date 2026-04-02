@@ -117,6 +117,17 @@ export function createTask(
   dbOverride?: DatabaseSync,
 ): Task {
   const db = dbOverride ?? getDb(params.projectId);
+
+  // Validate parent exists when parentTaskId is provided
+  if (params.parentTaskId) {
+    const parentRow = db.prepare(
+      "SELECT id FROM tasks WHERE id = ? AND project_id = ?",
+    ).get(params.parentTaskId, params.projectId) as Record<string, unknown> | undefined;
+    if (!parentRow) {
+      throw new Error(`Parent task "${params.parentTaskId}" not found in project "${params.projectId}"`);
+    }
+  }
+
   const id = crypto.randomUUID();
   const now = Date.now();
   // Reject system/internal actors as assignees — tasks must be assigned to real agents
@@ -328,6 +339,19 @@ export function transitionTask(
     const gate = isTaskInFuturePhase(task, db);
     if (gate.blocked) {
       return { ok: false, reason: gate.reason! };
+    }
+  }
+
+  // Parent dependency gate: block IN_PROGRESS if parent task is not DONE
+  if (params.toState === "IN_PROGRESS" && task.parentTaskId) {
+    const parentRow = db.prepare(
+      "SELECT id, state FROM tasks WHERE id = ? AND project_id = ?",
+    ).get(task.parentTaskId, params.projectId) as Record<string, unknown> | undefined;
+    if (parentRow && (parentRow.state as string) !== "DONE") {
+      return {
+        ok: false,
+        reason: `Cannot start: parent task ${(parentRow.id as string).slice(0, 8)} is still in state ${parentRow.state}`,
+      };
     }
   }
 
@@ -594,6 +618,24 @@ export function transitionTask(
         workflowId: task.workflowId,
       }, `task-completed:${params.taskId}`, db);
     } catch (err) { safeLog("transition.completedEvent", err); }
+
+    // Auto-unblock child tasks: when a parent completes, move BLOCKED children to ASSIGNED
+    try {
+      const blockedChildren = db.prepare(
+        "SELECT id, assigned_to FROM tasks WHERE parent_task_id = ? AND project_id = ? AND state = 'BLOCKED'",
+      ).all(params.taskId, params.projectId) as Array<Record<string, unknown>>;
+      for (const child of blockedChildren) {
+        const childId = child.id as string;
+        const childAssignee = child.assigned_to as string | null;
+        transitionTask({
+          projectId: params.projectId,
+          taskId: childId,
+          toState: childAssignee ? "ASSIGNED" : "OPEN",
+          actor: "system:dependency",
+          reason: `Parent task ${params.taskId.slice(0, 8)} completed — unblocking`,
+        }, db);
+      }
+    } catch (err) { safeLog("transition.unblockChildren", err); }
   }
   if (params.toState === "FAILED") {
     try {

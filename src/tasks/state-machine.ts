@@ -36,6 +36,7 @@ const VALID_TRANSITIONS: TransitionRule[] = [
   { from: "ASSIGNED", to: "BLOCKED" },
   { from: "IN_PROGRESS", to: "BLOCKED" },
   { from: "BLOCKED", to: "OPEN" },
+  { from: "BLOCKED", to: "ASSIGNED" },
 
   // Direct failure from any active state
   { from: "ASSIGNED", to: "FAILED" },
@@ -79,7 +80,7 @@ export type ValidationContext = {
 };
 
 export type ValidationError = {
-  code: "INVALID_TRANSITION" | "VERIFIER_GATE" | "EVIDENCE_REQUIRED" | "RETRY_EXHAUSTED";
+  code: "INVALID_TRANSITION" | "VERIFIER_GATE" | "EVIDENCE_REQUIRED" | "RETRY_EXHAUSTED" | "PARENT_NOT_DONE";
   message: string;
 };
 

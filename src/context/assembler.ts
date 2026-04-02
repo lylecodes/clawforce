@@ -17,6 +17,43 @@ import { resolveRegisteredSource } from "./registry.js";
 // Side-effect import: registers all context sources with the registry.
 import "./register-sources.js";
 
+/**
+ * Priority tiers for context sources (lower number = higher priority = kept first).
+ * When truncation is needed, lowest-priority (highest number) sources are dropped first.
+ */
+const SOURCE_PRIORITY: Record<string, number> = {
+  // Tier 1: Always keep — identity and instructions
+  instructions: 1, soul: 1, direction: 1, policies: 1, standards: 1,
+  custom: 1, project_md: 1, memory_instructions: 1, onboarding_welcome: 1,
+  architecture: 1,
+
+  // Tier 2: Current work context
+  task_board: 2, assigned_task: 2, task_creation_standards: 2,
+  execution_standards: 2, review_standards: 2, rejection_standards: 2,
+
+  // Tier 3: Communication and escalations
+  escalations: 3, pending_messages: 3, user_messages: 3, proposals: 3,
+  channel_messages: 3, worker_findings: 3, intervention_suggestions: 3,
+
+  // Tier 4: Planning and goals
+  planning_delta: 4, goal_hierarchy: 4, initiative_status: 4,
+  workflows: 4, recent_decisions: 4, budget_plan: 4, budget_guidance: 4,
+
+  // Tier 5: Team and performance
+  team_status: 5, team_performance: 5, agent_status: 5, trust_scores: 5,
+  velocity: 5, cost_summary: 5, cost_forecast: 5, available_capacity: 5,
+
+  // Tier 6: Observational / drop first
+  health_status: 6, sweep_status: 6, activity: 6, observed_events: 6,
+  clawforce_health_report: 6, weekly_digest: 6, policy_status: 6,
+  knowledge: 6, knowledge_candidates: 6, memory_review_context: 6,
+  preferences: 6, resources: 6, skill: 6, tools_reference: 6, file: 6,
+  custom_stream: 6,
+};
+
+/** Default priority for sources not explicitly listed. */
+const DEFAULT_SOURCE_PRIORITY = 4;
+
 // Re-export the shared implementations so existing consumers keep working.
 export {
   resolveInitiativeStatusSourceImpl as resolveInitiativeStatusSource,
@@ -85,12 +122,16 @@ export function assembleContext(
   }
   const budgetChars = opts?.budgetChars ?? config.contextBudgetChars ?? defaultBudgetChars;
   const sessionKey = opts?.sessionKey;
-  const sections: string[] = [];
 
-  // Inject title and persona at the top of the context
+  // Collect sections tagged with their source priority for smart truncation.
+  type TaggedSection = { content: string; priority: number; idx: number };
+  const sections: TaggedSection[] = [];
+  let idx = 0;
+
+  // Inject title and persona at the top of the context (always highest priority)
   const profileHeader = buildProfileHeader(agentId, config, opts?.projectDir);
   if (profileHeader) {
-    sections.push(profileHeader);
+    sections.push({ content: profileHeader, priority: 0, idx: idx++ });
   }
 
   for (const rawSource of config.briefing) {
@@ -100,24 +141,68 @@ export function assembleContext(
       : rawSource;
     const content = resolveSource(source, ctx, sessionKey);
     if (content) {
-      sections.push(content);
+      const priority = SOURCE_PRIORITY[source.source] ?? DEFAULT_SOURCE_PRIORITY;
+      sections.push({ content, priority, idx: idx++ });
     }
   }
 
-  // Auto-inject compaction instructions at the end for eligible agents
+  // Auto-inject compaction instructions at the end for eligible agents (high priority — instructions)
   if (isCompactionEnabled(config)) {
     const compactionInstructions = buildCompactionInstructions(config, ctx.projectDir);
     if (compactionInstructions) {
-      sections.push(compactionInstructions);
+      sections.push({ content: compactionInstructions, priority: 1, idx: idx++ });
     }
   }
 
   if (sections.length === 0) return "";
 
-  let result = sections.join("\n\n");
+  // Check total length before any truncation
+  const totalLength = sections.reduce((sum, s) => sum + s.content.length, 0) + (sections.length - 1) * 2;
+  if (totalLength <= budgetChars) {
+    return sections.map((s) => s.content).join("\n\n");
+  }
 
-  if (result.length > budgetChars) {
-    result = result.slice(0, budgetChars - 20) + "\n\n[...truncated]";
+  // Priority-based truncation: include highest-priority sections first,
+  // drop lowest-priority sources entirely until under budget.
+  const sorted = [...sections].sort((a, b) => a.priority - b.priority || a.idx - b.idx);
+
+  const TRUNCATION_NOTE_RESERVE = 60; // space reserved for the truncation footer
+  let usedChars = 0;
+  const included: TaggedSection[] = [];
+  let dropped = 0;
+  let hardTruncated = false;
+
+  for (const entry of sorted) {
+    const separatorCost = included.length > 0 ? 2 : 0; // "\n\n"
+    const sectionCost = entry.content.length + separatorCost;
+    if (usedChars + sectionCost + TRUNCATION_NOTE_RESERVE <= budgetChars) {
+      usedChars += sectionCost;
+      included.push(entry);
+    } else {
+      // Try to hard-truncate this last section if there's meaningful room
+      const remaining = budgetChars - usedChars - separatorCost - TRUNCATION_NOTE_RESERVE;
+      if (remaining > 100) {
+        included.push({ content: entry.content.slice(0, remaining), priority: entry.priority, idx: entry.idx });
+        usedChars += remaining + separatorCost;
+        hardTruncated = true;
+        dropped += sorted.length - included.length;
+        break;
+      } else {
+        dropped++;
+      }
+    }
+  }
+
+  // Re-sort included sections by original index to preserve logical order
+  included.sort((a, b) => a.idx - b.idx);
+
+  let result = included.map((s) => s.content).join("\n\n");
+  if (dropped > 0 || hardTruncated) {
+    if (dropped > 0) {
+      result += `\n\n[...truncated — dropped ${dropped} source${dropped > 1 ? "s" : ""} to fit budget]`;
+    } else {
+      result += "\n\n[...truncated]";
+    }
   }
 
   return result;

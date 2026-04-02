@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, it, expect } from "vitest";
 
 const { getMemoryDb } = await import("../../src/db.js");
-const { createTask, transitionTask } = await import("../../src/tasks/ops.js");
+const { createTask, transitionTask, attachEvidence } = await import("../../src/tasks/ops.js");
 const { enqueue } = await import("../../src/dispatch/queue.js");
 
 let db: DatabaseSync;
@@ -29,6 +29,7 @@ it("debug: cancels pending queue items on REVIEW", () => {
     const mid = db.prepare("SELECT status FROM dispatch_queue WHERE id = ?").get(queueItem.id) as Record<string, unknown>;
     console.log("After IN_PROGRESS:", mid.status);
 
+    attachEvidence({ projectId: PROJECT, taskId: task.id, type: "output", content: "done", attachedBy: "agent:worker" }, db);
     transitionTask({ projectId: PROJECT, taskId: task.id, toState: "REVIEW", actor: "agent:worker" }, db);
     const after = db.prepare("SELECT status FROM dispatch_queue WHERE id = ?").get(queueItem.id) as Record<string, unknown>;
     console.log("After REVIEW:", after.status);

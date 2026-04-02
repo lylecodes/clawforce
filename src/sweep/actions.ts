@@ -28,6 +28,7 @@ import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { advanceWorkflow, getPhaseStatus, listWorkflows } from "../workflow.js";
 import { ingestEvent, reclaimStaleEvents } from "../events/store.js";
 import { enqueue, failItem as failQueueItem, reclaimExpiredLeases } from "../dispatch/queue.js";
+import { releaseStaleReservations } from "../budget/reservation-cleanup.js";
 import { createMessage } from "../messaging/store.js";
 import { findManagerAgent } from "../events/actions.js";
 import { processAndDispatch } from "../dispatch/dispatcher.js";
@@ -58,6 +59,7 @@ export type SweepResult = {
   meetingsStale: number;
   frequencyDispatched: number;
   staleDispatchRecovered: number;
+  reservationsReleased: number;
   agentsRecovered: number;
   agentsEscalated: number;
 };
@@ -76,13 +78,11 @@ const DEFAULT_STALE_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 hours
 const DEFAULT_PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const DEFAULT_STALE_DISPATCH_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
-/** Dedup window for sweep events (1 hour). Allows re-detection of recurring conditions. */
-const SWEEP_DEDUP_WINDOW_MS = 60 * 60 * 1000;
-
-/** Generate a dedup key with a time bucket so events can recur across sweep windows. */
-function sweepDedupKey(prefix: string, id: string, now: number): string {
-  const bucket = Math.floor(now / SWEEP_DEDUP_WINDOW_MS);
-  return `${prefix}:${id}:${bucket}`;
+/** Generate a stable dedup key from finding type + entity ID.
+ * No timestamp component — the same condition produces the same event ID
+ * across sweep passes, letting the event store's own dedup handle recurrence. */
+function sweepDedupKey(prefix: string, id: string): string {
+  return `${prefix}:${id}`;
 }
 
 export async function sweep(options: SweepOptions): Promise<SweepResult> {
@@ -109,6 +109,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
   let goalsCascadeAchieved = 0;
   let leasesReclaimed = 0;
   let staleDispatchRecoveredCount = 0;
+  let reservationsReleased = 0;
   let budgetsReset = 0;
   let reviewEscalated = 0;
   let meetingsStale = 0;
@@ -159,7 +160,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
               finding: "stale",
               taskId,
               staleSinceMs: now - lastActivity,
-            }, sweepDedupKey("stale", taskId, now), db);
+            }, sweepDedupKey("stale", taskId), db);
 
             // Auto-block severely stale tasks (2x threshold) — stays direct (safety-critical)
             const meta = row.metadata ? JSON.parse(row.metadata as string) : null;
@@ -346,7 +347,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       ingestEvent(projectId, "sweep_finding", "cron", {
         finding: "retry_exhausted",
         taskId,
-      }, sweepDedupKey("escalated", taskId, now), db);
+      }, sweepDedupKey("escalated", taskId), db);
     }
 
     // 5. Expire stale proposals past TTL or explicit timeout — stays direct (low-risk, no dispatch)
@@ -396,7 +397,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
         ingestEvent(projectId, "protocol_expired", "cron", {
           messageId: msg.id, protocolType: msg.type,
           fromAgent: msg.fromAgent, toAgent: msg.toAgent,
-        }, sweepDedupKey("proto-expired", msg.id, now), db);
+        }, sweepDedupKey("proto-expired", msg.id), db);
       }
     } catch (err) {
       safeLog("sweep.protocolTimeout", err);
@@ -416,7 +417,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
           goalsNeedingPlan++;
           ingestEvent(projectId, "sweep_finding", "cron", {
             finding: "goal_no_plan", goalId, goalTitle: goal.title as string,
-          }, sweepDedupKey("goal-no-plan", goalId, now), db);
+          }, sweepDedupKey("goal-no-plan", goalId), db);
         }
       }
     } catch (err) {
@@ -468,7 +469,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
               taskId,
               reviewDurationHours: Math.round((now - reviewEnteredAt) / 3_600_000),
               assignedTo: row.assigned_to,
-            }, sweepDedupKey("review-stale", taskId, now), db);
+            }, sweepDedupKey("review-stale", taskId), db);
 
             reviewEscalated++;
           }
@@ -491,6 +492,16 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
 
     // 7. Reclaim expired dispatch queue leases
     leasesReclaimed = reclaimExpiredLeases(projectId, db);
+
+    // 7.0.1 Release stale budget reservations from leased items that never completed
+    try {
+      reservationsReleased = releaseStaleReservations(db, projectId);
+      if (reservationsReleased > 0) {
+        safeLog("sweep.reservationCleanup", `Released ${reservationsReleased} stale reservations`);
+      }
+    } catch (err) {
+      safeLog("sweep.reservationCleanup", err);
+    }
 
     // 7.1. Recover dispatch queue items stuck in 'dispatched' state with no active session
     try {
@@ -546,7 +557,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
             taskId,
             queueItemId: itemId,
             staleDurationMs,
-          }, sweepDedupKey("stale-dispatch", itemId, now), db);
+          }, sweepDedupKey("stale-dispatch", itemId), db);
 
           staleDispatchRecoveredCount++;
         }
@@ -650,7 +661,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
         finding: "spend_rate_warning",
         pct: spendWarning.pct,
         reason: spendWarning.reason,
-      }, sweepDedupKey("spend-warning", projectId, now), db);
+      }, sweepDedupKey("spend-warning", projectId), db);
     }
   } catch (err) {
     safeLog("sweep.spendRateWarning", err);
@@ -675,7 +686,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
           channelId,
           channelName: row.name,
           staleSinceMs: now - lastActivity,
-        }, sweepDedupKey("meeting-stale", channelId, now), db);
+        }, sweepDedupKey("meeting-stale", channelId), db);
         meetingsStale++;
       }
     }
@@ -694,7 +705,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
         agentId: job.agentId,
         jobName: job.jobName,
         reason: job.reason,
-      }, sweepDedupKey("freq-job", `${job.agentId}:${job.jobName}`, now), db);
+      }, sweepDedupKey("freq-job", `${job.agentId}:${job.jobName}`), db);
       frequencyDispatched++;
     }
   } catch (err) {
@@ -717,7 +728,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     stale, autoBlocked, deadlineExpired, workflowsAdvanced, escalated,
     complianceBlocked, stuckKilled, proposalsExpired, protocolsExpired,
     goalsNeedingPlan, goalsCascadeAchieved,
-    leasesReclaimed, staleDispatchRecovered: staleDispatchRecoveredCount,
+    leasesReclaimed, staleDispatchRecovered: staleDispatchRecoveredCount, reservationsReleased,
     eventsProcessed, dispatched, budgetsReset, autoAssigned,
     sloChecked, sloBreach, alertsFired, anomaliesDetected,
     reviewEscalated, meetingsStale, frequencyDispatched,

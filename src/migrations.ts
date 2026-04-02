@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 40;
+export const SCHEMA_VERSION = 41;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -54,6 +54,7 @@ const migrations: Record<number, Migration> = {
   38: migrateV38,
   39: migrateV39,
   40: migrateV40,
+  41: migrateV41,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1260,6 +1261,17 @@ function migrateV40(db: DatabaseSync): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_proposals_origin ON proposals(origin)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_origin ON tasks(origin)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_origin_id ON tasks(origin_id) WHERE origin_id IS NOT NULL`);
+}
+
+// --- Migration V41: Performance indexes for cost, dispatch queue, and tasks ---
+
+function migrateV41(db: DatabaseSync): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_cost_records_project_agent ON cost_records(project_id, agent_id);
+    CREATE INDEX IF NOT EXISTS idx_cost_records_created ON cost_records(created_at);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_queue_project_status_created ON dispatch_queue(project_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_state_priority ON tasks(project_id, state, priority);
+  `);
 }
 
 /** Idempotent ALTER TABLE — ignores "duplicate column name" errors. */

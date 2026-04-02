@@ -13,7 +13,7 @@ vi.mock("../../src/identity.js", () => ({
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");
-const { createTask, transitionTask } = await import("../../src/tasks/ops.js");
+const { createTask, transitionTask, attachEvidence } = await import("../../src/tasks/ops.js");
 const { enqueue, cancelItem } = await import("../../src/dispatch/queue.js");
 
 let db: DatabaseSync;
@@ -53,8 +53,9 @@ it("debug: transitionTask to REVIEW cancels queued items", () => {
   console.log("Queue items:", all.map(i => `${i.id?.toString().slice(0,8)} status=${i.status}`));
   
   transitionTask({ projectId: PROJECT, taskId: task.id, toState: "IN_PROGRESS", actor: "agent:worker" }, db);
+  attachEvidence({ projectId: PROJECT, taskId: task.id, type: "output", content: "done", attachedBy: "agent:worker" }, db);
   transitionTask({ projectId: PROJECT, taskId: task.id, toState: "REVIEW", actor: "agent:worker" }, db);
-  
+
   const after = db.prepare("SELECT status FROM dispatch_queue WHERE id = ?").get(queueItem!.id) as Record<string, unknown>;
   console.log("After REVIEW transition:", after.status);
   expect(after.status).toBe("cancelled");

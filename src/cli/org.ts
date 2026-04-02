@@ -420,7 +420,7 @@ function countIssues(agents: Record<string, AgentEntry>, filteredIds: Set<string
 export function cmdOrgSet(
   agentId: string,
   reportsTo: string,
-  _opts: { yes?: boolean },
+  _opts: { yes?: boolean; dryRun?: boolean },
 ): void {
   const configPath = getGlobalConfigPath();
   if (!fs.existsSync(configPath)) {
@@ -506,6 +506,11 @@ export function cmdOrgSet(
     for (const c of consequences) {
       console.log(`    ${c}`);
     }
+  }
+
+  if (_opts.dryRun) {
+    console.log(`\n  [DRY RUN] Would apply this change. No files modified.\n`);
+    return;
   }
 
   // Apply the change using YAML document manipulation (preserves comments/formatting)

@@ -37,6 +37,9 @@ import { computeBudgetPacing } from "../budget/pacer.js";
 /** Task lease duration in milliseconds — long enough for async dispatch + execution + 5min buffer. */
 const TASK_LEASE_MS = 2 * 60 * 60 * 1000 + 5 * 60 * 1000; // 2h + 5min buffer
 
+/** Default per-agent dispatch rate limit when no explicit limit is configured. */
+const DEFAULT_AGENT_DISPATCH_LIMIT = 15; // per hour
+
 /**
  * Sentinel error thrown when the cron service is unavailable.
  * Caught by dispatchLoop to abort the current pass gracefully
@@ -133,20 +136,20 @@ function checkProjectLimits(projectId: string, config: DispatchConfig | undefine
 /** Check if an agent is at its concurrency or rate limit. Returns null if OK, or a reason string. */
 function checkAgentLimits(agentId: string, config: DispatchConfig | undefined): string | null {
   const agentLimits = config?.agentLimits?.[agentId];
-  if (!agentLimits) return null;
 
-  if (agentLimits.maxConcurrent != null) {
+  if (agentLimits?.maxConcurrent != null) {
     const active = agentDispatches.get(agentId) ?? 0;
     if (active >= agentLimits.maxConcurrent) {
       return `Agent "${agentId}" concurrency limit reached (${active}/${agentLimits.maxConcurrent})`;
     }
   }
-  if (agentLimits.maxPerHour != null) {
-    pruneTimestamps(agentDispatchTimestamps, agentId);
-    const recentCount = (agentDispatchTimestamps.get(agentId) ?? []).length;
-    if (recentCount >= agentLimits.maxPerHour) {
-      return `Agent "${agentId}" rate limit reached (${recentCount}/${agentLimits.maxPerHour} per hour)`;
-    }
+
+  // Rate limit: use explicit per-agent limit if configured, otherwise apply default
+  const effectiveMaxPerHour = agentLimits?.maxPerHour ?? DEFAULT_AGENT_DISPATCH_LIMIT;
+  pruneTimestamps(agentDispatchTimestamps, agentId);
+  const recentCount = (agentDispatchTimestamps.get(agentId) ?? []).length;
+  if (recentCount >= effectiveMaxPerHour) {
+    return `Agent "${agentId}" rate limit reached (${recentCount}/${effectiveMaxPerHour} per hour)`;
   }
   return null;
 }
@@ -322,6 +325,22 @@ async function dispatchItem(
   db: DatabaseSync,
   resolvedAgentId: string,
 ): Promise<void> {
+  // Pre-dispatch deadline check — catch expired deadlines before wasting a dispatch slot
+  {
+    const task = getTask(projectId, item.taskId, db);
+    if (task?.deadline && Date.now() > task.deadline) {
+      failItem(item.id, "Deadline expired before dispatch", db, projectId);
+      emitDispatchEvent(projectId, "dispatch_failed", item, { error: "Deadline expired before dispatch", safetyLimit: "deadline" }, db);
+      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "deadline_expired" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      // Also transition the task to FAILED so it doesn't sit in a dispatchable state
+      try {
+        const { transitionTask } = require("../tasks/ops.js") as typeof import("../tasks/ops.js");
+        transitionTask({ projectId, taskId: item.taskId, toState: "FAILED", actor: "system:dispatch", reason: "Deadline expired before dispatch", verificationRequired: false }, db);
+      } catch (err) { safeLog("dispatcher.deadlineTransition", err); }
+      return;
+    }
+  }
+
   // Emergency stop — blocks everything
   if (isEmergencyStopActive(projectId, db)) {
     failItem(item.id, "Emergency stop active — all dispatches blocked", db, projectId);

@@ -865,13 +865,13 @@ describe("clawforce_config tool", () => {
         action: "update_domain",
         domain: "proj",
         orchestrator: "a",
-        actor: "manager-bot",
+        actor: "user:manager-bot",
       });
 
       expect(emitDiagnosticEvent).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "config_updated",
-          actor: "manager-bot",
+          actor: "user:manager-bot",
           section: "domain",
         }),
       );

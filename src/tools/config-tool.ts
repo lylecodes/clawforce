@@ -45,9 +45,195 @@ import { validateGlobalConfig, validateDomainConfig } from "../config/schema.js"
 import { validateAllConfigs } from "../config/validate.js";
 import { initializeAllDomains } from "../config/init.js";
 import { safeLog } from "../diagnostics.js";
+import { getDirectReports } from "../org.js";
+import { getAgentConfig } from "../project.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readStringParam, readBooleanParam, safeExecute } from "./common.js";
+
+// --- Authorization ---
+
+/**
+ * Fields considered sensitive — only modifiable by the target agent's manager
+ * or a user/system actor. Agents cannot modify these on themselves or others.
+ */
+const SENSITIVE_FIELDS = new Set([
+  "reports_to",
+  "extends",
+  "coordination",
+  "budget",
+  "verification",
+  "performance_policy",
+]);
+
+/**
+ * Check if an actor prefix indicates a privileged actor (human user or system).
+ */
+function isPrivilegedActor(actor: string): boolean {
+  return actor.startsWith("user:") || actor === "system";
+}
+
+/**
+ * Extract the bare agent ID from an actor string.
+ * Actor format: "agent:<agentId>" or just an agent ID for legacy callers.
+ */
+function extractAgentId(actor: string): string | null {
+  if (isPrivilegedActor(actor)) return null;
+  if (actor.startsWith("agent:")) return actor.slice("agent:".length);
+  // Legacy: bare agent ID (not "user:" or "system")
+  return actor;
+}
+
+/**
+ * Check whether a manager agent manages the target agent (target reports to manager).
+ */
+function isManagerOf(managerId: string, targetAgentId: string, projectId: string | null): boolean {
+  if (!projectId) {
+    // Fall back to global config: check if target's reports_to == managerId
+    // We can't use getDirectReports without a projectId, so check the agent config directly
+    const entry = getAgentConfig(targetAgentId);
+    if (entry && entry.config.reports_to === managerId) return true;
+    return false;
+  }
+  const reports = getDirectReports(projectId, managerId);
+  return reports.includes(targetAgentId);
+}
+
+/**
+ * Determine the manager of a given agent (who the agent reports_to).
+ */
+function getManagerOfAgent(targetAgentId: string): string | null {
+  const entry = getAgentConfig(targetAgentId);
+  if (!entry) return null;
+  const reportsTo = entry.config.reports_to;
+  if (!reportsTo || reportsTo === "parent") return null;
+  return reportsTo;
+}
+
+/**
+ * Authorize a config change operation.
+ *
+ * Rules:
+ * 1. Privileged actors (user:*, system) can do anything.
+ * 2. Self-management: an agent can modify its own NON-sensitive fields.
+ * 3. Manager privilege: a manager can modify config for direct reports.
+ * 4. Sensitive fields: only modifiable by the target's manager or privileged actors.
+ */
+export function authorizeConfigChange(
+  actor: string,
+  targetAgentId: string,
+  field: string,
+  projectId: string | null,
+): { allowed: boolean; reason?: string } {
+  // Rule 1: privileged actors bypass all checks
+  if (isPrivilegedActor(actor)) {
+    return { allowed: true };
+  }
+
+  const actorAgentId = extractAgentId(actor);
+  if (!actorAgentId) {
+    return { allowed: true }; // shouldn't happen, but be safe
+  }
+
+  const isSensitive = SENSITIVE_FIELDS.has(field);
+  const isSelf = actorAgentId === targetAgentId;
+  const actorIsManager = isManagerOf(actorAgentId, targetAgentId, projectId);
+  const targetManager = getManagerOfAgent(targetAgentId);
+
+  // Rule 2: self-management of non-sensitive fields is always allowed
+  if (isSelf && !isSensitive) {
+    return { allowed: true };
+  }
+
+  // Rule 3: manager can modify direct reports (including sensitive fields)
+  if (actorIsManager) {
+    return { allowed: true };
+  }
+
+  // Rule 4: sensitive field — only manager or privileged
+  if (isSensitive) {
+    const managerLabel = targetManager ? `"${targetManager}"` : "no manager assigned";
+    return {
+      allowed: false,
+      reason: `Agent "${actorAgentId}" cannot modify ${targetAgentId}'s "${field}" — only ${targetAgentId}'s manager (${managerLabel}) or the user can do this.`,
+    };
+  }
+
+  // Non-sensitive field, but modifying another agent — only managers can do this
+  if (!isSelf) {
+    return {
+      allowed: false,
+      reason: `Agent "${actorAgentId}" cannot modify ${targetAgentId}'s config — only ${targetAgentId}'s manager${targetManager ? ` ("${targetManager}")` : ""} or the user can do this.`,
+    };
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Authorize adding or removing an agent — restricted to managers of the
+ * target's team or privileged actors.
+ */
+function authorizeAgentLifecycle(
+  actor: string,
+  targetAgentId: string,
+  operation: "add" | "remove",
+  reportsTo: string | null,
+  projectId: string | null,
+): { allowed: boolean; reason?: string } {
+  if (isPrivilegedActor(actor)) {
+    return { allowed: true };
+  }
+
+  const actorAgentId = extractAgentId(actor);
+  if (!actorAgentId) {
+    return { allowed: true };
+  }
+
+  // For add: the agent will report to reportsTo. The actor must be that manager.
+  // For remove: check if actor is the target's current manager.
+  if (operation === "add") {
+    if (reportsTo && reportsTo === actorAgentId) {
+      // Actor is adding an agent that reports to them — allowed
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      reason: `Agent "${actorAgentId}" cannot add agent "${targetAgentId}" — only the intended manager${reportsTo ? ` ("${reportsTo}")` : ""} or the user can do this.`,
+    };
+  }
+
+  // remove: actor must be manager of the target
+  const actorIsManager = isManagerOf(actorAgentId, targetAgentId, projectId);
+  if (actorIsManager) {
+    return { allowed: true };
+  }
+
+  const targetManager = getManagerOfAgent(targetAgentId);
+  return {
+    allowed: false,
+    reason: `Agent "${actorAgentId}" cannot remove agent "${targetAgentId}" — only ${targetAgentId}'s manager${targetManager ? ` ("${targetManager}")` : ""} or the user can do this.`,
+  };
+}
+
+/**
+ * Authorize domain-level config changes — only user/system actors allowed.
+ */
+function authorizeDomainChange(
+  actor: string,
+  domain: string,
+  operation: string,
+): { allowed: boolean; reason?: string } {
+  if (isPrivilegedActor(actor)) {
+    return { allowed: true };
+  }
+
+  const actorAgentId = extractAgentId(actor);
+  return {
+    allowed: false,
+    reason: `Agent "${actorAgentId ?? actor}" cannot ${operation} domain "${domain}" — only the user or system can modify domain-level config.`,
+  };
+}
 
 // --- Actions ---
 
@@ -130,6 +316,7 @@ export function createClawforceConfigTool(options: {
   baseDir: string;
   projectId?: string;
 }) {
+  const projectId = options.projectId ?? null;
   return {
     label: "Config Management",
     name: "clawforce_config",
@@ -152,53 +339,53 @@ export function createClawforceConfigTool(options: {
         switch (action) {
           // --- Domain management ---
           case "create_domain":
-            return handleCreateDomain(baseDir, params, actor);
+            return handleCreateDomain(baseDir, params, actor, projectId);
           case "update_domain":
-            return handleUpdateDomain(baseDir, params, actor);
+            return handleUpdateDomain(baseDir, params, actor, projectId);
           case "delete_domain":
-            return handleDeleteDomain(baseDir, params, actor);
+            return handleDeleteDomain(baseDir, params, actor, projectId);
           case "list_domains":
             return handleListDomains(baseDir);
 
           // --- Agent management ---
           case "add_agent":
-            return handleAddAgent(baseDir, params, actor);
+            return handleAddAgent(baseDir, params, actor, projectId);
           case "remove_agent":
-            return handleRemoveAgent(baseDir, params, actor);
+            return handleRemoveAgent(baseDir, params, actor, projectId);
           case "update_agent":
-            return handleUpdateAgent(baseDir, params, actor);
+            return handleUpdateAgent(baseDir, params, actor, projectId);
 
           // --- Budget ---
           case "set_budget":
-            return handleSetBudget(baseDir, params, actor);
+            return handleSetBudget(baseDir, params, actor, projectId);
 
           // --- Policy ---
           case "add_policy":
-            return handleAddPolicy(baseDir, params, actor);
+            return handleAddPolicy(baseDir, params, actor, projectId);
           case "remove_policy":
-            return handleRemovePolicy(baseDir, params, actor);
+            return handleRemovePolicy(baseDir, params, actor, projectId);
           case "update_policy":
-            return handleUpdatePolicy(baseDir, params, actor);
+            return handleUpdatePolicy(baseDir, params, actor, projectId);
 
           // --- Safety & operational ---
           case "set_safety":
-            return handleSetSafety(baseDir, params, actor);
+            return handleSetSafety(baseDir, params, actor, projectId);
           case "set_profile":
-            return handleSetProfile(baseDir, params, actor);
+            return handleSetProfile(baseDir, params, actor, projectId);
 
           // --- Context files (direction, standards, policies, architecture) ---
           case "set_direction":
-            return handleSetDirection(baseDir, params, actor);
+            return handleSetDirection(baseDir, params, actor, projectId);
           case "set_standards":
-            return handleSetContextFile(baseDir, params, actor, "STANDARDS");
+            return handleSetContextFile(baseDir, params, actor, "STANDARDS", projectId);
           case "set_policies":
-            return handleSetContextFile(baseDir, params, actor, "POLICIES");
+            return handleSetContextFile(baseDir, params, actor, "POLICIES", projectId);
           case "set_architecture":
-            return handleSetContextFile(baseDir, params, actor, "ARCHITECTURE");
+            return handleSetContextFile(baseDir, params, actor, "ARCHITECTURE", projectId);
 
           // --- Section ---
           case "set_section":
-            return handleSetSection(baseDir, params, actor);
+            return handleSetSection(baseDir, params, actor, projectId);
 
           // --- Read & validation ---
           case "get_config":
@@ -220,8 +407,14 @@ export function createClawforceConfigTool(options: {
 
 // --- Handler implementations ---
 
-function handleCreateDomain(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleCreateDomain(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const name = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: only user/system can create domains
+  const authResult = authorizeDomainChange(actor, name, "create");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
   const agents = params.agents as string[] | undefined;
   if (!agents || !Array.isArray(agents) || agents.length === 0) {
     return jsonResult({ ok: false, reason: "agents array is required for create_domain" });
@@ -265,8 +458,15 @@ function handleCreateDomain(baseDir: string, params: Record<string, unknown>, ac
   });
 }
 
-function handleUpdateDomain(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleUpdateDomain(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const name = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: only user/system can modify domain config
+  const authResult = authorizeDomainChange(actor, name, "update");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
+
   const configData = params.config_data as Record<string, unknown> | undefined;
 
   // Build updates from explicit params and config_data
@@ -310,8 +510,14 @@ function handleUpdateDomain(baseDir: string, params: Record<string, unknown>, ac
   });
 }
 
-function handleDeleteDomain(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleDeleteDomain(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const name = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: only user/system can delete domains
+  const authResult = authorizeDomainChange(actor, name, "delete");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
 
   try {
     deleteDomain(baseDir, name);
@@ -365,9 +571,16 @@ function handleListDomains(baseDir: string): ToolResult {
   });
 }
 
-function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const agentId = readStringParam(params, "agent_id", { required: true })!;
   const domain = readStringParam(params, "domain");
+  const reportsTo = readStringParam(params, "reports_to");
+
+  // Authorization: only managers of the target's team or user/system can add agents
+  const authResult = authorizeAgentLifecycle(actor, agentId, "add", reportsTo, projectId);
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
 
   // Build agent definition from params
   const agentDef: Record<string, unknown> = {};
@@ -377,7 +590,6 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
   const model = readStringParam(params, "model");
   const department = readStringParam(params, "department");
   const team = readStringParam(params, "team");
-  const reportsTo = readStringParam(params, "reports_to");
 
   if (extendsVal) agentDef.extends = extendsVal;
   if (persona) agentDef.persona = persona;
@@ -437,8 +649,14 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
   });
 }
 
-function handleRemoveAgent(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleRemoveAgent(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const agentId = readStringParam(params, "agent_id", { required: true })!;
+
+  // Authorization: only the target's manager or user/system can remove agents
+  const authResult = authorizeAgentLifecycle(actor, agentId, "remove", null, projectId);
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
 
   const removed = removeAgentFromGlobal(baseDir, agentId, true);
   if (!removed) {
@@ -455,7 +673,7 @@ function handleRemoveAgent(baseDir: string, params: Record<string, unknown>, act
   });
 }
 
-function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const agentId = readStringParam(params, "agent_id", { required: true })!;
 
   // Build updates from params
@@ -488,6 +706,14 @@ function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, act
     return jsonResult({ ok: false, reason: "No updates provided for update_agent" });
   }
 
+  // Authorization: check each field being updated
+  for (const field of Object.keys(updates)) {
+    const authResult = authorizeConfigChange(actor, agentId, field, projectId);
+    if (!authResult.allowed) {
+      return jsonResult({ ok: false, reason: authResult.reason });
+    }
+  }
+
   try {
     updateAgentInGlobal(baseDir, agentId, updates);
   } catch (err) {
@@ -507,12 +733,29 @@ function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, act
   });
 }
 
-function handleSetBudget(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleSetBudget(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain");
   const configData = params.config_data as Record<string, unknown> | undefined;
 
   if (!configData || typeof configData !== "object") {
     return jsonResult({ ok: false, reason: "config_data (budget object) is required for set_budget" });
+  }
+
+  // Authorization: budget is domain-level config — only user/system can modify
+  if (domain) {
+    const authResult = authorizeDomainChange(actor, domain, "set budget on");
+    if (!authResult.allowed) {
+      return jsonResult({ ok: false, reason: authResult.reason });
+    }
+  } else {
+    // Global budget — also restricted
+    if (!isPrivilegedActor(actor)) {
+      const actorAgentId = extractAgentId(actor);
+      return jsonResult({
+        ok: false,
+        reason: `Agent "${actorAgentId ?? actor}" cannot modify global budget — only the user or system can do this.`,
+      });
+    }
   }
 
   if (domain) {
@@ -543,8 +786,15 @@ function handleSetBudget(baseDir: string, params: Record<string, unknown>, actor
   });
 }
 
-function handleAddPolicy(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleAddPolicy(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: policy is domain-level config
+  const authResult = authorizeDomainChange(actor, domain, "add policy to");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
+
   const configData = params.config_data as Record<string, unknown> | undefined;
 
   if (!configData || typeof configData !== "object") {
@@ -584,9 +834,15 @@ function handleAddPolicy(baseDir: string, params: Record<string, unknown>, actor
   });
 }
 
-function handleRemovePolicy(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleRemovePolicy(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
   const policyName = readStringParam(params, "policy_name", { required: true })!;
+
+  // Authorization: policy is domain-level config
+  const authResult = authorizeDomainChange(actor, domain, "remove policy from");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
 
   const domainConfig = readDomainConfig(baseDir, domain);
   if (!domainConfig) {
@@ -616,9 +872,16 @@ function handleRemovePolicy(baseDir: string, params: Record<string, unknown>, ac
   });
 }
 
-function handleUpdatePolicy(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleUpdatePolicy(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
   const policyName = readStringParam(params, "policy_name", { required: true })!;
+
+  // Authorization: policy is domain-level config
+  const authResult = authorizeDomainChange(actor, domain, "update policy in");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
+
   const configData = params.config_data as Record<string, unknown> | undefined;
 
   if (!configData || typeof configData !== "object") {
@@ -654,8 +917,15 @@ function handleUpdatePolicy(baseDir: string, params: Record<string, unknown>, ac
   });
 }
 
-function handleSetSafety(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleSetSafety(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: safety is domain-level config
+  const authResult = authorizeDomainChange(actor, domain, "set safety on");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
+
   const configData = params.config_data as Record<string, unknown> | undefined;
 
   if (!configData || typeof configData !== "object") {
@@ -693,8 +963,15 @@ function handleSetSafety(baseDir: string, params: Record<string, unknown>, actor
   });
 }
 
-function handleSetProfile(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleSetProfile(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: profile is domain-level config
+  const authResult = authorizeDomainChange(actor, domain, "set profile on");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
+
   const profile = readStringParam(params, "operational_profile", { required: true })!;
 
   const validProfiles = ["low", "medium", "high", "ultra"];
@@ -718,8 +995,15 @@ function handleSetProfile(baseDir: string, params: Record<string, unknown>, acto
   });
 }
 
-function handleSetDirection(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleSetDirection(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: direction is domain-level config
+  const authResult = authorizeDomainChange(actor, domain, "set direction on");
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
+
   const content = readStringParam(params, "direction_content") ?? readStringParam(params, "context_content");
   if (!content) {
     return jsonResult({ ok: false, reason: "direction_content or context_content is required for set_direction" });
@@ -790,8 +1074,16 @@ function handleSetContextFile(
   params: Record<string, unknown>,
   actor: string,
   fileBaseName: "STANDARDS" | "POLICIES" | "ARCHITECTURE",
+  projectId: string | null,
 ): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+
+  // Authorization: context files are domain-level config
+  const authResult = authorizeDomainChange(actor, domain, `set ${fileBaseName.toLowerCase()} on`);
+  if (!authResult.allowed) {
+    return jsonResult({ ok: false, reason: authResult.reason });
+  }
+
   const content = readStringParam(params, "context_content");
   if (!content) {
     return jsonResult({ ok: false, reason: `context_content is required for set_${fileBaseName.toLowerCase()}` });
@@ -849,13 +1141,30 @@ function handleSetContextFile(
   });
 }
 
-function handleSetSection(baseDir: string, params: Record<string, unknown>, actor: string): ToolResult {
+function handleSetSection(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain");
   const section = readStringParam(params, "section", { required: true })!;
   const configData = params.config_data;
 
   if (configData === undefined) {
     return jsonResult({ ok: false, reason: "config_data is required for set_section" });
+  }
+
+  // Authorization: section-level config is domain/global level — restricted
+  if (domain) {
+    const authResult = authorizeDomainChange(actor, domain, `set section "${section}" on`);
+    if (!authResult.allowed) {
+      return jsonResult({ ok: false, reason: authResult.reason });
+    }
+  } else {
+    // Global section — restricted to privileged actors
+    if (!isPrivilegedActor(actor)) {
+      const actorAgentId = extractAgentId(actor);
+      return jsonResult({
+        ok: false,
+        reason: `Agent "${actorAgentId ?? actor}" cannot modify global config section "${section}" — only the user or system can do this.`,
+      });
+    }
   }
 
   if (domain) {

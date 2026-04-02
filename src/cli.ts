@@ -156,7 +156,7 @@ function loadDomainAgents(domainId: string): string[] {
 
 // ─── Commands ────────────────────────────────────────────────────────
 
-function cmdStatus(db: DatabaseSync) {
+function cmdStatus(db: DatabaseSync, json = false) {
   // Gateway
   let gatewayPid = "down";
   try {
@@ -184,6 +184,17 @@ function cmdStatus(db: DatabaseSync) {
   const recentCost = db.prepare(
     "SELECT COALESCE(SUM(cost_cents), 0) as cost, COUNT(*) as calls FROM cost_records WHERE created_at > ?"
   ).get(Date.now() - 3600_000) as { cost: number; calls: number };
+
+  if (json) {
+    console.log(JSON.stringify({
+      gateway: gatewayPid === "down" ? null : { pid: Number(gatewayPid) },
+      budget: budget ? { daily_limit_cents: budget.daily_limit_cents, daily_spent_cents: budget.daily_spent_cents, monthly_spent_cents: budget.monthly_spent_cents } : null,
+      burn_rate: { cost_cents: recentCost.cost, calls: recentCost.calls, window: "1h" },
+      tasks: Object.fromEntries(taskCounts.map(r => [r.state, r.cnt])),
+      queue: Object.fromEntries(queueCounts.map(r => [r.status, r.cnt])),
+    }, null, 2));
+    return;
+  }
 
   console.log("## ClawForce Status\n");
   console.log(`Gateway:     ${gatewayPid === "down" ? "DOWN" : `running (PID ${gatewayPid})`}`);
@@ -213,7 +224,7 @@ function cmdStatus(db: DatabaseSync) {
   }
 }
 
-function cmdTasks(db: DatabaseSync, filter?: string) {
+function cmdTasks(db: DatabaseSync, filter?: string, json = false) {
   const where = filter
     ? `WHERE state = '${filter.toUpperCase()}'`
     : "WHERE state NOT IN ('DONE', 'CANCELLED')";
@@ -224,6 +235,11 @@ function cmdTasks(db: DatabaseSync, filter?: string) {
            datetime(updated_at/1000, 'unixepoch') as updated
     FROM tasks ${where} ORDER BY state, created_at
   `).all() as Array<Record<string, unknown>>;
+
+  if (json) {
+    console.log(JSON.stringify({ filter: filter?.toUpperCase() ?? "active", tasks }, null, 2));
+    return;
+  }
 
   if (tasks.length === 0) {
     console.log("No tasks found.");
@@ -237,7 +253,7 @@ function cmdTasks(db: DatabaseSync, filter?: string) {
   }
 }
 
-function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number) {
+function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number, json = false) {
   const since = Date.now() - (hours ?? 24) * 3600_000;
   const sinceStr = fmtDate(since);
 
@@ -251,6 +267,11 @@ function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number) {
       WHERE c.created_at > ?
       GROUP BY c.agent_id, c.task_id ORDER BY cost DESC
     `).all(since) as Array<Record<string, unknown>>;
+
+    if (json) {
+      console.log(JSON.stringify({ group_by: "task", since: sinceStr, rows }, null, 2));
+      return;
+    }
 
     console.log(`## Costs by Task (since ${sinceStr})\n`);
     for (const r of rows) {
@@ -267,6 +288,11 @@ function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number) {
              SUM(output_tokens) as output_tok
       FROM cost_records GROUP BY day ORDER BY day DESC LIMIT 14
     `).all() as Array<Record<string, unknown>>;
+
+    if (json) {
+      console.log(JSON.stringify({ group_by: "day", rows }, null, 2));
+      return;
+    }
 
     console.log("## Costs by Day\n");
     for (const r of rows) {
@@ -287,6 +313,11 @@ function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number) {
 
   const total = rows.reduce((s, r) => s + (r.cost as number), 0);
 
+  if (json) {
+    console.log(JSON.stringify({ group_by: "agent", since: sinceStr, total_cents: total, rows }, null, 2));
+    return;
+  }
+
   console.log(`## Costs by Agent (since ${sinceStr})\n`);
   for (const r of rows) {
     const pct = Math.round(((r.cost as number) / total) * 100);
@@ -296,16 +327,11 @@ function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number) {
   console.log(`\n   Total: ${fmt$(total)}`);
 }
 
-function cmdQueue(db: DatabaseSync) {
+function cmdQueue(db: DatabaseSync, json = false) {
   // Status counts
   const counts = db.prepare(
     "SELECT status, COUNT(*) as cnt FROM dispatch_queue GROUP BY status"
   ).all() as Array<{ status: string; cnt: number }>;
-
-  console.log("## Dispatch Queue\n");
-  for (const r of counts) {
-    console.log(`  ${r.status.padEnd(14)} ${r.cnt}`);
-  }
 
   // Failure reasons
   const failures = db.prepare(`
@@ -313,13 +339,6 @@ function cmdQueue(db: DatabaseSync) {
     FROM dispatch_queue WHERE status = 'failed'
     GROUP BY last_error ORDER BY cnt DESC LIMIT 10
   `).all() as Array<{ last_error: string | null; cnt: number }>;
-
-  if (failures.length > 0) {
-    console.log("\nFailure reasons:");
-    for (const f of failures) {
-      console.log(`  ${f.cnt.toString().padStart(4)}x  ${f.last_error ?? "(no error message)"}`);
-    }
-  }
 
   // Recent dispatches
   const recent = db.prepare(`
@@ -329,6 +348,27 @@ function cmdQueue(db: DatabaseSync) {
     WHERE dq.created_at > ?
     ORDER BY dq.created_at DESC LIMIT 10
   `).all(Date.now() - 3600_000) as Array<Record<string, unknown>>;
+
+  if (json) {
+    console.log(JSON.stringify({
+      counts: Object.fromEntries(counts.map(r => [r.status, r.cnt])),
+      failures,
+      recent,
+    }, null, 2));
+    return;
+  }
+
+  console.log("## Dispatch Queue\n");
+  for (const r of counts) {
+    console.log(`  ${r.status.padEnd(14)} ${r.cnt}`);
+  }
+
+  if (failures.length > 0) {
+    console.log("\nFailure reasons:");
+    for (const f of failures) {
+      console.log(`  ${f.cnt.toString().padStart(4)}x  ${f.last_error ?? "(no error message)"}`);
+    }
+  }
 
   if (recent.length > 0) {
     console.log("\nRecent (last hour):");
@@ -420,7 +460,7 @@ function cmdErrors(db: DatabaseSync, hours?: number) {
   }
 }
 
-function cmdAgents(db: DatabaseSync) {
+function cmdAgents(db: DatabaseSync, json = false) {
   const agents = db.prepare(`
     SELECT agent_id,
            COUNT(*) as total_sessions,
@@ -431,19 +471,24 @@ function cmdAgents(db: DatabaseSync) {
     FROM cost_records GROUP BY agent_id ORDER BY last_active DESC
   `).all(Date.now() - 3600_000, Date.now() - 3600_000) as Array<Record<string, unknown>>;
 
-  console.log("## Agents\n");
-  for (const a of agents) {
-    const age = Date.now() - (a.last_active as number);
-    console.log(`${a.agent_id}`);
-    console.log(`  Last active: ${fmtAge(age)} ago | Today: ${fmt$((a.recent_cost as number))} (${a.recent_sessions} sessions) | Total: ${fmt$((a.total_cost as number))} (${a.total_sessions} sessions)`);
-  }
-
   // Tasks per agent
   const assignments = db.prepare(`
     SELECT assigned_to, state, COUNT(*) as cnt
     FROM tasks WHERE state NOT IN ('DONE', 'CANCELLED') AND assigned_to IS NOT NULL
     GROUP BY assigned_to, state ORDER BY assigned_to, state
   `).all() as Array<Record<string, unknown>>;
+
+  if (json) {
+    console.log(JSON.stringify({ agents, assignments }, null, 2));
+    return;
+  }
+
+  console.log("## Agents\n");
+  for (const a of agents) {
+    const age = Date.now() - (a.last_active as number);
+    console.log(`${a.agent_id}`);
+    console.log(`  Last active: ${fmtAge(age)} ago | Today: ${fmt$((a.recent_cost as number))} (${a.recent_sessions} sessions) | Total: ${fmt$((a.total_cost as number))} (${a.total_sessions} sessions)`);
+  }
 
   if (assignments.length > 0) {
     console.log("\nActive assignments:");
@@ -618,20 +663,13 @@ function detectAnomalies(db: DatabaseSync, projectId: string, hours: number): st
   return anomalies;
 }
 
-function cmdDashboard(db: DatabaseSync, projectId: string, hours: number): void {
+function cmdDashboard(db: DatabaseSync, projectId: string, hours: number, json = false): void {
   const since = Date.now() - hours * 3600_000;
 
-  // Anomaly detection — show at top
+  // Anomaly detection
   const anomalies = detectAnomalies(db, projectId, hours);
-  if (anomalies.length > 0) {
-    console.log("## Anomalies\n");
-    for (const a of anomalies) {
-      console.log(`  \u26A0\uFE0F  ${a}`);
-    }
-    console.log("");
-  }
 
-  // --- Summary line at top ---
+  // --- Summary ---
   let totalSessions = 0;
   let totalCostCents = 0;
   try {
@@ -644,6 +682,72 @@ function cmdDashboard(db: DatabaseSync, projectId: string, hours: number): void 
     totalSessions = sessionCount.sessions;
     totalCostCents = costSum.cost;
   } catch { /* ignore */ }
+
+  if (json) {
+    // Gather all dashboard data for JSON
+    let activeAgents: Array<Record<string, unknown>> = [];
+    try {
+      activeAgents = db.prepare(`
+        SELECT sa.agent_id,
+               COUNT(*) as sessions,
+               COALESCE(MAX(ac.cost), 0) as cost,
+               MAX(sa.started_at) as last_active,
+               SUM(sa.tool_call_count) as tool_calls
+        FROM session_archives sa
+        LEFT JOIN (SELECT agent_id, SUM(cost_cents) as cost FROM cost_records WHERE project_id = ? AND created_at > ? GROUP BY agent_id) ac ON ac.agent_id = sa.agent_id
+        WHERE sa.project_id = ? AND sa.started_at > ?
+        GROUP BY sa.agent_id ORDER BY last_active DESC
+      `).all(projectId, since, projectId, since) as Array<Record<string, unknown>>;
+    } catch { /* ignore */ }
+
+    let pendingProposals: Array<Record<string, unknown>> = [];
+    try {
+      pendingProposals = db.prepare(
+        "SELECT id, title, proposed_by, created_at, origin FROM proposals WHERE project_id = ? AND status = 'pending' AND created_at > ? ORDER BY created_at DESC LIMIT 10",
+      ).all(projectId, since) as Array<Record<string, unknown>>;
+    } catch { /* ignore */ }
+
+    let queueCounts: Array<{ status: string; cnt: number }> = [];
+    try {
+      queueCounts = db.prepare(
+        "SELECT status, COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? GROUP BY status",
+      ).all(projectId) as Array<{ status: string; cnt: number }>;
+    } catch { /* ignore */ }
+
+    let budget: Record<string, number> | undefined;
+    try {
+      budget = db.prepare(
+        "SELECT daily_limit_cents, daily_spent_cents, monthly_spent_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
+      ).get(projectId) as Record<string, number> | undefined;
+    } catch { /* ignore */ }
+
+    const taskCounts = db.prepare(
+      "SELECT state, COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state NOT IN ('DONE', 'CANCELLED') GROUP BY state",
+    ).all(projectId) as Array<{ state: string; cnt: number }>;
+
+    console.log(JSON.stringify({
+      hours,
+      total_sessions: totalSessions,
+      total_cost_cents: totalCostCents,
+      anomalies,
+      agents: activeAgents,
+      pending_proposals: pendingProposals,
+      queue: Object.fromEntries(queueCounts.map(r => [r.status, r.cnt])),
+      budget: budget ?? null,
+      active_tasks: Object.fromEntries(taskCounts.map(r => [r.state, r.cnt])),
+    }, null, 2));
+    return;
+  }
+
+  // Formatted output
+  if (anomalies.length > 0) {
+    console.log("## Anomalies\n");
+    for (const a of anomalies) {
+      console.log(`  \u26A0\uFE0F  ${a}`);
+    }
+    console.log("");
+  }
+
   console.log(`## Dashboard (last ${hours}h)  |  ${totalSessions} sessions  |  ${fmt$(totalCostCents)} total cost\n`);
 
   // --- Agent Status ---
@@ -821,7 +925,7 @@ function cmdDashboard(db: DatabaseSync, projectId: string, hours: number): void 
   }
 }
 
-function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string): void {
+function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string, json = false): void {
   const since = Date.now() - hours * 3600_000;
 
   let sql = `
@@ -842,6 +946,11 @@ function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFi
   sql += " ORDER BY sa.started_at DESC LIMIT 50";
 
   const sessions = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+
+  if (json) {
+    console.log(JSON.stringify({ hours, agent_filter: agentFilter ?? null, sessions }, null, 2));
+    return;
+  }
 
   console.log(`## Sessions (last ${hours}h${agentFilter ? `, agent: ${agentFilter}` : ""})\n`);
 
@@ -986,7 +1095,7 @@ function cmdSessionDetail(db: DatabaseSync, projectId: string, sessionKey: strin
   } catch { /* ignore */ }
 }
 
-function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: string, hours?: number): void {
+function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: string, hours?: number, json = false): void {
   let where = "WHERE project_id = ?";
   const params: (string | number)[] = [projectId];
 
@@ -1006,6 +1115,11 @@ function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: string,
     FROM proposals ${where}
     ORDER BY created_at DESC LIMIT 50
   `).all(...params) as Array<Record<string, unknown>>;
+
+  if (json) {
+    console.log(JSON.stringify({ status_filter: statusFilter, hours: hours ?? null, proposals }, null, 2));
+    return;
+  }
 
   console.log(`## Proposals (${statusFilter || "all"}${hours ? `, last ${hours}h` : ""})\n`);
 
@@ -1109,7 +1223,7 @@ function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilte
   }
 }
 
-function cmdMetrics(db: DatabaseSync, projectId: string, hours: number): void {
+function cmdMetrics(db: DatabaseSync, projectId: string, hours: number, json = false): void {
   const since = Date.now() - hours * 3600_000;
 
   const agents = db.prepare(`
@@ -1124,6 +1238,22 @@ function cmdMetrics(db: DatabaseSync, projectId: string, hours: number): void {
     WHERE sa.project_id = ? AND sa.started_at > ?
     GROUP BY sa.agent_id ORDER BY total_cost DESC
   `).all(projectId, since, projectId, since) as Array<Record<string, unknown>>;
+
+  if (json) {
+    const metricsData = agents.map(a => {
+      const agent = a.agent_id as string;
+      const proposalCount = (db.prepare(
+        "SELECT COUNT(*) as cnt FROM proposals WHERE proposed_by LIKE 'agent:' || ? || ':%' AND project_id = ? AND created_at > ?",
+      ).get(agent, projectId, since) as { cnt: number }).cnt;
+      const completedTasks = (db.prepare(`
+        SELECT COUNT(DISTINCT task_id) as cnt FROM transitions
+        WHERE actor LIKE 'agent:' || ? || ':%' AND to_state = 'DONE' AND created_at > ?
+      `).get(agent, since) as { cnt: number }).cnt;
+      return { ...a, proposals: proposalCount, completed_tasks: completedTasks };
+    });
+    console.log(JSON.stringify({ hours, agents: metricsData }, null, 2));
+    return;
+  }
 
   console.log(`## Per-Agent Metrics (last ${hours}h)\n`);
 
@@ -1160,10 +1290,25 @@ function cmdMetrics(db: DatabaseSync, projectId: string, hours: number): void {
   }
 }
 
-function cmdBudget(db: DatabaseSync, projectId: string): void {
+function cmdBudget(db: DatabaseSync, projectId: string, json = false): void {
   const budget = db.prepare(
     "SELECT daily_limit_cents, daily_spent_cents, monthly_spent_cents, daily_reset_at FROM budgets WHERE project_id = ? AND agent_id IS NULL",
   ).get(projectId) as Record<string, number> | undefined;
+
+  if (json) {
+    const hourCost = budget ? (db.prepare(
+      "SELECT COALESCE(SUM(cost_cents), 0) as cost FROM cost_records WHERE project_id = ? AND created_at > ?",
+    ).get(projectId, Date.now() - 3600_000) as { cost: number }).cost : 0;
+    const agentBudgets = db.prepare(
+      "SELECT agent_id, daily_limit_cents, daily_spent_cents, session_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NOT NULL",
+    ).all(projectId) as Array<Record<string, unknown>>;
+    console.log(JSON.stringify({
+      budget: budget ?? null,
+      burn_rate_cents_per_hour: hourCost,
+      agent_budgets: agentBudgets,
+    }, null, 2));
+    return;
+  }
 
   console.log("## Budget Pacing\n");
 
@@ -1238,9 +1383,7 @@ function cmdBudget(db: DatabaseSync, projectId: string): void {
   }
 }
 
-function cmdTrust(db: DatabaseSync, projectId: string): void {
-  console.log("## Trust Overview\n");
-
+function cmdTrust(db: DatabaseSync, projectId: string, json = false): void {
   // Get all trust scores, then deduplicate by extracted agent name (latest per name)
   const allScores = db.prepare(`
     SELECT agent_id, score, tier, trigger_type, created_at
@@ -1249,11 +1392,6 @@ function cmdTrust(db: DatabaseSync, projectId: string): void {
     ORDER BY created_at DESC
   `).all(projectId) as Array<Record<string, unknown>>;
 
-  if (allScores.length === 0) {
-    console.log("  No trust history recorded.");
-    return;
-  }
-
   // Deduplicate: keep latest score per extracted agent name
   const latestByName = new Map<string, Record<string, unknown>>();
   for (const row of allScores) {
@@ -1261,6 +1399,30 @@ function cmdTrust(db: DatabaseSync, projectId: string): void {
     if (!latestByName.has(name)) {
       latestByName.set(name, row);
     }
+  }
+
+  if (json) {
+    const trustData: Array<Record<string, unknown>> = [];
+    const dayAgo = Date.now() - 24 * 3600_000;
+    for (const [name, a] of latestByName) {
+      const rawAgent = a.agent_id as string;
+      const oldScore = db.prepare(`
+        SELECT score FROM trust_score_history
+        WHERE project_id = ? AND agent_id = ? AND created_at <= ?
+        ORDER BY created_at DESC LIMIT 1
+      `).get(projectId, rawAgent, dayAgo) as { score: number } | undefined;
+      const diff = oldScore ? (a.score as number) - oldScore.score : 0;
+      trustData.push({ agent: name, score: a.score, tier: a.tier, trigger_type: a.trigger_type, created_at: a.created_at, trend_24h: diff });
+    }
+    console.log(JSON.stringify({ agents: trustData }, null, 2));
+    return;
+  }
+
+  console.log("## Trust Overview\n");
+
+  if (allScores.length === 0) {
+    console.log("  No trust history recorded.");
+    return;
   }
 
   const dayAgo = Date.now() - 24 * 3600_000;
@@ -1466,7 +1628,7 @@ function cmdReplay(db: DatabaseSync, projectId: string, sessionKey: string): voi
 
 // ─── Lifecycle commands (DB-backed) ──────────────────────────────────
 
-function cmdDisable(db: DatabaseSync, projectId: string, args: string[]): void {
+function cmdDisable(db: DatabaseSync, projectId: string, args: string[], dryRun = false): void {
   // Check if already disabled
   const existing = db.prepare(
     "SELECT reason, disabled_at, disabled_by FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
@@ -1481,6 +1643,14 @@ function cmdDisable(db: DatabaseSync, projectId: string, args: string[]): void {
   }
 
   const reason = args.find(a => a.startsWith("--reason="))?.split("=").slice(1).join("=") ?? "Disabled via CLI";
+
+  if (dryRun) {
+    console.log(`## Domain Disable [DRY RUN]: ${projectId}\n`);
+    console.log(`Would disable with reason: ${reason}`);
+    console.log("Effect: New dispatches would be blocked immediately.");
+    console.log("Running sessions would finish naturally.");
+    return;
+  }
 
   // Insert domain disable via DB
   // crypto imported at top level
@@ -1526,8 +1696,8 @@ function cmdEnable(db: DatabaseSync, projectId: string): void {
   console.log("Effect: Dispatches will resume on next dispatch loop pass.");
 }
 
-function cmdKill(db: DatabaseSync, projectId: string, args: string[]): void {
-  console.log("## Emergency Stop\n");
+function cmdKill(db: DatabaseSync, projectId: string, args: string[], dryRun = false): void {
+  console.log(`## Emergency Stop${dryRun ? " [DRY RUN]" : ""}\n`);
 
   const reason = args.find(a => a.startsWith("--reason="))?.split("=").slice(1).join("=") ?? "Emergency stop via CLI";
 
@@ -1535,40 +1705,68 @@ function cmdKill(db: DatabaseSync, projectId: string, args: string[]): void {
   // crypto imported at top level
   const id = crypto.randomUUID();
   const now = Date.now();
-  db.prepare(`
-    INSERT OR REPLACE INTO disabled_scopes (id, project_id, scope_type, scope_value, reason, disabled_at, disabled_by)
-    VALUES (?, ?, 'domain', ?, ?, ?, ?)
-  `).run(id, projectId, projectId, `EMERGENCY: ${reason}`, now, "cli:kill");
-  console.log("  Domain disabled (DB)");
-
-  // 2. Activate emergency stop flag
-  db.prepare(
-    "INSERT OR REPLACE INTO project_metadata (project_id, key, value) VALUES (?, 'emergency_stop', 'true')",
-  ).run(projectId);
-  console.log("  Emergency stop activated");
-
-  // 3. Cancel all queued/leased dispatch items
-  const cancelled = db.prepare(
-    "UPDATE dispatch_queue SET status = 'cancelled', last_error = ?, completed_at = ? WHERE project_id = ? AND status IN ('queued', 'leased')",
-  ).run(`EMERGENCY: ${reason}`, now, projectId);
-  if (cancelled.changes > 0) {
-    console.log(`  Cancelled ${cancelled.changes} queued dispatch item(s)`);
+  if (dryRun) {
+    console.log(`  [DRY RUN] Would disable domain "${projectId}" with reason: EMERGENCY: ${reason}`);
   } else {
-    console.log("  No queued dispatch items to cancel");
+    db.prepare(`
+      INSERT OR REPLACE INTO disabled_scopes (id, project_id, scope_type, scope_value, reason, disabled_at, disabled_by)
+      VALUES (?, ?, 'domain', ?, ?, ?, ?)
+    `).run(id, projectId, projectId, `EMERGENCY: ${reason}`, now, "cli:kill");
+    console.log("  Domain disabled (DB)");
   }
 
-  // 4. Kill ClawForce agent processes
+  // 2. Activate emergency stop flag
+  if (dryRun) {
+    console.log("  [DRY RUN] Would activate emergency stop flag");
+  } else {
+    db.prepare(
+      "INSERT OR REPLACE INTO project_metadata (project_id, key, value) VALUES (?, 'emergency_stop', 'true')",
+    ).run(projectId);
+    console.log("  Emergency stop activated");
+  }
+
+  // 3. Cancel all queued/leased dispatch items
+  if (dryRun) {
+    const queuedCount = db.prepare(
+      "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND status IN ('queued', 'leased')",
+    ).get(projectId) as { cnt: number };
+    console.log(`  [DRY RUN] Would cancel ${queuedCount.cnt} queued dispatch item(s)`);
+  } else {
+    const cancelled = db.prepare(
+      "UPDATE dispatch_queue SET status = 'cancelled', last_error = ?, completed_at = ? WHERE project_id = ? AND status IN ('queued', 'leased')",
+    ).run(`EMERGENCY: ${reason}`, now, projectId);
+    if (cancelled.changes > 0) {
+      console.log(`  Cancelled ${cancelled.changes} queued dispatch item(s)`);
+    } else {
+      console.log("  No queued dispatch items to cancel");
+    }
+  }
+
+  // 4. Kill ClawForce agent processes (dynamic from domain YAML)
   try {
+    const domainAgents = loadDomainAgents(projectId);
+    let grepPattern: string;
+    if (domainAgents.length > 0) {
+      grepPattern = `agent.*(${domainAgents.join("|")})`;
+    } else {
+      // Fallback to project-based pattern
+      const prefix = projectId.replace(/-dev$/, "");
+      grepPattern = `agent.*(${prefix}-)`;
+    }
     const result = execSync(
-      `ps aux | grep -E "agent.*(cf-lead|cf-worker|cf-verifier|dash-lead|dash-worker|dash-verifier)" | grep -v grep | awk '{print $2}'`,
+      `ps aux | grep -E "${grepPattern}" | grep -v grep | awk '{print $2}'`,
       { encoding: "utf-8" },
     ).trim();
     if (result) {
       const pids = result.split("\n");
-      for (const pid of pids) {
-        try { process.kill(Number(pid), "SIGTERM"); } catch {}
+      if (dryRun) {
+        console.log(`  [DRY RUN] Would kill ${pids.length} agent process(es): PIDs ${pids.join(", ")}`);
+      } else {
+        for (const pid of pids) {
+          try { process.kill(Number(pid), "SIGTERM"); } catch {}
+        }
+        console.log(`  Killed ${pids.length} agent process(es)`);
       }
-      console.log(`  Killed ${pids.length} agent process(es)`);
     } else {
       console.log("  No agent processes found");
     }
@@ -1947,18 +2145,30 @@ function cmdConfigGet(domainId: string, dotPath: string, useGlobal: boolean): vo
   console.log(formatValue(value));
 }
 
-function cmdConfigSet(domainId: string, dotPath: string, rawValue: string, useGlobal: boolean): void {
+function cmdConfigSet(domainId: string, dotPath: string, rawValue: string, useGlobal: boolean, dryRun = false): void {
   const filePath = useGlobal ? getGlobalConfigPath() : getDomainYamlPath(domainId);
   const doc = loadYamlDocument(filePath);
+  const target = useGlobal ? "config.yaml" : domainId;
 
   const value = parseValue(rawValue);
   const parts = dotPath.split(".");
+
+  // Show current value for comparison
+  const raw = fs.readFileSync(filePath, "utf-8");
+  const parsed = YAML.parse(raw);
+  const currentValue = getByDotPath(parsed, dotPath);
+
+  if (dryRun) {
+    console.log(`[DRY RUN] Would set ${dotPath} in ${target}:`);
+    console.log(`  Current: ${formatValue(currentValue)}`);
+    console.log(`  New:     ${JSON.stringify(value)}`);
+    return;
+  }
 
   // setIn creates intermediate objects and preserves document structure
   doc.setIn(parts, value);
 
   fs.writeFileSync(filePath, String(doc), "utf-8");
-  const target = useGlobal ? "config.yaml" : domainId;
   console.log(`Set ${dotPath} = ${JSON.stringify(value)} in ${target}`);
 }
 
@@ -1988,7 +2198,7 @@ function cmdConfigShow(domainId: string, section: string | undefined, useGlobal:
   }
 }
 
-function cmdConfig(domainId: string, args: string[]): void {
+function cmdConfig(domainId: string, args: string[], configDryRun = false): void {
   const subcommand = args[1]; // args[0] is "config"
   const useGlobal = args.includes("--global");
 
@@ -2004,6 +2214,7 @@ Usage:
 Options:
   --domain=ID    Target domain (default: clawforce-dev)
   --global       Modify config.yaml instead of domain yaml
+  --dry-run, -n  (set only) Show what would change without writing
 
 Examples:
   cf config get dispatch.mode
@@ -2033,7 +2244,7 @@ Examples:
       }
       const [dotPath, ...valueParts] = setArgs;
       const rawValue = valueParts.join(" ");
-      cmdConfigSet(domainId, dotPath!, rawValue, useGlobal);
+      cmdConfigSet(domainId, dotPath!, rawValue, useGlobal, configDryRun);
       break;
     }
     case "show": {
@@ -2070,7 +2281,7 @@ function writeWatchState(state: WatchState): void {
   fs.writeFileSync(WATCH_STATE_FILE, JSON.stringify(state), "utf-8");
 }
 
-function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean): void {
+function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, json = false): void {
   const now = Date.now();
 
   if (reset) {
@@ -2212,6 +2423,24 @@ function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean): void {
     || newMessages.length > 0
     || budgetLine !== null
     || activeSessions.length > 0;
+
+  if (json) {
+    console.log(JSON.stringify({
+      since: since > 0 ? since : null,
+      has_changes: hasChanges,
+      anomalies,
+      completed_tasks: completedTasks,
+      failed_tasks: failedTasks,
+      new_sessions: newSessions,
+      state_changes: stateChanges,
+      new_proposals: newProposals,
+      new_messages: newMessages,
+      active_sessions: activeSessions,
+      budget_change: budgetLine,
+    }, null, 2));
+    writeWatchState({ lastCheckAt: now });
+    return;
+  }
 
   if (!hasChanges) {
     console.log(`## Since ${sinceLabel}${sinceTime} \u2014 No changes.`);
@@ -2368,6 +2597,231 @@ function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean): void {
   writeWatchState({ lastCheckAt: now });
 }
 
+// ─── Per-command help ────────────────────────────────────────────────
+
+const COMMAND_HELP: Record<string, string> = {
+  costs: `
+costs — Cost breakdown by agent, task, or time window
+
+Usage: cf costs [--by=agent|task|day] [--hours=N] [--json]
+
+Options:
+  --by=agent     Group by agent + model (default)
+  --by=task      Group by task
+  --by=day       Group by day (last 14 days)
+  --hours=N      Lookback window in hours (default: 24)
+
+Examples:
+  cf costs
+  cf costs --by=task --hours=8
+  cf costs --by=day
+`,
+  tasks: `
+tasks — Active tasks with states and assignees
+
+Usage: cf tasks [STATE] [--json]
+
+Arguments:
+  STATE    Filter by state: ASSIGNED, IN_PROGRESS, REVIEW, OPEN, BLOCKED, FAILED, DONE, CANCELLED
+           If omitted, shows all non-terminal tasks.
+
+Examples:
+  cf tasks
+  cf tasks REVIEW
+  cf tasks DONE
+`,
+  sessions: `
+sessions — List recent sessions with cost/output summary
+
+Usage: cf sessions [--hours=N] [--agent=X] [--json]
+
+Options:
+  --hours=N      Lookback window in hours (default: 4)
+  --agent=X      Filter to a specific agent
+
+Examples:
+  cf sessions
+  cf sessions --hours=12 --agent=cf-lead
+`,
+  flows: `
+flows — Per-session action timeline
+
+Usage: cf flows [--hours=N] [--agent=X] [--expand] [--json]
+
+Options:
+  --hours=N      Lookback window in hours (default: 4)
+  --agent=X      Filter to a specific agent
+  --expand       Show full tool call list instead of grouped summary
+
+Examples:
+  cf flows --expand
+  cf flows --agent=cf-worker-1 --hours=2
+`,
+  proposals: `
+proposals — List proposals with status and reasoning preview
+
+Usage: cf proposals [--status=pending|approved|rejected|all] [--hours=N] [--json]
+
+Options:
+  --status=X     Filter by status (default: pending)
+  --hours=N      Lookback window in hours
+
+Examples:
+  cf proposals
+  cf proposals --status=all --hours=48
+`,
+  org: `
+org — Live org tree and management
+
+Usage:
+  cf org [--team=X] [--agent=X] [--json]    Live org tree with runtime status
+  cf org set <agent> --reports-to <mgr>      Rewire reporting chain
+  cf org check [--json]                      Structural + operational audit
+
+Options:
+  --team=X        Filter tree to a specific team
+  --agent=X       Filter to an agent's chain (up + down)
+  --dry-run, -n   (org set) Preview change without applying
+
+Examples:
+  cf org
+  cf org --team=core
+  cf org set cf-worker-1 --reports-to cf-lead
+  cf org set cf-worker-1 --reports-to cf-lead --dry-run
+  cf org check
+`,
+  "org set": `
+org set — Rewire an agent's reporting chain
+
+Usage: cf org set <agent> --reports-to <manager|none> [--dry-run|-n] [--yes]
+
+Options:
+  --reports-to=X   New manager (or "none" to clear)
+  --dry-run, -n    Preview change without writing config
+  --yes            Skip confirmation
+
+Examples:
+  cf org set cf-worker-1 --reports-to cf-lead
+  cf org set cf-worker-1 --reports-to none
+  cf org set cf-worker-1 --reports-to cf-lead --dry-run
+`,
+  watch: `
+watch — Curated feed showing only what changed since last check
+
+Usage: cf watch [--reset] [--json]
+
+Options:
+  --reset    Clear watch state; next run shows everything
+
+Examples:
+  cf watch
+  cf watch --reset
+`,
+  disable: `
+disable — Disable domain via DB (blocks new dispatches)
+
+Usage: cf disable [--reason=MSG] [--dry-run|-n]
+
+Options:
+  --reason=MSG    Reason for disabling
+  --dry-run, -n   Show what would happen without doing it
+
+Examples:
+  cf disable
+  cf disable --reason="maintenance window"
+  cf disable --dry-run
+`,
+  kill: `
+kill — Emergency stop: disable domain + cancel queued + kill processes
+
+Usage: cf kill [--reason=MSG] [--dry-run|-n]
+       cf kill --resume
+
+Options:
+  --reason=MSG    Reason for the emergency stop
+  --resume        Clear emergency stop and re-enable domain
+  --dry-run, -n   Show what would happen without doing it
+
+Examples:
+  cf kill
+  cf kill --reason="runaway costs"
+  cf kill --dry-run
+  cf kill --resume
+`,
+  config: `
+config — Read and write ClawForce configuration
+
+Usage:
+  cf config get <dotpath>              Read a config value
+  cf config set <dotpath> <value>      Write a config value
+  cf config show [section]             Show full config or a section
+
+Options:
+  --domain=ID    Target domain (default: clawforce-dev)
+  --global       Modify config.yaml instead of domain yaml
+  --dry-run, -n  (config set) Show what would change without writing
+
+Examples:
+  cf config get dispatch.mode
+  cf config set budget.project.daily.cents 40000 --dry-run
+  cf config show dispatch
+`,
+  dashboard: `
+dashboard — Single-command overview with anomaly detection
+
+Usage: cf dashboard [--hours=N] [--json]
+
+Options:
+  --hours=N      Lookback window in hours (default: 4)
+
+Examples:
+  cf dashboard
+  cf dashboard --hours=12
+`,
+  status: `
+status — System vitals: gateway, budget, task counts, queue
+
+Usage: cf status [--json]
+`,
+  agents: `
+agents — Agent session status and activity
+
+Usage: cf agents [--json]
+`,
+  metrics: `
+metrics — Per-agent efficiency metrics
+
+Usage: cf metrics [--hours=N] [--json]
+
+Options:
+  --hours=N      Lookback window in hours (default: 24)
+`,
+  budget: `
+budget — Budget pacing status and projections
+
+Usage: cf budget [--json]
+`,
+  trust: `
+trust — Per-agent trust overview
+
+Usage: cf trust [--json]
+`,
+  queue: `
+queue — Dispatch queue health and failure reasons
+
+Usage: cf queue [--json]
+`,
+};
+
+function showCommandHelp(cmd: string): boolean {
+  const helpText = COMMAND_HELP[cmd];
+  if (helpText) {
+    console.log(helpText.trimEnd());
+    return true;
+  }
+  return false;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -2376,6 +2830,8 @@ const projectId =
   (args.find(a => a.startsWith("--domain="))?.split("=")[1]) ??
   (args.find(a => a.startsWith("--project="))?.split("=")[1]) ??
   DEFAULT_PROJECT;
+const jsonMode = args.includes("--json");
+const dryRun = args.includes("--dry-run") || args.includes("-n");
 
 if (!command || command === "help" || command === "--help") {
   console.log(`
@@ -2433,19 +2889,38 @@ Verification:
 Options:
   --project=ID, --domain=ID Project/domain ID (default: clawforce-dev)
   --global                  (config only) Target config.yaml instead of domain yaml
+  --json                    Output as JSON instead of formatted text
+  --dry-run, -n             Preview mutating commands without applying changes
+                            Works with: config set, disable, kill, org set
+
+Use <command> --help for per-command usage and examples.
 `);
   process.exit(0);
 }
 
 // Config commands don't need the database
 if (command === "config") {
-  cmdConfig(projectId, args);
+  if (args.includes("--help")) {
+    showCommandHelp("config");
+    process.exit(0);
+  }
+  cmdConfig(projectId, args, dryRun);
   process.exit(0);
 }
 
 // Org commands — DB is optional for tree/check, not needed for set
 if (command === "org") {
   const sub = args[1];
+
+  // --help handling
+  if (args.includes("--help")) {
+    if (sub === "set") {
+      showCommandHelp("org set");
+    } else {
+      showCommandHelp("org");
+    }
+    process.exit(0);
+  }
 
   if (sub === "set") {
     const agentId = args[2];
@@ -2456,7 +2931,7 @@ if (command === "org") {
       console.error("Usage: cf org set <agent> --reports-to <manager|none>");
       process.exit(1);
     }
-    cmdOrgSet(agentId, reportsTo, { yes: yesFlag });
+    cmdOrgSet(agentId, reportsTo, { yes: yesFlag, dryRun });
     process.exit(0);
   }
 
@@ -2496,18 +2971,28 @@ const feedbackArg = args.find(a => a.startsWith("--feedback="));
 const feedbackValue = feedbackArg?.split("=").slice(1).join("=");
 const expandFlag = args.includes("--expand");
 
+// Per-command --help check
+if (args.includes("--help") && command && COMMAND_HELP[command]) {
+  showCommandHelp(command);
+  db.close();
+  process.exit(0);
+}
+
+// Helper: output JSON and exit, skipping formatted output
+let jsonOutput: unknown = null;
+
 switch (command) {
   case "status":
-    cmdStatus(db);
+    cmdStatus(db, jsonMode);
     break;
   case "tasks":
-    cmdTasks(db, args[1] && !args[1].startsWith("--") ? args[1] : undefined);
+    cmdTasks(db, args[1] && !args[1].startsWith("--") ? args[1] : undefined, jsonMode);
     break;
   case "costs":
-    cmdCosts(db, groupBy, hours);
+    cmdCosts(db, groupBy, hours, jsonMode);
     break;
   case "queue":
-    cmdQueue(db);
+    cmdQueue(db, jsonMode);
     break;
   case "transitions":
     cmdTransitions(db, hours);
@@ -2516,7 +3001,7 @@ switch (command) {
     cmdErrors(db, hours);
     break;
   case "agents":
-    cmdAgents(db);
+    cmdAgents(db, jsonMode);
     break;
   case "streams":
     cmdStreams(db);
@@ -2528,10 +3013,10 @@ switch (command) {
     break;
   }
   case "dashboard":
-    cmdDashboard(db, projectId, hours ?? 4);
+    cmdDashboard(db, projectId, hours ?? 4, jsonMode);
     break;
   case "sessions":
-    cmdSessions(db, projectId, hours ?? 4, agentFilter);
+    cmdSessions(db, projectId, hours ?? 4, agentFilter, jsonMode);
     break;
   case "session": {
     const sessionKey = args[1];
@@ -2543,19 +3028,19 @@ switch (command) {
     break;
   }
   case "proposals":
-    cmdProposals(db, projectId, statusFilter ?? "pending", hours);
+    cmdProposals(db, projectId, statusFilter ?? "pending", hours, jsonMode);
     break;
   case "flows":
     cmdFlows(db, projectId, hours ?? 4, agentFilter, expandFlag);
     break;
   case "metrics":
-    cmdMetrics(db, projectId, hours ?? 24);
+    cmdMetrics(db, projectId, hours ?? 24, jsonMode);
     break;
   case "budget":
-    cmdBudget(db, projectId);
+    cmdBudget(db, projectId, jsonMode);
     break;
   case "trust":
-    cmdTrust(db, projectId);
+    cmdTrust(db, projectId, jsonMode);
     break;
   case "inbox":
     cmdInbox(db, projectId);
@@ -2598,10 +3083,10 @@ switch (command) {
     break;
   }
   case "watch":
-    cmdWatch(db, projectId, args.includes("--reset"));
+    cmdWatch(db, projectId, args.includes("--reset"), jsonMode);
     break;
   case "disable":
-    cmdDisable(db, projectId, args);
+    cmdDisable(db, projectId, args, dryRun);
     break;
   case "enable":
     cmdEnable(db, projectId);
@@ -2610,7 +3095,7 @@ switch (command) {
     if (args.includes("--resume")) {
       cmdKillResume(db, projectId);
     } else {
-      cmdKill(db, projectId, args);
+      cmdKill(db, projectId, args, dryRun);
     }
     break;
   case "running":
@@ -2623,5 +3108,7 @@ switch (command) {
     console.error(`Unknown command: ${command}\nRun with --help for usage.`);
     process.exit(1);
 }
+
+void jsonOutput; // suppress unused warning
 
 db.close();

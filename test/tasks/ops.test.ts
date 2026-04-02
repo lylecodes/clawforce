@@ -557,6 +557,7 @@ describe("clawforce/ops", () => {
 
     // Transition task to REVIEW — should cancel the queued item
     transitionTask({ projectId: PROJECT, taskId: task.id, toState: "IN_PROGRESS", actor: "agent:worker" }, db);
+    attachEvidence({ projectId: PROJECT, taskId: task.id, type: "output", content: "done", attachedBy: "agent:worker" }, db);
     transitionTask({ projectId: PROJECT, taskId: task.id, toState: "REVIEW", actor: "agent:worker" }, db);
 
     // The queued item should now be cancelled (not dispatched)
@@ -583,5 +584,99 @@ describe("clawforce/ops", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.key).toBe("cycle_time");
     expect((rows[0]!.value as number)).toBeGreaterThanOrEqual(0);
+  });
+
+  // --- Task dependency enforcement ---
+
+  it("createTask throws when parentTaskId does not exist", () => {
+    expect(() =>
+      createTask({
+        projectId: PROJECT,
+        title: "Orphan child",
+        createdBy: "agent:pm",
+        parentTaskId: "non-existent-parent-id",
+      }, db),
+    ).toThrow(/Parent task.*not found/);
+  });
+
+  it("createTask succeeds when parentTaskId is valid", () => {
+    const parent = createTask({ projectId: PROJECT, title: "Parent", createdBy: "agent:pm" }, db);
+    const child = createTask({
+      projectId: PROJECT,
+      title: "Child",
+      createdBy: "agent:pm",
+      assignedTo: "agent:worker",
+      parentTaskId: parent.id,
+    }, db);
+    expect(child.parentTaskId).toBe(parent.id);
+  });
+
+  it("blocks IN_PROGRESS transition when parent is not DONE", () => {
+    const parent = createTask({
+      projectId: PROJECT, title: "Parent task", createdBy: "agent:pm", assignedTo: "agent:lead",
+    }, db);
+    const child = createTask({
+      projectId: PROJECT, title: "Child task", createdBy: "agent:pm", assignedTo: "agent:worker",
+      parentTaskId: parent.id,
+    }, db);
+
+    // Child is ASSIGNED — try to start it while parent is still ASSIGNED
+    const result = transitionTask({
+      projectId: PROJECT, taskId: child.id, toState: "IN_PROGRESS", actor: "agent:worker",
+    }, db);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/Cannot start: parent task .+ is still in state ASSIGNED/);
+    }
+  });
+
+  it("allows IN_PROGRESS transition when parent is DONE", () => {
+    const parent = createTask({
+      projectId: PROJECT, title: "Parent for allow", createdBy: "agent:pm", assignedTo: "agent:lead",
+    }, db);
+    const child = createTask({
+      projectId: PROJECT, title: "Child for allow", createdBy: "agent:pm", assignedTo: "agent:worker",
+      parentTaskId: parent.id,
+    }, db);
+
+    // Complete the parent task
+    transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "IN_PROGRESS", actor: "agent:lead" }, db);
+    attachEvidence({ projectId: PROJECT, taskId: parent.id, type: "output", content: "parent done", attachedBy: "agent:lead" }, db);
+    transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "REVIEW", actor: "agent:lead" }, db);
+    transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "DONE", actor: "agent:verifier" }, db);
+
+    // Now child should be able to start
+    const result = transitionTask({
+      projectId: PROJECT, taskId: child.id, toState: "IN_PROGRESS", actor: "agent:worker",
+    }, db);
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("auto-unblocks BLOCKED child tasks when parent completes", () => {
+    const parent = createTask({
+      projectId: PROJECT, title: "Parent unblock", createdBy: "agent:pm", assignedTo: "agent:lead",
+    }, db);
+    const child = createTask({
+      projectId: PROJECT, title: "Child blocked", createdBy: "agent:pm", assignedTo: "agent:worker",
+      parentTaskId: parent.id,
+    }, db);
+
+    // Manually block the child (simulating dependency blocking)
+    transitionTask({ projectId: PROJECT, taskId: child.id, toState: "BLOCKED", actor: "system:dependency", reason: "Waiting for parent" }, db);
+
+    const blockedChild = getTask(PROJECT, child.id, db)!;
+    expect(blockedChild.state).toBe("BLOCKED");
+
+    // Complete the parent
+    transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "IN_PROGRESS", actor: "agent:lead" }, db);
+    attachEvidence({ projectId: PROJECT, taskId: parent.id, type: "output", content: "parent done", attachedBy: "agent:lead" }, db);
+    transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "REVIEW", actor: "agent:lead" }, db);
+    transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "DONE", actor: "agent:verifier" }, db);
+
+    // Child should now be ASSIGNED (auto-unblocked)
+    const unblocked = getTask(PROJECT, child.id, db)!;
+    expect(unblocked.state).toBe("ASSIGNED");
   });
 });
