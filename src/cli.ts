@@ -53,6 +53,7 @@ import { execSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
 import YAML from "yaml";
+import { cmdOrg, cmdOrgSet, cmdOrgCheck } from "./cli/org.js";
 
 const HOME = process.env.HOME ?? "/tmp";
 const DEFAULT_PROJECT = "clawforce-dev";
@@ -2420,6 +2421,11 @@ Config:
   config set <dotpath> <v>  Write a config value (auto-detects type)
   config show [section]     Show full config or a section
 
+Org:
+  org [--team=X] [--agent=X]  Live org tree with runtime status
+  org set <agent> --reports-to <mgr>  Rewire reporting chain
+  org check                 Structural + operational audit
+
 Verification:
   running                   Show what's actually running right now
   health                    Comprehensive health check
@@ -2434,6 +2440,45 @@ Options:
 // Config commands don't need the database
 if (command === "config") {
   cmdConfig(projectId, args);
+  process.exit(0);
+}
+
+// Org commands — DB is optional for tree/check, not needed for set
+if (command === "org") {
+  const sub = args[1];
+
+  if (sub === "set") {
+    const agentId = args[2];
+    const reportsToArg = args.find(a => a.startsWith("--reports-to="));
+    const reportsTo = reportsToArg?.split("=")[1];
+    const yesFlag = args.includes("--yes");
+    if (!agentId || agentId.startsWith("--") || !reportsTo) {
+      console.error("Usage: cf org set <agent> --reports-to <manager|none>");
+      process.exit(1);
+    }
+    cmdOrgSet(agentId, reportsTo, { yes: yesFlag });
+    process.exit(0);
+  }
+
+  // org and org check can use DB optionally
+  let orgDb: DatabaseSync | null = null;
+  const orgDbPath = path.join(DB_DIR, projectId, "clawforce.db");
+  if (fs.existsSync(orgDbPath)) {
+    orgDb = new DatabaseSync(orgDbPath, { open: true });
+  }
+
+  if (sub === "check") {
+    cmdOrgCheck(orgDb, projectId);
+  } else {
+    const teamArg = args.find(a => a.startsWith("--team="));
+    const agentArg = args.find(a => a.startsWith("--agent="));
+    cmdOrg(orgDb, projectId, {
+      team: teamArg?.split("=")[1],
+      agent: agentArg?.split("=")[1],
+    });
+  }
+
+  if (orgDb) orgDb.close();
   process.exit(0);
 }
 
