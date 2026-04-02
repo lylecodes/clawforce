@@ -63,7 +63,7 @@ function getDb(projectId: string): DatabaseSync {
   const dbPath = path.join(DB_DIR, projectId, "clawforce.db");
   if (!fs.existsSync(dbPath)) {
     console.error(`Database not found: ${dbPath}`);
-    process.exit(1);
+    process.exit(2);
   }
   return new DatabaseSync(dbPath, { open: true });
 }
@@ -156,7 +156,7 @@ function loadDomainAgents(domainId: string): string[] {
 
 // ─── Commands ────────────────────────────────────────────────────────
 
-function cmdStatus(db: DatabaseSync, json = false) {
+export function cmdStatus(db: DatabaseSync, json = false) {
   // Gateway
   let gatewayPid = "down";
   try {
@@ -224,7 +224,7 @@ function cmdStatus(db: DatabaseSync, json = false) {
   }
 }
 
-function cmdTasks(db: DatabaseSync, filter?: string, json = false) {
+export function cmdTasks(db: DatabaseSync, filter?: string, json = false) {
   const where = filter
     ? `WHERE state = '${filter.toUpperCase()}'`
     : "WHERE state NOT IN ('DONE', 'CANCELLED')";
@@ -253,7 +253,7 @@ function cmdTasks(db: DatabaseSync, filter?: string, json = false) {
   }
 }
 
-function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number, json = false) {
+export function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number, json = false) {
   const since = Date.now() - (hours ?? 24) * 3600_000;
   const sinceStr = fmtDate(since);
 
@@ -327,7 +327,7 @@ function cmdCosts(db: DatabaseSync, groupBy?: string, hours?: number, json = fal
   console.log(`\n   Total: ${fmt$(total)}`);
 }
 
-function cmdQueue(db: DatabaseSync, json = false) {
+export function cmdQueue(db: DatabaseSync, json = false) {
   // Status counts
   const counts = db.prepare(
     "SELECT status, COUNT(*) as cnt FROM dispatch_queue GROUP BY status"
@@ -380,7 +380,7 @@ function cmdQueue(db: DatabaseSync, json = false) {
   }
 }
 
-function cmdTransitions(db: DatabaseSync, hours?: number) {
+export function cmdTransitions(db: DatabaseSync, hours?: number) {
   const since = Date.now() - (hours ?? 2) * 3600_000;
 
   const rows = db.prepare(`
@@ -402,7 +402,7 @@ function cmdTransitions(db: DatabaseSync, hours?: number) {
   }
 }
 
-function cmdErrors(db: DatabaseSync, hours?: number) {
+export function cmdErrors(db: DatabaseSync, hours?: number) {
   const since = Date.now() - (hours ?? 2) * 3600_000;
 
   // Failed dispatches
@@ -460,7 +460,7 @@ function cmdErrors(db: DatabaseSync, hours?: number) {
   }
 }
 
-function cmdAgents(db: DatabaseSync, json = false) {
+export function cmdAgents(db: DatabaseSync, json = false) {
   const agents = db.prepare(`
     SELECT agent_id,
            COUNT(*) as total_sessions,
@@ -498,33 +498,76 @@ function cmdAgents(db: DatabaseSync, json = false) {
   }
 }
 
-function cmdStreams(db: DatabaseSync) {
-  // This reads from the builtin manifest — just list what's available
+export function cmdStreams(db: DatabaseSync, domainId: string) {
   console.log("## Available Data Streams\n");
   console.log("Use context sources in agent briefings or export via webhook.\n");
 
-  const streams = [
-    ["cost_summary", "Cost tracking summary for the project"],
-    ["cost_forecast", "Budget exhaustion projection"],
-    ["budget_guidance", "Budget utilization, remaining sessions, forecast"],
-    ["task_board", "Current task board with status, priority, assignee"],
-    ["velocity", "Task completion velocity and trends"],
-    ["team_performance", "Performance metrics per team member"],
-    ["trust_scores", "Trust evolution scores per action category"],
-    ["agent_status", "Status of all agents in the team"],
-    ["health_status", "System health indicators"],
-    ["sweep_status", "Automated sweep findings"],
-    ["initiative_status", "Initiative allocation vs spend"],
-    ["weekly_digest", "Weekly performance summary"],
-    ["intervention_suggestions", "Pattern-detected recommendations"],
-  ];
+  // Read stream definitions from the builtin manifest source file
+  let catalogStreams: Array<{ name: string; description: string }> = [];
+  try {
+    const scriptDir = path.dirname(process.argv[1] ?? "");
+    const manifestPath = path.resolve(scriptDir, "streams", "builtin-manifest.ts");
+    if (fs.existsSync(manifestPath)) {
+      const content = fs.readFileSync(manifestPath, "utf-8");
+      const re = /registerStream\(\{\s*name:\s*"([^"]+)",\s*description:\s*"([^"]+)"/g;
+      let m;
+      while ((m = re.exec(content)) !== null) {
+        catalogStreams.push({ name: m[1]!, description: m[2]! });
+      }
+    }
+  } catch { /* fall through to hardcoded fallback */ }
 
-  for (const [name, desc] of streams) {
-    console.log(`  ${name.padEnd(28)} ${desc}`);
+  // Fallback: hardcoded list (in case manifest file can't be parsed)
+  if (catalogStreams.length === 0) {
+    catalogStreams = [
+      { name: "cost_summary", description: "Cost tracking summary for the project" },
+      { name: "cost_forecast", description: "Budget exhaustion projection" },
+      { name: "budget_guidance", description: "Budget utilization, remaining sessions, forecast" },
+      { name: "task_board", description: "Current task board with status, priority, assignee" },
+      { name: "velocity", description: "Task completion velocity and trends" },
+      { name: "team_performance", description: "Performance metrics per team member" },
+      { name: "trust_scores", description: "Trust evolution scores per action category" },
+      { name: "agent_status", description: "Status of all agents in the team" },
+      { name: "health_status", description: "System health indicators" },
+      { name: "sweep_status", description: "Automated sweep findings" },
+      { name: "initiative_status", description: "Initiative allocation vs spend" },
+      { name: "weekly_digest", description: "Weekly performance summary" },
+      { name: "intervention_suggestions", description: "Pattern-detected recommendations" },
+    ];
+    console.log("  (using fallback list -- builtin manifest not found)\n");
+  }
+
+  // Load domain YAML to check which streams are configured in default briefings
+  const activeSources = new Set<string>();
+  const yamlPath = path.join(DB_DIR, "domains", `${domainId}.yaml`);
+  try {
+    if (fs.existsSync(yamlPath)) {
+      const raw = fs.readFileSync(yamlPath, "utf-8");
+      const parsed = YAML.parse(raw) as Record<string, unknown>;
+      const defaults = parsed.defaults as Record<string, unknown> | undefined;
+      if (defaults && Array.isArray(defaults.briefing)) {
+        for (const entry of defaults.briefing) {
+          if (typeof entry === "string") activeSources.add(entry);
+          else if (entry && typeof entry === "object" && "source" in entry) {
+            activeSources.add((entry as Record<string, string>).source);
+          }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  for (const s of catalogStreams) {
+    const active = activeSources.has(s.name) ? " [active]" : "";
+    console.log(`  ${s.name.padEnd(28)} ${s.description}${active}`);
+  }
+
+  if (activeSources.size > 0) {
+    console.log(`\n  ${activeSources.size} stream(s) active in domain "${domainId}" defaults.`);
+    console.log("  Agents may have additional streams via presets.");
   }
 }
 
-function cmdQuery(db: DatabaseSync, sql: string) {
+export function cmdQuery(db: DatabaseSync, sql: string) {
   try {
     const rows = db.prepare(sql).all() as Array<Record<string, unknown>>;
     if (rows.length === 0) {
@@ -544,7 +587,7 @@ function cmdQuery(db: DatabaseSync, sql: string) {
 
 // ─── Visibility Suite ────────────────────────────────────────────────
 
-function detectAnomalies(db: DatabaseSync, projectId: string, hours: number): string[] {
+export function detectAnomalies(db: DatabaseSync, projectId: string, hours: number): string[] {
   const anomalies: string[] = [];
   const since = Date.now() - hours * 3600_000;
 
@@ -663,7 +706,7 @@ function detectAnomalies(db: DatabaseSync, projectId: string, hours: number): st
   return anomalies;
 }
 
-function cmdDashboard(db: DatabaseSync, projectId: string, hours: number, json = false): void {
+export function cmdDashboard(db: DatabaseSync, projectId: string, hours: number, json = false): void {
   const since = Date.now() - hours * 3600_000;
 
   // Anomaly detection
@@ -925,7 +968,7 @@ function cmdDashboard(db: DatabaseSync, projectId: string, hours: number, json =
   }
 }
 
-function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string, json = false): void {
+export function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string, json = false): void {
   const since = Date.now() - hours * 3600_000;
 
   let sql = `
@@ -977,7 +1020,7 @@ function cmdSessions(db: DatabaseSync, projectId: string, hours: number, agentFi
   }
 }
 
-function cmdSessionDetail(db: DatabaseSync, projectId: string, sessionKey: string): void {
+export function cmdSessionDetail(db: DatabaseSync, projectId: string, sessionKey: string): void {
   // Find matching session
   const session = db.prepare(`
     SELECT * FROM session_archives WHERE project_id = ? AND session_key LIKE ?
@@ -986,7 +1029,7 @@ function cmdSessionDetail(db: DatabaseSync, projectId: string, sessionKey: strin
 
   if (!session) {
     console.error(`No session found matching "${sessionKey}"`);
-    process.exit(1);
+    process.exit(2);
   }
 
   const fullKey = session.session_key as string;
@@ -1095,7 +1138,7 @@ function cmdSessionDetail(db: DatabaseSync, projectId: string, sessionKey: strin
   } catch { /* ignore */ }
 }
 
-function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: string, hours?: number, json = false): void {
+export function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: string, hours?: number, json = false): void {
   let where = "WHERE project_id = ?";
   const params: (string | number)[] = [projectId];
 
@@ -1142,7 +1185,7 @@ function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: string,
   }
 }
 
-function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string, expand?: boolean): void {
+export function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilter?: string, expand?: boolean): void {
   const since = Date.now() - hours * 3600_000;
 
   let sql = `
@@ -1223,7 +1266,7 @@ function cmdFlows(db: DatabaseSync, projectId: string, hours: number, agentFilte
   }
 }
 
-function cmdMetrics(db: DatabaseSync, projectId: string, hours: number, json = false): void {
+export function cmdMetrics(db: DatabaseSync, projectId: string, hours: number, json = false): void {
   const since = Date.now() - hours * 3600_000;
 
   const agents = db.prepare(`
@@ -1290,7 +1333,7 @@ function cmdMetrics(db: DatabaseSync, projectId: string, hours: number, json = f
   }
 }
 
-function cmdBudget(db: DatabaseSync, projectId: string, json = false): void {
+export function cmdBudget(db: DatabaseSync, projectId: string, json = false): void {
   const budget = db.prepare(
     "SELECT daily_limit_cents, daily_spent_cents, monthly_spent_cents, daily_reset_at FROM budgets WHERE project_id = ? AND agent_id IS NULL",
   ).get(projectId) as Record<string, number> | undefined;
@@ -1383,7 +1426,9 @@ function cmdBudget(db: DatabaseSync, projectId: string, json = false): void {
   }
 }
 
-function cmdTrust(db: DatabaseSync, projectId: string, json = false): void {
+export function cmdTrust(db: DatabaseSync, projectId: string, json = false): void {
+  const LOW_TRUST_THRESHOLD = 0.5;
+
   // Get all trust scores, then deduplicate by extracted agent name (latest per name)
   const allScores = db.prepare(`
     SELECT agent_id, score, tier, trigger_type, created_at
@@ -1401,6 +1446,18 @@ function cmdTrust(db: DatabaseSync, projectId: string, json = false): void {
     }
   }
 
+  // Helper: get recent trust events for an agent
+  function getRecentEvents(rawAgentId: string, limit: number): Array<Record<string, unknown>> {
+    try {
+      return db.prepare(`
+        SELECT score, tier, trigger_type, created_at
+        FROM trust_score_history
+        WHERE project_id = ? AND agent_id = ?
+        ORDER BY created_at DESC LIMIT ?
+      `).all(projectId, rawAgentId, limit) as Array<Record<string, unknown>>;
+    } catch { return []; }
+  }
+
   if (json) {
     const trustData: Array<Record<string, unknown>> = [];
     const dayAgo = Date.now() - 24 * 3600_000;
@@ -1412,7 +1469,15 @@ function cmdTrust(db: DatabaseSync, projectId: string, json = false): void {
         ORDER BY created_at DESC LIMIT 1
       `).get(projectId, rawAgent, dayAgo) as { score: number } | undefined;
       const diff = oldScore ? (a.score as number) - oldScore.score : 0;
-      trustData.push({ agent: name, score: a.score, tier: a.tier, trigger_type: a.trigger_type, created_at: a.created_at, trend_24h: diff });
+      const recentEvents = getRecentEvents(rawAgent, 5);
+      const warning = (a.score as number) < LOW_TRUST_THRESHOLD;
+      trustData.push({
+        agent: name, score: a.score, tier: a.tier, trigger_type: a.trigger_type,
+        created_at: a.created_at, trend_24h: diff, warning,
+        recent_events: recentEvents.map(e => ({
+          score: e.score, trigger_type: e.trigger_type, at: fmtAgo(e.created_at as number),
+        })),
+      });
     }
     console.log(JSON.stringify({ agents: trustData }, null, 2));
     return;
@@ -1429,7 +1494,8 @@ function cmdTrust(db: DatabaseSync, projectId: string, json = false): void {
 
   for (const [name, a] of latestByName) {
     const rawAgent = a.agent_id as string;
-    const score = (a.score as number).toFixed(2);
+    const scoreNum = a.score as number;
+    const score = scoreNum.toFixed(2);
     const tier = a.tier as string;
     const lastChange = fmtAgo(a.created_at as number);
     const trigger = a.trigger_type as string;
@@ -1443,42 +1509,77 @@ function cmdTrust(db: DatabaseSync, projectId: string, json = false): void {
 
     let trend = "stable";
     if (oldScore) {
-      const diff = (a.score as number) - oldScore.score;
+      const diff = scoreNum - oldScore.score;
       if (diff > 0.05) trend = `\u2191 up (+${diff.toFixed(2)})`;
       else if (diff < -0.05) trend = `\u2193 down (${diff.toFixed(2)})`;
     }
 
-    console.log(`  ${pad(name, 20)} score: ${score}  tier: ${pad(tier, 12)} last change: ${lastChange} (${trigger})  trend: ${trend}`);
+    const warning = scoreNum < LOW_TRUST_THRESHOLD ? "  !! LOW TRUST" : "";
+    console.log(`  ${pad(name, 20)} score: ${score}  tier: ${pad(tier, 12)} last change: ${lastChange} (${trigger})  trend: ${trend}${warning}`);
+
+    // Show recent trust-affecting events (last 5)
+    const recentEvents = getRecentEvents(rawAgent, 5);
+    if (recentEvents.length > 1) { // skip if only the current score entry
+      // Show events after the first (current) one
+      const past = recentEvents.slice(1);
+      for (const ev of past) {
+        const evScore = (ev.score as number).toFixed(2);
+        const evTrigger = ev.trigger_type as string;
+        const evAge = fmtAgo(ev.created_at as number);
+        console.log(`    ${evAge.padEnd(14)} ${evTrigger.padEnd(24)} score: ${evScore}`);
+      }
+    }
   }
 }
 
-function cmdInbox(db: DatabaseSync, projectId: string): void {
+export function cmdInbox(db: DatabaseSync, projectId: string, opts?: { agent?: string; unread?: boolean; expand?: boolean }): void {
   console.log("## Inbox\n");
 
-  // Messages to/from user
+  // Build query with optional filters
+  let where = "project_id = ? AND (to_agent = 'user' OR from_agent = 'user')";
+  const params: (string | number)[] = [projectId];
+
+  if (opts?.agent) {
+    where += " AND (from_agent = ? OR to_agent = ?)";
+    params.push(opts.agent, opts.agent);
+  }
+
+  if (opts?.unread) {
+    where += " AND read_at IS NULL";
+  }
+
   const messages = db.prepare(`
     SELECT id, from_agent, to_agent, content, status, created_at, read_at, type
     FROM messages
-    WHERE project_id = ? AND (to_agent = 'user' OR from_agent = 'user')
+    WHERE ${where}
     ORDER BY created_at DESC LIMIT 30
-  `).all(projectId) as Array<Record<string, unknown>>;
+  `).all(...params) as Array<Record<string, unknown>>;
 
   if (messages.length === 0) {
-    console.log("  No messages.");
+    const filterDesc = opts?.agent ? ` for ${opts.agent}` : "";
+    const unreadDesc = opts?.unread ? " (unread only)" : "";
+    console.log(`  No messages${filterDesc}${unreadDesc}.`);
     return;
   }
 
   for (const m of messages) {
     const direction = (m.from_agent as string) === "user" ? "\u2192" : "\u2190";
     const other = (m.from_agent as string) === "user" ? m.to_agent : m.from_agent;
-    const preview = truncate(m.content as string, 60);
     const age = fmtAgo(m.created_at as number);
     const readStatus = m.read_at ? "" : " [unread]";
-    console.log(`  ${direction} ${pad(other as string, 18)} ${preview.padEnd(62)} ${age}${readStatus}`);
+
+    if (opts?.expand) {
+      console.log(`  ${direction} ${other as string} (${age})${readStatus}`);
+      console.log(`    ${m.content as string}`);
+      console.log("");
+    } else {
+      const preview = truncate(m.content as string, 60);
+      console.log(`  ${direction} ${pad(other as string, 18)} ${preview.padEnd(62)} ${age}${readStatus}`);
+    }
   }
 }
 
-function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): void {
+export function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): void {
   // Find proposal by prefix
   const proposal = db.prepare(
     "SELECT id, title, status FROM proposals WHERE project_id = ? AND id LIKE ?",
@@ -1486,12 +1587,12 @@ function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): vo
 
   if (!proposal) {
     console.error(`No proposal found matching "${proposalId}"`);
-    process.exit(1);
+    process.exit(2);
   }
 
   if (proposal.status !== "pending") {
     console.error(`Proposal "${(proposal.id as string).slice(0, 8)}" is already ${proposal.status}`);
-    process.exit(1);
+    process.exit(2);
   }
 
   const now = Date.now();
@@ -1511,19 +1612,19 @@ function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): vo
   console.log(`Approved: "${truncate(proposal.title as string, 60)}" (${(proposal.id as string).slice(0, 8)})`);
 }
 
-function cmdReject(db: DatabaseSync, projectId: string, proposalId: string, feedback?: string): void {
+export function cmdReject(db: DatabaseSync, projectId: string, proposalId: string, feedback?: string): void {
   const proposal = db.prepare(
     "SELECT id, title, status FROM proposals WHERE project_id = ? AND id LIKE ?",
   ).get(projectId, `${proposalId}%`) as Record<string, unknown> | undefined;
 
   if (!proposal) {
     console.error(`No proposal found matching "${proposalId}"`);
-    process.exit(1);
+    process.exit(2);
   }
 
   if (proposal.status !== "pending") {
     console.error(`Proposal "${(proposal.id as string).slice(0, 8)}" is already ${proposal.status}`);
-    process.exit(1);
+    process.exit(2);
   }
 
   const now = Date.now();
@@ -1544,7 +1645,7 @@ function cmdReject(db: DatabaseSync, projectId: string, proposalId: string, feed
   if (feedback) console.log(`Feedback: ${feedback}`);
 }
 
-function cmdMessage(db: DatabaseSync, projectId: string, toAgent: string, content: string): void {
+export function cmdMessage(db: DatabaseSync, projectId: string, toAgent: string, content: string): void {
   const id = crypto.randomUUID();
   const now = Date.now();
 
@@ -1565,7 +1666,7 @@ function cmdMessage(db: DatabaseSync, projectId: string, toAgent: string, conten
   console.log(`Message sent to ${toAgent}: "${truncate(content, 60)}"`);
 }
 
-function cmdReplay(db: DatabaseSync, projectId: string, sessionKey: string): void {
+export function cmdReplay(db: DatabaseSync, projectId: string, sessionKey: string): void {
   // Find matching session
   const session = db.prepare(`
     SELECT session_key, agent_id, started_at, ended_at, outcome
@@ -1575,7 +1676,7 @@ function cmdReplay(db: DatabaseSync, projectId: string, sessionKey: string): voi
 
   if (!session) {
     console.error(`No session found matching "${sessionKey}"`);
-    process.exit(1);
+    process.exit(2);
   }
 
   const fullKey = session.session_key as string;
@@ -1628,7 +1729,7 @@ function cmdReplay(db: DatabaseSync, projectId: string, sessionKey: string): voi
 
 // ─── Lifecycle commands (DB-backed) ──────────────────────────────────
 
-function cmdDisable(db: DatabaseSync, projectId: string, args: string[], dryRun = false): void {
+export function cmdDisable(db: DatabaseSync, projectId: string, args: string[], dryRun = false): void {
   // Check if already disabled
   const existing = db.prepare(
     "SELECT reason, disabled_at, disabled_by FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
@@ -1668,7 +1769,7 @@ function cmdDisable(db: DatabaseSync, projectId: string, args: string[], dryRun 
   console.log(`\nTo re-enable: pnpm cf enable`);
 }
 
-function cmdEnable(db: DatabaseSync, projectId: string): void {
+export function cmdEnable(db: DatabaseSync, projectId: string): void {
   const existing = db.prepare(
     "SELECT reason, disabled_at FROM disabled_scopes WHERE project_id = ? AND scope_type = 'domain' AND scope_value = ?",
   ).get(projectId, projectId) as Record<string, unknown> | undefined;
@@ -1696,7 +1797,7 @@ function cmdEnable(db: DatabaseSync, projectId: string): void {
   console.log("Effect: Dispatches will resume on next dispatch loop pass.");
 }
 
-function cmdKill(db: DatabaseSync, projectId: string, args: string[], dryRun = false): void {
+export function cmdKill(db: DatabaseSync, projectId: string, args: string[], dryRun = false): void {
   console.log(`## Emergency Stop${dryRun ? " [DRY RUN]" : ""}\n`);
 
   const reason = args.find(a => a.startsWith("--reason="))?.split("=").slice(1).join("=") ?? "Emergency stop via CLI";
@@ -1780,7 +1881,7 @@ function cmdKill(db: DatabaseSync, projectId: string, args: string[], dryRun = f
   console.log("  2. pnpm cf kill --resume (clear emergency stop flag)");
 }
 
-function cmdKillResume(db: DatabaseSync, projectId: string): void {
+export function cmdKillResume(db: DatabaseSync, projectId: string): void {
   // Clear emergency stop flag
   const estop = db.prepare(
     "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
@@ -1815,7 +1916,7 @@ function cmdKillResume(db: DatabaseSync, projectId: string): void {
 
 // ─── Running command ─────────────────────────────────────────────────
 
-function cmdRunning(db: DatabaseSync, projectId: string): void {
+export function cmdRunning(db: DatabaseSync, projectId: string): void {
   console.log("## Running State\n");
 
   // 1. Domain disabled?
@@ -1945,7 +2046,7 @@ function cmdRunning(db: DatabaseSync, projectId: string): void {
 
 // ─── Health command ──────────────────────────────────────────────────
 
-function cmdHealth(db: DatabaseSync, projectId: string): void {
+export function cmdHealth(db: DatabaseSync, projectId: string): void {
   console.log("## Health Check\n");
 
   let issues = 0;
@@ -2078,7 +2179,7 @@ function getGlobalConfigPath(): string {
 function loadYamlDocument(filePath: string): YAML.Document {
   if (!fs.existsSync(filePath)) {
     console.error(`File not found: ${filePath}`);
-    process.exit(1);
+    process.exit(2);
   }
   const raw = fs.readFileSync(filePath, "utf-8");
   return YAML.parseDocument(raw);
@@ -2132,7 +2233,7 @@ function cmdConfigGet(domainId: string, dotPath: string, useGlobal: boolean): vo
   const filePath = useGlobal ? getGlobalConfigPath() : getDomainYamlPath(domainId);
   if (!fs.existsSync(filePath)) {
     console.error(`File not found: ${filePath}`);
-    process.exit(1);
+    process.exit(2);
   }
   const raw = fs.readFileSync(filePath, "utf-8");
   const parsed = YAML.parse(raw);
@@ -2140,7 +2241,7 @@ function cmdConfigGet(domainId: string, dotPath: string, useGlobal: boolean): vo
   if (value === undefined) {
     const target = useGlobal ? "config.yaml" : domainId;
     console.error(`Path "${dotPath}" not found in ${target}`);
-    process.exit(1);
+    process.exit(2);
   }
   console.log(formatValue(value));
 }
@@ -2176,7 +2277,7 @@ function cmdConfigShow(domainId: string, section: string | undefined, useGlobal:
   const filePath = useGlobal ? getGlobalConfigPath() : getDomainYamlPath(domainId);
   if (!fs.existsSync(filePath)) {
     console.error(`File not found: ${filePath}`);
-    process.exit(1);
+    process.exit(2);
   }
   const raw = fs.readFileSync(filePath, "utf-8");
   const parsed = YAML.parse(raw);
@@ -2186,7 +2287,7 @@ function cmdConfigShow(domainId: string, section: string | undefined, useGlobal:
     if (value === undefined) {
       const target = useGlobal ? "config.yaml" : domainId;
       console.error(`Section "${section}" not found in ${target}`);
-      process.exit(1);
+      process.exit(2);
     }
     if (typeof value === "object" && value !== null) {
       console.log(YAML.stringify(value).trimEnd());
@@ -2281,7 +2382,7 @@ function writeWatchState(state: WatchState): void {
   fs.writeFileSync(WATCH_STATE_FILE, JSON.stringify(state), "utf-8");
 }
 
-function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, json = false): void {
+export function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, json = false): void {
   const now = Date.now();
 
   if (reset) {
@@ -2802,9 +2903,27 @@ budget — Budget pacing status and projections
 Usage: cf budget [--json]
 `,
   trust: `
-trust — Per-agent trust overview
+trust — Per-agent trust overview with recent events
 
 Usage: cf trust [--json]
+
+Shows current trust score, tier, 24h trend, and recent trust-affecting
+events (last 4) for each agent. Agents with score below 0.5 are flagged.
+`,
+  inbox: `
+inbox — User messages from/to agents
+
+Usage: cf inbox [--agent=X] [--unread] [--expand]
+
+Options:
+  --agent=X      Filter messages to/from a specific agent
+  --unread       Show only unread messages
+  --expand       Show full message text instead of truncated preview
+
+Examples:
+  cf inbox
+  cf inbox --agent=cf-lead
+  cf inbox --unread --expand
 `,
   queue: `
 queue — Dispatch queue health and failure reasons
@@ -2823,6 +2942,14 @@ function showCommandHelp(cmd: string): boolean {
 }
 
 // ─── Main ────────────────────────────────────────────────────────────
+
+// Guard: only run main logic when executed directly (not when imported as a module)
+const __isMain = process.argv[1] && (
+  import.meta.url.endsWith(process.argv[1]) ||
+  import.meta.url.endsWith(process.argv[1].replace(/\.ts$/, ".js")) ||
+  import.meta.url === `file://${process.argv[1]}`
+);
+if (__isMain) {
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -2858,8 +2985,8 @@ Visibility Suite:
   flows [--hours=N] [--agent=X] [--expand]  Per-session action timeline
   metrics [--hours=N]       Per-agent efficiency metrics
   budget                    Budget pacing status and projections
-  trust                     Per-agent trust overview
-  inbox                     User messages from/to agents
+  trust                     Per-agent trust overview with recent events
+  inbox [--agent=X] [--unread] [--expand]  User messages from/to agents
   approve <id>              Approve a pending proposal
   reject <id> [--feedback="reason"]  Reject a pending proposal
   message <agent> "text"    Send a user message to an agent
@@ -2971,6 +3098,87 @@ const feedbackArg = args.find(a => a.startsWith("--feedback="));
 const feedbackValue = feedbackArg?.split("=").slice(1).join("=");
 const expandFlag = args.includes("--expand");
 
+// ─── Unknown flag detection ──────────────────────────────────────────
+
+const KNOWN_FLAGS: Record<string, string[]> = {
+  _global: ["--domain", "--project", "--json", "--dry-run", "-n", "--help", "--expand"],
+  status: ["--json"],
+  tasks: ["--json"],
+  costs: ["--by", "--hours", "--json"],
+  queue: ["--json"],
+  transitions: ["--hours"],
+  errors: ["--hours"],
+  agents: ["--json"],
+  streams: [],
+  query: [],
+  dashboard: ["--hours", "--json"],
+  sessions: ["--hours", "--agent", "--json"],
+  session: [],
+  proposals: ["--status", "--hours", "--json"],
+  flows: ["--hours", "--agent", "--expand"],
+  metrics: ["--hours", "--json"],
+  budget: ["--json"],
+  trust: ["--json"],
+  inbox: ["--agent", "--unread", "--expand"],
+  approve: [],
+  reject: ["--feedback"],
+  message: [],
+  replay: [],
+  watch: ["--reset", "--json"],
+  disable: ["--reason"],
+  enable: [],
+  kill: ["--reason", "--resume"],
+  running: [],
+  health: [],
+  config: ["--global"],
+  org: ["--team", "--agent", "--reports-to", "--yes"],
+};
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0) as number[]);
+  for (let i = 0; i <= m; i++) dp[i]![0] = i;
+  for (let j = 0; j <= n; j++) dp[0]![j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i]![j] = Math.min(
+        dp[i - 1]![j]! + 1,
+        dp[i]![j - 1]! + 1,
+        dp[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return dp[m]![n]!;
+}
+
+if (command && !args.includes("--help")) {
+  const cmdFlags = KNOWN_FLAGS[command] ?? [];
+  const allKnown = [...KNOWN_FLAGS._global, ...cmdFlags];
+  // Extract flag base names (before =)
+  const knownBases = allKnown.map(f => f.replace(/=.*$/, ""));
+
+  for (const arg of args.slice(1)) {
+    if (!arg.startsWith("--")) continue;
+    const flagBase = arg.split("=")[0]!;
+    if (knownBases.includes(flagBase)) continue;
+
+    // Find closest match
+    let bestMatch = "";
+    let bestDist = Infinity;
+    for (const known of knownBases) {
+      const dist = levenshtein(flagBase, known);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestMatch = known;
+      }
+    }
+
+    const suggestion = bestDist <= 3 ? ` Did you mean ${bestMatch}?` : "";
+    console.error(`Warning: unknown flag ${flagBase}.${suggestion}`);
+  }
+}
+
 // Per-command --help check
 if (args.includes("--help") && command && COMMAND_HELP[command]) {
   showCommandHelp(command);
@@ -3004,7 +3212,7 @@ switch (command) {
     cmdAgents(db, jsonMode);
     break;
   case "streams":
-    cmdStreams(db);
+    cmdStreams(db, projectId);
     break;
   case "query": {
     const sql = args.slice(1).filter(a => !a.startsWith("--")).join(" ");
@@ -3042,9 +3250,11 @@ switch (command) {
   case "trust":
     cmdTrust(db, projectId, jsonMode);
     break;
-  case "inbox":
-    cmdInbox(db, projectId);
+  case "inbox": {
+    const unreadFlag = args.includes("--unread");
+    cmdInbox(db, projectId, { agent: agentFilter, unread: unreadFlag, expand: expandFlag });
     break;
+  }
   case "approve": {
     const approveId = args[1];
     if (!approveId || approveId.startsWith("--")) {
@@ -3112,3 +3322,5 @@ switch (command) {
 void jsonOutput; // suppress unused warning
 
 db.close();
+
+} // end __isMain guard

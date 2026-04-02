@@ -433,24 +433,29 @@ export function transitionTask(
   const ownTransaction = !params.withinTransaction;
   if (ownTransaction) db.prepare("BEGIN IMMEDIATE").run();
   try {
-    // Lease-conflict check inside transaction to prevent TOCTOU race
+    // Re-read task state inside transaction to close TOCTOU window between
+    // the initial getTask() (pre-validation) and the actual UPDATE.
+    const freshTask = db.prepare(
+      "SELECT state, lease_holder, lease_expires_at FROM tasks WHERE id = ? AND project_id = ?",
+    ).get(params.taskId, params.projectId) as Record<string, unknown> | undefined;
+
+    if (!freshTask || freshTask.state !== task.state) {
+      if (ownTransaction) db.prepare("ROLLBACK").run();
+      return { ok: false, reason: `Concurrent state change: task no longer in state "${task.state}"` };
+    }
+
+    // Lease-conflict check using fresh read (no separate query needed)
     if (needsLeaseCheck) {
-      const leaseRow = db.prepare(
-        "SELECT lease_holder, lease_expires_at FROM tasks WHERE id = ?",
-      ).get(params.taskId) as Record<string, unknown> | undefined;
+      const holder = freshTask.lease_holder as string | null;
+      const expiresAt = freshTask.lease_expires_at as number | null;
+      const actor = params.assignedTo ?? params.actor;
 
-      if (leaseRow) {
-        const holder = leaseRow.lease_holder as string | null;
-        const expiresAt = leaseRow.lease_expires_at as number | null;
-        const actor = params.assignedTo ?? params.actor;
-
-        if (holder && expiresAt && expiresAt > Date.now() && holder !== actor) {
-          if (ownTransaction) db.prepare("ROLLBACK").run();
-          return {
-            ok: false,
-            reason: `Task is leased by "${holder}" until ${new Date(expiresAt).toISOString()}. Cannot transition while another agent holds the lease.`,
-          };
-        }
+      if (holder && expiresAt && expiresAt > Date.now() && holder !== actor) {
+        if (ownTransaction) db.prepare("ROLLBACK").run();
+        return {
+          ok: false,
+          reason: `Task is leased by "${holder}" until ${new Date(expiresAt).toISOString()}. Cannot transition while another agent holds the lease.`,
+        };
       }
     }
 

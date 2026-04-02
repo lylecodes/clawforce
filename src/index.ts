@@ -269,7 +269,7 @@ export { checkCanaryHealth } from "./experiments/canary.js";
 export { validateExperimentConfig } from "./experiments/validation.js";
 
 // --- Verification Gates ---
-export { runVerificationGates, formatGateResults } from "./verification/runner.js";
+export { runVerificationGates, formatGateResults, getTransitionFailureReason } from "./verification/runner.js";
 export { generateBranchName, createTaskBranch, mergeTaskBranch, deleteTaskBranch, discardTaskBranch } from "./verification/git.js";
 export { getEffectiveVerificationConfig, runVerificationIfConfigured } from "./verification/lifecycle.js";
 export type { VerificationConfig, VerificationGate, GitIsolationConfig } from "./types.js";

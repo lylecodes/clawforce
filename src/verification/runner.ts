@@ -69,24 +69,47 @@ export function runVerificationGates(
       timedOut = e.killed === true || e.signal === "SIGTERM";
     }
 
+    const durationMs = Date.now() - gateStart;
+    const timeoutSeconds = (gate.timeout_seconds ?? defaultGateTimeout);
     results.push({
       name: gate.name,
-      passed: exitCode === 0,
+      passed: exitCode === 0 && !timedOut,
       required,
       exitCode,
       stdout: stdout.slice(-2000),
-      stderr: stderr.slice(-2000),
-      durationMs: Date.now() - gateStart,
+      stderr: timedOut
+        ? `Gate timed out after ${timeoutSeconds}s`
+        : stderr.slice(-2000),
+      durationMs,
       timedOut,
     });
   }
 
   return {
-    allRequiredPassed: results.filter((r) => r.required).every((r) => r.passed),
-    anyOptionalFailed: results.filter((r) => !r.required).some((r) => !r.passed),
+    allRequiredPassed: results.filter((r) => r.required).every((r) => r.passed && !r.timedOut),
+    anyOptionalFailed: results.filter((r) => !r.required).some((r) => !r.passed || r.timedOut),
     results,
     totalDurationMs: Date.now() - startTime,
   };
+}
+
+/**
+ * Build a concise transition failure reason from verification results.
+ * Highlights timed-out gates separately from normal failures.
+ */
+export function getTransitionFailureReason(result: VerificationRunResult): string {
+  const timedOut = result.results.filter((r) => r.required && r.timedOut);
+  const failed = result.results.filter((r) => r.required && !r.passed && !r.timedOut);
+
+  const parts: string[] = [];
+  if (timedOut.length > 0) {
+    parts.push(`Timed out: ${timedOut.map((r) => r.name).join(", ")}`);
+  }
+  if (failed.length > 0) {
+    parts.push(`Failed: ${failed.map((r) => r.name).join(", ")}`);
+  }
+  if (parts.length === 0) return "Required verification gates did not pass";
+  return `Required verification gates blocked transition — ${parts.join("; ")}`;
 }
 
 /**
@@ -95,7 +118,7 @@ export function runVerificationGates(
 export function formatGateResults(result: VerificationRunResult): string {
   const lines = ["## Verification Gates\n"];
   for (const r of result.results) {
-    const status = r.passed ? "PASS" : "FAIL";
+    const status = r.timedOut ? "TIMEOUT" : r.passed ? "PASS" : "FAIL";
     const req = r.required ? "required" : "optional";
     const time = (r.durationMs / 1000).toFixed(1);
     lines.push(`### ${r.name} (${status}) [${req}] - ${time}s`);

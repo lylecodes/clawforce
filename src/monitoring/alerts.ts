@@ -119,6 +119,8 @@ function evaluateSingleRule(
     actionFired = true;
   } catch (err) {
     safeLog("alerts.fireAction", err);
+    // Track failed delivery so it's visible in the feed/dashboard
+    trackFailedAlert(projectId, name, rule, value, err, now, db);
   }
 
   if (actionFired) {
@@ -196,4 +198,66 @@ function fireAlertAction(
       break;
     }
   }
+}
+
+/** In-memory log of recent alert delivery failures (capped at 100 entries). */
+const failedAlerts: Array<{
+  projectId: string;
+  alertName: string;
+  action: string;
+  error: string;
+  timestamp: number;
+}> = [];
+
+const MAX_FAILED_ALERTS = 100;
+
+/**
+ * Record a failed alert delivery and emit an event so it surfaces in
+ * the dashboard/feed instead of being silently swallowed.
+ */
+function trackFailedAlert(
+  projectId: string,
+  alertName: string,
+  rule: AlertRuleDefinition,
+  value: number,
+  err: unknown,
+  now: number,
+  db: DatabaseSync,
+): void {
+  const errorMessage = err instanceof Error ? err.message : String(err);
+
+  // In-memory tracking (ring buffer)
+  if (failedAlerts.length >= MAX_FAILED_ALERTS) {
+    failedAlerts.shift();
+  }
+  failedAlerts.push({
+    projectId,
+    alertName,
+    action: rule.action,
+    error: errorMessage,
+    timestamp: now,
+  });
+
+  // Emit event so it shows up in the feed/dashboard
+  try {
+    ingestEvent(projectId, "alert_delivery_failed", "internal", {
+      alert: alertName,
+      action: rule.action,
+      metricKey: rule.metricKey,
+      value,
+      error: errorMessage,
+    }, `alert-delivery-failed:${alertName}:${now}`, db);
+  } catch (eventErr) {
+    safeLog("alerts.trackFailed.event", eventErr);
+  }
+}
+
+/**
+ * Get recent failed alert deliveries (for diagnostics / dashboard).
+ */
+export function getFailedAlerts(projectId?: string): typeof failedAlerts {
+  if (projectId) {
+    return failedAlerts.filter((a) => a.projectId === projectId);
+  }
+  return [...failedAlerts];
 }
