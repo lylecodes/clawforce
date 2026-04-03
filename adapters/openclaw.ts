@@ -825,6 +825,20 @@ const clawforcePlugin = {
       const entry = getAgentConfig(ctx.agentId);
       if (!entry) return; // Unknown agent — not managed by clawforce, allow
 
+      // --- Emergency stop: block ALL tool calls when kill switch is active ---
+      try {
+        const db = getDb(entry.projectId);
+        const estop = db.prepare(
+          "SELECT value FROM project_metadata WHERE project_id = ? AND key = 'emergency_stop'",
+        ).get(entry.projectId) as { value: string } | undefined;
+        if (estop?.value === "true") {
+          return {
+            block: true,
+            blockReason: "EMERGENCY STOP — all tool calls blocked. Run: pnpm cf kill --resume",
+          };
+        }
+      } catch { /* DB may not be available — allow */ }
+
       // --- Per-minute rate limit gate: block if global or agent rate exceeded ---
       try {
         if (ctx.sessionKey) {
