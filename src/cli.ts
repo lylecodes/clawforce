@@ -1843,36 +1843,54 @@ export function cmdKill(db: DatabaseSync, projectId: string, args: string[], dry
     }
   }
 
-  // 4. Kill ClawForce agent processes (dynamic from domain YAML)
+  // 4. Kill active agent sessions via gateway RPC
+  // This aborts Claude API streams in-process — no child processes to kill.
   try {
-    const domainAgents = loadDomainAgents(projectId);
-    let grepPattern: string;
-    if (domainAgents.length > 0) {
-      grepPattern = `agent.*(${domainAgents.join("|")})`;
+    if (dryRun) {
+      let activeCount = 0;
+      try {
+        const activeSessions = db.prepare(
+          "SELECT COUNT(*) as cnt FROM tracked_sessions WHERE project_id = ?",
+        ).get(projectId) as { cnt: number };
+        activeCount = activeSessions.cnt;
+      } catch { /* table may not exist */ }
+      console.log(`  [DRY RUN] Would abort ${activeCount} tracked session(s) via gateway`);
     } else {
-      // Fallback to project-based pattern
-      const prefix = projectId.replace(/-dev$/, "");
-      grepPattern = `agent.*(${prefix}-)`;
+      const result = execSync(
+        `openclaw gateway call clawforce.kill --json --params '${JSON.stringify({ projectId, reason, agents: loadDomainAgents(projectId) })}'`,
+        { encoding: "utf-8", timeout: 10_000 },
+      ).trim();
+      try {
+        const parsed = JSON.parse(result);
+        if (parsed.killed > 0) {
+          console.log(`  Aborted ${parsed.killed} active session(s) via gateway`);
+        } else {
+          console.log("  No active sessions to abort");
+        }
+      } catch {
+        console.log("  Gateway kill response:", result);
+      }
     }
-    const result = execSync(
-      `ps aux | grep -E "${grepPattern}" | grep -v grep | awk '{print $2}'`,
-      { encoding: "utf-8" },
-    ).trim();
-    if (result) {
-      const pids = result.split("\n");
-      if (dryRun) {
-        console.log(`  [DRY RUN] Would kill ${pids.length} agent process(es): PIDs ${pids.join(", ")}`);
-      } else {
-        for (const pid of pids) {
+  } catch (err) {
+    // Gateway might not be running or method might not be registered
+    console.log(`  Gateway kill failed (gateway may not be running): ${err instanceof Error ? err.message : String(err)}`);
+    // Fallback: try to kill agent processes by PID
+    try {
+      const domainAgents = loadDomainAgents(projectId);
+      const grepPattern = domainAgents.length > 0
+        ? `agent.*(${domainAgents.join("|")})`
+        : `agent.*(${projectId.replace(/-dev$/, "")}-)`;
+      const pids = execSync(
+        `ps aux | grep -E "${grepPattern}" | grep -v grep | awk '{print $2}'`,
+        { encoding: "utf-8" },
+      ).trim();
+      if (pids) {
+        for (const pid of pids.split("\n")) {
           try { process.kill(Number(pid), "SIGTERM"); } catch {}
         }
-        console.log(`  Killed ${pids.length} agent process(es)`);
+        console.log(`  Fallback: killed ${pids.split("\n").length} process(es) via SIGTERM`);
       }
-    } else {
-      console.log("  No agent processes found");
-    }
-  } catch {
-    console.log("  No agent processes found");
+    } catch { /* no processes found */ }
   }
 
   console.log(`\n## Emergency Stop Complete\n`);

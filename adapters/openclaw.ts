@@ -1959,6 +1959,38 @@ const clawforcePlugin = {
       }
     });
 
+    // --- Kill sessions gateway method ---
+    // Aborts all active ClawForce agent sessions via gateway AbortController.
+    // Called by `cf kill` to immediately stop running agents without killing the gateway.
+    api.registerGatewayMethod("clawforce.kill", async ({ params, context, respond }) => {
+      const { projectId, reason, agents } = params as { projectId?: string; reason?: string; agents?: string[] };
+      const killReason = reason ?? "Emergency kill via CLI";
+      const targetAgents = agents ?? [];
+      let killed = 0;
+
+      if (!context.chatAbortControllers) {
+        respond(true, { killed: 0, reason: killReason, error: "No abort controllers available" });
+        return;
+      }
+
+      for (const [runId, entry] of context.chatAbortControllers) {
+        const sessionKey = (entry as { sessionKey?: string }).sessionKey ?? "";
+        // If target agents specified, only kill those. Otherwise kill all.
+        const shouldKill = targetAgents.length === 0
+          || targetAgents.some((a: string) => sessionKey.includes(`:${a}:`));
+        if (shouldKill) {
+          try {
+            (entry as { controller: AbortController }).controller.abort();
+            context.chatAbortControllers.delete(runId);
+            killed++;
+            api.logger.info(`Clawforce: killed session ${sessionKey} — ${killReason}`);
+          } catch { /* continue killing others */ }
+        }
+      }
+
+      respond(true, { killed, reason: killReason });
+    });
+
     // --- Channel message injection gateway method ---
     // API surface for human Telegram messages → channel (gateway wiring is an OpenClaw concern)
     api.registerGatewayMethod("clawforce.inject_channel_message", async ({ params, respond }) => {
