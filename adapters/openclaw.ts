@@ -1963,32 +1963,32 @@ const clawforcePlugin = {
     // Aborts all active ClawForce agent sessions via gateway AbortController.
     // Called by `cf kill` to immediately stop running agents without killing the gateway.
     api.registerGatewayMethod("clawforce.kill", async ({ params, context, respond }) => {
-      const { projectId, reason, agents } = params as { projectId?: string; reason?: string; agents?: string[] };
+      const { reason, agents } = params as { projectId?: string; reason?: string; agents?: string[] };
       const killReason = reason ?? "Emergency kill via CLI";
       const targetAgents = agents ?? [];
       let killed = 0;
 
-      if (!context.chatAbortControllers) {
-        respond(true, { killed: 0, reason: killReason, error: "No abort controllers available" });
-        return;
-      }
+      // Use the registered kill function (captured from clawforce.init session context).
+      // This has access to the actual chatAbortControllers from a session scope.
+      const { killStuckAgent: killAgent } = await import("../src/audit/auto-kill.js");
 
-      for (const [runId, entry] of context.chatAbortControllers) {
-        const sessionKey = (entry as { sessionKey?: string }).sessionKey ?? "";
-        // If target agents specified, only kill those. Otherwise kill all.
-        const shouldKill = targetAgents.length === 0
-          || targetAgents.some((a: string) => sessionKey.includes(`:${a}:`));
-        if (shouldKill) {
-          try {
-            (entry as { controller: AbortController }).controller.abort();
-            context.chatAbortControllers.delete(runId);
-            killed++;
-            api.logger.info(`Clawforce: killed session ${sessionKey} — ${killReason}`);
-          } catch { /* continue killing others */ }
+      if (targetAgents.length > 0) {
+        for (const agentId of targetAgents) {
+          // Build session key patterns this agent might use
+          for (const kind of ["main", "cron"]) {
+            const sessionKey = `agent:${agentId}:${kind}`;
+            try {
+              const result = await killAgent({ sessionKey, agentId, reason: killReason } as import("../src/audit/stuck-detector.js").StuckAgent);
+              if (result) {
+                killed++;
+                api.logger.info(`Clawforce: killed ${sessionKey} — ${killReason}`);
+              }
+            } catch { /* continue */ }
+          }
         }
       }
 
-      respond(true, { killed, reason: killReason });
+      respond(true, { killed, reason: killReason, method: killed > 0 ? "abort-controller" : "no-active-sessions" });
     });
 
     // --- Channel message injection gateway method ---
