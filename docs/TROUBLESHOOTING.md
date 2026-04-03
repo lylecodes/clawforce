@@ -138,8 +138,8 @@ The sweep auto-detects dispatch items stuck in `dispatched` status with no activ
 
 ## Recovering from Emergency Stop
 
-Activate: `pnpm cf kill` (disables domain + cancels queue + kills processes).
-Recover: `pnpm cf kill --resume` (clears stop + re-enables domain). After recovery, the sweep picks up stale tasks automatically.
+Activate: `pnpm cf kill` — disables domain, cancels queue, and blocks ALL tool calls. Agents can think but can't execute any tools (Bash, Write, Edit, Read all return EMERGENCY STOP).
+Recover: `pnpm cf kill --resume` — clears stop, re-enables domain, unblocks tools. The sweep picks up stale tasks automatically.
 
 ## Diagnosing Org Structure Problems
 
@@ -181,7 +181,7 @@ Tasks with no activity for 2x the stale threshold (default: 8 hours) are auto-bl
 Transition it to CANCELLED. This is terminal -- no retries, no evidence required: `pnpm cf tasks transition <taskId> CANCELLED`.
 
 **Q: What's the difference between disabling and emergency stop?**
-Disable (`pnpm cf disable`) blocks new dispatches but lets running sessions finish. Emergency stop (`pnpm cf kill`) does that plus cancels the queue and kills running processes.
+Disable (`pnpm cf disable`) blocks new dispatches but lets running sessions finish. Emergency stop (`pnpm cf kill`) does that plus cancels the queue and blocks ALL tool calls — agents become completely impotent.
 
 **Q: How do I check if budget pacing is throttling my dispatches?**
 `pnpm cf budget` shows pacing status and projections. If you see "hourly pace exceeded", the system is spreading spend across the day. Disable pacing per-team if needed: `pnpm cf config set dispatch.teams.<team>.budget_pacing.enabled false`.

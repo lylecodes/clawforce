@@ -34,7 +34,7 @@
  * Runtime Control:
  *   disable         Disable domain via DB (blocks new dispatches)
  *   enable          Enable domain via DB (resume dispatches)
- *   kill            Emergency stop: disable domain + cancel queued + kill processes
+ *   kill            Emergency stop: disable + cancel queue + block ALL tool calls
  *   kill --resume   Clear emergency stop and re-enable domain
  *
  * Config:
@@ -2851,7 +2851,7 @@ Examples:
   cf disable --dry-run
 `,
   kill: `
-kill — Emergency stop: disable domain + cancel queued + kill processes
+kill — Emergency stop: disable + cancel queue + block ALL tool calls
 
 Usage: cf kill [--reason=MSG] [--dry-run|-n]
        cf kill --resume
@@ -3014,7 +3014,7 @@ Visibility Suite:
 Runtime Control:
   disable [--reason=MSG]    Disable domain via DB (blocks new dispatches)
   enable                    Enable domain via DB (resume dispatches)
-  kill [--reason=MSG]       Emergency stop: disable domain + cancel queued + kill processes
+  kill [--reason=MSG]       Emergency stop: disable + cancel queue + block ALL tool calls
   kill --resume             Clear emergency stop and re-enable domain
 
 Config:

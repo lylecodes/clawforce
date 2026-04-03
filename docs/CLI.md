@@ -214,15 +214,23 @@ Resume dispatches on next dispatch loop pass.
 
 ### `cf kill [--reason=MSG]`
 
-Emergency stop: disable domain + cancel queued items + set emergency flag + kill agent processes.
+Emergency stop — the real kill switch. Four layers of protection:
+
+1. **Domain disabled** — blocks all new dispatches immediately
+2. **Emergency stop flag** — persistent in DB, survives gateway restarts
+3. **Queue cancelled** — all pending/leased dispatch items dropped
+4. **All tool calls blocked** — every Bash, Write, Edit, Read from any managed agent returns `EMERGENCY STOP`. Agents can think but can't act.
+
+Running sessions will burn some tokens on thinking but cannot execute any tools. They die when they hit the context limit or retry cap.
 
 ```
-pnpm cf kill --reason="Runaway costs detected"
+pnpm cf kill --reason="Agent doing something destructive"
+pnpm cf kill --dry-run    # preview what would happen
 ```
 
 ### `cf kill --resume`
 
-Clear emergency stop and re-enable the domain.
+Clear emergency stop flag, re-enable domain, resume dispatches. Tool calls are unblocked immediately.
 
 ---
 
