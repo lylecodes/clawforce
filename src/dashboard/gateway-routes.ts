@@ -389,10 +389,14 @@ function routeRead(
         const detail = querySessionDetail(domain, decodeURIComponent(segments[1]));
         return detail ? ok(detail) : { status: 404, body: { error: "Session not found" } };
       }
-      return ok(querySessions(domain, {
-        limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
-        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
-      }));
+      return ok(querySessions(
+        domain,
+        { agentId: params.agent },
+        {
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+        },
+      ));
     }
 
     case "metrics":

@@ -198,6 +198,41 @@ export function listSessionArchives(
   return rows.map(mapArchiveRow);
 }
 
+/**
+ * Count total session archives matching the given filters (ignoring limit/offset).
+ * Used for pagination metadata.
+ */
+export function countSessionArchives(
+  projectId: string,
+  filters?: Pick<SessionArchiveFilters, "agentId" | "since" | "until" | "outcome">,
+  dbOverride?: DatabaseSync,
+): number {
+  const db = dbOverride ?? getDb(projectId);
+  const conditions = ["project_id = ?"];
+  const params: (string | number | null)[] = [projectId];
+
+  if (filters?.agentId) {
+    conditions.push("agent_id = ?");
+    params.push(filters.agentId);
+  }
+  if (filters?.since) {
+    conditions.push("started_at >= ?");
+    params.push(filters.since);
+  }
+  if (filters?.until) {
+    conditions.push("started_at <= ?");
+    params.push(filters.until);
+  }
+  if (filters?.outcome) {
+    conditions.push("outcome = ?");
+    params.push(filters.outcome);
+  }
+
+  const sql = `SELECT COUNT(*) as cnt FROM session_archives WHERE ${conditions.join(" AND ")}`;
+  const row = db.prepare(sql).get(...params) as Record<string, number> | undefined;
+  return row?.cnt ?? 0;
+}
+
 // --- Helpers ---
 
 function mapArchiveRow(row: Record<string, unknown>): SessionArchive {

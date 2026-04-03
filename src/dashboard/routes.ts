@@ -170,10 +170,14 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           return detail ? ok(detail) : { status: 404, body: { error: "Session not found" } };
         }
         // GET /api/projects/:id/sessions
-        return ok(querySessions(projectId, {
-          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
-          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
-        }));
+        return ok(querySessions(
+          projectId,
+          { agentId: params.agent },
+          {
+            limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+            offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+          },
+        ));
       }
 
       case "events": {

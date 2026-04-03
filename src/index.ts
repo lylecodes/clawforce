@@ -253,7 +253,7 @@ export { getTemplate, STARTUP_TEMPLATE } from "./templates/startup.js";
 export { renderObservedEvents } from "./context/observed-events.js";
 
 // --- Telemetry ---
-export { archiveSession, getSessionArchive, listSessionArchives } from "./telemetry/session-archive.js";
+export { archiveSession, getSessionArchive, listSessionArchives, countSessionArchives } from "./telemetry/session-archive.js";
 export { flushToolCallDetails, getToolCallDetails } from "./telemetry/tool-capture.js";
 export { detectConfigChange, getConfigVersion, getConfigHistory } from "./telemetry/config-tracker.js";
 export { recordReview, getReviewsForTask, getReviewStats } from "./telemetry/review-store.js";

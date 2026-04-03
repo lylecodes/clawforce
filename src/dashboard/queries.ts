@@ -8,7 +8,7 @@
 import { getActiveProjectIds } from "../lifecycle.js";
 import { getAgentConfig, getRegisteredAgentIds, getExtendedProjectConfig } from "../project.js";
 import { listTasks, getTask, getTaskEvidence, getTaskTransitions } from "../tasks/ops.js";
-import { listSessionArchives, getSessionArchive } from "../telemetry/session-archive.js";
+import { listSessionArchives, getSessionArchive, countSessionArchives } from "../telemetry/session-archive.js";
 import { queryMetrics, aggregateMetrics } from "../metrics.js";
 import { getCostSummary } from "../cost.js";
 import { evaluateSlos } from "../monitoring/slo.js";
@@ -258,22 +258,32 @@ export function queryTaskDetail(projectId: string, taskId: string) {
   return { task, evidence, transitions };
 }
 
-/** List archived sessions. */
-export function querySessions(projectId: string, pagination?: PaginationParams) {
+/** List archived sessions with pagination, total count, and optional agent filter. */
+export function querySessions(
+  projectId: string,
+  filters?: { agentId?: string },
+  pagination?: PaginationParams,
+) {
   const limit = pagination?.limit ?? 50;
   const offset = pagination?.offset ?? 0;
 
+  const filterOpts = { agentId: filters?.agentId };
+
   const entries = listSessionArchives(projectId, {
+    ...filterOpts,
     limit: limit + 1,
     offset,
   });
 
   const hasMore = entries.length > limit;
   const sessions = entries.slice(0, limit);
+  const total = countSessionArchives(projectId, filterOpts);
+
   return {
     sessions,
+    total,
     hasMore,
-    count: sessions.length,
+    count: total,
   };
 }
 
