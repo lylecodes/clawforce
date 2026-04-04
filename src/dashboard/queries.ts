@@ -596,7 +596,7 @@ export function queryProtocols(
   return { protocols, count: protocols.length };
 }
 
-/** Query goals for a project with optional filters. */
+/** Query goals for a project with optional filters. Enriches each goal with per-goal task counts. */
 export function queryGoals(
   projectId: string,
   filters?: {
@@ -616,7 +616,26 @@ export function queryGoals(
   });
   const hasMore = goals.length > limit;
   const sliced = goals.slice(0, limit);
-  return { goals: sliced, hasMore, count: sliced.length };
+
+  // Enrich each goal with per-goal task state counts so initiative cards show correct numbers
+  let enriched: Array<typeof sliced[number] & { taskCounts?: Record<string, number> }>;
+  try {
+    const db = getDb(projectId);
+    enriched = sliced.map((goal) => {
+      const taskRows = db.prepare(
+        "SELECT state, COUNT(*) as cnt FROM tasks WHERE goal_id = ? AND project_id = ? GROUP BY state",
+      ).all(goal.id, projectId) as Array<{ state: string; cnt: number }>;
+      const taskCounts: Record<string, number> = {};
+      for (const r of taskRows) {
+        taskCounts[r.state] = r.cnt;
+      }
+      return { ...goal, taskCounts };
+    });
+  } catch {
+    enriched = sliced;
+  }
+
+  return { goals: enriched, hasMore, count: enriched.length };
 }
 
 /** Query goal detail with children, tasks, and progress. */

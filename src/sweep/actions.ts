@@ -60,6 +60,7 @@ export type SweepResult = {
   frequencyDispatched: number;
   staleDispatchRecovered: number;
   reservationsReleased: number;
+  orphanedCronRecovered: number;
   agentsRecovered: number;
   agentsEscalated: number;
 };
@@ -113,6 +114,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
   let budgetsReset = 0;
   let reviewEscalated = 0;
   let meetingsStale = 0;
+  let orphanedCronRecovered = 0;
 
   // Reclaim events stuck in 'processing' (e.g. from a previous crash)
   try {
@@ -225,7 +227,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       if ((hardDepCount.count as number) > 0) {
         const unresolved = getUnresolvedBlockers(projectId, taskId, db);
         if (unresolved.length === 0) {
-          transitionTask(
+          const depResult = transitionTask(
             {
               projectId,
               taskId,
@@ -237,11 +239,105 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
             },
             db,
           );
+          if (depResult.ok) {
+            staleUnblocked++;
+            continue;
+          }
+        }
+      }
+
+      // Recover parent-task-blocked children when the parent is DONE.
+      // This is a backstop for the auto-unblock in transitionTask that fires
+      // when a parent completes — catches cases where that event was missed.
+      const taskRow = db.prepare(
+        "SELECT parent_task_id, assigned_to FROM tasks WHERE id = ? AND project_id = ?",
+      ).get(taskId, projectId) as Record<string, unknown> | undefined;
+
+      if (taskRow?.parent_task_id) {
+        const parentState = db.prepare(
+          "SELECT state FROM tasks WHERE id = ? AND project_id = ?",
+        ).get(taskRow.parent_task_id as string, projectId) as Record<string, unknown> | undefined;
+
+        if (parentState && (parentState.state as string) === "DONE") {
+          const toState = taskRow.assigned_to ? "ASSIGNED" : "OPEN";
+          const parentResult = transitionTask(
+            {
+              projectId,
+              taskId,
+              toState: toState as TaskState,
+              actor: "system:sweep",
+              reason: "Auto-unblocked: parent task is DONE",
+              verificationRequired: false,
+              withinTransaction: true,
+            },
+            db,
+          );
+          if (parentResult.ok) staleUnblocked++;
         }
       }
     }
 
     safeLog("sweep.unblockStale", `Unblocked ${staleUnblocked} stale-blocked tasks`);
+
+    // 1.6. Recover orphaned tasks assigned to dead cron session agent IDs.
+    // Tasks get assigned to session-specific IDs like "agent:cf-worker:cron:uuid".
+    // When that cron session dies, the task is orphaned. Reassign to the base agent ID.
+    try {
+      const cronAssignedTasks = db.prepare(
+        "SELECT id, assigned_to FROM tasks WHERE project_id = ? AND assigned_to LIKE '%:cron:%' AND state NOT IN ('DONE', 'FAILED', 'CANCELLED')",
+      ).all(projectId) as Record<string, unknown>[];
+
+      if (cronAssignedTasks.length > 0) {
+        // Build a set of active session keys
+        const activeSessionKeys = new Set(
+          getActiveSessions().map((s) => s.sessionKey),
+        );
+
+        // Also check the tracked_sessions table (persisted sessions survive process restarts)
+        const persistedSessionRows = db.prepare(
+          "SELECT session_key FROM tracked_sessions WHERE project_id = ?",
+        ).all(projectId) as Record<string, unknown>[];
+        for (const row of persistedSessionRows) {
+          activeSessionKeys.add(row.session_key as string);
+        }
+
+        for (const row of cronAssignedTasks) {
+          const taskId = row.id as string;
+          const assignedTo = row.assigned_to as string;
+
+          // Check if a session exists for this cron agent ID
+          const hasActiveSession = [...activeSessionKeys].some(
+            (key) => key.includes(assignedTo) || assignedTo.includes(key),
+          );
+          if (hasActiveSession) continue;
+
+          // Extract base agent ID: "agent:cf-worker:cron:uuid" → "cf-worker"
+          // Pattern: everything before ":cron:" and after the optional "agent:" prefix
+          const cronIdx = assignedTo.indexOf(":cron:");
+          if (cronIdx === -1) continue;
+          let baseAgentId = assignedTo.slice(0, cronIdx);
+          if (baseAgentId.startsWith("agent:")) {
+            baseAgentId = baseAgentId.slice("agent:".length);
+          }
+
+          // Reassign to the base agent ID
+          db.prepare(
+            "UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ? AND project_id = ?",
+          ).run(baseAgentId, now, taskId, projectId);
+
+          orphanedCronRecovered++;
+          emitDiagnosticEvent({
+            type: "sweep_orphaned_cron_recovered",
+            projectId,
+            taskId,
+            oldAssignedTo: assignedTo,
+            newAssignedTo: baseAgentId,
+          });
+        }
+      }
+    } catch (err) {
+      safeLog("sweep.orphanedCronRecovery", err);
+    }
 
     // 2. Enforce deadlines — stays direct (safety-critical, no delay acceptable)
     const overdue = db
@@ -541,8 +637,8 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
             projectId,
           );
 
-          // Re-enqueue the task for retry
-          enqueue(projectId, taskId, undefined, undefined, db);
+          // Re-enqueue the task for retry (skip failed dedup — this IS the recovery)
+          enqueue(projectId, taskId, undefined, undefined, db, undefined, undefined, true);
 
           emitDiagnosticEvent({
             type: "dispatch_stale_recovered",
@@ -732,6 +828,6 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     eventsProcessed, dispatched, budgetsReset, autoAssigned,
     sloChecked, sloBreach, alertsFired, anomaliesDetected,
     reviewEscalated, meetingsStale, frequencyDispatched,
-    agentsRecovered, agentsEscalated,
+    orphanedCronRecovered, agentsRecovered, agentsEscalated,
   };
 }

@@ -9,6 +9,7 @@ import crypto from "node:crypto";
 import { deflateSync, inflateSync } from "node:zlib";
 import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "../db.js";
+import { getCostSummary } from "../cost.js";
 import { safeLog } from "../diagnostics.js";
 
 // --- Types ---
@@ -82,6 +83,28 @@ export function archiveSession(
   const id = crypto.randomUUID();
   const now = Date.now();
 
+  // Aggregate cost from cost_records if not provided by the caller
+  let totalCostCents = params.totalCostCents ?? 0;
+  let totalInputTokens = params.totalInputTokens ?? 0;
+  let totalOutputTokens = params.totalOutputTokens ?? 0;
+  if (totalCostCents === 0) {
+    try {
+      const costSummary = getCostSummary({
+        projectId: params.projectId,
+        agentId: params.agentId,
+        since: params.startedAt,
+        until: params.endedAt ?? Date.now(),
+      }, db);
+      if (costSummary.totalCostCents > 0) {
+        totalCostCents = costSummary.totalCostCents;
+        if (totalInputTokens === 0) totalInputTokens = costSummary.totalInputTokens;
+        if (totalOutputTokens === 0) totalOutputTokens = costSummary.totalOutputTokens;
+      }
+    } catch (err) {
+      safeLog("telemetry.archive.costAggregation", err);
+    }
+  }
+
   // Compress large text fields
   const contextContent = params.contextContent
     ? compress(params.contextContent)
@@ -112,7 +135,7 @@ export function archiveSession(
       params.contextHash ?? null, contextContent, transcript, agentConfigSnapshot,
       params.taskId ?? null, params.queueItemId ?? null, params.jobName ?? null,
       params.outcome, params.exitSignal ?? null, params.complianceDetail ?? null,
-      params.totalCostCents ?? 0, params.totalInputTokens ?? 0, params.totalOutputTokens ?? 0,
+      totalCostCents, totalInputTokens, totalOutputTokens,
       params.model ?? null, params.provider ?? null,
       params.configVersionId ?? null, params.experimentVariantId ?? null,
       params.startedAt, params.endedAt ?? null, params.durationMs ?? null,

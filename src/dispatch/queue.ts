@@ -50,6 +50,8 @@ export function enqueue(
   riskTier?: string,
   /** Skip the task-state guard (e.g. when dispatching a verifier for a REVIEW task). */
   skipStateCheck?: boolean,
+  /** Skip the recent-failure dedup check (e.g. when re-enqueueing from sweep recovery). */
+  skipFailedDedup?: boolean,
 ): DispatchQueueItem | null {
   const db = dbOverride ?? getDb(projectId);
 
@@ -81,6 +83,28 @@ export function enqueue(
 
   const id = crypto.randomUUID();
   const now = Date.now();
+
+  // Dedup failed items: skip if there's a recent failed item for this task (within 5 minutes).
+  // Apply exponential backoff — each consecutive failure doubles the cooldown (5m, 10m, 20m, ...).
+  // Skipped when caller explicitly opts out (e.g. sweep recovery re-enqueue).
+  if (!skipFailedDedup) {
+    const FAILED_DEDUP_BASE_MS = 5 * 60 * 1000; // 5 minutes
+    const recentFailed = db.prepare(
+      `SELECT completed_at, dispatch_attempts FROM dispatch_queue
+       WHERE project_id = ? AND task_id = ? AND status = 'failed'
+       ORDER BY completed_at DESC LIMIT 1`,
+    ).get(projectId, taskId) as Record<string, unknown> | undefined;
+
+    if (recentFailed) {
+      const failedAt = recentFailed.completed_at as number;
+      const attempts = (recentFailed.dispatch_attempts as number) ?? 1;
+      // Exponential backoff: 5m * 2^(attempts-1), capped at 60 minutes
+      const backoffMs = Math.min(FAILED_DEDUP_BASE_MS * Math.pow(2, Math.max(0, attempts - 1)), 60 * 60 * 1000);
+      if (now - failedAt < backoffMs) {
+        return null;
+      }
+    }
+  }
 
   const prio = priority ?? 2;
 
