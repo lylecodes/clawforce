@@ -21,6 +21,7 @@ src/
 ├── tasks/                 # Task state machine, ops, lifecycle
 ├── dispatch/              # Event-driven dispatch, queue, cron
 ├── budget/                # 3-dimension budget (hourly/daily/monthly), pacing, reservations
+├── memory/                # Ghost turn recall, persist rules, MCP provider support
 ├── context/               # Context assembly, source registry, priority truncation
 ├── monitoring/            # SLOs, anomaly detection, alerts, health tiers
 ├── verification/          # Git-based verification gates (typecheck, build, test)
@@ -43,16 +44,17 @@ src/
 - **Functions export for testing:** CLI functions are exported with `__isMain` guard.
 - **Sweep runs periodically:** Handles deadlines, stale tasks, budget resets, cleanup.
 - **Context is priority-ranked:** When truncated, drops low-priority sources first.
+- **Memory is configurable:** Per-agent recall intensity, persist rules, MCP provider support (RetainDB, Mem0).
 
 ## Testing
 
 ```bash
-npx vitest --run                    # Full suite (4221 tests, ~18s)
+npx vitest --run                    # Full suite (4258 tests, ~19s)
 npx vitest --run test/tasks/        # Test one module
 npx vitest --run --reporter=verbose # See all test names
 ```
 
-Pre-existing type error in `adapters/openclaw.ts:2307` — ignore it.
+Pre-existing type error in `adapters/openclaw.ts:2405` (`deleteAfterRun` on CronJobRecord) — ignore it.
 
 ## CLI Commands
 
@@ -71,6 +73,19 @@ All support `--json` for machine-readable output. Mutating commands support `--d
 - `~/.clawforce/domains/<name>/context/` — DIRECTION, STANDARDS, POLICIES, ARCHITECTURE per team
 
 Full reference: `docs/CONFIG_REFERENCE.md`
+
+## Dashboard
+
+7 views served at `/clawforce/` via OpenClaw gateway:
+- **Monitor** — single-page widget dashboard (org tree, budget, pipeline, activity, performance, alerts, health)
+- **Tasks** — kanban board with drag-drop state transitions
+- **Approvals** — risk-based approval workflow
+- **Org Chart** — full agent hierarchy with runtime status
+- **Comms** — agent messaging, inbox, threads
+- **Config** — domain config editor, context file editor, memory settings
+- **Experiments** — A/B experiment tracking
+
+Tab selector (gear icon) lets users customize which views appear.
 
 ## Important Rules
 
