@@ -54,8 +54,6 @@ npx vitest --run test/tasks/        # Test one module
 npx vitest --run --reporter=verbose # See all test names
 ```
 
-Pre-existing type error in `adapters/openclaw.ts:2405` (`deleteAfterRun` on CronJobRecord) — ignore it.
-
 ## CLI Commands
 
 Full reference: `docs/CLI.md`

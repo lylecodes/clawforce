@@ -52,6 +52,7 @@ export type CronJobRecord = {
   description?: string;
   schedule: CronSchedule;
   state: CronJobState;
+  deleteAfterRun?: boolean;
 };
 
 /** Cron service interface for runtime job management. */

@@ -28,9 +28,9 @@ import { safeLog } from "../diagnostics.js";
 
 // --- Internal ---
 
-/** Resolve the ClawForce base directory (~/.clawforce). */
+/** Resolve the ClawForce base directory (~/.clawforce), respecting CLAWFORCE_HOME override. */
 function getBaseDir(): string {
-  return path.join(os.homedir(), ".clawforce");
+  return process.env.CLAWFORCE_HOME ?? path.join(os.homedir(), ".clawforce");
 }
 
 // --- Read operations ---
@@ -74,7 +74,7 @@ export function updateDomainConfig(
   section: string,
   data: unknown,
   actor = "dashboard",
-): { ok: boolean; error?: string } {
+): { ok: boolean; error?: string; warnings?: string[]; reloadErrors?: string[] } {
   const baseDir = getBaseDir();
   const result = updateDomainConfigFile(baseDir, projectId, { [section]: data }, actor);
 
@@ -84,10 +84,18 @@ export function updateDomainConfig(
 
   // Reload domain config into runtime
   try {
-    initializeAllDomains(baseDir);
+    const reloadResult = initializeAllDomains(baseDir);
+    if (reloadResult.errors.length > 0 || reloadResult.warnings.length > 0) {
+      return {
+        ok: true,
+        ...(reloadResult.warnings.length > 0 ? { warnings: reloadResult.warnings } : {}),
+        ...(reloadResult.errors.length > 0 ? { reloadErrors: reloadResult.errors } : {}),
+      };
+    }
   } catch (err) {
     // Non-fatal: file is saved even if runtime reload fails
     safeLog("config.api-service", `Runtime reload after config update failed: ${err}`);
+    return { ok: true, warnings: [`Runtime reload failed: ${err instanceof Error ? err.message : String(err)}`] };
   }
 
   return { ok: true };

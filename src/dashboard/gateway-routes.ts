@@ -598,8 +598,10 @@ function serveStatic(
   const relativePath = pathname.replace(/^\/clawforce\/?/, "") || "index.html";
   const filePath = path.join(staticDir, relativePath);
 
-  // Security: prevent path traversal
-  if (!filePath.startsWith(staticDir)) {
+  // Security: prevent path traversal — use path.resolve + separator boundary
+  const resolvedFile = path.resolve(filePath);
+  const resolvedBase = path.resolve(staticDir);
+  if (resolvedFile !== resolvedBase && !resolvedFile.startsWith(resolvedBase + path.sep)) {
     return false;
   }
 

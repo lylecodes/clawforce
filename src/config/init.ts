@@ -17,6 +17,7 @@ import type { AgentConfig, ContextSource, Expectation, PerformancePolicy, Workfo
 import type { GlobalConfig, DomainConfig, GlobalAgentDef, MixinDef } from "./schema.js";
 import { inferPreset, markInferred } from "./inference.js";
 import { resolveConditionals } from "./conditionals.js";
+import { validateAllConfigs } from "./validate.js";
 import { normalizeDomainProfile } from "../profiles/operational.js";
 import { createGoal, listGoals } from "../goals/ops.js";
 import { getDb } from "../db.js";
@@ -38,18 +39,13 @@ export type InitResult = {
 export function initializeAllDomains(baseDir: string): InitResult {
   const result: InitResult = { domains: [], errors: [], warnings: [] };
 
-  // Run config validation first — non-blocking, but log all issues
+  // Run config validation first — non-blocking, all issues are warnings
   try {
-    const { validateAllConfigs } = require("./validate.js") as typeof import("./validate.js");
     const report = validateAllConfigs(baseDir);
     for (const issue of report.issues) {
       const prefix = issue.severity === "error" ? "ERROR" : issue.severity === "warn" ? "WARN" : "INFO";
       const msg = `[${prefix}] ${issue.code}: ${issue.message}${issue.path ? ` (${issue.path})` : ""}`;
-      if (issue.severity === "error") {
-        result.errors.push(msg);
-      } else {
-        result.warnings.push(msg);
-      }
+      result.warnings.push(msg);
     }
   } catch (err) {
     // Validation failure is non-blocking — domains still load

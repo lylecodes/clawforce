@@ -114,7 +114,7 @@ export function resolveDomainFromPath(
   entries.sort((a, b) => b.resolved.length - a.resolved.length);
 
   for (const entry of entries) {
-    if (workingDir.startsWith(entry.resolved)) {
+    if (workingDir === entry.resolved || workingDir.startsWith(entry.resolved + path.sep)) {
       return entry.domain;
     }
   }

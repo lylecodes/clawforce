@@ -2495,36 +2495,44 @@ Examples:
 
 // ─── Watch command ──────────────────────────────────────────────────
 
-const WATCH_STATE_FILE = path.join(DB_DIR, ".watch_state");
+function getWatchStatePath(projectId: string): string {
+  return path.join(DB_DIR, projectId, ".watch_state");
+}
 
 interface WatchState {
   lastCheckAt: number;
 }
 
-function readWatchState(): WatchState | null {
+function readWatchState(projectId: string): WatchState | null {
   try {
-    if (!fs.existsSync(WATCH_STATE_FILE)) return null;
-    const raw = fs.readFileSync(WATCH_STATE_FILE, "utf-8");
+    const watchFile = getWatchStatePath(projectId);
+    if (!fs.existsSync(watchFile)) return null;
+    const raw = fs.readFileSync(watchFile, "utf-8");
     return JSON.parse(raw) as WatchState;
   } catch {
     return null;
   }
 }
 
-function writeWatchState(state: WatchState): void {
-  fs.writeFileSync(WATCH_STATE_FILE, JSON.stringify(state), "utf-8");
+function writeWatchState(projectId: string, state: WatchState): void {
+  const watchFile = getWatchStatePath(projectId);
+  const dir = path.dirname(watchFile);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(watchFile, JSON.stringify(state), "utf-8");
 }
 
 export function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, json = false): void {
   const now = Date.now();
 
   if (reset) {
-    writeWatchState({ lastCheckAt: 0 });
+    writeWatchState(projectId, { lastCheckAt: 0 });
     console.log("Watch state reset. Next run will show everything.");
     return;
   }
 
-  const state = readWatchState();
+  const state = readWatchState(projectId);
   const since = state?.lastCheckAt ?? 0;
   const isFirstRun = since === 0;
 
@@ -2672,13 +2680,13 @@ export function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, js
       active_sessions: activeSessions,
       budget_change: budgetLine,
     }, null, 2));
-    writeWatchState({ lastCheckAt: now });
+    writeWatchState(projectId, { lastCheckAt: now });
     return;
   }
 
   if (!hasChanges) {
     console.log(`## Since ${sinceLabel}${sinceTime} \u2014 No changes.`);
-    writeWatchState({ lastCheckAt: now });
+    writeWatchState(projectId, { lastCheckAt: now });
     return;
   }
 
@@ -2828,7 +2836,7 @@ export function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, js
   }
 
   // Update state
-  writeWatchState({ lastCheckAt: now });
+  writeWatchState(projectId, { lastCheckAt: now });
 }
 
 // ─── Per-command help ────────────────────────────────────────────────

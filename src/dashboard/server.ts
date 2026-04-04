@@ -159,9 +159,10 @@ export function createDashboardServer(options?: DashboardOptions) {
     const relativePath = stripped === "/" ? "index.html" : stripped.slice(1);
     const filePath = path.join(staticDir, relativePath);
 
-    // Security: prevent path traversal
+    // Security: prevent path traversal — use path.resolve + separator boundary
     const resolved = path.resolve(filePath);
-    if (!resolved.startsWith(staticDir)) {
+    const resolvedBase = path.resolve(staticDir);
+    if (resolved !== resolvedBase && !resolved.startsWith(resolvedBase + path.sep)) {
       respondJson(res, 403, { error: "Forbidden" });
       return;
     }
