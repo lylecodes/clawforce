@@ -358,3 +358,19 @@ export type {
   ContextOwnershipConfig,
   ObserveEntry,
 } from "./types.js";
+
+// --- Control API Contract ---
+export * from "./api/contract.js";
+
+// --- Config API Service ---
+export {
+  readDomainConfig as readDomainConfigApi,
+  readGlobalConfig as readGlobalConfigApi,
+  updateDomainConfig as updateDomainConfigApi,
+  updateGlobalAgentConfig,
+  createDomain,
+  getDomainContextDir,
+  upsertGlobalAgents,
+  writeDomainConfig as writeDomainConfigApi,
+  reloadAllDomains,
+} from "./config/api-service.js";

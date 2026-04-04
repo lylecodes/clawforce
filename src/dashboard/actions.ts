@@ -17,16 +17,16 @@ import { emitSSE } from "./sse.js";
 import type { EvidenceType, TaskPriority, TaskState } from "../types.js";
 import { ingestEvent } from "../events/store.js";
 import { createDemoConfig } from "./demo.js";
-import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
-import { loadGlobalConfig } from "../config/loader.js";
-import { initializeAllDomains } from "../config/init.js";
 import { createGoal } from "../goals/ops.js";
 import { getDb } from "../db.js";
 import { getRegisteredAgentIds, getAgentConfig, getExtendedProjectConfig } from "../project.js";
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
-import YAML from "yaml";
+import {
+  updateDomainConfig as updateDomainConfigViaService,
+  upsertGlobalAgents,
+  writeDomainConfig,
+  reloadAllDomains,
+  readDomainConfig as readDomainConfigViaService,
+} from "../config/api-service.js";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -447,26 +447,23 @@ function handleConfigAction(
         data = agents;
       }
 
-      // Attempt to persist the config change to the domain YAML file
+      // Persist the config change via the config API service
       try {
-        const baseDir = path.join(os.homedir(), ".clawforce");
-        const domainsDir = path.join(baseDir, "domains");
-        const domainPath = path.join(domainsDir, `${projectId}.yaml`);
-
-        if (!fs.existsSync(domainPath)) {
+        // Check domain exists first
+        const existing = readDomainConfigViaService(projectId);
+        if (!existing) {
           return { status: 404, body: { error: `Domain config file not found: ${projectId}.yaml` } };
         }
 
-        const raw = fs.readFileSync(domainPath, "utf-8");
-        const config = YAML.parse(raw) as Record<string, unknown>;
-        config[section] = data;
-        fs.writeFileSync(domainPath, YAML.stringify(config), "utf-8");
+        const result = updateDomainConfigViaService(
+          projectId,
+          section,
+          data,
+          (body.actor as string) ?? "dashboard",
+        );
 
-        // Reload domain config into runtime
-        try {
-          initializeAllDomains(baseDir);
-        } catch {
-          // Non-fatal: file is saved even if runtime reload fails
+        if (!result.ok) {
+          return { status: 400, body: { error: result.error } };
         }
 
         emitSSE(projectId, "config:changed", { section });
@@ -572,49 +569,33 @@ function handleEventsAction(
 export function handleDemoCreate(): RouteResult {
   try {
     const { global, domain, domainExtras } = createDemoConfig();
-    const baseDir = path.join(os.homedir(), ".clawforce");
 
-    // Scaffold config directory
-    scaffoldConfigDir(baseDir);
-
-    // Write agents to global config
+    // Write agents to global config via the config API service
     if (global.agents) {
-      const configPath = path.join(baseDir, "config.yaml");
-      let existing: Record<string, unknown>;
-
-      try {
-        existing = loadGlobalConfig(baseDir) as Record<string, unknown>;
-      } catch {
-        existing = { agents: {} };
+      const agentResult = upsertGlobalAgents(global.agents, "demo-setup");
+      if (!agentResult.ok) {
+        return { status: 500, body: { error: `Failed to write demo agents: ${agentResult.error}` } };
       }
-
-      const existingAgents = (existing.agents ?? {}) as Record<string, unknown>;
-      Object.assign(existingAgents, global.agents);
-      existing.agents = existingAgents;
-
-      fs.writeFileSync(configPath, YAML.stringify(existing), "utf-8");
     }
 
-    // Build domain YAML with extras (budget, safety, goals)
-    const domainYaml: Record<string, unknown> = {
+    // Build domain config with extras (budget, safety, goals)
+    const domainConfig: Record<string, unknown> = {
       domain: domain.name,
       agents: domain.agents,
     };
-    if (domain.orchestrator) domainYaml.orchestrator = domain.orchestrator;
-    if (domain.operational_profile) domainYaml.operational_profile = domain.operational_profile;
-    Object.assign(domainYaml, domainExtras);
+    if (domain.orchestrator) domainConfig.orchestrator = domain.orchestrator;
+    if (domain.operational_profile) domainConfig.operational_profile = domain.operational_profile;
+    Object.assign(domainConfig, domainExtras);
 
-    // Write domain file
-    const domainsDir = path.join(baseDir, "domains");
-    fs.mkdirSync(domainsDir, { recursive: true });
-    const domainPath = path.join(domainsDir, `${domain.name}.yaml`);
-
-    // If demo domain already exists, overwrite it
-    fs.writeFileSync(domainPath, YAML.stringify(domainYaml), "utf-8");
+    // Write domain file via the config API service (full replacement)
+    const domainResult = writeDomainConfig(domain.name, domainConfig as unknown as import("../config/schema.js").DomainConfig);
+    if (!domainResult.ok) {
+      return { status: 500, body: { error: `Failed to write demo domain: ${domainResult.error}` } };
+    }
 
     // Load the new domain config into the running runtime so queries work immediately
-    const initResult = initializeAllDomains(baseDir);
-    const loadedOk = initResult.domains.includes(domain.name);
+    const reloadResult = reloadAllDomains();
+    const loadedOk = reloadResult.domains.includes(domain.name);
 
     // Create goal records for demo initiatives so they show in the Command Center
     // First, clear any existing demo-setup goals to prevent duplicates on repeated clicks

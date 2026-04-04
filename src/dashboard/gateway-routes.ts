@@ -65,6 +65,7 @@ import {
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
 import { TASK_STATES, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
+import type { CapabilityResponse } from "../api/contract.js";
 
 /** Parse an integer from a string, returning a default if NaN. */
 function safeParseInt(value: string, defaultValue: number): number {
@@ -511,9 +512,64 @@ function routeRead(
         windowHours: params.window ? safeParseInt(params.window, 24) : undefined,
       }));
 
+    case "capabilities":
+      return ok(buildCapabilities(domain));
+
     default:
       return notFound("Unknown resource");
   }
+}
+
+// --- Capability Discovery ---
+
+function buildCapabilities(domain: string): CapabilityResponse {
+  // Detect which features are enabled for this domain by checking
+  // whether the domain has relevant config or data.
+  let hasApprovals = false;
+  let hasBudget = false;
+  let hasTrust = false;
+  let hasMemory = false;
+  let hasExperiments = false;
+  let hasComms = false;
+
+  try {
+    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
+    const extConfig = getExtendedProjectConfig(domain);
+
+    if (extConfig) {
+      hasApprovals = !!extConfig.policies; // approval is policy-driven
+      hasBudget = !!extConfig.safety; // budget/safety config present
+      hasTrust = !!extConfig.trust;
+      hasMemory = !!extConfig.memory;
+      hasExperiments = true; // experiments are always available as a feature
+      hasComms = !!(extConfig.channels && (extConfig.channels as unknown[]).length > 0);
+    }
+  } catch {
+    // If config loading fails, report minimal features
+  }
+
+  return {
+    version: "0.2.0",
+    features: {
+      tasks: true, // tasks are always available
+      approvals: hasApprovals,
+      budget: hasBudget,
+      trust: hasTrust,
+      memory: hasMemory,
+      experiments: hasExperiments,
+      comms: hasComms,
+    },
+    endpoints: [
+      "dashboard", "agents", "tasks", "approvals", "messages",
+      "meetings", "budget", "trust", "costs", "goals", "config",
+      "org", "health", "slos", "alerts", "events", "sessions",
+      "metrics", "policies", "protocols", "audit-log", "audit-runs",
+      "enforcement-retries", "onboarding", "tracked-sessions",
+      "worker-assignments", "queue", "experiments", "knowledge",
+      "knowledge-flags", "promotion-candidates", "interventions",
+      "workstreams", "inbox", "operational-metrics", "capabilities",
+    ],
+  };
 }
 
 // --- Static file serving ---
