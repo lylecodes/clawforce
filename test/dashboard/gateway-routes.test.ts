@@ -184,7 +184,7 @@ describe("createDashboardHandler", () => {
     const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/sessions?limit=25&offset=10");
     await handler(req, res);
-    expect(querySessions).toHaveBeenCalledWith("test-project", { limit: 25, offset: 10 });
+    expect(querySessions).toHaveBeenCalledWith("test-project", { agentId: undefined }, { limit: 25, offset: 10 });
     expect(res.statusCode).toBe(200);
   });
 

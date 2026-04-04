@@ -33,6 +33,7 @@ vi.mock("../../src/tasks/ops.js", () => ({
 
 vi.mock("../../src/telemetry/session-archive.js", () => ({
   listSessionArchives: vi.fn(() => [{ sessionKey: "s1", agentId: "agent-dev", durationMs: 1200, toolCallCount: 3, totalCostCents: 15 }]),
+  countSessionArchives: vi.fn(() => 1),
 }));
 
 vi.mock("../../src/metrics.js", () => ({
@@ -205,6 +206,7 @@ describe("querySessions", () => {
     const result = querySessions("proj1");
     expect(result.sessions).toHaveLength(1);
     expect(result.hasMore).toBe(false);
+    expect(result.total).toBe(1);
     expect(result.count).toBe(1);
     expect(result.sessions[0]).toMatchObject({
       sessionKey: "s1",

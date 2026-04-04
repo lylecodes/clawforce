@@ -227,13 +227,14 @@ describe("clawforce plugin", () => {
       expect(serviceIds).toContain("clawforce-sweep");
     });
 
-    it("registers 5 gateway methods", () => {
-      expect(api.registerGatewayMethod).toHaveBeenCalledTimes(5);
+    it("registers 6 gateway methods", () => {
+      expect(api.registerGatewayMethod).toHaveBeenCalledTimes(6);
       expect(api._gatewayMethods.has("clawforce.init")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.bootstrap")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.dispatch")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.approval_callback")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.inject_channel_message")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.kill")).toBe(true);
     });
 
     it("does nothing when config.enabled is false", () => {
