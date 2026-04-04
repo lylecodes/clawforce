@@ -54,6 +54,7 @@ import path from "node:path";
 import fs from "node:fs";
 import YAML from "yaml";
 import { cmdOrg, cmdOrgSet, cmdOrgCheck } from "./cli/org.js";
+import { getAgentSaturation, getQueueWaitTime, getAgentThroughput, getCostEfficiency, getSessionEfficiency, getTaskCycleTime, getFailureRate, getRetryRate } from "./metrics/operational.js";
 
 const HOME = process.env.HOME ?? "/tmp";
 const DEFAULT_PROJECT = "clawforce-dev";
@@ -703,6 +704,37 @@ export function detectAnomalies(db: DatabaseSync, projectId: string, hours: numb
     }
   } catch { /* ignore */ }
 
+  // 7. Agent workload saturation > 3 (overloaded)
+  try {
+    const saturated = getAgentSaturation(projectId, hours, db);
+    for (const s of saturated) {
+      if (s.saturation > 3) {
+        anomalies.push(`${s.agentId} overloaded: saturation ${s.saturation.toFixed(1)} (assigned: ${s.assignedTasks}, queued: ${s.queuedDispatches}, throughput: ${s.avgCompletedPerHour}/hr)`);
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 8. High failure rate (>30%) for agents with enough data
+  try {
+    const failures = getFailureRate(projectId, hours * 7, db);
+    for (const f of failures) {
+      const total = f.doneTasks + f.failedTasks;
+      if (total >= 3 && f.failureRatePct > 30) {
+        anomalies.push(`${f.agentId} high failure rate: ${f.failureRatePct}% (${f.failedTasks}/${total} tasks failed)`);
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 9. Low session efficiency (<50%) for agents with enough sessions
+  try {
+    const sessEff = getSessionEfficiency(projectId, hours, db);
+    for (const s of sessEff) {
+      if (s.totalSessions >= 3 && s.efficiencyPct < 50) {
+        anomalies.push(`${s.agentId} low session efficiency: ${s.efficiencyPct}% (${s.productiveSessions}/${s.totalSessions} sessions produced output)`);
+      }
+    }
+  } catch { /* ignore */ }
+
   return anomalies;
 }
 
@@ -1294,7 +1326,17 @@ export function cmdMetrics(db: DatabaseSync, projectId: string, hours: number, j
       `).get(agent, since) as { cnt: number }).cnt;
       return { ...a, proposals: proposalCount, completed_tasks: completedTasks };
     });
-    console.log(JSON.stringify({ hours, agents: metricsData }, null, 2));
+    const operational = {
+      saturation: getAgentSaturation(projectId, hours, db),
+      queueWaitTime: getQueueWaitTime(projectId, hours, db),
+      throughput: getAgentThroughput(projectId, db),
+      costEfficiency: getCostEfficiency(projectId, hours, db),
+      sessionEfficiency: getSessionEfficiency(projectId, hours, db),
+      cycleTime: getTaskCycleTime(projectId, hours * 7, db),
+      failureRate: getFailureRate(projectId, hours * 7, db),
+      retryRate: getRetryRate(projectId, hours * 7, db),
+    };
+    console.log(JSON.stringify({ hours, agents: metricsData, operational }, null, 2));
     return;
   }
 
@@ -1331,6 +1373,79 @@ export function cmdMetrics(db: DatabaseSync, projectId: string, hours: number, j
     console.log(`    Tools/session: ${avgTools}  |  Cost/proposal: ${costPerProposal} (${proposalCount})  |  Cost/completed task: ${costPerTask} (${completedTasks})`);
     console.log("");
   }
+
+  // --- Operational Metrics ---
+  try {
+    const saturation = getAgentSaturation(projectId, hours, db);
+    if (saturation.length > 0) {
+      console.log("## Workload Saturation\n");
+      for (const s of saturation) {
+        const flag = s.saturation > 3 ? " [OVERLOADED]" : s.saturation > 1.5 ? " [HIGH]" : "";
+        console.log(`  ${pad(s.agentId, 20)} saturation: ${s.saturation.toFixed(1)}  (assigned: ${s.assignedTasks}, queued: ${s.queuedDispatches}, avg/hr: ${s.avgCompletedPerHour})${flag}`);
+      }
+      console.log("");
+    }
+
+    const throughput = getAgentThroughput(projectId, db);
+    if (throughput.length > 0) {
+      console.log("## Throughput (tasks completed)\n");
+      for (const t of throughput) {
+        console.log(`  ${pad(t.agentId, 20)} 1h: ${t.completedLastHour}  |  4h: ${t.completedLast4Hours}  |  24h: ${t.completedLast24Hours}  |  avg: ${t.avgPerHour}/hr`);
+      }
+      console.log("");
+    }
+
+    const waitTime = getQueueWaitTime(projectId, hours, db);
+    if (waitTime.length > 0) {
+      console.log("## Queue Wait Time (ASSIGNED -> IN_PROGRESS)\n");
+      for (const w of waitTime) {
+        console.log(`  ${pad(w.agentId, 20)} avg: ${fmtAge(w.avgWaitMs)}  |  median: ${fmtAge(w.medianWaitMs)}  |  max: ${fmtAge(w.maxWaitMs)}  (${w.sampleCount} samples)`);
+      }
+      console.log("");
+    }
+
+    const sessionEff = getSessionEfficiency(projectId, hours, db);
+    if (sessionEff.length > 0) {
+      console.log("## Session Efficiency\n");
+      for (const s of sessionEff) {
+        const flag = s.efficiencyPct < 50 ? " [LOW]" : "";
+        console.log(`  ${pad(s.agentId, 20)} ${s.productiveSessions}/${s.totalSessions} productive (${s.efficiencyPct}%)${flag}`);
+      }
+      console.log("");
+    }
+
+    const failureRate = getFailureRate(projectId, hours * 7, db);
+    if (failureRate.length > 0) {
+      const withFailures = failureRate.filter((f) => f.failedTasks > 0);
+      if (withFailures.length > 0) {
+        console.log("## Failure Rate\n");
+        for (const f of withFailures) {
+          const flag = f.failureRatePct > 30 ? " [HIGH]" : "";
+          console.log(`  ${pad(f.agentId, 20)} ${f.failedTasks} failed / ${f.doneTasks + f.failedTasks} total (${f.failureRatePct}%)${flag}`);
+        }
+        console.log("");
+      }
+    }
+
+    const retryRate = getRetryRate(projectId, hours * 7, db);
+    if (retryRate.length > 0) {
+      console.log("## Retry Rate\n");
+      for (const r of retryRate) {
+        console.log(`  ${pad(r.agentId, 20)} ${r.retryCycles} retry cycles across ${r.tasksWithRetries} task(s)`);
+      }
+      console.log("");
+    }
+
+    const cycleTime = getTaskCycleTime(projectId, hours * 7, db);
+    if (cycleTime.length > 0) {
+      console.log("## Task Cycle Time\n");
+      for (const c of cycleTime) {
+        const pri = c.priority ?? "?";
+        console.log(`  ${pad(c.agentId, 20)} [${pri}]  avg: ${fmtAge(c.avgCycleMs)}  |  min: ${fmtAge(c.minCycleMs)}  |  max: ${fmtAge(c.maxCycleMs)}  (${c.sampleCount} tasks)`);
+      }
+      console.log("");
+    }
+  } catch { /* operational metrics are best-effort */ }
 }
 
 export function cmdBudget(db: DatabaseSync, projectId: string, json = false): void {

@@ -34,6 +34,8 @@ import { buildChannelTranscript } from "../channels/messages.js";
 import { getMeetingStatus } from "../channels/meeting.js";
 import { getDb } from "../db.js";
 import { writeAuditEntry } from "../audit.js";
+import { getAllOperationalMetrics } from "../metrics/operational.js";
+import type { OperationalMetrics } from "../metrics/operational.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -2177,4 +2179,13 @@ export function queryUserInbox(
   } catch {
     return { messages: [], count: 0 };
   }
+}
+
+/** Query operational metrics (saturation, throughput, wait time, cycle time, etc.). */
+export function queryOperationalMetrics(
+  projectId: string,
+  params?: { windowHours?: number },
+): OperationalMetrics {
+  const windowHours = params?.windowHours ?? 24;
+  return getAllOperationalMetrics(projectId, windowHours);
 }

@@ -60,6 +60,7 @@ import {
   queryInterventions,
   queryWorkStreams,
   queryUserInbox,
+  queryOperationalMetrics,
 } from "./queries.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
@@ -504,6 +505,11 @@ function routeRead(
         since: params.since ? safeParseInt(params.since, 0) : undefined,
       }));
     }
+
+    case "operational-metrics":
+      return ok(queryOperationalMetrics(domain, {
+        windowHours: params.window ? safeParseInt(params.window, 24) : undefined,
+      }));
 
     default:
       return notFound("Unknown resource");
