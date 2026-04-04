@@ -1318,6 +1318,75 @@ export type KnowledgeConfig = {
 
 // --- Memory Governance types ---
 
+/** Memory recall (ghost turn) configuration — controls automatic memory retrieval. */
+export type MemoryRecallConfig = {
+  /** Enable ghost turn memory recall. Default: true. */
+  enabled?: boolean;
+  /** Recall intensity preset. Default: "medium". */
+  intensity?: "low" | "medium" | "high";
+  /** Override cooldown between recall attempts in milliseconds. */
+  cooldownMs?: number;
+  /** Max number of memory searches per ghost turn. */
+  maxSearches?: number;
+  /** Max characters injected into context from recalled memories. */
+  maxInjectedChars?: number;
+};
+
+/** Persist trigger types for memory save rules. */
+export type MemoryPersistTrigger = "session_end" | "task_completed" | "task_failed" | "periodic";
+
+/** Persist action types for memory save rules. */
+export type MemoryPersistAction = "extract_learnings" | "save_decisions" | "save_errors" | "custom";
+
+/** A single memory persist rule — when and what to save. */
+export type MemoryPersistRule = {
+  /** When this rule triggers. */
+  trigger: MemoryPersistTrigger;
+  /** What to save/extract. */
+  action: MemoryPersistAction;
+  /** Optional filter pattern (e.g. glob or keyword). */
+  filter?: string;
+  /** Custom extraction prompt (required when action is "custom"). */
+  prompt?: string;
+};
+
+/** Memory persistence configuration — controls what gets saved to memory. */
+export type MemoryPersistConfig = {
+  /** Enable memory persistence. Default: true. */
+  enabled?: boolean;
+  /** Rules for what to save and when. */
+  rules?: MemoryPersistRule[];
+  /** Auto-extract learnings at session end. Default: true. */
+  autoExtract?: boolean;
+  /** Custom extraction prompt override for auto-extract. */
+  extractPrompt?: string;
+};
+
+/** External memory provider configuration (MCP or builtin). */
+export type MemoryProviderConfig = {
+  /** Provider type. Default: "builtin". */
+  type: "builtin" | "mcp";
+  /** MCP server configuration (when type is "mcp"). */
+  mcp?: {
+    /** MCP server name or command. */
+    server: string;
+    /** MCP server arguments. */
+    args?: string[];
+    /** Which MCP tools to use (e.g. ["retain", "recall", "reflect"]). */
+    tools?: string[];
+  };
+};
+
+/** Full memory configuration — set per-agent or at domain level. */
+export type MemoryConfig2 = {
+  /** Ghost turn recall settings. */
+  recall?: MemoryRecallConfig;
+  /** What gets saved to memory. */
+  persist?: MemoryPersistConfig;
+  /** External memory provider (MCP). */
+  provider?: MemoryProviderConfig;
+};
+
 export type MemoryGovernanceConfig = {
   instructions?: boolean | string;  // true = role default, string = custom, false = disable
   expectations?: boolean;           // true = role default expectations, false = none
@@ -1328,6 +1397,12 @@ export type MemoryGovernanceConfig = {
     aggressiveness?: "low" | "medium" | "high";
     scope?: "self" | "reports" | "all";
   };
+  /** Ghost turn recall settings. */
+  recall?: MemoryRecallConfig;
+  /** What gets saved to memory. */
+  persist?: MemoryPersistConfig;
+  /** External memory provider (MCP). */
+  provider?: MemoryProviderConfig;
 };
 
 // --- Budget forecast types ---

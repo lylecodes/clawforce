@@ -328,6 +328,107 @@ export function validateAllConfigs(baseDir: string): ValidationReport {
           }
         }
       }
+
+      // --- Memory config validation ---
+      const memory = agentDef.memory as Record<string, unknown> | undefined;
+      if (memory && typeof memory === "object") {
+        // Validate recall section
+        if (memory.recall !== undefined && typeof memory.recall === "object" && memory.recall !== null) {
+          const recall = memory.recall as Record<string, unknown>;
+          if (recall.intensity !== undefined) {
+            const validIntensities = ["low", "medium", "high"];
+            if (typeof recall.intensity !== "string" || !validIntensities.includes(recall.intensity)) {
+              issues.push({
+                severity: "error",
+                file: "project.yaml",
+                path: `agents.${agentId}.memory.recall.intensity`,
+                agentId,
+                code: "INVALID_MEMORY_RECALL_INTENSITY",
+                message: `Agent ${agentId}: memory.recall.intensity must be one of: ${validIntensities.join(", ")}`,
+              });
+            }
+          }
+          if (recall.cooldownMs !== undefined && typeof recall.cooldownMs !== "number") {
+            issues.push({
+              severity: "error",
+              file: "project.yaml",
+              path: `agents.${agentId}.memory.recall.cooldownMs`,
+              agentId,
+              code: "TYPE_COERCION",
+              message: `Agent ${agentId}: memory.recall.cooldownMs must be a number`,
+            });
+          }
+        }
+
+        // Validate persist section
+        if (memory.persist !== undefined && typeof memory.persist === "object" && memory.persist !== null) {
+          const persist = memory.persist as Record<string, unknown>;
+          if (persist.rules !== undefined && Array.isArray(persist.rules)) {
+            const validTriggers = new Set(["session_end", "task_completed", "task_failed", "periodic"]);
+            const validActions = new Set(["extract_learnings", "save_decisions", "save_errors", "custom"]);
+            for (let i = 0; i < persist.rules.length; i++) {
+              const rule = persist.rules[i] as Record<string, unknown>;
+              if (!rule || typeof rule !== "object") continue;
+              if (typeof rule.trigger === "string" && !validTriggers.has(rule.trigger)) {
+                issues.push({
+                  severity: "error",
+                  file: "project.yaml",
+                  path: `agents.${agentId}.memory.persist.rules[${i}].trigger`,
+                  agentId,
+                  code: "INVALID_PERSIST_TRIGGER",
+                  message: `Agent ${agentId}: memory.persist.rules[${i}].trigger "${rule.trigger}" is not valid`,
+                });
+              }
+              if (typeof rule.action === "string" && !validActions.has(rule.action)) {
+                issues.push({
+                  severity: "error",
+                  file: "project.yaml",
+                  path: `agents.${agentId}.memory.persist.rules[${i}].action`,
+                  agentId,
+                  code: "INVALID_PERSIST_ACTION",
+                  message: `Agent ${agentId}: memory.persist.rules[${i}].action "${rule.action}" is not valid`,
+                });
+              }
+              if (rule.action === "custom" && typeof rule.prompt !== "string") {
+                issues.push({
+                  severity: "warn",
+                  file: "project.yaml",
+                  path: `agents.${agentId}.memory.persist.rules[${i}].prompt`,
+                  agentId,
+                  code: "MISSING_CUSTOM_PROMPT",
+                  message: `Agent ${agentId}: memory.persist.rules[${i}] uses "custom" action but has no prompt`,
+                });
+              }
+            }
+          }
+        }
+
+        // Validate provider section
+        if (memory.provider !== undefined && typeof memory.provider === "object" && memory.provider !== null) {
+          const provider = memory.provider as Record<string, unknown>;
+          const validProviderTypes = ["builtin", "mcp"];
+          if (provider.type !== undefined && (typeof provider.type !== "string" || !validProviderTypes.includes(provider.type))) {
+            issues.push({
+              severity: "error",
+              file: "project.yaml",
+              path: `agents.${agentId}.memory.provider.type`,
+              agentId,
+              code: "INVALID_PROVIDER_TYPE",
+              message: `Agent ${agentId}: memory.provider.type must be one of: ${validProviderTypes.join(", ")}`,
+            });
+          }
+          if (provider.type === "mcp" && (!provider.mcp || typeof provider.mcp !== "object")) {
+            issues.push({
+              severity: "error",
+              file: "project.yaml",
+              path: `agents.${agentId}.memory.provider.mcp`,
+              agentId,
+              code: "MISSING_MCP_CONFIG",
+              message: `Agent ${agentId}: memory.provider.mcp is required when type is "mcp"`,
+            });
+          }
+        }
+      }
     }
   }
 

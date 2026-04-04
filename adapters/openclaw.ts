@@ -524,21 +524,47 @@ const clawforcePlugin = {
         }
 
         // Ghost turn memory recall
+        // Per-agent memory.recall config overrides plugin-level ghostRecall defaults
+        const agentRecall = config.memory?.recall;
+        const recallEnabled = agentRecall?.enabled ?? cfg.ghostRecall.enabled;
+        const recallIntensity = agentRecall?.intensity ?? cfg.ghostRecall.intensity;
+        const recallMaxSearches = agentRecall?.maxSearches ?? cfg.ghostRecall.maxSearches;
+        const recallMaxInjectedChars = agentRecall?.maxInjectedChars ?? cfg.ghostRecall.maxInjectedChars;
+        const recallCooldownMs = agentRecall?.cooldownMs; // undefined = use intensity preset default
+
         let ghostContext: string | null = null;
-        if (cfg.ghostRecall.enabled && _createMemorySearchTool) {
+        if (recallEnabled && _createMemorySearchTool) {
           try {
             const isMemMode = memoryModeStore.get(sessionKey) ?? false;
             const isCron = !!jobName;
             let recallResult: GhostRecallResult | null = null;
 
+            // Determine the memory tool to use based on provider config
+            const providerType = config.memory?.provider?.type ?? "builtin";
+            let toolInstance: MemoryToolInstance | null = null;
+
+            if (providerType === "mcp") {
+              // TODO: MCP memory provider — use MCP server's recall/search tool
+              // When MCP client infrastructure is available, connect to the configured
+              // MCP server and use its search tool instead of OpenClaw's built-in memory_search.
+              // For now, fall back to builtin.
+              const mcpCfg = config.memory?.provider?.mcp;
+              if (mcpCfg) {
+                api.logger.info(`Clawforce: MCP memory provider configured (server: ${mcpCfg.server}) — falling back to builtin until MCP client is available`);
+              }
+              const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
+              toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
+            } else {
+              const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
+              toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
+            }
+
             if (isCron) {
               // Cron path: use job prompt directly, no LLM triage
               const cronPrompt = (event as { prompt?: string }).prompt ?? "";
-              const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
-              const toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
               recallResult = await runCronRecall(cronPrompt, toolInstance, {
-                maxSearches: cfg.ghostRecall.maxSearches,
-                maxInjectedChars: cfg.ghostRecall.maxInjectedChars,
+                maxSearches: recallMaxSearches,
+                maxInjectedChars: recallMaxInjectedChars,
                 debug: cfg.ghostRecall.debug,
                 sessionKey,
                 projectId: entry.projectId,
@@ -546,21 +572,20 @@ const clawforcePlugin = {
               });
             } else {
               // User-facing path: LLM triage on recent messages
-              const rawTool = _createMemorySearchTool({ agentSessionKey: sessionKey });
-              const toolInstance = rawTool ? adaptMemoryTool(rawTool) as unknown as MemoryToolInstance : null;
               recallResult = await runGhostRecall(
                 (event as { messages?: unknown[] }).messages ?? [],
                 toolInstance,
                 {
                   sessionKey,
-                  intensity: cfg.ghostRecall.intensity,
+                  intensity: recallIntensity,
                   memoryMode: isMemMode,
                   windowSize: cfg.ghostRecall.windowSize,
-                  maxInjectedChars: cfg.ghostRecall.maxInjectedChars,
-                  maxSearches: cfg.ghostRecall.maxSearches,
+                  maxInjectedChars: recallMaxInjectedChars,
+                  maxSearches: recallMaxSearches,
                   debug: cfg.ghostRecall.debug,
                   projectId: entry.projectId,
                   agentId,
+                  cooldownOverrideMs: recallCooldownMs,
                 },
               );
             }
@@ -1041,6 +1066,33 @@ const clawforcePlugin = {
           }
         } catch (err) {
           api.logger.warn(`Clawforce: meeting turn advance failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      // --- Memory persist rules (session_end trigger) ---
+      if (ctx.agentId) {
+        const persistEntry = getAgentConfig(ctx.agentId);
+        if (persistEntry) {
+          try {
+            const { shouldPersistMemory, getExtractionPrompt } = await import("../src/memory/persist.js");
+            const matchingRules = shouldPersistMemory("session_end", persistEntry.config);
+            if (matchingRules.length > 0) {
+              const prompts = matchingRules.map((rule) => getExtractionPrompt(rule, persistEntry.config));
+              // TODO: When MCP memory provider is active, call MCP server's retain/store tool.
+              // For now, emit a diagnostic event with the extraction prompts for downstream consumers.
+              emitDiagnosticEvent({
+                type: "memory_persist_triggered",
+                agentId: ctx.agentId,
+                sessionKey: ctx.sessionKey,
+                trigger: "session_end",
+                ruleCount: matchingRules.length,
+                prompts,
+              });
+            }
+          } catch (err) {
+            // Non-critical — don't let persist logic break session cleanup
+            api.logger.warn(`Clawforce: memory persist error: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }
 

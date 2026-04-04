@@ -29,6 +29,8 @@ export type GhostTurnOpts = {
   /** Project and agent IDs for search dedup. Optional for backwards compat. */
   projectId?: string;
   agentId?: string;
+  /** Override cooldown from per-agent config (ms). When set, takes priority over intensity preset cooldown. */
+  cooldownOverrideMs?: number;
 };
 
 export type MemoryToolInstance = {
@@ -271,7 +273,7 @@ export async function runGhostRecall(
   const startTime = Date.now();
   const effectiveIntensity: GhostTurnIntensity = opts.memoryMode ? "high" : opts.intensity;
   const preset = INTENSITY_PRESETS[effectiveIntensity];
-  const cooldownMs = opts.memoryMode ? 0 : preset.cooldownMs;
+  const cooldownMs = opts.memoryMode ? 0 : (opts.cooldownOverrideMs ?? preset.cooldownMs);
   const maxSearches = opts.memoryMode
     ? preset.maxSearches + 1
     : Math.min(opts.maxSearches, preset.maxSearches);

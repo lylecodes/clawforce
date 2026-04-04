@@ -5,7 +5,7 @@
  * plus runtime validators that return structured error lists.
  */
 
-import type { OperationalProfile, RuleDefinition } from "../types.js";
+import type { OperationalProfile, RuleDefinition, MemoryRecallConfig, MemoryPersistConfig, MemoryProviderConfig } from "../types.js";
 
 // --- Types ---
 
@@ -89,6 +89,12 @@ export type DomainConfig = {
     briefing?: unknown[];
     expectations?: unknown[];
     performance_policy?: Record<string, unknown>;
+    /** Domain-wide memory defaults inherited by all agents. */
+    memory?: {
+      recall?: MemoryRecallConfig;
+      persist?: MemoryPersistConfig;
+      provider?: MemoryProviderConfig;
+    };
   };
   /**
    * Role-level defaults applied to agents based on their `extends` field.
@@ -166,7 +172,122 @@ export function validateGlobalConfig(config: unknown): ValidationResult {
     });
   }
 
+  // Validate memory config on agents
+  if (isObject(config.agents)) {
+    for (const [agentId, agentDef] of Object.entries(config.agents as Record<string, unknown>)) {
+      if (!isObject(agentDef)) continue;
+      const memory = agentDef.memory;
+      if (memory !== undefined && isObject(memory)) {
+        const memErrors = validateMemorySection(memory, `agents.${agentId}.memory`);
+        errors.push(...memErrors);
+      }
+    }
+  }
+
   return { valid: errors.length === 0, errors };
+}
+
+function validateMemorySection(memory: Record<string, unknown>, pathPrefix: string): ValidationResult["errors"] {
+  const errors: ValidationResult["errors"] = [];
+
+  // Validate recall
+  if (memory.recall !== undefined) {
+    if (!isObject(memory.recall)) {
+      errors.push({ field: `${pathPrefix}.recall`, message: "recall must be an object" });
+    } else {
+      const recall = memory.recall;
+      if (recall.enabled !== undefined && typeof recall.enabled !== "boolean") {
+        errors.push({ field: `${pathPrefix}.recall.enabled`, message: "recall.enabled must be a boolean" });
+      }
+      if (recall.intensity !== undefined) {
+        const validIntensities = ["low", "medium", "high"];
+        if (typeof recall.intensity !== "string" || !validIntensities.includes(recall.intensity)) {
+          errors.push({ field: `${pathPrefix}.recall.intensity`, message: `recall.intensity must be one of: ${validIntensities.join(", ")}` });
+        }
+      }
+      if (recall.cooldownMs !== undefined && typeof recall.cooldownMs !== "number") {
+        errors.push({ field: `${pathPrefix}.recall.cooldownMs`, message: "recall.cooldownMs must be a number" });
+      }
+      if (recall.maxSearches !== undefined && typeof recall.maxSearches !== "number") {
+        errors.push({ field: `${pathPrefix}.recall.maxSearches`, message: "recall.maxSearches must be a number" });
+      }
+      if (recall.maxInjectedChars !== undefined && typeof recall.maxInjectedChars !== "number") {
+        errors.push({ field: `${pathPrefix}.recall.maxInjectedChars`, message: "recall.maxInjectedChars must be a number" });
+      }
+    }
+  }
+
+  // Validate persist
+  if (memory.persist !== undefined) {
+    if (!isObject(memory.persist)) {
+      errors.push({ field: `${pathPrefix}.persist`, message: "persist must be an object" });
+    } else {
+      const persist = memory.persist;
+      if (persist.enabled !== undefined && typeof persist.enabled !== "boolean") {
+        errors.push({ field: `${pathPrefix}.persist.enabled`, message: "persist.enabled must be a boolean" });
+      }
+      if (persist.autoExtract !== undefined && typeof persist.autoExtract !== "boolean") {
+        errors.push({ field: `${pathPrefix}.persist.autoExtract`, message: "persist.autoExtract must be a boolean" });
+      }
+      if (persist.extractPrompt !== undefined && typeof persist.extractPrompt !== "string") {
+        errors.push({ field: `${pathPrefix}.persist.extractPrompt`, message: "persist.extractPrompt must be a string" });
+      }
+      if (persist.rules !== undefined) {
+        if (!Array.isArray(persist.rules)) {
+          errors.push({ field: `${pathPrefix}.persist.rules`, message: "persist.rules must be an array" });
+        } else {
+          const validTriggers = ["session_end", "task_completed", "task_failed", "periodic"];
+          const validActions = ["extract_learnings", "save_decisions", "save_errors", "custom"];
+          for (let i = 0; i < persist.rules.length; i++) {
+            const rule = persist.rules[i] as Record<string, unknown>;
+            if (!isObject(rule)) {
+              errors.push({ field: `${pathPrefix}.persist.rules[${i}]`, message: "each rule must be an object" });
+              continue;
+            }
+            if (!validTriggers.includes(rule.trigger as string)) {
+              errors.push({ field: `${pathPrefix}.persist.rules[${i}].trigger`, message: `trigger must be one of: ${validTriggers.join(", ")}` });
+            }
+            if (!validActions.includes(rule.action as string)) {
+              errors.push({ field: `${pathPrefix}.persist.rules[${i}].action`, message: `action must be one of: ${validActions.join(", ")}` });
+            }
+            if (rule.action === "custom" && typeof rule.prompt !== "string") {
+              errors.push({ field: `${pathPrefix}.persist.rules[${i}].prompt`, message: "custom action requires a prompt string" });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Validate provider
+  if (memory.provider !== undefined) {
+    if (!isObject(memory.provider)) {
+      errors.push({ field: `${pathPrefix}.provider`, message: "provider must be an object" });
+    } else {
+      const provider = memory.provider;
+      const validTypes = ["builtin", "mcp"];
+      if (typeof provider.type !== "string" || !validTypes.includes(provider.type)) {
+        errors.push({ field: `${pathPrefix}.provider.type`, message: `provider.type must be one of: ${validTypes.join(", ")}` });
+      }
+      if (provider.type === "mcp") {
+        if (!isObject(provider.mcp)) {
+          errors.push({ field: `${pathPrefix}.provider.mcp`, message: "provider.mcp is required when type is 'mcp'" });
+        } else {
+          if (typeof provider.mcp.server !== "string" || (provider.mcp.server as string).length === 0) {
+            errors.push({ field: `${pathPrefix}.provider.mcp.server`, message: "provider.mcp.server must be a non-empty string" });
+          }
+          if (provider.mcp.args !== undefined && !Array.isArray(provider.mcp.args)) {
+            errors.push({ field: `${pathPrefix}.provider.mcp.args`, message: "provider.mcp.args must be an array" });
+          }
+          if (provider.mcp.tools !== undefined && !Array.isArray(provider.mcp.tools)) {
+            errors.push({ field: `${pathPrefix}.provider.mcp.tools`, message: "provider.mcp.tools must be an array" });
+          }
+        }
+      }
+    }
+  }
+
+  return errors;
 }
 
 export function validateDomainConfig(config: unknown): ValidationResult {
