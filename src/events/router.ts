@@ -28,6 +28,8 @@ import { writeAuditEntry } from "../audit.js";
 import { getProposal } from "../approval/resolve.js";
 import { getIntentByProposalForProject, resolveIntentForProject } from "../approval/intent-store.js";
 import { addPreApproval } from "../approval/pre-approved.js";
+import { advanceMeetingTurn, concludeMeeting } from "../channels/meeting.js";
+import { autoAssign } from "../assignment/engine.js";
 import { recordTrustDecision } from "../trust/tracker.js";
 
 export type EventHandlerResult = {
@@ -720,9 +722,6 @@ function handleTaskCreated(event: ClawforceEvent, db: DatabaseSync): EventHandle
     if (!extConfig?.assignment?.enabled) return { action: "handled", taskId };
 
     try {
-      // Dynamic import to avoid circular dependency
-      // (assignment → tasks/ops → events/store → router → assignment)
-      const { autoAssign } = require("../assignment/engine.js") as typeof import("../assignment/engine.js");
       const result = autoAssign(event.projectId, taskId, extConfig.assignment, db);
       if (result.assigned) return { action: "handled", taskId };
     } catch (err) { safeLog("event.router.autoAssign", err); }
@@ -737,11 +736,6 @@ function handleMeetingTurnCompleted(event: ClawforceEvent, _db: DatabaseSync): E
   if (!channelId) return { action: "ignored" };
 
   try {
-    const { advanceMeetingTurn, concludeMeeting } = require("../channels/meeting.js") as {
-      advanceMeetingTurn: (p: string, c: string) => { nextAgent: string | null; turnIndex: number; done: boolean };
-      concludeMeeting: (p: string, c: string, a: string) => unknown;
-    };
-
     const result = advanceMeetingTurn(event.projectId, channelId);
     if (result.done) {
       concludeMeeting(event.projectId, channelId, "system");

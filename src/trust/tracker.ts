@@ -20,6 +20,8 @@ import crypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
+import { getExtendedProjectConfig } from "../project.js";
+import { snapshotTrustScore } from "../telemetry/trust-history.js";
 
 // --- Types ---
 
@@ -99,7 +101,6 @@ function getTrustDefaults(projectId?: string): {
 } {
   try {
     if (projectId) {
-      const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
       const extConfig = getExtendedProjectConfig(projectId);
       const trustConfig = extConfig?.trust;
       if (trustConfig) {
@@ -180,7 +181,6 @@ export function recordTrustDecision(
 
   // Telemetry: snapshot trust score after this decision
   try {
-    const { snapshotTrustScore } = require("../telemetry/trust-history.js") as typeof import("../telemetry/trust-history.js");
     const trustDefaults = getTrustDefaults(params.projectId);
     const tier = trustAfter > trustDefaults.tierThresholdHigh ? "high" : trustAfter > trustDefaults.tierThresholdMedium ? "medium" : "low";
     snapshotTrustScore({

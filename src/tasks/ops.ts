@@ -149,31 +149,65 @@ export function createTask(
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  stmt.run(
-    id,
-    params.projectId,
-    params.title,
-    params.description ?? null,
-    state,
-    params.priority ?? "P2",
-    assignedTo ?? null,
-    params.createdBy,
-    now,
-    now,
-    params.deadline ?? null,
-    params.maxRetries ?? 3,
-    params.tags ? JSON.stringify(params.tags) : null,
-    params.workflowId ?? null,
-    params.workflowPhase ?? null,
-    params.parentTaskId ?? null,
-    params.department ?? null,
-    params.team ?? null,
-    params.goalId ?? null,
-    params.kind ?? null,
-    params.origin ?? null,
-    params.originId ?? null,
-    params.metadata ? JSON.stringify(params.metadata) : null,
-  );
+  // Wrap task INSERT + audit + event in a single transaction for atomicity.
+  // If any write fails, the whole thing rolls back — no orphaned tasks without event trails.
+  db.prepare("BEGIN IMMEDIATE").run();
+  try {
+    stmt.run(
+      id,
+      params.projectId,
+      params.title,
+      params.description ?? null,
+      state,
+      params.priority ?? "P2",
+      assignedTo ?? null,
+      params.createdBy,
+      now,
+      now,
+      params.deadline ?? null,
+      params.maxRetries ?? 3,
+      params.tags ? JSON.stringify(params.tags) : null,
+      params.workflowId ?? null,
+      params.workflowPhase ?? null,
+      params.parentTaskId ?? null,
+      params.department ?? null,
+      params.team ?? null,
+      params.goalId ?? null,
+      params.kind ?? null,
+      params.origin ?? null,
+      params.originId ?? null,
+      params.metadata ? JSON.stringify(params.metadata) : null,
+    );
+
+    writeAuditEntry({
+      projectId: params.projectId,
+      actor: params.createdBy,
+      action: "task.create",
+      targetType: "task",
+      targetId: id,
+      detail: params.title,
+      withinTransaction: true,
+    }, db);
+
+    // Emit task_created event ONLY. handleTaskCreated() in the event router is the
+    // single entry point that handles both OPEN and ASSIGNED tasks:
+    // - OPEN tasks → auto-assign (if configured) → emits task_assigned
+    // - ASSIGNED tasks → emits task_assigned (so dispatch fires)
+    // This eliminates duplicate task_assigned events from createTask + handleTaskCreated.
+    ingestEvent(params.projectId, "task_created", "internal", {
+      taskId: id,
+      title: params.title,
+      state,
+      assignedTo,
+      department: params.department,
+      team: params.team,
+    }, `task-created:${id}`, db);
+
+    db.prepare("COMMIT").run();
+  } catch (err) {
+    try { db.prepare("ROLLBACK").run(); } catch { /* already rolled back */ }
+    throw err;
+  }
 
   const task = getTask(params.projectId, id, db)!;
 
@@ -191,11 +225,12 @@ export function createTask(
   }
   (task as Task & { duplicateWarning?: string }).duplicateWarning = duplicateWarning;
 
-  // Track assignment so bootstrap hook can detect workers
+  // Track assignment so bootstrap hook can detect workers (side effect — outside transaction)
   if (assignedTo) {
     registerWorkerAssignment(assignedTo, params.projectId, id);
   }
 
+  // Diagnostic emitter — external side effect, not a DB write
   try {
     emitDiagnosticEvent({
       type: "clawforce.transition",
@@ -208,35 +243,6 @@ export function createTask(
   } catch (err) {
     safeLog("task.create.diagnostic", err);
   }
-
-  try {
-    writeAuditEntry({
-      projectId: params.projectId,
-      actor: params.createdBy,
-      action: "task.create",
-      targetType: "task",
-      targetId: id,
-      detail: params.title,
-    }, db);
-  } catch (err) {
-    safeLog("task.create.audit", err);
-  }
-
-  // Emit task_created event ONLY. handleTaskCreated() in the event router is the
-  // single entry point that handles both OPEN and ASSIGNED tasks:
-  // - OPEN tasks → auto-assign (if configured) → emits task_assigned
-  // - ASSIGNED tasks → emits task_assigned (so dispatch fires)
-  // This eliminates duplicate task_assigned events from createTask + handleTaskCreated.
-  try {
-    ingestEvent(params.projectId, "task_created", "internal", {
-      taskId: id,
-      title: params.title,
-      state,
-      assignedTo,
-      department: params.department,
-      team: params.team,
-    }, `task-created:${id}`, db);
-  } catch (err) { safeLog("task.create.event", err); }
 
   return task;
 }
@@ -429,7 +435,9 @@ export function transitionTask(
 
   updateValues.push(params.taskId, task.state, params.projectId);
 
-  // D1: Wrap UPDATE + INSERT in a transaction for atomicity
+  // D1: Wrap state UPDATE + transition INSERT + audit + events in a single transaction.
+  // This ensures no inconsistent state: if any DB write fails, everything rolls back.
+  // Side effects (queue ops, worker registry, diagnostics, child unblocking) stay outside.
   const ownTransaction = !params.withinTransaction;
   if (ownTransaction) db.prepare("BEGIN IMMEDIATE").run();
   try {
@@ -483,6 +491,69 @@ export function transitionTask(
       now,
     );
 
+    // Audit log entry — inside transaction for atomicity
+    writeAuditEntry({
+      projectId: params.projectId,
+      actor: params.actor,
+      action: "task.transition",
+      targetType: "task",
+      targetId: params.taskId,
+      detail: JSON.stringify({ from: task.state, to: params.toState, reason: params.reason }),
+      withinTransaction: true,
+    }, db);
+
+    // Event writes — inside transaction so event trail is always consistent with state
+
+    if (params.toState === "ASSIGNED") {
+      const assignee = params.assignedTo ?? params.actor;
+      ingestEvent(params.projectId, "task_assigned", "internal", {
+        taskId: params.taskId,
+        assignedTo: assignee,
+        fromState: task.state,
+      }, `task-assigned:${params.taskId}:${transitionId}`, db);
+    }
+
+    if (task.state === "IN_PROGRESS" && params.toState === "REVIEW") {
+      let evidenceCount = 0;
+      try {
+        const evidenceRow = db.prepare("SELECT COUNT(*) as cnt FROM evidence WHERE task_id = ?").get(params.taskId) as Record<string, unknown> | undefined;
+        evidenceCount = (evidenceRow?.cnt as number) ?? 0;
+      } catch (err) { safeLog("transition.evidenceCount", err); }
+
+      ingestEvent(params.projectId, "task_review_ready", "internal", {
+        taskId: params.taskId,
+        assignedTo: task.assignedTo,
+        fromState: task.state,
+        evidenceCount,
+      }, `task-review:${params.taskId}:${transitionId}`, db);
+    }
+
+    if (params.toState === "DONE") {
+      ingestEvent(params.projectId, "task_completed", "internal", {
+        taskId: params.taskId,
+        actor: params.actor,
+        workflowId: task.workflowId,
+      }, `task-completed:${params.taskId}`, db);
+    }
+
+    if (params.toState === "FAILED") {
+      ingestEvent(params.projectId, "task_failed", "internal", {
+        taskId: params.taskId,
+        actor: params.actor,
+        reason: params.reason,
+        workflowId: task.workflowId,
+      }, `task-failed:${params.taskId}:${transitionId}`, db);
+    }
+
+    // Always emit task_transitioned for every state change
+    ingestEvent(params.projectId, "task_transitioned", "internal", {
+      taskId: params.taskId,
+      fromState: task.state,
+      toState: params.toState,
+      agentId: params.actor,
+      transitionId,
+    }, `task-transitioned:${params.taskId}:${transitionId}`, db);
+
     if (ownTransaction) db.prepare("COMMIT").run();
   } catch (err) {
     if (ownTransaction) {
@@ -491,35 +562,12 @@ export function transitionTask(
     throw err;
   }
 
-  // Audit log entry — called AFTER commit (writeAuditEntry manages its own BEGIN IMMEDIATE
-  // unless we're inside a caller-managed transaction, in which case it joins it).
-  try {
-    writeAuditEntry({
-      projectId: params.projectId,
-      actor: params.actor,
-      action: "task.transition",
-      targetType: "task",
-      targetId: params.taskId,
-      detail: JSON.stringify({ from: task.state, to: params.toState, reason: params.reason }),
-      withinTransaction: params.withinTransaction,
-    }, db);
-  } catch (err) {
-    safeLog("transition.audit", err);
-  }
+  // --- Side effects (outside transaction) ---
 
   // Track/clear worker assignment for bootstrap hook detection
   if (params.toState === "ASSIGNED") {
     const assignee = params.assignedTo ?? params.actor;
     registerWorkerAssignment(assignee, params.projectId, params.taskId);
-
-    // Emit task_assigned event (for auto-dispatch)
-    try {
-      ingestEvent(params.projectId, "task_assigned", "internal", {
-        taskId: params.taskId,
-        assignedTo: assignee,
-        fromState: task.state,
-      }, `task-assigned:${params.taskId}:${transitionId}`, db);
-    } catch (err) { safeLog("transition.assignedEvent", err); }
   }
   if (params.toState === "DONE" || params.toState === "FAILED" || params.toState === "CANCELLED") {
     if (task.assignedTo) clearWorkerAssignment(task.assignedTo, db);
@@ -596,35 +644,9 @@ export function transitionTask(
     } catch (err) { safeLog("transition.completionRateFailed", err); }
   }
 
-  // Emit task_review_ready when transitioning from IN_PROGRESS to REVIEW
-  if (task.state === "IN_PROGRESS" && params.toState === "REVIEW") {
-    let evidenceCount = 0;
-    try {
-      const evidenceRow = db.prepare("SELECT COUNT(*) as cnt FROM evidence WHERE task_id = ?").get(params.taskId) as Record<string, unknown> | undefined;
-      evidenceCount = (evidenceRow?.cnt as number) ?? 0;
-    } catch (err) { safeLog("transition.evidenceCount", err); }
-
-    try {
-      ingestEvent(params.projectId, "task_review_ready", "internal", {
-        taskId: params.taskId,
-        assignedTo: task.assignedTo,
-        fromState: task.state,
-        evidenceCount,
-      }, `task-review:${params.taskId}:${transitionId}`, db);
-    } catch (err) { safeLog("transition.reviewEvent", err); }
-  }
-
-  // Emit events for terminal transitions
+  // Auto-unblock child tasks: when a parent completes, move BLOCKED children to ASSIGNED
+  // (outside transaction — each child transition manages its own transaction)
   if (params.toState === "DONE") {
-    try {
-      ingestEvent(params.projectId, "task_completed", "internal", {
-        taskId: params.taskId,
-        actor: params.actor,
-        workflowId: task.workflowId,
-      }, `task-completed:${params.taskId}`, db);
-    } catch (err) { safeLog("transition.completedEvent", err); }
-
-    // Auto-unblock child tasks: when a parent completes, move BLOCKED children to ASSIGNED
     try {
       const blockedChildren = db.prepare(
         "SELECT id, assigned_to FROM tasks WHERE parent_task_id = ? AND project_id = ? AND state = 'BLOCKED'",
@@ -642,27 +664,6 @@ export function transitionTask(
       }
     } catch (err) { safeLog("transition.unblockChildren", err); }
   }
-  if (params.toState === "FAILED") {
-    try {
-      ingestEvent(params.projectId, "task_failed", "internal", {
-        taskId: params.taskId,
-        actor: params.actor,
-        reason: params.reason,
-        workflowId: task.workflowId,
-      }, `task-failed:${params.taskId}:${transitionId}`, db);
-    } catch (err) { safeLog("transition.failedEvent", err); }
-  }
-
-  // Emit task_transitioned event for every state transition
-  try {
-    ingestEvent(params.projectId, "task_transitioned", "internal", {
-      taskId: params.taskId,
-      fromState: task.state,
-      toState: params.toState,
-      agentId: params.actor,
-      transitionId,
-    }, `task-transitioned:${params.taskId}:${transitionId}`, db);
-  } catch (err) { safeLog("transition.transitionedEvent", err); }
 
   const updatedTask = getTask(params.projectId, params.taskId, db)!;
   const transition: Transition = {

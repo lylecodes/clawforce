@@ -47,7 +47,10 @@
       "types": "./dist/src/dashboard/plugin.d.ts",
       "default": "./dist/src/dashboard/plugin.js"
     },
-    "./openclaw": "./adapters/openclaw.ts"
+    "./openclaw": {
+      "types": "./dist/adapters/openclaw.d.ts",
+      "default": "./dist/adapters/openclaw.js"
+    }
   },
   "files": [
     "dist",
