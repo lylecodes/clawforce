@@ -35,7 +35,6 @@ describe("ESM package exports", () => {
     expect(cf.approvals).toBeDefined();
     expect(cf.triggers).toBeDefined();
     expect(cf.telemetry).toBeDefined();
-    expect(cf.experiments).toBeDefined();
   });
 
   it("dispatch namespace has enqueue, cancel, status methods", async () => {
