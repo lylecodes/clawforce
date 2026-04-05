@@ -131,7 +131,6 @@ export type CapabilityResponse = {
     budget: boolean;
     trust: boolean;
     memory: boolean;
-    experiments: boolean;
     comms: boolean;
   };
   endpoints: string[];

@@ -54,7 +54,6 @@ import {
   queryTrackedSessions,
   queryWorkerAssignments,
   queryQueueStatus,
-  queryExperiments,
   queryKnowledge,
   queryKnowledgeFlags,
   queryPromotionCandidates,
@@ -469,9 +468,6 @@ function routeRead(
     case "queue":
       return ok(queryQueueStatus(domain));
 
-    case "experiments":
-      return ok(queryExperiments(domain));
-
     case "knowledge":
       return ok(queryKnowledge(domain, {
         limit: params.limit ? safeParseInt(params.limit, 100) : undefined,
@@ -530,7 +526,6 @@ function buildCapabilities(domain: string): CapabilityResponse {
   let hasBudget = false;
   let hasTrust = false;
   let hasMemory = false;
-  let hasExperiments = false;
   let hasComms = false;
 
   try {
@@ -541,7 +536,6 @@ function buildCapabilities(domain: string): CapabilityResponse {
       hasBudget = !!extConfig.safety; // budget/safety config present
       hasTrust = !!extConfig.trust;
       hasMemory = !!extConfig.memory;
-      hasExperiments = true; // experiments are always available as a feature
       hasComms = !!(extConfig.channels && (extConfig.channels as unknown[]).length > 0);
     }
   } catch {
@@ -556,7 +550,6 @@ function buildCapabilities(domain: string): CapabilityResponse {
       budget: hasBudget,
       trust: hasTrust,
       memory: hasMemory,
-      experiments: hasExperiments,
       comms: hasComms,
     },
     endpoints: [
@@ -565,7 +558,7 @@ function buildCapabilities(domain: string): CapabilityResponse {
       "org", "health", "slos", "alerts", "events", "sessions",
       "metrics", "policies", "protocols", "audit-log", "audit-runs",
       "enforcement-retries", "onboarding", "tracked-sessions",
-      "worker-assignments", "queue", "experiments", "knowledge",
+      "worker-assignments", "queue", "knowledge",
       "knowledge-flags", "promotion-candidates", "interventions",
       "workstreams", "inbox", "operational-metrics", "capabilities",
     ],

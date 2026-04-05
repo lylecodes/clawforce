@@ -60,7 +60,6 @@ import {
   queryOnboardingState,
   queryTrackedSessions,
   queryWorkerAssignments,
-  queryExperiments,
   queryKnowledge,
   queryKnowledgeFlags,
   queryPromotionCandidates,
@@ -377,9 +376,6 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
         return ok(queryQueueStatus(projectId));
       }
 
-      case "experiments": {
-        return ok(queryExperiments(projectId));
-      }
 
       case "knowledge": {
         return ok(queryKnowledge(projectId, {

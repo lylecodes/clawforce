@@ -40,7 +40,7 @@ export const VALID_BRIEFING_SOURCES: ReadonlySet<string> = new Set([
  */
 export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
   "clawforce_task", "clawforce_verify", "clawforce_message",
-  "clawforce_context", "clawforce_experiment", "clawforce_ops",
+  "clawforce_context", "clawforce_ops",
   "clawforce_memory", "clawforce_skill", "clawforce_knowledge",
   "clawforce_scale", "clawforce_workflow", "clawforce_channel",
   "clawforce_goal", "clawforce_log",

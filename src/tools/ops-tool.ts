@@ -52,17 +52,6 @@ import {
 import { EVENT_STATUSES } from "../types.js";
 import type { EventStatus } from "../types.js";
 import { activateEmergencyStop, deactivateEmergencyStop, isEmergencyStopActive } from "../safety.js";
-import {
-  createExperiment,
-  startExperiment,
-  pauseExperiment,
-  completeExperiment,
-  killExperiment,
-  getExperiment,
-  listExperiments,
-} from "../experiments/lifecycle.js";
-import { getExperimentResults } from "../experiments/results.js";
-import type { ExperimentState } from "../types.js";
 
 const OPS_ACTIONS = [
   "agent_status", "kill_agent", "disable_agent", "enable_agent",
@@ -76,8 +65,6 @@ const OPS_ACTIONS = [
   "init_questions", "init_apply", "route",
   "emergency_stop", "emergency_resume",
   "disable_domain", "enable_domain", "domain_status",
-  "create_experiment", "start_experiment", "pause_experiment", "complete_experiment",
-  "kill_experiment", "apply_experiment", "experiment_status", "list_experiments",
   "propose_feature",
 ] as const;
 
@@ -149,16 +136,6 @@ const ClawforceOpsSchema = Type.Object({
   route_name: Type.Optional(Type.String({ description: "Route name to execute (for route action)." })),
   route_config: Type.Optional(Type.String({ description: "JSON route config: { name, source, condition, outputs } (for route action)." })),
   stream_data: Type.Optional(Type.String({ description: "JSON stream data context for condition evaluation (for route action)." })),
-  // experiment management params
-  experiment_id: Type.Optional(Type.String({ description: "Experiment ID (for experiment_status, start/pause/complete/kill/apply_experiment)." })),
-  experiment_name: Type.Optional(Type.String({ description: "Experiment name (for create_experiment)." })),
-  experiment_description: Type.Optional(Type.String({ description: "Description (for create_experiment)." })),
-  experiment_hypothesis: Type.Optional(Type.String({ description: "Hypothesis (for create_experiment)." })),
-  experiment_variants: Type.Optional(Type.String({ description: "JSON array of variant definitions (for create_experiment)." })),
-  experiment_strategy: Type.Optional(Type.String({ description: "Assignment strategy JSON (for create_experiment)." })),
-  experiment_criteria: Type.Optional(Type.String({ description: "Completion criteria JSON (for create_experiment)." })),
-  experiment_auto_apply: Type.Optional(Type.Boolean({ description: "Auto-apply winner when complete (for create_experiment)." })),
-  experiment_state_filter: Type.Optional(Type.String({ description: "Filter by state: draft, running, paused, completed, cancelled (for list_experiments)." })),
   // propose_feature params
   proposal_title: Type.Optional(Type.String({ description: "Feature proposal title (for propose_feature)." })),
   proposal_description: Type.Optional(Type.String({ description: "Feature proposal description (for propose_feature)." })),
@@ -1295,189 +1272,6 @@ export function createClawforceOpsTool(options?: {
               config_dir: configDir,
               budget_guidance: guidance,
             });
-          }
-
-          // --- Experiment Management ---
-
-          case "create_experiment": {
-            const name = readStringParam(params, "experiment_name");
-            if (!name) return jsonResult({ ok: false, reason: "experiment_name is required" });
-
-            const variantsStr = readStringParam(params, "experiment_variants");
-            if (!variantsStr) return jsonResult({ ok: false, reason: "experiment_variants is required (JSON array)" });
-
-            let variants: Array<{ name: string; isControl?: boolean; config: Record<string, unknown> }>;
-            try {
-              variants = JSON.parse(variantsStr);
-            } catch {
-              return jsonResult({ ok: false, reason: "experiment_variants must be valid JSON array" });
-            }
-
-            const strategyStr = readStringParam(params, "experiment_strategy");
-            let assignmentStrategy: Record<string, unknown> | undefined;
-            if (strategyStr) {
-              try {
-                assignmentStrategy = JSON.parse(strategyStr);
-              } catch {
-                return jsonResult({ ok: false, reason: "experiment_strategy must be valid JSON" });
-              }
-            }
-
-            const criteriaStr = readStringParam(params, "experiment_criteria");
-            let completionCriteria: Record<string, unknown> | undefined;
-            if (criteriaStr) {
-              try {
-                completionCriteria = JSON.parse(criteriaStr);
-              } catch {
-                return jsonResult({ ok: false, reason: "experiment_criteria must be valid JSON" });
-              }
-            }
-
-            const db = getDb(projectId);
-            try {
-              const result = createExperiment(projectId, {
-                name,
-                description: readStringParam(params, "experiment_description") ?? undefined,
-                hypothesis: readStringParam(params, "experiment_hypothesis") ?? undefined,
-                assignmentStrategy: assignmentStrategy as any,
-                completionCriteria: completionCriteria as any,
-                autoApplyWinner: readBooleanParam(params, "experiment_auto_apply") ?? false,
-                createdBy: caller,
-                variants,
-              }, db);
-
-              writeAuditEntry({
-                projectId,
-                actor: caller,
-                action: "create_experiment",
-                targetType: "experiment",
-                targetId: result.id,
-                detail: JSON.stringify({ name, variantCount: variants.length }),
-              }, db);
-
-              return jsonResult({ ok: true, experiment: result });
-            } catch (err) {
-              return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
-            }
-          }
-
-          case "start_experiment": {
-            const experimentId = readStringParam(params, "experiment_id");
-            if (!experimentId) return jsonResult({ ok: false, reason: "experiment_id is required" });
-
-            const db = getDb(projectId);
-            try {
-              const result = startExperiment(projectId, experimentId, db);
-              writeAuditEntry({ projectId, actor: caller, action: "start_experiment", targetType: "experiment", targetId: experimentId }, db);
-              return jsonResult({ ok: true, experiment: result });
-            } catch (err) {
-              return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
-            }
-          }
-
-          case "pause_experiment": {
-            const experimentId = readStringParam(params, "experiment_id");
-            if (!experimentId) return jsonResult({ ok: false, reason: "experiment_id is required" });
-
-            const db = getDb(projectId);
-            try {
-              const result = pauseExperiment(projectId, experimentId, db);
-              writeAuditEntry({ projectId, actor: caller, action: "pause_experiment", targetType: "experiment", targetId: experimentId }, db);
-              return jsonResult({ ok: true, experiment: result });
-            } catch (err) {
-              return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
-            }
-          }
-
-          case "complete_experiment": {
-            const experimentId = readStringParam(params, "experiment_id");
-            if (!experimentId) return jsonResult({ ok: false, reason: "experiment_id is required" });
-
-            const db = getDb(projectId);
-            try {
-              const result = completeExperiment(projectId, experimentId, undefined, db);
-              writeAuditEntry({ projectId, actor: caller, action: "complete_experiment", targetType: "experiment", targetId: experimentId }, db);
-              return jsonResult({ ok: true, experiment: result });
-            } catch (err) {
-              return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
-            }
-          }
-
-          case "kill_experiment": {
-            const experimentId = readStringParam(params, "experiment_id");
-            if (!experimentId) return jsonResult({ ok: false, reason: "experiment_id is required" });
-
-            const db = getDb(projectId);
-            try {
-              const result = killExperiment(projectId, experimentId, db);
-              writeAuditEntry({ projectId, actor: caller, action: "kill_experiment", targetType: "experiment", targetId: experimentId }, db);
-              return jsonResult({ ok: true, experiment: result });
-            } catch (err) {
-              return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
-            }
-          }
-
-          case "apply_experiment": {
-            const experimentId = readStringParam(params, "experiment_id");
-            if (!experimentId) return jsonResult({ ok: false, reason: "experiment_id is required" });
-
-            const db = getDb(projectId);
-            const exp = getExperiment(projectId, experimentId, db);
-            if (!exp) return jsonResult({ ok: false, reason: `Experiment not found: ${experimentId}` });
-
-            if (exp.state !== "completed") {
-              return jsonResult({ ok: false, reason: `Cannot apply experiment in state "${exp.state}" — must be "completed"` });
-            }
-
-            // Determine winner: use stored winner or compute from results
-            let winnerVariantId = exp.winnerVariantId;
-            if (!winnerVariantId) {
-              const results = getExperimentResults(projectId, experimentId, db);
-              winnerVariantId = results.winner?.id;
-            }
-
-            if (!winnerVariantId) {
-              return jsonResult({ ok: false, reason: "No winner variant determined. Complete the experiment with a winner or ensure variants have session data." });
-            }
-
-            const winnerVariant = exp.variants.find(v => v.id === winnerVariantId);
-
-            writeAuditEntry({
-              projectId,
-              actor: caller,
-              action: "apply_experiment",
-              targetType: "experiment",
-              targetId: experimentId,
-              detail: JSON.stringify({ winnerVariantId, winnerVariantName: winnerVariant?.name }),
-            }, db);
-
-            return jsonResult({
-              ok: true,
-              experimentId,
-              winnerVariantId,
-              winnerVariant: winnerVariant ?? null,
-              message: "Winner variant identified. Apply variant config to agent configuration manually.",
-            });
-          }
-
-          case "experiment_status": {
-            const experimentId = readStringParam(params, "experiment_id");
-            if (!experimentId) return jsonResult({ ok: false, reason: "experiment_id is required" });
-
-            const db = getDb(projectId);
-            const exp = getExperiment(projectId, experimentId, db);
-            if (!exp) return jsonResult({ ok: false, reason: `Experiment not found: ${experimentId}` });
-
-            const results = getExperimentResults(projectId, experimentId, db);
-
-            return jsonResult({ ok: true, experiment: exp, results });
-          }
-
-          case "list_experiments": {
-            const stateFilter = readStringParam(params, "experiment_state_filter");
-            const db = getDb(projectId);
-            const experiments = listExperiments(projectId, stateFilter as ExperimentState | undefined, db);
-            return jsonResult({ ok: true, experiments, count: experiments.length });
           }
 
           case "propose_feature": {

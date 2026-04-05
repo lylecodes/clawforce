@@ -15,7 +15,6 @@ import { HooksNamespace } from "./hooks.js";
 import { ApprovalsNamespace } from "./approvals.js";
 import { TriggersNamespace } from "./triggers.js";
 import { TelemetryNamespace } from "./telemetry.js";
-import { ExperimentsNamespace } from "./experiments.js";
 
 export class Clawforce {
   readonly domain: string;
@@ -37,7 +36,6 @@ export class Clawforce {
   private _approvals?: ApprovalsNamespace;
   private _triggers?: TriggersNamespace;
   private _telemetry?: TelemetryNamespace;
-  private _experiments?: ExperimentsNamespace;
 
   private constructor(opts: ClawforceOptions) {
     this.opts = opts;
@@ -95,9 +93,6 @@ export class Clawforce {
   }
   get telemetry(): TelemetryNamespace {
     return (this._telemetry ??= new TelemetryNamespace(this.domain));
-  }
-  get experiments(): ExperimentsNamespace {
-    return (this._experiments ??= new ExperimentsNamespace(this.domain));
   }
 }
 

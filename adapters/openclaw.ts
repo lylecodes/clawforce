@@ -343,9 +343,6 @@ const clawforcePlugin = {
     // --- Meeting session tracking (per-session) ---
     const meetingSessionStore = new Map<string, { channelId: string; turnIndex: number; projectId: string }>();
 
-    // --- Experiment variant tracking (per-session) ---
-    const experimentSessionStore = new Map<string, { experimentId: string; variantId: string }>();
-
     // --- Context injection via before_prompt_build ---
     api.on("before_prompt_build", async (event, ctx) => {
       const agentId = ctx.agentId;
@@ -373,34 +370,6 @@ const clawforcePlugin = {
             api.logger.warn(`Clawforce: unknown job "${jobName}" for agent ${agentId} — using base config`);
           }
         }
-
-        // Experiment variant resolution — assign session to active experiment variant
-        // before context assembly so the variant config overrides take effect.
-        const dispatchCtxForExperiment = resolveDispatchContext((event as { prompt?: string }).prompt);
-        try {
-          const { getActiveExperimentForProject, assignVariant, getVariantConfig } = await import("../src/experiments/assignment.js");
-          const { mergeVariantConfig } = await import("../src/experiments/config.js");
-
-          const db = getDb(entry.projectId);
-          const activeExperiment = getActiveExperimentForProject(entry.projectId, db);
-          if (activeExperiment) {
-            const assignment = assignVariant(activeExperiment.experimentId, sessionKey, {
-              agentId,
-              jobName: jobName ?? undefined,
-              taskId: dispatchCtxForExperiment?.taskId,
-            }, db);
-            if (assignment.variantId) {
-              const variantConfig = getVariantConfig(activeExperiment.experimentId, assignment.variantId, db);
-              if (variantConfig) {
-                config = mergeVariantConfig(config, variantConfig);
-              }
-              experimentSessionStore.set(sessionKey, {
-                experimentId: activeExperiment.experimentId,
-                variantId: assignment.variantId,
-              });
-            }
-          }
-        } catch { /* experiment assignment is non-fatal */ }
 
         // Refresh provider rate limits (non-blocking, best-effort)
         // TODO: OpenClaw has loadProviderUsageSummary() which fetches live rate
@@ -1050,7 +1019,6 @@ const clawforcePlugin = {
       clearRateLimitSession(ctx.sessionKey);
       memoryModeStore.delete(ctx.sessionKey);
       sessionTurnCountStore.delete(ctx.sessionKey);
-      experimentSessionStore.delete(ctx.sessionKey);
 
       // --- Meeting turn advancement ---
       const meetingCtx = meetingSessionStore.get(ctx.sessionKey);

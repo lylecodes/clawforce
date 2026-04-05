@@ -263,15 +263,6 @@ export { detectConfigChange, getConfigVersion, getConfigHistory } from "./teleme
 export { recordReview, getReviewsForTask, getReviewStats } from "./telemetry/review-store.js";
 export { snapshotTrustScore, getTrustTimeline } from "./telemetry/trust-history.js";
 
-// --- Experiments ---
-export { createExperiment, startExperiment, pauseExperiment, completeExperiment, killExperiment, getExperiment, listExperiments } from "./experiments/lifecycle.js";
-export { mergeVariantConfig } from "./experiments/config.js";
-export { assignVariant, getActiveExperimentForProject } from "./experiments/assignment.js";
-export { recordExperimentOutcome, getExperimentResults } from "./experiments/results.js";
-export type { ExperimentResults } from "./experiments/results.js";
-export { checkCanaryHealth } from "./experiments/canary.js";
-export { validateExperimentConfig } from "./experiments/validation.js";
-
 // --- Verification Gates ---
 export { runVerificationGates, formatGateResults, getTransitionFailureReason } from "./verification/runner.js";
 export { generateBranchName, createTaskBranch, mergeTaskBranch, deleteTaskBranch, discardTaskBranch } from "./verification/git.js";
@@ -349,13 +340,6 @@ export type {
   TriggerAfterProcess,
   TriggerSeverity,
   TriggerDefinition,
-  ExperimentState,
-  ExperimentAssignmentStrategy,
-  CompletionCriteria,
-  VariantConfig,
-  ExperimentOutcome,
-  Experiment,
-  ExperimentVariant,
   LifecycleConfig,
   ManagerBehaviorConfig,
   TelemetryConfig,
