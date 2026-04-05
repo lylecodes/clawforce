@@ -161,6 +161,7 @@ export { setDeliveryAdapter, getDeliveryAdapter, deliverMessage, clearDeliveryAd
 
 // --- Audit ---
 export { registerKillFunction } from "./audit/auto-kill.js";
+export { writeAuditEntry } from "./audit.js";
 
 // --- Tasks ---
 export { handleWorkerSessionEnd } from "./tasks/session-end.js";
@@ -182,6 +183,9 @@ export { executeAction } from "./events/actions.js";
 // --- Triggers ---
 export { evaluateConditions, resolvePath } from "./triggers/conditions.js";
 export { fireTrigger, getTriggerDefinitions, clearCooldowns } from "./triggers/processor.js";
+
+// --- Metrics ---
+export { recordMetric } from "./metrics.js";
 
 // --- Diagnostics ---
 export { emitDiagnosticEvent, setDiagnosticEmitter } from "./diagnostics.js";
