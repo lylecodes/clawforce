@@ -13,6 +13,7 @@ import type { ContextSource, AgentConfig } from "../types.js";
 import { isCompactionEnabled, buildCompactionInstructions } from "./sources/compaction.js";
 import { resolveSoulDoc } from "./sources/agent-docs.js";
 import { resolveRegisteredSource } from "./registry.js";
+import { getExtendedProjectConfig } from "../project.js";
 
 // Side-effect import: registers all context sources with the registry.
 import "./register-sources.js";
@@ -113,7 +114,6 @@ export function assembleContext(
   let defaultBudgetChars = 15_000;
   if (opts?.projectId) {
     try {
-      const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
       const extConfig = getExtendedProjectConfig(opts.projectId);
       if (extConfig?.context?.defaultBudgetChars != null) {
         defaultBudgetChars = extConfig.context.defaultBudgetChars;

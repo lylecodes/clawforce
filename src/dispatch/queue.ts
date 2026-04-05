@@ -12,6 +12,7 @@ import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { ingestEvent } from "../events/store.js";
 import { recordMetric } from "../metrics.js";
 import { writeAuditEntry } from "../audit.js";
+import { getExtendedProjectConfig } from "../project.js";
 import { checkQueueDepth } from "../safety.js";
 import type { DispatchQueueItem, DispatchQueueStatus } from "../types.js";
 
@@ -111,7 +112,6 @@ export function enqueue(
   // Read max dispatch attempts from config, fall back to default 3
   let effectiveMaxDispatchAttempts = 3;
   try {
-    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
     const extConfig = getExtendedProjectConfig(projectId);
     if (extConfig?.dispatch?.maxDispatchAttempts != null) {
       effectiveMaxDispatchAttempts = extConfig.dispatch.maxDispatchAttempts;
@@ -161,7 +161,6 @@ export function claimNext(
   // Read queue lease from config, fall back to parameter, then default
   let effectiveLeaseDuration = leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
   try {
-    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
     const extConfig = getExtendedProjectConfig(projectId);
     if (extConfig?.dispatch?.queueLeaseMs != null && leaseDurationMs == null) {
       effectiveLeaseDuration = extConfig.dispatch.queueLeaseMs;
@@ -397,8 +396,9 @@ export function releaseToQueued(
 export function cancelItem(
   id: string,
   dbOverride?: DatabaseSync,
+  projectId?: string,
 ): void {
-  const db = dbOverride ?? getDb("");
+  const db = dbOverride ?? getDb(projectId ?? "");
   db.prepare(
     "UPDATE dispatch_queue SET status = 'cancelled', completed_at = ? WHERE id = ?",
   ).run(Date.now(), id);

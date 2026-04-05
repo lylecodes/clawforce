@@ -65,7 +65,7 @@ export class DispatchNamespace {
     return internalEnqueue(
       this.domain,
       taskId,
-      undefined,
+      opts?.agentId ? { agentId: opts.agentId } : undefined,
       opts?.priority,
       undefined,
       undefined,
@@ -118,7 +118,7 @@ export class DispatchNamespace {
    * @param itemId - The queue item ID (not the task ID)
    */
   cancel(itemId: string): void {
-    cancelItem(itemId);
+    cancelItem(itemId, undefined, this.domain);
   }
 
   /**
@@ -126,11 +126,12 @@ export class DispatchNamespace {
    *
    * Returns counts by status: queued, leased, completed, failed, cancelled.
    */
-  status(): { queued: number; leased: number; completed: number; failed: number; cancelled: number } {
+  status(): { queued: number; leased: number; dispatched: number; completed: number; failed: number; cancelled: number } {
     const result = getQueueStatus(this.domain);
     return {
       queued: result.queued,
       leased: result.leased,
+      dispatched: result.dispatched,
       completed: result.completed,
       failed: result.failed,
       cancelled: result.cancelled,

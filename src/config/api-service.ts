@@ -8,7 +8,6 @@
  * Delegates to config/writer.ts and config/loader.ts for actual YAML I/O.
  */
 
-import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import YAML from "yaml";
@@ -25,12 +24,13 @@ import { loadGlobalConfig } from "./loader.js";
 import { scaffoldConfigDir } from "./wizard.js";
 import { initializeAllDomains } from "./init.js";
 import { safeLog } from "../diagnostics.js";
+import { getClawforceHome } from "../paths.js";
 
 // --- Internal ---
 
 /** Resolve the ClawForce base directory (~/.clawforce), respecting CLAWFORCE_HOME override. */
 function getBaseDir(): string {
-  return process.env.CLAWFORCE_HOME ?? path.join(os.homedir(), ".clawforce");
+  return getClawforceHome();
 }
 
 // --- Read operations ---

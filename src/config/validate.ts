@@ -8,6 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import YAML from "yaml";
 import { safeLog } from "../diagnostics.js";
 import { VALID_BRIEFING_SOURCES, KNOWN_TOOLS } from "../config-validator.js";
 
@@ -660,15 +661,5 @@ function detectMixinCycle(
 }
 
 function requireYaml(): { parse: (s: string) => unknown } | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require("yaml") as { parse: (s: string) => unknown };
-  } catch {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      return require("js-yaml") as { parse: (s: string) => unknown };
-    } catch {
-      return null;
-    }
-  }
+  return YAML;
 }

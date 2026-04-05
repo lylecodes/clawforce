@@ -26,6 +26,8 @@ import { getSafetyConfig } from "../safety.js";
 import { EVIDENCE_TYPES, TASK_KINDS, TASK_PRIORITIES, TASK_STATES } from "../types.js";
 import type { EvidenceType, TaskKind, TaskPriority, TaskState } from "../types.js";
 import { getAgentConfig } from "../project.js";
+import { getEffectiveVerificationConfig } from "../verification/lifecycle.js";
+import { mergeTaskBranch, deleteTaskBranch } from "../verification/git.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
@@ -227,14 +229,11 @@ export function createClawforceTaskTool(options?: {
               const completedTask = getTask(projectId, taskId);
               const branchName = (completedTask?.metadata as Record<string, unknown> | undefined)?.branchName as string | undefined;
               if (branchName) {
-                const { getEffectiveVerificationConfig } = require("../verification/lifecycle.js") as typeof import("../verification/lifecycle.js");
                 const verConfig = getEffectiveVerificationConfig(projectId);
                 if (verConfig.git?.auto_merge) {
-                  const { getAgentConfig: getAgentCfg } = require("../project.js") as typeof import("../project.js");
-                  const cfEntry = getAgentCfg(actor);
+                  const cfEntry = getAgentConfig(actor);
                   const projectDir = cfEntry?.projectDir;
                   if (projectDir) {
-                    const { mergeTaskBranch, deleteTaskBranch } = require("../verification/git.js") as typeof import("../verification/git.js");
                     const mergeResult = mergeTaskBranch(projectDir, branchName, verConfig.git.base_branch);
                     if (mergeResult.ok && verConfig.git.delete_after_merge) {
                       deleteTaskBranch(projectDir, branchName);

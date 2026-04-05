@@ -17,6 +17,7 @@ import { getSSEManager } from "./sse.js";
 import { checkAuth, setCorsHeaders, checkRateLimit } from "./auth.js";
 import type { AuthOptions } from "./auth.js";
 import { safeLog } from "../diagnostics.js";
+import { getExtendedProjectConfig } from "../project.js";
 import {
   queryAgents,
   queryAgentDetail,
@@ -533,7 +534,6 @@ function buildCapabilities(domain: string): CapabilityResponse {
   let hasComms = false;
 
   try {
-    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
     const extConfig = getExtendedProjectConfig(domain);
 
     if (extConfig) {

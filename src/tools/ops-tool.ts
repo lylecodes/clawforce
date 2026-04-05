@@ -8,6 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { getClawforceHome } from "../paths.js";
 import type { SQLInputValue } from "node:sqlite";
 import { Type } from "@sinclair/typebox";
 import { getInitQuestions, buildConfigFromAnswers, getBudgetGuidance } from "../config/init-flow.js";
@@ -1264,7 +1265,7 @@ export function createClawforceOpsTool(options?: {
             }
 
             const configDir = readStringParam(params, "config_dir") ??
-              path.join(process.env.HOME ?? "/tmp", ".clawforce");
+              getClawforceHome();
 
             const { global, domain } = buildConfigFromAnswers(answers);
 

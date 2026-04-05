@@ -5,6 +5,8 @@
  * Each topic has a preset filter so agents only see relevant knowledge.
  */
 
+import { resolve, join, sep } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { generate as generateRoles } from "./topics/roles.js";
 import { generate as generateTasks } from "./topics/tasks.js";
 import { generate as generateAccountability } from "./topics/accountability.js";
@@ -54,13 +56,11 @@ export function registerCustomSkills(
   projectDir: string,
 ): void {
   const topics: CustomSkillTopic[] = [];
-  const { resolve, join } = require("node:path") as typeof import("node:path");
-  const { existsSync } = require("node:fs") as typeof import("node:fs");
 
   for (const [id, skill] of Object.entries(skills)) {
     const resolved = resolve(projectDir, skill.path);
     // Path traversal guard
-    if (!resolved.startsWith(projectDir)) continue;
+    if (resolved !== projectDir && !resolved.startsWith(projectDir + sep)) continue;
     if (!existsSync(resolved)) continue;
 
     topics.push({
@@ -245,7 +245,6 @@ export function resolveSkillSource(preset: string, topic?: string, excludeTopics
           return `Topic "${topic}" is not available for preset "${preset}".`;
         }
         try {
-          const { readFileSync } = require("node:fs") as typeof import("node:fs");
           const content = readFileSync(custom.filePath, "utf-8").trim();
           if (!content) return `Topic "${topic}" is empty.`;
           // Cap at 10KB

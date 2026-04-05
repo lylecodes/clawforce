@@ -55,10 +55,10 @@ import fs from "node:fs";
 import YAML from "yaml";
 import { cmdOrg, cmdOrgSet, cmdOrgCheck } from "./cli/org.js";
 import { getAgentSaturation, getQueueWaitTime, getAgentThroughput, getCostEfficiency, getSessionEfficiency, getTaskCycleTime, getFailureRate, getRetryRate } from "./metrics/operational.js";
+import { getClawforceHome } from "./paths.js";
 
-const HOME = process.env.HOME ?? "/tmp";
 const DEFAULT_PROJECT = "clawforce-dev";
-const DB_DIR = path.join(HOME, ".clawforce");
+const DB_DIR = getClawforceHome();
 
 function getDb(projectId: string): DatabaseSync {
   const dbPath = path.join(DB_DIR, projectId, "clawforce.db");

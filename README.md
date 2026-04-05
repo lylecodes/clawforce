@@ -228,6 +228,36 @@ const cf = Clawforce.init({ domain: "my-project" });
 serveDashboard(cf, { port: 5173 });
 ```
 
+## Framework + Base Dashboard
+
+ClawForce is the product with the durable value. The framework owns the
+canonical primitives and contracts: hierarchies, tasks, approvals, budgets,
+context, trust, telemetry, and config semantics.
+
+The dashboard is optional. It should act as the base control plane for the
+common ClawForce surfaces that most builders share, not as the source of truth
+for the system.
+
+That means:
+
+- you can adopt ClawForce without adopting the dashboard
+- you can use the base dashboard as the default operator UI
+- you can build domain-specific views and workflows on top of the base
+  dashboard without forking the framework
+
+The intended boundary is:
+
+- **Framework:** schemas, storage, config, query/action/event contracts
+- **Base dashboard:** presentation, operator workflows, default UI
+- **Extensions:** domain-specific pages, cards, actions, and config editors
+
+If a dashboard feature needs new data or mutations, the framework contract
+should be extended first. The dashboard should consume published ClawForce APIs,
+not private file layouts or hidden DB assumptions.
+
+Direction doc:
+[`docs/plans/2026-04-04-framework-dashboard-direction.md`](docs/plans/2026-04-04-framework-dashboard-direction.md)
+
 ## Capability System
 
 Agents have capabilities, not job titles. Built-in presets provide sensible defaults:

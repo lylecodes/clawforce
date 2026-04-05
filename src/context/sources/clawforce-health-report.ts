@@ -5,6 +5,7 @@
  * into a compact markdown report (under 2KB).
  */
 
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -196,7 +197,6 @@ export function buildClawforceHealthReport(
     // Show recent git changes if projectDir available
     if (projectDir) {
       try {
-        const { execSync } = require("node:child_process");
         const diff = execSync("git log --oneline -5", {
           cwd: projectDir,
           encoding: "utf-8",

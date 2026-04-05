@@ -8,6 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { getExtendedProjectConfig } from "../project.js";
 
 export type ReviewContextOpts = {
   agentId: string;
@@ -34,7 +35,6 @@ export function buildReviewContext(opts: ReviewContextOpts & { projectId?: strin
   let defaultMaxChars = 50_000;
   if (opts.projectId) {
     try {
-      const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
       const extConfig = getExtendedProjectConfig(opts.projectId);
       if (extConfig?.memory?.reviewTranscriptMaxChars != null) {
         defaultMaxChars = extConfig.memory.reviewTranscriptMaxChars;

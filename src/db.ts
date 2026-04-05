@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import { runMigrations } from "./migrations.js";
+import { getClawforceHome } from "./paths.js";
 
 const databases: Map<string, DatabaseSync> = new Map();
 
@@ -37,8 +38,8 @@ function resolveHomeDir(): string {
   return home;
 }
 
-let projectsDir = path.join(resolveHomeDir(), ".clawforce");
-let dataDir = path.join(resolveHomeDir(), ".clawforce", "data");
+let projectsDir = getClawforceHome();
+let dataDir = path.join(getClawforceHome(), "data");
 
 export function setProjectsDir(dir: string): void {
   projectsDir = dir.startsWith("~")

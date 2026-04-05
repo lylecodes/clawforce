@@ -10,6 +10,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { transitionTask } from "./ops.js";
 import { getTask } from "./ops.js";
+import { getExtendedProjectConfig } from "../project.js";
 
 type TrackedWorker = {
   projectId: string;
@@ -118,7 +119,6 @@ export function enforceWorkerCompliance(
   // Read non-compliance action from config, default to BLOCKED
   let nonComplianceAction: "BLOCKED" | "REVIEW" | "FAILED" | "alert_only" = "BLOCKED";
   try {
-    const { getExtendedProjectConfig } = require("../project.js") as typeof import("../project.js");
     const extConfig = getExtendedProjectConfig(entry.projectId);
     if (extConfig?.lifecycle?.workerNonComplianceAction) {
       nonComplianceAction = extConfig.lifecycle.workerNonComplianceAction;

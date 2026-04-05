@@ -9,8 +9,9 @@
  * No internal files are modified — this is a pure wrapper layer.
  */
 
-import * as path from "node:path";
+import path from "node:path";
 import { initializeAllDomains } from "../config/init.js";
+import { getClawforceHome } from "../paths.js";
 import {
   getAgentConfig,
   getRegisteredAgentIds,
@@ -54,7 +55,7 @@ export class ConfigNamespace {
    */
   load(configPath?: string): void {
     // Default to ~/.clawforce if no path provided
-    const resolvedPath = configPath ?? path.join(process.env.HOME ?? "/tmp", ".clawforce");
+    const resolvedPath = configPath ?? getClawforceHome();
     // If the caller passes a YAML file path, treat its parent dir as baseDir.
     const baseDir = resolvedPath.endsWith(".yaml")
       ? path.dirname(resolvedPath)

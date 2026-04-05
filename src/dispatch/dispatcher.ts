@@ -19,8 +19,11 @@ import { classifyRisk } from "../risk/classifier.js";
 import { getRiskConfig } from "../risk/config.js";
 import { applyRiskGate } from "../risk/gate.js";
 import { findRootInitiative, getInitiativeSpend } from "../goals/ops.js";
-import { getTask, getTaskEvidence } from "../tasks/ops.js";
+import { getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
 import { acquireTaskLease, releaseTaskLease } from "../tasks/ops.js";
+import { getAgentConfig } from "../project.js";
+import { getEffectiveVerificationConfig } from "../verification/lifecycle.js";
+import { createTaskBranch } from "../verification/git.js";
 import { ingestEvent } from "../events/store.js";
 import { processEvents } from "../events/router.js";
 import { claimNext, failItem, markDispatched, reclaimExpiredLeases, releaseToQueued } from "./queue.js";
@@ -334,7 +337,6 @@ async function dispatchItem(
       try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, reason: "deadline_expired" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
       // Also transition the task to FAILED so it doesn't sit in a dispatchable state
       try {
-        const { transitionTask } = require("../tasks/ops.js") as typeof import("../tasks/ops.js");
         transitionTask({ projectId, taskId: item.taskId, toState: "FAILED", actor: "system:dispatch", reason: "Deadline expired before dispatch", verificationRequired: false }, db);
       } catch (err) { safeLog("dispatcher.deadlineTransition", err); }
       return;
@@ -378,8 +380,7 @@ async function dispatchItem(
         const sessionType = item.payload?.sessionType as string | undefined;
         const agentEntry = (() => {
           try {
-            const { getAgentConfig: getAgentCfg } = require("../project.js") as typeof import("../project.js");
-            return getAgentCfg(resolvedAgentId);
+            return getAgentConfig(resolvedAgentId);
           } catch { return undefined; }
         })();
         const isWorker = agentEntry?.config?.extends === "employee";
@@ -603,14 +604,11 @@ async function dispatchItem(
 
   // Git isolation: create branch for this task
   try {
-    const { getEffectiveVerificationConfig } = require("../verification/lifecycle.js") as typeof import("../verification/lifecycle.js");
     const verConfig = getEffectiveVerificationConfig(projectId);
     if (verConfig.git?.enabled) {
-      const { getAgentConfig: getAgentCfg } = require("../project.js") as typeof import("../project.js");
-      const cfEntry = getAgentCfg(resolvedAgentId);
+      const cfEntry = getAgentConfig(resolvedAgentId);
       const projectDir = cfEntry?.projectDir;
       if (projectDir) {
-        const { createTaskBranch } = require("../verification/git.js") as typeof import("../verification/git.js");
         const branchResult = createTaskBranch(
           projectDir,
           item.taskId,

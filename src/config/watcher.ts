@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import YAML from "yaml";
 import { safeLog } from "../diagnostics.js";
 import type { GlobalConfig, DomainConfig } from "./schema.js";
 
@@ -121,9 +122,7 @@ export function startConfigWatcher(baseDir: string, onReload: ReloadCallback): v
         if (changedFile && fs.existsSync(changedFile)) {
           try {
             const raw = fs.readFileSync(changedFile, "utf-8");
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const yaml = require("yaml") as { parse: (s: string) => unknown };
-            const parsed = yaml.parse(raw);
+            const parsed = YAML.parse(raw);
             if (!parsed || typeof parsed !== "object") {
               safeLog("config.watcher", `Skipping reload: ${filename} parsed to non-object value`);
               return;

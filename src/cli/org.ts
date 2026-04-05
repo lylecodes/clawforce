@@ -14,9 +14,9 @@ import type { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import fs from "node:fs";
 import YAML from "yaml";
+import { getClawforceHome } from "../paths.js";
 
-const HOME = process.env.HOME ?? "/tmp";
-const DB_DIR = path.join(HOME, ".clawforce");
+const DB_DIR = getClawforceHome();
 const DOMAINS_DIR = path.join(DB_DIR, "domains");
 
 // ─── Types ───────────────────────────────────────────────────────────
