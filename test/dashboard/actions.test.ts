@@ -446,22 +446,35 @@ describe("handleAction", () => {
   it("queues an agent kill through the sync action path", () => {
     const result = handleAction("test-project", "agents/a1/kill", {});
     expect(result.status).toBe(202);
-    expect(result.body).toEqual({
-      ok: true,
-      queued: true,
-      agentId: "a1",
-    });
+    const body = result.body as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body.queued).toBe(true);
+    expect(body.agentId).toBe("a1");
+    // 202 response must include action envelope with actionType
+    const action = body.action as Record<string, unknown>;
+    expect(action).toBeDefined();
+    expect(action.actionType).toBe("agent_kill");
+    expect(action.state).toBe("accepted");
+    // statusUrl is included when actionId is available (may be undefined if DB unavailable)
+    expect("actionId" in action).toBe(true);
+    expect("statusUrl" in action).toBe(true);
   });
 
   it("queues a domain kill through the sync action path", () => {
     const result = handleAction("test-project", "kill", { reason: "panic" });
     expect(result.status).toBe(202);
-    expect(result.body).toEqual({
-      ok: true,
-      queued: true,
-      domainEnabled: false,
-      emergencyStop: true,
-    });
+    const body = result.body as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body.queued).toBe(true);
+    expect(body.domainEnabled).toBe(false);
+    expect(body.emergencyStop).toBe(true);
+    // 202 response must include action envelope with actionType
+    const action = body.action as Record<string, unknown>;
+    expect(action).toBeDefined();
+    expect(action.actionType).toBe("domain_kill");
+    expect(action.state).toBe("accepted");
+    expect("actionId" in action).toBe(true);
+    expect("statusUrl" in action).toBe(true);
   });
 
   // --- Meetings ---
@@ -1068,7 +1081,8 @@ describe("handleAction", () => {
     expect(disableDomain).toHaveBeenCalledWith("test-project", "EMERGENCY: bad rollout", "user");
     expect(activateEmergencyStop).toHaveBeenCalledWith("test-project");
     expect(killStuckAgent).toHaveBeenCalledTimes(8);
-    expect(writeAuditEntry).toHaveBeenCalledTimes(2);
+    // 3 audit entries: disable_domain, emergency_stop, lock_bypassed
+    expect(writeAuditEntry).toHaveBeenCalledTimes(3);
   });
 
   // --- Unknown ---

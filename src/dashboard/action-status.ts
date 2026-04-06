@@ -220,10 +220,14 @@ export function cleanupOldRecords(
  * the action still runs and the error is suppressed. This ensures action tracking
  * is pure observability and never breaks the guarded operation.
  *
- * 1. Creates an action record with status "accepted"
+ * 1. Creates an action record with status "accepted" (or reuses existingActionId)
  * 2. Transitions to "in_progress" immediately before running fn
  * 3. Transitions to "completed" on success or "failed" on error
  * 4. Returns { actionId, result } on success or re-throws on failure
+ *
+ * @param existingActionId - If provided, reuse this pre-created action record instead of creating a new one.
+ *   Callers that need to return the actionId in a 202 response before background work runs should
+ *   pre-create the record with createActionRecord and pass the ID here.
  */
 export async function withActionTracking<T>(
   projectId: string,
@@ -231,14 +235,17 @@ export async function withActionTracking<T>(
   actor: string,
   fn: () => Promise<T>,
   db?: DatabaseSync,
+  existingActionId?: string,
 ): Promise<{ actionId: string; result: T }> {
   let resolved: DatabaseSync | undefined;
-  let actionId: string | undefined;
+  let actionId: string | undefined = existingActionId;
 
   // Tracking setup is non-fatal
   try {
     resolved = resolveDb(projectId, db);
-    actionId = createActionRecord(projectId, action, actor, undefined, resolved);
+    if (!actionId) {
+      actionId = createActionRecord(projectId, action, actor, undefined, resolved);
+    }
     updateActionStatus(actionId, "in_progress", undefined, resolved);
   } catch {
     /* tracking unavailable — proceed without it */
@@ -264,10 +271,12 @@ export async function withActionTracking<T>(
  *
  * Tracking is best-effort: if the DB is unavailable, the action still runs.
  *
- * 1. Creates an action record with status "accepted"
+ * 1. Creates an action record with status "accepted" (or reuses existingActionId)
  * 2. Transitions to "in_progress" before running fn
  * 3. Transitions to "completed" on success or "failed" on error
  * 4. Returns { actionId, result } on success or re-throws on failure
+ *
+ * @param existingActionId - If provided, reuse this pre-created action record instead of creating a new one.
  */
 export function withActionTrackingSync<T>(
   projectId: string,
@@ -275,14 +284,17 @@ export function withActionTrackingSync<T>(
   actor: string,
   fn: () => T,
   db?: DatabaseSync,
+  existingActionId?: string,
 ): { actionId: string; result: T } {
   let resolved: DatabaseSync | undefined;
-  let actionId: string | undefined;
+  let actionId: string | undefined = existingActionId;
 
   // Tracking setup is non-fatal
   try {
     resolved = resolveDb(projectId, db);
-    actionId = createActionRecord(projectId, action, actor, undefined, resolved);
+    if (!actionId) {
+      actionId = createActionRecord(projectId, action, actor, undefined, resolved);
+    }
     updateActionStatus(actionId, "in_progress", undefined, resolved);
   } catch {
     /* tracking unavailable — proceed without it */

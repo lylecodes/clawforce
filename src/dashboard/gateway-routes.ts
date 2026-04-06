@@ -75,6 +75,8 @@ import {
   ContextFileError,
 } from "./queries.js";
 import type { ActionStatusQuery } from "../api/contract.js";
+import { getActionRecord } from "./action-status.js";
+import { getDb } from "../db.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
 import { TASK_STATES, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
@@ -945,6 +947,28 @@ function routeRead(
       return ok(queryActionStatus(domain, query));
     }
 
+    case "actions": {
+      // GET /clawforce/api/:domain/actions — list (spec-aligned path alias for action-records)
+      // GET /clawforce/api/:domain/actions/:actionId — single record
+      const actionId = segments[1];
+      if (actionId) {
+        try {
+          const db = getDb(domain);
+          const record = getActionRecord(actionId, db);
+          if (!record) return notFound(`Action record "${actionId}" not found`);
+          return ok(record);
+        } catch {
+          return notFound(`Action record "${actionId}" not found`);
+        }
+      }
+      const query: ActionStatusQuery = {
+        status: params.status as ActionStatusQuery["status"] | undefined,
+        limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+      };
+      return ok(queryActionStatus(domain, query));
+    }
+
     default:
       return notFound("Unknown resource");
   }
@@ -998,7 +1022,7 @@ function buildCapabilities(domain: string): CapabilityResponse {
       "worker-assignments", "queue", "knowledge",
       "knowledge-flags", "promotion-candidates", "interventions",
       "workstreams", "inbox", "operational-metrics", "capabilities",
-      "extensions", "runtime",
+      "extensions", "runtime", "actions", "action-records",
     ],
     extensions: {
       count: loadedExtensions.length,
