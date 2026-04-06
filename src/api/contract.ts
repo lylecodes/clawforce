@@ -322,3 +322,51 @@ export type LocksQueryResponse = {
   locks: LockEntry[];
   count: number;
 };
+
+// --- History types ---
+
+/**
+ * Provenance of a change: who initiated it.
+ * - "human"  — operator action via dashboard or CLI
+ * - "agent"  — autonomous agent action
+ * - "system" — automated system action (sweep, cron, migration)
+ */
+export type ChangeProvenance = "human" | "agent" | "system";
+
+/**
+ * A single change record in the canonical change history.
+ * Provides before/after diffs, provenance, and revert state
+ * so operators can understand what changed and safely undo it.
+ */
+export type ChangeRecord = {
+  id: string;
+  projectId: string;
+  /** Structural type: "config" | "budget" | "agent" | "org" | "doc" | "rule" | "job" | "lock" */
+  resourceType: string;
+  /** e.g. section name, agent ID, doc path */
+  resourceId: string;
+  /** "create" | "update" | "delete" | "revert" | "domain_kill" */
+  action: string;
+  provenance: ChangeProvenance;
+  actor: string;
+  /** JSON snapshot of state before the change (null for creates) */
+  before: string | null;
+  /** JSON snapshot of state after the change (null for deletes) */
+  after: string | null;
+  /** Whether this change can be safely reverted */
+  reversible: boolean;
+  /** ID of the change record that reverted this one, if any */
+  revertedBy?: string;
+  createdAt: number;
+};
+
+/** Result of a revert operation. */
+export type RevertResult =
+  | { ok: true; changeId: string; revertChangeId: string }
+  | { ok: false; reason: string };
+
+/** Response for queryRecentChanges() and queryResourceHistory(). */
+export type ChangeHistoryResponse = {
+  records: ChangeRecord[];
+  count: number;
+};

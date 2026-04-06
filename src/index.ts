@@ -163,6 +163,12 @@ export { setDeliveryAdapter, getDeliveryAdapter, deliverMessage, clearDeliveryAd
 export { registerKillFunction } from "./audit/auto-kill.js";
 export { writeAuditEntry } from "./audit.js";
 
+// --- History ---
+export { recordChange, getChange, getResourceHistory, listRecentChanges } from "./history/store.js";
+export type { ChangeRecord, ChangeProvenance, RecordChangeParams, ResourceHistoryOpts, RecentChangesOpts } from "./history/store.js";
+export { canRevert, revertChange } from "./history/revert.js";
+export type { RevertResult, CanRevertResult } from "./history/revert.js";
+
 // --- Tasks ---
 export { handleWorkerSessionEnd } from "./tasks/session-end.js";
 

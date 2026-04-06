@@ -2327,3 +2327,50 @@ export function queryActionStatus(
     return { records: [], count: 0 };
   }
 }
+
+// --- History queries ---
+
+import {
+  getResourceHistory,
+  listRecentChanges,
+  type ResourceHistoryOpts,
+  type RecentChangesOpts,
+  type ChangeProvenance,
+} from "../history/store.js";
+
+/**
+ * Query changes for a specific resource.
+ * Wraps getResourceHistory with error handling.
+ */
+export function queryResourceHistory(
+  projectId: string,
+  resourceType: string,
+  resourceId: string,
+  opts?: ResourceHistoryOpts,
+) {
+  try {
+    const records = getResourceHistory(projectId, resourceType, resourceId, opts);
+    return { records, count: records.length };
+  } catch {
+    return { records: [], count: 0 };
+  }
+}
+
+/**
+ * Query recent changes across all resources for a project.
+ * Wraps listRecentChanges with error handling.
+ */
+export function queryRecentChanges(
+  projectId: string,
+  opts?: RecentChangesOpts,
+) {
+  try {
+    const records = listRecentChanges(projectId, opts);
+    return { records, count: records.length };
+  } catch {
+    return { records: [], count: 0 };
+  }
+}
+
+// Re-export types for gateway-routes.ts
+export type { ChangeProvenance };

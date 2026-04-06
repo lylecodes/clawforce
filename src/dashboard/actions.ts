@@ -46,6 +46,8 @@ import { validateRuleDefinition } from "../config/schema.js";
 import { acquireLock, releaseLock } from "../locks/store.js";
 import { checkLock, applyOverridePolicy } from "../locks/enforce.js";
 import { createActionRecord, withActionTracking, withActionTrackingSync } from "./action-status.js";
+import { recordChange, type ChangeProvenance } from "../history/store.js";
+import { revertChange } from "../history/revert.js";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -89,6 +91,8 @@ export function handleAction(
       return handleInterventionAction(projectId, segments, body);
     case "locks":
       return handleLockAction(projectId, segments, body);
+    case "history":
+      return handleHistoryAction(projectId, segments, body);
     default:
       return notFound(`Unknown action resource: ${resource}`);
   }
@@ -411,6 +415,18 @@ export async function handleDomainKillAction(
       detail: JSON.stringify({ bypassClass: "emergency_kill", reason }),
     });
   } catch { /* non-fatal */ }
+  try {
+    // Domain kill is operational — explicitly non-reversible
+    recordChange(projectId, {
+      resourceType: "org",
+      resourceId: projectId,
+      action: "domain_kill",
+      provenance: "human",
+      actor,
+      after: { reason, cancelledDispatches, killedSessions },
+      reversible: false,
+    });
+  } catch { /* non-fatal */ }
 
   return ok({
     ok: true,
@@ -558,25 +574,51 @@ function handleAgentAction(
   switch (action) {
     case "disable": {
       const reason = (body.reason as string) ?? "Disabled via dashboard";
+      const disableActor = (body.actor as string) ?? "dashboard";
       disableAgent(projectId, agentId, reason);
       emitSSE(projectId, "agent:status", { agentId, status: "disabled", reason });
       try {
         ingestEvent(projectId, "agent_disabled", "internal", {
           agentId,
           reason,
-          actor: (body.actor as string) ?? "dashboard",
+          actor: disableActor,
         }, `agent-disabled:${agentId}:${Date.now()}`);
+      } catch { /* non-fatal */ }
+      try {
+        recordChange(projectId, {
+          resourceType: "agent",
+          resourceId: agentId,
+          action: "update",
+          provenance: "human",
+          actor: disableActor,
+          before: { agentId, enabled: true },
+          after: { agentId, enabled: false, reason },
+          reversible: true,
+        });
       } catch { /* non-fatal */ }
       return ok({ agentId, status: "disabled" });
     }
     case "enable": {
+      const enableActor = (body.actor as string) ?? "dashboard";
       enableAgent(projectId, agentId);
       emitSSE(projectId, "agent:status", { agentId, status: "idle" });
       try {
         ingestEvent(projectId, "agent_enabled", "internal", {
           agentId,
-          actor: (body.actor as string) ?? "dashboard",
+          actor: enableActor,
         }, `agent-enabled:${agentId}:${Date.now()}`);
+      } catch { /* non-fatal */ }
+      try {
+        recordChange(projectId, {
+          resourceType: "agent",
+          resourceId: agentId,
+          action: "update",
+          provenance: "human",
+          actor: enableActor,
+          before: { agentId, enabled: false },
+          after: { agentId, enabled: true },
+          reversible: true,
+        });
       } catch { /* non-fatal */ }
       return ok({ agentId, status: "enabled" });
     }
@@ -943,6 +985,19 @@ function handleConfigAction(
             actor,
           }, `config-updated:${section}:${Date.now()}`);
         } catch { /* non-fatal */ }
+        try {
+          const provenance: ChangeProvenance = actor === "dashboard" || actor === "system" ? "human" : "human";
+          recordChange(projectId, {
+            resourceType: "config",
+            resourceId: section,
+            action: "update",
+            provenance,
+            actor,
+            before: existing[sectionToPersist as keyof typeof existing],
+            after: data,
+            reversible: true,
+          });
+        } catch { /* non-fatal */ }
         return ok({ ok: true, section, actionId });
       } catch (err) {
         return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
@@ -1077,6 +1132,18 @@ function handleBudgetAction(
             dailyLimitCents,
             allocationConfig,
           }),
+        });
+      } catch { /* non-fatal */ }
+
+      try {
+        recordChange(projectId, {
+          resourceType: "budget",
+          resourceId: childAgentId,
+          action: "update",
+          provenance: "human",
+          actor,
+          after: { parentAgentId, childAgentId, dailyLimitCents, allocationConfig },
+          reversible: true,
         });
       } catch { /* non-fatal */ }
 
@@ -2048,6 +2115,18 @@ function handleLockAction(
             detail: JSON.stringify({ surface, reason: lock.reason }),
           });
         } catch { /* non-fatal */ }
+        try {
+          recordChange(projectId, {
+            resourceType: "lock",
+            resourceId: surface,
+            action: "create",
+            provenance: "human",
+            actor,
+            before: null,
+            after: { surface, lockedBy: actor, reason: lock.reason },
+            reversible: true,
+          });
+        } catch { /* non-fatal */ }
         emitSSE(projectId, "locks:changed", { surface, event: "acquired", lockedBy: actor });
         return { status: 201, body: { ok: true, lock } };
       } catch (err) {
@@ -2070,6 +2149,18 @@ function handleLockAction(
             detail: JSON.stringify({ surface }),
           });
         } catch { /* non-fatal */ }
+        try {
+          recordChange(projectId, {
+            resourceType: "lock",
+            resourceId: surface,
+            action: "delete",
+            provenance: "human",
+            actor,
+            before: { surface, lockedBy: actor },
+            after: null,
+            reversible: true,
+          });
+        } catch { /* non-fatal */ }
         emitSSE(projectId, "locks:changed", { surface, event: "released", releasedBy: actor });
         return ok({ ok: true, surface });
       } catch (err) {
@@ -2079,6 +2170,42 @@ function handleLockAction(
     default:
       return notFound(`Unknown lock action: ${action}`);
   }
+}
+
+function handleHistoryAction(
+  projectId: string,
+  segments: string[],
+  body: Record<string, unknown>,
+): RouteResult {
+  // history/:changeId/revert
+  if (segments.length >= 3 && segments[2] === "revert") {
+    const changeId = segments[1]!;
+    const actor = (body.actor as string) ?? "dashboard";
+
+    const result = revertChange(projectId, changeId, actor);
+    if (!result.ok) {
+      return { status: 400, body: { ok: false, error: result.reason } };
+    }
+
+    try {
+      writeAuditEntry({
+        projectId,
+        actor,
+        action: "history_revert",
+        targetType: "change_record",
+        targetId: changeId,
+        detail: JSON.stringify({ changeId, revertChangeId: result.revertChangeId }),
+      });
+    } catch { /* non-fatal */ }
+
+    return ok({
+      ok: true,
+      changeId: result.changeId,
+      revertChangeId: result.revertChangeId,
+    });
+  }
+
+  return notFound(`Unknown history action: ${segments.join("/")}`);
 }
 
 // --- Helpers ---

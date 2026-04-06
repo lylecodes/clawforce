@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 41;
+export const SCHEMA_VERSION = 42;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -55,6 +55,7 @@ const migrations: Record<number, Migration> = {
   39: migrateV39,
   40: migrateV40,
   41: migrateV41,
+  42: migrateV42,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1271,6 +1272,33 @@ function migrateV41(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_cost_records_created ON cost_records(created_at);
     CREATE INDEX IF NOT EXISTS idx_dispatch_queue_project_status_created ON dispatch_queue(project_id, status, created_at);
     CREATE INDEX IF NOT EXISTS idx_tasks_project_state_priority ON tasks(project_id, state, priority);
+  `);
+}
+
+// --- Migration V42: Change history for operator confidence and safe revert ---
+
+function migrateV42(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS change_history (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      resource_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      provenance TEXT NOT NULL DEFAULT 'human',
+      actor TEXT NOT NULL,
+      before_snapshot TEXT,
+      after_snapshot TEXT,
+      reversible INTEGER NOT NULL DEFAULT 1,
+      reverted_by TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_change_history_project
+      ON change_history(project_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_change_history_resource
+      ON change_history(project_id, resource_type, resource_id, created_at DESC);
   `);
 }
 

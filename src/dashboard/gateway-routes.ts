@@ -70,6 +70,8 @@ import {
   queryOperationalMetrics,
   queryConfigVersions,
   queryActionStatus,
+  queryResourceHistory,
+  queryRecentChanges,
   readContextFile,
   writeContextFile,
   ContextFileError,
@@ -956,6 +958,30 @@ function routeRead(
         offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
       };
       return ok(queryActionStatus(domain, query));
+    }
+
+    case "history": {
+      // GET /clawforce/api/:domain/history
+      //   — list recent changes (all resources)
+      // GET /clawforce/api/:domain/history/:resourceType/:resourceId
+      //   — resource-specific history
+      const resourceType = segments[1];
+      const resourceId = segments[2];
+
+      if (resourceType && resourceId) {
+        return ok(queryResourceHistory(domain, resourceType, decodeURIComponent(resourceId), {
+          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+          provenance: params.provenance as import("../history/store.js").ChangeProvenance | undefined,
+        }));
+      }
+
+      return ok(queryRecentChanges(domain, {
+        limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+        resourceType: params.resourceType,
+        provenance: params.provenance as import("../history/store.js").ChangeProvenance | undefined,
+      }));
     }
 
     default:
