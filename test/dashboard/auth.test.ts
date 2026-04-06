@@ -179,6 +179,20 @@ describe("checkAuth", () => {
       }
     }
   });
+
+  it("sets X-Content-Type-Options: nosniff on 401 response", () => {
+    const req = createMockReq({ remoteAddress: "192.168.1.50" });
+    // Capture writeHead headers
+    let capturedHeaders: Record<string, unknown> = {};
+    const res = {
+      writeHead: vi.fn((status: number, headers?: Record<string, unknown>) => {
+        capturedHeaders = headers ?? {};
+      }),
+      end: vi.fn(),
+    } as unknown as ServerResponse;
+    checkAuth(req, res, {});
+    expect(capturedHeaders["X-Content-Type-Options"]).toBe("nosniff");
+  });
 });
 
 describe("setCorsHeaders", () => {
@@ -188,6 +202,13 @@ describe("setCorsHeaders", () => {
     setCorsHeaders(req, res);
     expect(res._headers["access-control-allow-methods"]).toBe("GET, POST, OPTIONS");
     expect(res._headers["access-control-allow-headers"]).toBe("Authorization, Content-Type");
+  });
+
+  it("sets Access-Control-Max-Age for preflight caching", () => {
+    const req = createMockReq({});
+    const res = createMockRes();
+    setCorsHeaders(req, res);
+    expect(res._headers["access-control-max-age"]).toBe("600");
   });
 
   it("does not set Allow-Origin when no Origin header", () => {
@@ -335,5 +356,24 @@ describe("checkRateLimit", () => {
     expect(getRateLimitMap().size).toBeGreaterThan(0);
     resetRateLimits();
     expect(getRateLimitMap().size).toBe(0);
+  });
+
+  it("sets X-Content-Type-Options: nosniff on 429 response", () => {
+    // Exhaust the rate limit
+    for (let i = 0; i < 100; i++) {
+      const req = createMockReq({ remoteAddress: "10.0.0.8" });
+      const res = createMockRes();
+      checkRateLimit(req, res);
+    }
+    let capturedHeaders: Record<string, unknown> = {};
+    const req = createMockReq({ remoteAddress: "10.0.0.8" });
+    const res = {
+      writeHead: vi.fn((status: number, headers?: Record<string, unknown>) => {
+        capturedHeaders = headers ?? {};
+      }),
+      end: vi.fn(),
+    } as unknown as ServerResponse;
+    checkRateLimit(req, res);
+    expect(capturedHeaders["X-Content-Type-Options"]).toBe("nosniff");
   });
 });

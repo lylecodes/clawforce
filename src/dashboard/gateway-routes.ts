@@ -66,6 +66,7 @@ import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
 import { TASK_STATES, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
 import type { CapabilityResponse } from "../api/contract.js";
+import { getExtendedProjectConfig } from "../project.js";
 
 /** Parse an integer from a string, returning a default if NaN. */
 function safeParseInt(value: string, defaultValue: number): number {
@@ -90,6 +91,13 @@ export type DashboardHandlerOptions = {
   auth?: AuthOptions & { skipAuth?: boolean };
   /** Allowed CORS origins. Defaults to localhost-only. */
   allowedOrigins?: string[];
+  /**
+   * Runtime mode — who owns the process and auth lifecycle.
+   *   "embedded"   — running inside an OpenClaw gateway plugin; OpenClaw owns auth.
+   *   "standalone" — running as a dedicated HTTP server; ClawForce owns auth.
+   * Defaults to "embedded" when skipAuth=true, "standalone" otherwise.
+   */
+  runtimeMode?: "embedded" | "standalone";
 };
 
 /**
@@ -97,11 +105,17 @@ export type DashboardHandlerOptions = {
  * Returns a handler compatible with registerHttpRoute handler signature.
  */
 export function createDashboardHandler(options: DashboardHandlerOptions) {
+  const runtimeMode = options.runtimeMode
+    ?? (options.auth?.skipAuth ? "embedded" : "standalone");
+
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
 
     // CORS — origin-validated (localhost by default, configurable)
     setCorsHeaders(req, res, options.allowedOrigins);
+
+    // Identify runtime mode on every response so the SPA can adapt
+    res.setHeader("X-ClawForce-Runtime", runtimeMode);
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -129,6 +143,16 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
         return;
       }
       getSSEManager().addClient(domain, res);
+      return;
+    }
+
+    // Runtime metadata endpoint: /clawforce/api/runtime
+    if (url.pathname === "/clawforce/api/runtime" && req.method === "GET") {
+      respondJson(res, 200, {
+        mode: runtimeMode,
+        auth: runtimeMode === "embedded" ? "openclaw-delegated" : "clawforce-managed",
+        version: "0.2.0",
+      });
       return;
     }
 

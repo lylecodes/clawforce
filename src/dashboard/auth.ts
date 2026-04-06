@@ -33,7 +33,7 @@ export type RateLimitEntry = {
 
 const LOCALHOST_ADDRS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"]);
 
-/** Extract the remote IP from a request (stripping IPv6-mapped IPv4 prefix). */
+/** Extract the remote IP from a request. */
 export function getRemoteIp(req: IncomingMessage): string {
   const raw = req.socket?.remoteAddress ?? "unknown";
   return raw;
@@ -99,6 +99,7 @@ export function setCorsHeaders(
 
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  res.setHeader("Access-Control-Max-Age", "600");
 
   if (!origin) {
     // No Origin header (same-origin or non-browser) — skip ACAO
@@ -209,6 +210,7 @@ function respondJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(json),
+    "X-Content-Type-Options": "nosniff",
   });
   res.end(json);
 }
