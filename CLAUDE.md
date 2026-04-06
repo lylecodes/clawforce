@@ -49,7 +49,7 @@ src/
 ## Testing
 
 ```bash
-npx vitest --run                    # Full suite (4258 tests, ~19s)
+npx vitest --run                    # Full suite (4269 tests, ~17s)
 npx vitest --run test/tasks/        # Test one module
 npx vitest --run --reporter=verbose # See all test names
 ```
@@ -74,16 +74,23 @@ Full reference: `docs/CONFIG_REFERENCE.md`
 
 ## Dashboard
 
-7 views served at `/clawforce/` via OpenClaw gateway:
+Views served at `/clawforce/` via OpenClaw gateway (or standalone on port 3117):
 - **Monitor** — single-page widget dashboard (org tree, budget, pipeline, activity, performance, alerts, health)
+- **Overview** — domain summary: agent counts, task states, cost summary
 - **Tasks** — kanban board with drag-drop state transitions
 - **Approvals** — risk-based approval workflow
-- **Org Chart** — full agent hierarchy with runtime status
+- **Ops** — operational controls: disable/enable agents and domains, intervention history
+- **Org** — full agent hierarchy with runtime status
+- **Workspace** — work stream view and worker assignments
 - **Comms** — agent messaging, inbox, threads
 - **Config** — domain config editor, context file editor, memory settings
-- **Experiments** — A/B experiment tracking
+- **Extensions** — pages contributed by registered extensions (e.g., Experiments)
 
 Tab selector (gear icon) lets users customize which views appear.
+
+Runtime detection: `GET /clawforce/api/runtime` — returns mode (`embedded` or `standalone`) and auth mode. `X-ClawForce-Runtime` header is set on every response.
+
+Extension API: `registerDashboardExtension()` from `clawforce/dashboard/extensions` — contributes pages, panels, actions, and config sections. Extensions registry at `GET /clawforce/api/extensions`.
 
 ## Important Rules
 
