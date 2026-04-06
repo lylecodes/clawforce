@@ -964,6 +964,10 @@ function buildCapabilities(domain: string): CapabilityResponse {
     // If config loading fails, report minimal features
   }
 
+  // Reflect currently registered dashboard extensions — extensions are loaded
+  // by OpenClaw plugins at startup, not by ClawForce itself.
+  const loadedExtensions = listDashboardExtensions();
+
   return {
     version: "0.2.0",
     features: {
@@ -985,6 +989,10 @@ function buildCapabilities(domain: string): CapabilityResponse {
       "workstreams", "inbox", "operational-metrics", "capabilities",
       "extensions", "runtime",
     ],
+    extensions: {
+      count: loadedExtensions.length,
+      ids: loadedExtensions.map((e) => e.id),
+    },
   };
 }
 

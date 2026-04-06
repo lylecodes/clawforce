@@ -252,6 +252,16 @@ export type KillResponse = {
   killed: number;
 };
 
+// --- Action Status ---
+
+export type { ActionStatus, ActionRecord } from "../dashboard/action-status.js";
+
+export type ActionStatusQuery = {
+  status?: "accepted" | "in_progress" | "completed" | "failed";
+  limit?: number;
+  offset?: number;
+};
+
 // --- Capability discovery ---
 
 export type CapabilityResponse = {
@@ -265,6 +275,13 @@ export type CapabilityResponse = {
     comms: boolean;
   };
   endpoints: string[];
+  /** Extension summary — reflects dashboard extensions currently registered. */
+  extensions?: {
+    /** Total number of registered dashboard extensions. */
+    count: number;
+    /** IDs of extensions currently loaded. */
+    ids: string[];
+  };
 };
 
 export type DashboardExtensionListResponse = {
@@ -278,4 +295,29 @@ export type DashboardRuntimeResponse = {
   standaloneCompatibilityServer?: boolean;
   standaloneUrl?: string;
   notes: string[];
+};
+
+// --- Lock types ---
+
+/** A lock entry as returned by the dashboard API. */
+export type LockEntry = {
+  id: string;
+  projectId: string;
+  surface: string;
+  lockedBy: string;
+  lockedAt: number;
+  reason?: string;
+};
+
+/** Response for lock/unlock actions. */
+export type LockResponse = {
+  ok: boolean;
+  lock?: LockEntry;
+  error?: string;
+};
+
+/** Response for queryLocks(). */
+export type LocksQueryResponse = {
+  locks: LockEntry[];
+  count: number;
 };
