@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { getMemoryDb } from "../../src/db.js";
-import { ensureLockTable } from "../../src/locks/store.js";
+import { ensureLockTable, setOverridePolicy } from "../../src/locks/store.js";
 import type { DatabaseSync } from "node:sqlite";
 
 // We test lock actions and queryLocks using the store directly (not via HTTP routing)
@@ -19,7 +19,7 @@ import {
   listLocks,
   isLocked,
 } from "../../src/locks/store.js";
-import { checkLock } from "../../src/locks/enforce.js";
+import { checkLock, applyOverridePolicy } from "../../src/locks/enforce.js";
 
 describe("Dashboard Locks Integration", () => {
   let db: DatabaseSync;
@@ -135,6 +135,69 @@ describe("Dashboard Locks Integration", () => {
       expect(locks[0]!.lockedBy).toBe("human-lead");
       expect(locks[0]!.reason).toBe("rule audit in progress");
       expect(typeof locks[0]!.lockedAt).toBe("number");
+    });
+
+    it("returns updatedAt on each lock entry", () => {
+      acquireLock(projectId, "budget", "human-1", undefined, db);
+      const locks = listLocks(projectId, db);
+      expect(typeof locks[0]!.updatedAt).toBe("number");
+    });
+  });
+
+  describe("HTTP 409 conflict shape", () => {
+    it("checkLock result contains the lock entry needed for 409 response", () => {
+      acquireLock(projectId, "budget", "human-admin", "launch week freeze", db);
+
+      const result = checkLock(projectId, "budget", "cf-lead", db);
+      expect(result.locked).toBe(true);
+
+      // Simulate what actions.ts returns as HTTP 409
+      const response = {
+        status: 409,
+        body: {
+          ok: false,
+          error: "LOCKED_BY_HUMAN",
+          lock: {
+            surface: "budget",
+            lockedBy: result.entry!.lockedBy,
+            lockedAt: result.entry!.lockedAt,
+            reason: result.entry!.reason,
+          },
+        },
+      };
+
+      expect(response.status).toBe(409);
+      expect(response.body.error).toBe("LOCKED_BY_HUMAN");
+      expect(response.body.lock.lockedBy).toBe("human-admin");
+      expect(response.body.lock.reason).toBe("launch week freeze");
+      expect(typeof response.body.lock.lockedAt).toBe("number");
+    });
+  });
+
+  describe("manual_changes_lock policy", () => {
+    it("applyOverridePolicy creates a lock after a human edit when policy is manual_changes_lock", () => {
+      setOverridePolicy(projectId, "rules", "manual_changes_lock", db);
+
+      // Simulate a human dashboard edit applying the policy
+      applyOverridePolicy(projectId, "rules", "dashboard", "auto-locked by policy", db);
+
+      expect(isLocked(projectId, "rules", db)).toBe(true);
+    });
+
+    it("agent is blocked from saving after manual_changes_lock policy auto-locks", () => {
+      setOverridePolicy(projectId, "jobs", "manual_changes_lock", db);
+      applyOverridePolicy(projectId, "jobs", "dashboard", undefined, db);
+
+      // Now agent tries to check — should be blocked
+      const result = checkLock(projectId, "jobs", "cf-lead", db);
+      expect(result.locked).toBe(true);
+      expect(result.entry!.lockedBy).toBe("dashboard");
+    });
+
+    it("autonomous_until_locked policy does not create a lock on human edit", () => {
+      // No policy set — defaults to autonomous_until_locked
+      applyOverridePolicy(projectId, "budget", "dashboard", undefined, db);
+      expect(isLocked(projectId, "budget", db)).toBe(false);
     });
   });
 });

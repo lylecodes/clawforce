@@ -44,8 +44,8 @@ import { safeLog } from "../diagnostics.js";
 import type { DomainConfig, GlobalAgentDef } from "../config/schema.js";
 import { validateRuleDefinition } from "../config/schema.js";
 import { acquireLock, releaseLock } from "../locks/store.js";
-import { checkLock } from "../locks/enforce.js";
-import { withActionTracking, withActionTrackingSync } from "./action-status.js";
+import { checkLock, applyOverridePolicy } from "../locks/enforce.js";
+import { createActionRecord, withActionTracking, withActionTrackingSync } from "./action-status.js";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -171,19 +171,33 @@ function handleDomainAction(
       });
     }
 
-    case "kill":
-      void handleDomainKillAction(projectId, body).catch((err) => {
+    case "kill": {
+      let preActionId: string | undefined;
+      try {
+        const db = getDb(projectId);
+        preActionId = createActionRecord(projectId, "domain_kill", actor, undefined, db);
+      } catch { /* non-fatal — proceed without pre-created record */ }
+
+      void handleDomainKillAction(projectId, body, preActionId).catch((err) => {
         safeLog("dashboard.actions.domainKill", err);
       });
+      const statusUrl = preActionId ? `/clawforce/api/${projectId}/actions/${preActionId}` : undefined;
       return {
         status: 202,
         body: {
           ok: true,
+          action: {
+            actionId: preActionId,
+            state: "accepted",
+            actionType: "domain_kill",
+            statusUrl,
+          },
           queued: true,
           domainEnabled: false,
           emergencyStop: true,
         },
       };
+    }
 
     default:
       return notFound(`Unknown domain action: ${action}`);
@@ -236,6 +250,7 @@ export async function handleAgentKillAction(
   projectId: string,
   agentId: string,
   body: Record<string, unknown>,
+  existingActionId?: string,
 ): Promise<RouteResult> {
   if (!isKnownProjectAgent(projectId, agentId)) {
     return notFound(`Agent "${agentId}" is not registered in project "${projectId}".`);
@@ -244,7 +259,7 @@ export async function handleAgentKillAction(
   const actor = (body.actor as string) ?? "dashboard";
   const reason = (body.reason as string) ?? "Killed via dashboard";
 
-  let actionId: string | undefined;
+  let actionId: string | undefined = existingActionId;
   let killedSessions: number;
 
   try {
@@ -256,13 +271,16 @@ export async function handleAgentKillAction(
         const sessions = await killAgentSessions(projectId, agentId, reason);
         return sessions;
       },
+      undefined,
+      existingActionId,
     );
     actionId = tracked.actionId;
     killedSessions = tracked.result;
 
     emitSSE(projectId, "action_status", {
       actionId,
-      status: "completed",
+      state: "completed",
+      actionType: "agent_kill",
     });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -272,7 +290,8 @@ export async function handleAgentKillAction(
     if (actionId) {
       emitSSE(projectId, "action_status", {
         actionId,
-        status: "failed",
+        state: "failed",
+        actionType: "agent_kill",
         error: errMsg,
       });
     }
@@ -303,12 +322,13 @@ export async function handleAgentKillAction(
 export async function handleDomainKillAction(
   projectId: string,
   body: Record<string, unknown>,
+  existingActionId?: string,
 ): Promise<RouteResult> {
   const actor = (body.actor as string) ?? "dashboard";
   const rawReason = (body.reason as string) ?? "Emergency stop via dashboard";
   const reason = rawReason.startsWith("EMERGENCY:") ? rawReason : `EMERGENCY: ${rawReason}`;
 
-  let actionId: string | undefined;
+  let actionId: string | undefined = existingActionId;
   let cancelledDispatches: number;
   let killedSessions: number;
 
@@ -329,6 +349,8 @@ export async function handleDomainKillAction(
 
         return { cancelledDispatches: cancelled, killedSessions: sessions };
       },
+      undefined,
+      existingActionId,
     );
     actionId = tracked.actionId;
     cancelledDispatches = tracked.result.cancelledDispatches;
@@ -336,7 +358,8 @@ export async function handleDomainKillAction(
 
     emitSSE(projectId, "action_status", {
       actionId,
-      status: "completed",
+      state: "completed",
+      actionType: "domain_kill",
     });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -345,7 +368,8 @@ export async function handleDomainKillAction(
     if (actionId) {
       emitSSE(projectId, "action_status", {
         actionId,
-        status: "failed",
+        state: "failed",
+        actionType: "domain_kill",
         error: errMsg,
       });
     }
@@ -376,6 +400,15 @@ export async function handleDomainKillAction(
       targetType: "domain",
       targetId: projectId,
       detail: JSON.stringify({ reason, cancelledDispatches, killedSessions }),
+    });
+    // Safety bypass: kill unconditionally overrides any active locks
+    writeAuditEntry({
+      projectId,
+      actor,
+      action: "lock_bypassed",
+      targetType: "domain",
+      targetId: projectId,
+      detail: JSON.stringify({ bypassClass: "emergency_kill", reason }),
     });
   } catch { /* non-fatal */ }
 
@@ -556,13 +589,26 @@ function handleAgentAction(
       });
     }
     case "kill": {
-      void handleAgentKillAction(projectId, agentId, body).catch((err) => {
+      let preAgentActionId: string | undefined;
+      try {
+        const db = getDb(projectId);
+        preAgentActionId = createActionRecord(projectId, "agent_kill", (body.actor as string) ?? "dashboard", undefined, db);
+      } catch { /* non-fatal — proceed without pre-created record */ }
+
+      void handleAgentKillAction(projectId, agentId, body, preAgentActionId).catch((err) => {
         safeLog("dashboard.actions.agentKill", err);
       });
+      const agentStatusUrl = preAgentActionId ? `/clawforce/api/${projectId}/actions/${preAgentActionId}` : undefined;
       return {
         status: 202,
         body: {
           ok: true,
+          action: {
+            actionId: preAgentActionId,
+            state: "accepted",
+            actionType: "agent_kill",
+            statusUrl: agentStatusUrl,
+          },
           queued: true,
           agentId,
         },
@@ -758,17 +804,38 @@ function handleConfigAction(
         try {
           const lockCheck = checkLock(projectId, lockSurface, actor);
           if (lockCheck.locked && lockCheck.entry) {
+            // Audit the blocked mutation
+            try {
+              writeAuditEntry({
+                projectId,
+                actor,
+                action: "lock_blocked_mutation",
+                targetType: "lock",
+                targetId: lockSurface,
+                detail: JSON.stringify({
+                  surface: lockSurface,
+                  blockedActor: actor,
+                  lockedBy: lockCheck.entry.lockedBy,
+                  reason: lockCheck.entry.reason,
+                }),
+              });
+            } catch { /* non-fatal */ }
             return {
-              status: 423,
+              status: 409,
               body: {
                 ok: false,
-                error: `Surface "${lockSurface}" is locked by "${lockCheck.entry.lockedBy}"` +
-                  (lockCheck.entry.reason ? `: ${lockCheck.entry.reason}` : ""),
-                lockedBy: lockCheck.entry.lockedBy,
-                surface: lockSurface,
+                error: "LOCKED_BY_HUMAN",
+                lock: {
+                  surface: lockSurface,
+                  lockedBy: lockCheck.entry.lockedBy,
+                  lockedAt: lockCheck.entry.lockedAt,
+                  reason: lockCheck.entry.reason,
+                },
               },
             };
           }
+          // Apply override policy (for manual_changes_lock, auto-create/refresh the lock)
+          applyOverridePolicy(projectId, lockSurface, actor);
         } catch { /* non-fatal — lock check failure should not block saves */ }
       }
 
@@ -868,7 +935,7 @@ function handleConfigAction(
           return { status: 400, body: { error: result.error } };
         }
 
-        emitSSE(projectId, "action_status", { actionId, status: "completed" });
+        emitSSE(projectId, "action_status", { actionId, state: "completed", actionType: `config_save:${section}` });
         emitSSE(projectId, "config:changed", { section });
         try {
           ingestEvent(projectId, "config_updated", "internal", {
@@ -984,7 +1051,8 @@ function handleBudgetAction(
       if (!result.ok) {
         emitSSE(projectId, "action_status", {
           actionId: budgetActionId,
-          status: "failed",
+          state: "failed",
+          actionType: "budget_allocate",
           error: result.reason,
         });
         return { status: 400, body: { ok: false, error: result.reason } };
@@ -992,7 +1060,8 @@ function handleBudgetAction(
 
       emitSSE(projectId, "action_status", {
         actionId: budgetActionId,
-        status: "completed",
+        state: "completed",
+        actionType: "budget_allocate",
       });
 
       try {

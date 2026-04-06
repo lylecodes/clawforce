@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { getMemoryDb } from "../../src/db.js";
-import { acquireLock, ensureLockTable } from "../../src/locks/store.js";
-import { checkLock, requireUnlocked } from "../../src/locks/enforce.js";
+import { acquireLock, ensureLockTable, getOverridePolicy, setOverridePolicy, isLocked } from "../../src/locks/store.js";
+import { checkLock, requireUnlocked, checkAgentMutation, applyOverridePolicy } from "../../src/locks/enforce.js";
 import type { DatabaseSync } from "node:sqlite";
 
 describe("locks/enforce", () => {
@@ -93,6 +93,57 @@ describe("locks/enforce", () => {
       expect(() => {
         requireUnlocked(projectId, "rules", "agent-x", db);
       }).toThrow(/rules/);
+    });
+  });
+
+  describe("checkAgentMutation", () => {
+    it("returns null when surface is not locked", () => {
+      const entry = checkAgentMutation(projectId, "budget", "agent-a", db);
+      expect(entry).toBeNull();
+    });
+
+    it("returns the lock entry when blocked", () => {
+      acquireLock(projectId, "budget", "human-1", "Q1 freeze", db);
+      const entry = checkAgentMutation(projectId, "budget", "agent-a", db);
+      expect(entry).not.toBeNull();
+      expect(entry!.lockedBy).toBe("human-1");
+    });
+
+    it("returns null when actor is the lock owner (owner bypass)", () => {
+      acquireLock(projectId, "budget", "human-1", undefined, db);
+      const entry = checkAgentMutation(projectId, "budget", "human-1", db);
+      expect(entry).toBeNull();
+    });
+  });
+
+  describe("applyOverridePolicy", () => {
+    it("does nothing when policy is autonomous_until_locked (default)", () => {
+      // Policy is default autonomous_until_locked, so no lock should be created
+      applyOverridePolicy(projectId, "budget", "dashboard", undefined, db);
+      expect(isLocked(projectId, "budget", db)).toBe(false);
+    });
+
+    it("creates a lock when policy is manual_changes_lock and surface is not locked", () => {
+      setOverridePolicy(projectId, "budget", "manual_changes_lock", db);
+      applyOverridePolicy(projectId, "budget", "dashboard", "human edit", db);
+      expect(isLocked(projectId, "budget", db)).toBe(true);
+    });
+
+    it("refreshes an existing lock when policy is manual_changes_lock", () => {
+      setOverridePolicy(projectId, "budget", "manual_changes_lock", db);
+      acquireLock(projectId, "budget", "dashboard", "initial", db);
+      applyOverridePolicy(projectId, "budget", "dashboard", "refreshed", db);
+      // Lock should still be held by dashboard
+      expect(isLocked(projectId, "budget", db)).toBe(true);
+    });
+
+    it("is a no-op when policy is manual_changes_lock but lock held by different actor (non-fatal)", () => {
+      setOverridePolicy(projectId, "budget", "manual_changes_lock", db);
+      acquireLock(projectId, "budget", "human-admin", "admin lock", db);
+      // applyOverridePolicy called by "dashboard" — should not throw, lock stays with human-admin
+      expect(() => {
+        applyOverridePolicy(projectId, "budget", "dashboard", "dashboard edit", db);
+      }).not.toThrow();
     });
   });
 });
