@@ -237,7 +237,7 @@ export function listNotifications(
 
   const rows = db
     .prepare(`SELECT * FROM notifications WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
-    .all(...values, limit, offset) as Record<string, unknown>[];
+    .all(...(values as Array<string | number | null>), limit, offset) as Record<string, unknown>[];
 
   return rows.map(rowToRecord);
 }

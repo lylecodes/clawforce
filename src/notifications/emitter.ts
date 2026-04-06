@@ -45,7 +45,7 @@ export function getNotificationDeliveryAdapter(): NotificationDeliveryAdapter | 
 
 export type EmitNotificationParams = Omit<
   CreateNotificationParams,
-  "deliveryStatus"
+  "deliveryStatus" | "projectId"
 >;
 
 /**
@@ -63,7 +63,7 @@ export function emitNotification(
   // Persist the record — delivery status starts as "pending"
   const record = createNotification(
     projectId,
-    { ...params, deliveryStatus: "pending" },
+    { ...params, projectId, deliveryStatus: "pending" },
     dbOverride,
   );
 
