@@ -153,4 +153,28 @@ describe("createDashboardServer", () => {
     const addr = inst.server.address();
     expect(addr).toBeNull();
   });
+
+  it("sets X-Content-Type-Options: nosniff on all responses", async () => {
+    const { port } = await startServer({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("sets X-Frame-Options: DENY on all responses", async () => {
+    const { port } = await startServer({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+  });
+
+  it("sets X-ClawForce-Runtime: standalone on all responses", async () => {
+    const { port } = await startServer({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(res.headers.get("x-clawforce-runtime")).toBe("standalone");
+  });
+
+  it("sets X-ClawForce-Runtime: standalone on OPTIONS preflight", async () => {
+    const { port } = await startServer({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, { method: "OPTIONS" });
+    expect(res.headers.get("x-clawforce-runtime")).toBe("standalone");
+  });
 });

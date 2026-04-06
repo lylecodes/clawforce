@@ -23,14 +23,17 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryBudgetStatus: vi.fn(() => ({ windows: [], alerts: [] })),
   queryBudgetForecast: vi.fn(() => ({ daily: null, weekly: null, monthly: null })),
   queryTrustScores: vi.fn(() => ({ agents: [], overrides: [] })),
+  queryTrustHistory: vi.fn(() => ({ history: [] })),
   queryConfig: vi.fn(() => ({ agents: {} })),
   queryMeetings: vi.fn(() => ({ meetings: [], count: 0 })),
   queryMeetingDetail: vi.fn(() => null),
+  queryThreadMessages: vi.fn(() => ({ messages: [] })),
   queryHealth: vi.fn(() => ({ tier: "GREEN" })),
   querySlos: vi.fn(() => ({ slos: [] })),
   queryAlerts: vi.fn(() => ({ alerts: [] })),
   queryEvents: vi.fn(() => ({ events: [], total: 0, count: 0, limit: 50, offset: 0 })),
   querySessions: vi.fn(() => ({ sessions: [], hasMore: false, count: 0 })),
+  querySessionDetail: vi.fn((pid: string, sid: string) => sid === "s1" ? { id: "s1" } : null),
   queryMetricsDashboard: vi.fn(() => ({ metrics: [], count: 0 })),
   queryPolicies: vi.fn(() => ({ policies: [] })),
   queryProtocols: vi.fn(() => ({ protocols: [], count: 0 })),
@@ -40,6 +43,15 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryOnboardingState: vi.fn(() => ({ entries: [], count: 0 })),
   queryTrackedSessions: vi.fn(() => ({ sessions: [], total: 0, count: 0, limit: 50, offset: 0 })),
   queryWorkerAssignments: vi.fn(() => ({ assignments: [], count: 0 })),
+  queryQueueStatus: vi.fn(() => ({ queue: [], pending: 0, processing: 0 })),
+  queryExperiments: vi.fn(() => ({ experiments: [], count: 0 })),
+  queryKnowledge: vi.fn(() => ({ entries: [], count: 0 })),
+  queryKnowledgeFlags: vi.fn(() => ({ flags: [], count: 0 })),
+  queryPromotionCandidates: vi.fn(() => ({ candidates: [], count: 0 })),
+  queryInterventions: vi.fn(() => ({ interventions: [], count: 0 })),
+  queryWorkStreams: vi.fn(() => ({ workstreams: [], count: 0 })),
+  queryUserInbox: vi.fn(() => ({ messages: [], count: 0 })),
+  queryOperationalMetrics: vi.fn(() => ({ metrics: {} })),
 }));
 
 vi.mock("../../src/dashboard/actions.js", () => ({
@@ -59,9 +71,12 @@ vi.mock("../../src/diagnostics.js", () => ({
 
 const { createDashboardHandler } = await import("../../src/dashboard/gateway-routes.js");
 const {
-  queryAgents, queryDashboardSummary, querySessions,
+  queryAgents, queryDashboardSummary, querySessions, querySessionDetail,
   queryAuditLog, queryAuditRuns, queryEnforcementRetries,
   queryOnboardingState, queryTrackedSessions, queryWorkerAssignments,
+  queryQueueStatus, queryExperiments, queryKnowledge, queryKnowledgeFlags,
+  queryPromotionCandidates, queryInterventions, queryWorkStreams,
+  queryUserInbox, queryOperationalMetrics, queryTrustHistory, queryThreadMessages,
 } = await import("../../src/dashboard/queries.js");
 const { handleAction } = await import("../../src/dashboard/actions.js");
 const { getSSEManager } = await import("../../src/dashboard/sse.js");
@@ -350,6 +365,171 @@ describe("createDashboardHandler", () => {
     const handler = createDashboardHandler({ auth: { token: "mytoken" } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents", undefined, { authorization: "Bearer mytoken" });
     await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  // --- Runtime mode ---
+
+  it("GET /clawforce/api/runtime returns embedded mode when skipAuth=true", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/runtime");
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.bodyData);
+    expect(body.mode).toBe("embedded");
+    expect(body.auth).toBe("openclaw-delegated");
+    expect(body.version).toBeTruthy();
+  });
+
+  it("GET /clawforce/api/runtime returns standalone mode when skipAuth=false", async () => {
+    const handler = createDashboardHandler({ auth: { token: "tok" } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/runtime", undefined, { authorization: "Bearer tok" });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.bodyData);
+    expect(body.mode).toBe("standalone");
+    expect(body.auth).toBe("clawforce-managed");
+  });
+
+  it("GET /clawforce/api/runtime returns explicitly set runtimeMode", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true }, runtimeMode: "standalone" });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/runtime");
+    await handler(req, res);
+    const body = JSON.parse(res.bodyData);
+    expect(body.mode).toBe("standalone");
+  });
+
+  it("sets X-ClawForce-Runtime header on all responses (embedded)", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents");
+    await handler(req, res);
+    expect(res.setHeader).toHaveBeenCalledWith("X-ClawForce-Runtime", "embedded");
+  });
+
+  it("sets X-ClawForce-Runtime header on all responses (standalone)", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: false, token: "tok" } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents", undefined, { authorization: "Bearer tok" });
+    await handler(req, res);
+    expect(res.setHeader).toHaveBeenCalledWith("X-ClawForce-Runtime", "standalone");
+  });
+
+  it("sets X-ClawForce-Runtime header on OPTIONS preflight", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("OPTIONS", "/clawforce/api/test-project/agents");
+    await handler(req, res);
+    expect(res.setHeader).toHaveBeenCalledWith("X-ClawForce-Runtime", "embedded");
+  });
+
+  // --- Previously untested routes ---
+
+  it("routes GET /clawforce/api/:domain/trust/history to queryTrustHistory", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/trust/history");
+    await handler(req, res);
+    expect(queryTrustHistory).toHaveBeenCalledWith("test-project", expect.any(Object));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/messages/:threadId to queryThreadMessages", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/messages/thread-1");
+    await handler(req, res);
+    expect(queryThreadMessages).toHaveBeenCalledWith("test-project", "thread-1", expect.any(Object));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/sessions/:sessionId to querySessionDetail", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/sessions/s1");
+    await handler(req, res);
+    expect(querySessionDetail).toHaveBeenCalledWith("test-project", "s1");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("returns 404 for unknown session", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/sessions/no-such-session");
+    await handler(req, res);
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("routes GET /clawforce/api/:domain/queue to queryQueueStatus", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/queue");
+    await handler(req, res);
+    expect(queryQueueStatus).toHaveBeenCalledWith("test-project");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/experiments to queryExperiments", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/experiments");
+    await handler(req, res);
+    expect(queryExperiments).toHaveBeenCalledWith("test-project");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/knowledge to queryKnowledge", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/knowledge");
+    await handler(req, res);
+    expect(queryKnowledge).toHaveBeenCalledWith("test-project", expect.any(Object));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/knowledge-flags to queryKnowledgeFlags", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/knowledge-flags");
+    await handler(req, res);
+    expect(queryKnowledgeFlags).toHaveBeenCalledWith("test-project", expect.any(Object));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/promotion-candidates to queryPromotionCandidates", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/promotion-candidates");
+    await handler(req, res);
+    expect(queryPromotionCandidates).toHaveBeenCalledWith("test-project", expect.any(Object));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/interventions to queryInterventions", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/interventions");
+    await handler(req, res);
+    expect(queryInterventions).toHaveBeenCalledWith("test-project");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/workstreams to queryWorkStreams", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/workstreams");
+    await handler(req, res);
+    expect(queryWorkStreams).toHaveBeenCalledWith("test-project", undefined);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/workstreams/:leadId to queryWorkStreams with leadId", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/workstreams/lead-1");
+    await handler(req, res);
+    expect(queryWorkStreams).toHaveBeenCalledWith("test-project", "lead-1");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/inbox to queryUserInbox", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/inbox");
+    await handler(req, res);
+    expect(queryUserInbox).toHaveBeenCalledWith("test-project", expect.any(Object));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/operational-metrics to queryOperationalMetrics", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/operational-metrics");
+    await handler(req, res);
+    expect(queryOperationalMetrics).toHaveBeenCalledWith("test-project", expect.any(Object));
     expect(res.statusCode).toBe(200);
   });
 });

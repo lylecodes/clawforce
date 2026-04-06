@@ -73,7 +73,7 @@ export function createDashboardServer(options?: DashboardOptions) {
     );
   }
   if (!token && isLocalhost(host)) {
-    console.warn("[clawforce-dashboard] WARNING: Starting without authentication on localhost. Set CLAWFORCE_DASHBOARD_TOKEN for production use.");
+    safeLog("dashboard-server", "WARNING: Starting without authentication on localhost. Set CLAWFORCE_DASHBOARD_TOKEN for production use.");
   }
 
   // Resolve static dir — use the provided dashboardDir or look for
@@ -100,6 +100,12 @@ export function createDashboardServer(options?: DashboardOptions) {
   const server = http.createServer(async (req, res) => {
     // CORS — origin-validated
     setCorsHeaders(req, res, allowedOrigins);
+
+    // Security headers — applied to all responses
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    // Identify runtime mode so the SPA can adapt
+    res.setHeader("X-ClawForce-Runtime", "standalone");
 
     // Preflight
     if (req.method === "OPTIONS") {
@@ -207,7 +213,12 @@ export function createDashboardServer(options?: DashboardOptions) {
     server,
     start(): Promise<void> {
       return new Promise((resolve, reject) => {
-        server.listen(port, host, () => resolve());
+        server.listen(port, host, () => {
+          const addr = server.address();
+          const boundPort = typeof addr === "object" && addr ? addr.port : port;
+          safeLog("dashboard-server", `standalone dashboard listening on http://${host}:${boundPort}/`);
+          resolve();
+        });
         server.once("error", reject);
       });
     },
