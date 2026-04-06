@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import {
   checkAuth,
   setCorsHeaders,
+  setSecurityHeaders,
   checkRateLimit,
   resetRateLimits,
   isLocalhost,
@@ -277,6 +278,26 @@ describe("setCorsHeaders", () => {
     const res = createMockRes();
     setCorsHeaders(req, res);
     expect(res._headers["access-control-allow-origin"]).toBeUndefined();
+  });
+});
+
+describe("setSecurityHeaders", () => {
+  it("applies the baseline dashboard hardening headers", () => {
+    const res = createMockRes();
+    setSecurityHeaders(res);
+    expect(res._headers["x-content-type-options"]).toBe("nosniff");
+    expect(res._headers["x-frame-options"]).toBe("DENY");
+    expect(res._headers["referrer-policy"]).toBe("no-referrer");
+    expect(res._headers["cross-origin-opener-policy"]).toBe("same-origin");
+    expect(res._headers["cross-origin-resource-policy"]).toBe("same-origin");
+    expect(res._headers["permissions-policy"]).toBe("camera=(), microphone=(), geolocation=()");
+    expect(res._headers["content-security-policy"]).toBeUndefined();
+  });
+
+  it("optionally sets a caller-provided content security policy", () => {
+    const res = createMockRes();
+    setSecurityHeaders(res, { csp: "default-src 'self'" });
+    expect(res._headers["content-security-policy"]).toBe("default-src 'self'");
   });
 });
 

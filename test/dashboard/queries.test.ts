@@ -123,12 +123,17 @@ vi.mock("../../src/org.js", () => ({
 
 vi.mock("../../src/enforcement/disabled-store.js", () => ({
   listDisabledAgents: vi.fn(() => []),
+  isDomainDisabled: vi.fn(() => false),
 }));
 
 vi.mock("../../src/enforcement/tracker.js", () => ({
   getActiveSessions: vi.fn(() => [
     { agentId: "agent-dev", projectId: "proj1", sessionKey: "sk1", metrics: { startedAt: 0, toolCalls: [] } },
   ]),
+}));
+
+vi.mock("../../src/safety.js", () => ({
+  isEmergencyStopActive: vi.fn(() => false),
 }));
 
 const {
@@ -376,6 +381,8 @@ describe("queryHealth", () => {
   it("returns health tier", () => {
     const result = queryHealth("proj1");
     expect(result.tier).toBe("GREEN");
+    expect(result.emergencyStop).toBe(false);
+    expect(result.domainEnabled).toBe(true);
   });
 });
 

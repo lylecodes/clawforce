@@ -21,7 +21,7 @@ import type { MessageType, MessageStatus, ProtocolStatus, GoalStatus, TaskOrigin
 import { listGoals, getGoal, getChildGoals, getGoalTasks } from "../goals/ops.js";
 import { computeGoalProgress } from "../goals/cascade.js";
 import { getDirectReports, getDepartmentAgents } from "../org.js";
-import { listDisabledAgents } from "../enforcement/disabled-store.js";
+import { listDisabledAgents, isDomainDisabled } from "../enforcement/disabled-store.js";
 import { getActiveSessions } from "../enforcement/tracker.js";
 import type { TaskState, TaskPriority, TaskKind, EventStatus } from "../types.js";
 import { listPendingProposals } from "../approval/resolve.js";
@@ -36,6 +36,12 @@ import { getDb } from "../db.js";
 import { writeAuditEntry } from "../audit.js";
 import { getAllOperationalMetrics } from "../metrics/operational.js";
 import type { OperationalMetrics } from "../metrics/operational.js";
+import { isEmergencyStopActive } from "../safety.js";
+import {
+  readDomainConfig as readDomainConfigViaService,
+  readGlobalConfig as readGlobalConfigViaService,
+} from "../config/api-service.js";
+import type { ConfigQueryResult } from "../api/contract.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -95,8 +101,52 @@ export function readContextFile(projectDir: string, relativePath: string) {
 
 export function writeContextFile(projectDir: string, relativePath: string, content: string) {
   const filePath = resolveContextFilePath(projectDir, relativePath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, "utf8");
   return { ok: true as const };
+}
+
+function buildBudgetWindowConfig(
+  budgetRow: Record<string, unknown>,
+  window: "hourly" | "daily" | "monthly",
+): { cents?: number; tokens?: number; requests?: number } | undefined {
+  const cents = typeof budgetRow[`${window}_limit_cents`] === "number"
+    ? budgetRow[`${window}_limit_cents`] as number
+    : undefined;
+  const tokens = typeof budgetRow[`${window}_limit_tokens`] === "number"
+    ? budgetRow[`${window}_limit_tokens`] as number
+    : undefined;
+  const requests = typeof budgetRow[`${window}_limit_requests`] === "number"
+    ? budgetRow[`${window}_limit_requests`] as number
+    : undefined;
+
+  if (cents === undefined && tokens === undefined && requests === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(cents !== undefined ? { cents } : {}),
+    ...(tokens !== undefined ? { tokens } : {}),
+    ...(requests !== undefined ? { requests } : {}),
+  };
+}
+
+function renderDashboardBriefingLabel(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  const source = typeof (value as Record<string, unknown>).source === "string"
+    ? (value as Record<string, unknown>).source as string
+    : "";
+  if (!source) return "";
+  if (source === "file" && typeof (value as Record<string, unknown>).path === "string") {
+    const filePath = ((value as Record<string, unknown>).path as string).trim();
+    if (filePath) return `file: ${filePath}`;
+  }
+  if (source === "custom_stream" && typeof (value as Record<string, unknown>).streamName === "string") {
+    const streamName = ((value as Record<string, unknown>).streamName as string).trim();
+    if (streamName) return `custom_stream: ${streamName}`;
+  }
+  return source;
 }
 
 /** List all active projects. */
@@ -539,6 +589,8 @@ export function queryOrgChart(projectId: string) {
 /** Get project health tier (based on SLO/alert/anomaly counts). */
 export function queryHealth(projectId: string) {
   const extConfig = getExtendedProjectConfig(projectId);
+  const emergencyStop = isEmergencyStopActive(projectId);
+  const domainEnabled = !isDomainDisabled(projectId);
 
   let sloChecked = 0;
   let sloBreach = 0;
@@ -567,7 +619,14 @@ export function queryHealth(projectId: string) {
     anomaliesDetected: 0,
   });
 
-  return { tier, sloChecked, sloBreach, alertsFired };
+  return {
+    tier,
+    sloChecked,
+    sloBreach,
+    alertsFired,
+    emergencyStop,
+    domainEnabled,
+  };
 }
 
 /** Query active and recent protocols for a project. */
@@ -1019,11 +1078,13 @@ export function queryTrustHistory(projectId: string, params?: Record<string, str
   }
 }
 
-/** Read current config for a project, shaped for the dashboard DomainConfig type. */
-export function queryConfig(projectId: string) {
+/** Read current config for a project, shaped for the dashboard ConfigQueryResult type. */
+export function queryConfig(projectId: string): ConfigQueryResult {
   const extConfig = getExtendedProjectConfig(projectId);
+  const rawDomainConfig = readDomainConfigViaService(projectId);
+  const rawGlobalConfig = readGlobalConfigViaService();
 
-  // Build agents list from the agent registry
+  // Build agents list from the agent registry, preserving rich structures for round-trip editing.
   const allAgentIds = getRegisteredAgentIds();
   const agents = allAgentIds
     .map((aid) => {
@@ -1038,31 +1099,49 @@ export function queryConfig(projectId: string) {
         department: entry.config.department,
         team: entry.config.team,
         channel: entry.config.channel,
-        briefing: (entry.config.briefing ?? []).map((b) =>
-          typeof b === "string" ? b : b.source,
-        ),
-        expectations: (entry.config.expectations ?? []).map((exp) =>
-          typeof exp === "string"
-            ? exp
-            : `${exp.tool}${Array.isArray(exp.action) ? `: ${exp.action.join(", ")}` : exp.action ? `: ${exp.action}` : ""} (min: ${exp.min_calls})`,
-        ),
+        // Preserve full briefing source objects so the SPA can edit and re-save without data loss.
+        briefing: (entry.config.briefing ?? []) as unknown[],
+        // Preserve full expectation objects so the SPA can edit and re-save without data loss.
+        expectations: (entry.config.expectations ?? []) as unknown[],
         performance_policy: entry.config.performance_policy,
       };
     })
     .filter(Boolean);
 
-  // Build budget from budget-windows status, falling back to domain config
+  // Build budget from persisted runtime limits, falling back to budget window status.
   let budget: Record<string, unknown> = {};
   try {
-    const budgetStatus = getBudgetStatus(projectId);
-    if (budgetStatus.hourly || budgetStatus.daily || budgetStatus.monthly) {
+    const db = getDb(projectId);
+    const budgetRow = db.prepare(
+      `SELECT
+         hourly_limit_cents, hourly_limit_tokens, hourly_limit_requests,
+         daily_limit_cents, daily_limit_tokens, daily_limit_requests,
+         monthly_limit_cents, monthly_limit_tokens, monthly_limit_requests
+       FROM budgets
+       WHERE project_id = ? AND agent_id IS NULL`,
+    ).get(projectId) as Record<string, unknown> | undefined;
+
+    if (budgetRow) {
       budget = {
-        daily: budgetStatus.daily ? { cents: budgetStatus.daily.limitCents } : undefined,
-        hourly: budgetStatus.hourly ? { cents: budgetStatus.hourly.limitCents } : undefined,
-        monthly: budgetStatus.monthly ? { cents: budgetStatus.monthly.limitCents } : undefined,
+        daily: buildBudgetWindowConfig(budgetRow, "daily"),
+        hourly: buildBudgetWindowConfig(budgetRow, "hourly"),
+        monthly: buildBudgetWindowConfig(budgetRow, "monthly"),
       };
     }
-  } catch { /* no budget configured */ }
+  } catch { /* DB may not exist */ }
+
+  if (Object.keys(budget).length === 0) {
+    try {
+      const budgetStatus = getBudgetStatus(projectId);
+      if (budgetStatus.hourly || budgetStatus.daily || budgetStatus.monthly) {
+        budget = {
+          daily: budgetStatus.daily ? { cents: budgetStatus.daily.limitCents } : undefined,
+          hourly: budgetStatus.hourly ? { cents: budgetStatus.hourly.limitCents } : undefined,
+          monthly: budgetStatus.monthly ? { cents: budgetStatus.monthly.limitCents } : undefined,
+        };
+      }
+    } catch { /* no budget configured */ }
+  }
 
   // Build tool_gates array from extConfig.toolGates
   const toolGatesConfig = extConfig?.toolGates ?? {};
@@ -1072,20 +1151,125 @@ export function queryConfig(projectId: string) {
     risk_tier: ((gate as Record<string, unknown>)?.tier ?? (gate as Record<string, unknown>)?.risk_tier ?? "low") as string,
   }));
 
-  // Build safety from extConfig
-  const safety = extConfig?.safety ?? {};
+  const safetyConfig = (extConfig?.safety ?? rawDomainConfig?.safety ?? {}) as Record<string, unknown>;
+  const safety = {
+    circuit_breaker_multiplier: (safetyConfig.costCircuitBreaker ?? safetyConfig.circuit_breaker_multiplier) as number | undefined,
+    spawn_depth_limit: (safetyConfig.maxSpawnDepth ?? safetyConfig.spawn_depth_limit) as number | undefined,
+    loop_detection_threshold: (safetyConfig.loopDetectionThreshold ?? safetyConfig.loop_detection_threshold) as number | undefined,
+  };
+
+  const initiatives = Object.entries((rawDomainConfig?.goals ?? {}) as Record<string, unknown>)
+    .reduce<Record<string, { allocation_pct: number; goal?: string }>>((acc, [goalId, goalDef]) => {
+      if (!goalDef || typeof goalDef !== "object") return acc;
+      const allocation = (goalDef as Record<string, unknown>).allocation;
+      if (typeof allocation !== "number") return acc;
+      acc[goalId] = {
+        allocation_pct: allocation,
+        goal: goalId,
+      };
+      return acc;
+    }, {});
+
+  if (typeof rawDomainConfig?.operational_profile === "string") {
+    budget.operational_profile = rawDomainConfig.operational_profile;
+  }
+  if (Object.keys(initiatives).length > 0) {
+    budget.initiatives = Object.fromEntries(
+      Object.entries(initiatives).map(([goalId, value]) => [goalId, value.allocation_pct]),
+    );
+  }
+
+  const profile = rawDomainConfig?.operational_profile
+    ? { operational_profile: rawDomainConfig.operational_profile }
+    : {};
+
+  const rules = Array.isArray(rawDomainConfig?.rules)
+    ? rawDomainConfig.rules
+    : [];
+
+  const dashboardAssistantRaw = (rawDomainConfig?.dashboard_assistant && typeof rawDomainConfig.dashboard_assistant === "object")
+    ? rawDomainConfig.dashboard_assistant as Record<string, unknown>
+    : null;
+  const dashboardAssistant = {
+    enabled: dashboardAssistantRaw?.enabled !== false,
+    ...(typeof dashboardAssistantRaw?.agentId === "string" && dashboardAssistantRaw.agentId.trim()
+      ? { agentId: dashboardAssistantRaw.agentId.trim() }
+      : {}),
+    ...(typeof dashboardAssistantRaw?.model === "string" && dashboardAssistantRaw.model.trim()
+      ? { model: dashboardAssistantRaw.model.trim() }
+      : {}),
+  };
+
+  const memory = ((extConfig?.memory ?? rawDomainConfig?.memory) && typeof (extConfig?.memory ?? rawDomainConfig?.memory) === "object")
+    ? (extConfig?.memory ?? rawDomainConfig?.memory) as Record<string, unknown>
+    : {};
+  const eventHandlers = (rawDomainConfig?.event_handlers && typeof rawDomainConfig.event_handlers === "object")
+    ? rawDomainConfig.event_handlers as Record<string, unknown>
+    : {};
+  const knowledge = (rawDomainConfig?.knowledge && typeof rawDomainConfig.knowledge === "object")
+    ? rawDomainConfig.knowledge as Record<string, unknown>
+    : {};
+  const workflows = Array.isArray(rawDomainConfig?.workflows)
+    ? rawDomainConfig.workflows
+    : [];
+  const defaults = (rawDomainConfig?.defaults && typeof rawDomainConfig.defaults === "object")
+    ? rawDomainConfig.defaults as Record<string, unknown>
+    : {};
+  const roleDefaults = (rawDomainConfig?.role_defaults && typeof rawDomainConfig.role_defaults === "object")
+    ? rawDomainConfig.role_defaults as Record<string, unknown>
+    : {};
+  const teamTemplates = (rawDomainConfig?.team_templates && typeof rawDomainConfig.team_templates === "object")
+    ? rawDomainConfig.team_templates as Record<string, unknown>
+    : {};
+
+  const jobs = allAgentIds.flatMap((aid) => {
+    const entry = getAgentConfig(aid);
+    if (!entry || entry.projectId !== projectId) return [];
+
+    const rawGlobalAgent = rawGlobalConfig.agents?.[aid] as Record<string, unknown> | undefined;
+    const rawJobs = (rawGlobalAgent?.jobs && typeof rawGlobalAgent.jobs === "object")
+      ? rawGlobalAgent.jobs as Record<string, unknown>
+      : undefined;
+    const normalizedJobs = entry.config.jobs ?? {};
+
+    const jobNames = new Set<string>([
+      ...Object.keys(rawJobs ?? {}),
+      ...Object.keys(normalizedJobs),
+    ]);
+
+    return [...jobNames].map((jobName) => {
+      const rawJob = rawJobs?.[jobName];
+      const normalizedJob = normalizedJobs[jobName];
+      const rawJobObj = (rawJob && typeof rawJob === "object") ? rawJob as Record<string, unknown> : undefined;
+      return {
+        id: `${aid}:${jobName}`,
+        agent: aid,
+        cron: typeof rawJobObj?.cron === "string"
+          ? rawJobObj.cron
+          : normalizedJob?.cron ?? "",
+        enabled: rawJobObj?.enabled !== false,
+        description: typeof rawJobObj?.description === "string" ? rawJobObj.description : undefined,
+      };
+    });
+  });
 
   return {
-    agents,
-    budget,
+    agents: agents as import("../api/contract.js").ConfigAgent[],
+    budget: budget as import("../api/contract.js").ConfigBudgetSection,
     tool_gates: toolGates,
-    initiatives: {},
-    jobs: [],
+    initiatives,
+    jobs,
     safety,
-    profile: {},
-    rules: [],
-    event_handlers: extConfig?.eventHandlers ? Object.values(extConfig.eventHandlers) : [],
-    memory: {},
+    profile,
+    rules,
+    defaults,
+    role_defaults: roleDefaults,
+    team_templates: teamTemplates,
+    dashboard_assistant: dashboardAssistant,
+    event_handlers: eventHandlers,
+    workflows: workflows as string[],
+    knowledge,
+    memory,
   };
 }
 

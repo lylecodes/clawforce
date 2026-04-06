@@ -1,4 +1,6 @@
 import type { Clawforce } from "../sdk/index.js";
+import { createDashboardServer } from "./server.js";
+import { safeLog } from "../diagnostics.js";
 
 export interface DashboardOptions {
   port?: number;
@@ -25,18 +27,24 @@ export interface DashboardOptions {
  * ```
  */
 export function serveDashboard(cf: Clawforce, opts?: DashboardOptions): void {
-  const _port = opts?.port
+  const port = opts?.port
     ?? (process.env.CLAWFORCE_DASHBOARD_PORT ? Number(process.env.CLAWFORCE_DASHBOARD_PORT) : 3117);
-  const _host = opts?.host
+  const host = opts?.host
     ?? process.env.CLAWFORCE_DASHBOARD_HOST
     ?? "localhost";
+  const dashboardDir = opts?.dashboardDir;
 
-  // This is a thin wrapper establishing the plugin interface.
-  // Full implementation will wire the existing dashboard server
-  // to use the SDK instance instead of direct internal imports.
-  // For now, it validates the pattern and documents the contract.
-  const dashDir = opts?.dashboardDir ?? "(default: ../clawforce-dashboard/dist)";
-  console.log(`[clawforce-dashboard] Ready to serve dashboard for domain "${cf.domain}" on ${_host}:${_port}`);
-  console.log(`[clawforce-dashboard] Dashboard dir: ${dashDir}`);
-  console.log(`[clawforce-dashboard] Full implementation pending — use existing gateway routes for now`);
+  const dashboard = createDashboardServer({
+    port,
+    host,
+    dashboardDir,
+  });
+
+  void dashboard.start()
+    .then(() => {
+      console.log(`[clawforce-dashboard] Serving dashboard for domain "${cf.domain}" at http://${host}:${port}/clawforce/`);
+    })
+    .catch((err) => {
+      safeLog("dashboard.plugin", err);
+    });
 }

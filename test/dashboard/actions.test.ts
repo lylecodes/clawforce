@@ -15,6 +15,9 @@ vi.mock("../../src/tasks/ops.js", () => ({
 vi.mock("../../src/enforcement/disabled-store.js", () => ({
   disableAgent: vi.fn(),
   enableAgent: vi.fn(),
+  disableDomain: vi.fn(),
+  enableDomain: vi.fn(),
+  isDomainDisabled: vi.fn(() => false),
 }));
 
 vi.mock("../../src/channels/meeting.js", () => ({
@@ -30,17 +33,270 @@ vi.mock("../../src/dashboard/sse.js", () => ({
   emitSSE: vi.fn(),
 }));
 
-const { handleAction } = await import("../../src/dashboard/actions.js");
+vi.mock("../../src/diagnostics.js", () => ({
+  safeLog: vi.fn(),
+}));
+
+vi.mock("../../src/audit.js", () => ({
+  writeAuditEntry: vi.fn(),
+}));
+
+vi.mock("../../src/safety.js", () => ({
+  activateEmergencyStop: vi.fn(),
+  deactivateEmergencyStop: vi.fn(),
+  isEmergencyStopActive: vi.fn(() => false),
+}));
+
+vi.mock("../../src/audit/auto-kill.js", () => ({
+  killStuckAgent: vi.fn(async () => false),
+}));
+
+vi.mock("../../src/budget-cascade.js", () => ({
+  allocateBudget: vi.fn(() => ({ ok: true })),
+}));
+
+vi.mock("../../src/budget/normalize.js", () => ({
+  normalizeBudgetConfig: vi.fn((config: unknown) => config ?? {}),
+}));
+
+vi.mock("../../src/config/api-service.js", () => ({
+  updateDomainConfig: vi.fn(() => ({ ok: true })),
+  updateGlobalAgentConfig: vi.fn(() => ({ ok: true })),
+  upsertGlobalAgents: vi.fn(() => ({ ok: true })),
+  writeDomainConfig: vi.fn(() => ({ ok: true })),
+  reloadAllDomains: vi.fn(() => ({ domains: ["test-project"], errors: [] })),
+  readDomainConfig: vi.fn(() => ({
+    domain: "test-project",
+    agents: ["a1", "a2"],
+    goals: {
+      existing: { allocation: 25, description: "Existing goal" },
+    },
+  })),
+  readGlobalConfig: vi.fn(() => ({
+    agents: {
+      a1: {
+        briefing: [
+          { source: "file", path: "context/ops.md" },
+          { source: "direction" },
+        ],
+        expectations: [
+          { tool: "clawforce_task", action: ["transition", "comment"], min_calls: 2 },
+        ],
+        jobs: {
+          standup: { cron: "0 9 * * *", description: "Daily sync", enabled: true, nudge: "existing" },
+        },
+      },
+      a2: {
+        jobs: {
+          cleanup: { cron: "0 18 * * *", enabled: false },
+        },
+      },
+    },
+  })),
+}));
+
+vi.mock("../../src/db.js", () => ({
+  getDb: vi.fn(() => ({
+    prepare: vi.fn(() => ({
+      run: vi.fn(() => ({ changes: 0 })),
+    })),
+  })),
+}));
+
+vi.mock("../../src/project.js", () => {
+  const configs = new Map<string, any>([
+    ["a1", { projectId: "test-project", config: { extends: "worker" } }],
+    ["a2", { projectId: "test-project", config: { extends: "worker" } }],
+    ["agent-a", { projectId: "test-project", config: { extends: "worker" } }],
+    ["agent-b", { projectId: "test-project", config: { extends: "worker" } }],
+    ["other", { projectId: "other-project", config: { extends: "worker" } }],
+  ]);
+  return {
+    getRegisteredAgentIds: vi.fn(() => [...configs.keys()]),
+    getAgentConfig: vi.fn((id: string) => configs.get(id) ?? null),
+    getExtendedProjectConfig: vi.fn(() => null),
+  };
+});
+
+const {
+  handleAction,
+  handleStarterDomainCreate,
+  handleAgentKillAction,
+  handleDomainKillAction,
+} = await import("../../src/dashboard/actions.js");
 const { approveProposal, rejectProposal } = await import("../../src/approval/resolve.js");
 const { createTask, reassignTask, transitionTask } = await import("../../src/tasks/ops.js");
-const { disableAgent, enableAgent } = await import("../../src/enforcement/disabled-store.js");
+const {
+  disableAgent,
+  enableAgent,
+  disableDomain,
+  enableDomain,
+  isDomainDisabled,
+} = await import("../../src/enforcement/disabled-store.js");
 const { startMeeting, concludeMeeting } = await import("../../src/channels/meeting.js");
 const { sendChannelMessage } = await import("../../src/channels/messages.js");
 const { emitSSE } = await import("../../src/dashboard/sse.js");
+const { writeAuditEntry } = await import("../../src/audit.js");
+const {
+  activateEmergencyStop,
+  deactivateEmergencyStop,
+  isEmergencyStopActive,
+} = await import("../../src/safety.js");
+const { killStuckAgent } = await import("../../src/audit/auto-kill.js");
+const { allocateBudget } = await import("../../src/budget-cascade.js");
+const { normalizeBudgetConfig } = await import("../../src/budget/normalize.js");
+const { getDb } = await import("../../src/db.js");
+const {
+  updateDomainConfig,
+  readDomainConfig,
+  updateGlobalAgentConfig,
+  readGlobalConfig,
+  upsertGlobalAgents,
+  writeDomainConfig,
+  reloadAllDomains,
+} = await import("../../src/config/api-service.js");
+
+describe("handleStarterDomainCreate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (readDomainConfig as any).mockReturnValue(null);
+    (readGlobalConfig as any).mockReturnValue({ agents: {} });
+    (upsertGlobalAgents as any).mockReturnValue({ ok: true });
+    (writeDomainConfig as any).mockReturnValue({ ok: true });
+    (reloadAllDomains as any).mockReturnValue({ domains: ["starter-co"], errors: [] });
+  });
+
+  it("creates a starter domain for a new business", () => {
+    const result = handleStarterDomainCreate({
+      domainId: "Starter Co",
+      mode: "new",
+      mission: "Ship internal tools",
+      operationalProfile: "high",
+      paths: ["~/work/starter"],
+    });
+
+    expect(result.status).toBe(201);
+    expect(upsertGlobalAgents).toHaveBeenCalledWith({
+      "starter-co-lead": expect.objectContaining({
+        extends: "manager",
+        title: "Business Lead",
+      }),
+      "starter-co-builder": expect.objectContaining({
+        extends: "employee",
+        reports_to: "starter-co-lead",
+      }),
+    }, "dashboard");
+    expect(writeDomainConfig).toHaveBeenCalledWith("starter-co", expect.objectContaining({
+      domain: "starter-co",
+      agents: ["starter-co-lead", "starter-co-builder"],
+      orchestrator: "starter-co-lead",
+      paths: ["~/work/starter"],
+      operational_profile: "high",
+      template: "startup",
+    }));
+  });
+
+  it("rejects starter creation when the domain already exists", () => {
+    (readDomainConfig as any).mockReturnValue({ domain: "starter-co", agents: [] });
+
+    const result = handleStarterDomainCreate({
+      domainId: "starter-co",
+      mode: "new",
+    });
+
+    expect(result.status).toBe(409);
+    expect(upsertGlobalAgents).not.toHaveBeenCalled();
+    expect(writeDomainConfig).not.toHaveBeenCalled();
+  });
+
+  it("creates a governance starter around existing agents and only upserts missing defs", () => {
+    (readGlobalConfig as any).mockReturnValue({
+      agents: {
+        lead: { extends: "manager", title: "Existing Lead" },
+      },
+    });
+    (reloadAllDomains as any).mockReturnValue({ domains: ["governed"], errors: [] });
+
+    const result = handleStarterDomainCreate({
+      domainId: "governed",
+      mode: "governance",
+      existingAgents: ["lead", "worker-a", "worker-b"],
+      leadAgentId: "lead",
+    });
+
+    expect(result.status).toBe(201);
+    expect(upsertGlobalAgents).toHaveBeenCalledWith({
+      "worker-a": expect.objectContaining({
+        extends: "employee",
+        reports_to: "lead",
+      }),
+      "worker-b": expect.objectContaining({
+        extends: "employee",
+        reports_to: "lead",
+      }),
+    }, "dashboard");
+    expect(writeDomainConfig).toHaveBeenCalledWith("governed", expect.objectContaining({
+      domain: "governed",
+      agents: ["lead", "worker-a", "worker-b"],
+      orchestrator: "lead",
+    }));
+  });
+
+  it("rejects governance starter creation without existing agents", () => {
+    const result = handleStarterDomainCreate({
+      domainId: "governed",
+      mode: "governance",
+      existingAgents: [],
+    });
+
+    expect(result.status).toBe(400);
+    expect(upsertGlobalAgents).not.toHaveBeenCalled();
+    expect(writeDomainConfig).not.toHaveBeenCalled();
+  });
+});
 
 describe("handleAction", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    (readDomainConfig as any).mockReturnValue({
+      domain: "test-project",
+      agents: ["a1", "a2"],
+      goals: {
+        existing: { allocation: 25, description: "Existing goal" },
+      },
+    });
+    (readGlobalConfig as any).mockReturnValue({
+      agents: {
+        a1: {
+          briefing: [
+            { source: "file", path: "context/ops.md" },
+            { source: "direction" },
+          ],
+          expectations: [
+            { tool: "clawforce_task", action: ["transition", "comment"], min_calls: 2 },
+          ],
+          jobs: {
+            standup: { cron: "0 9 * * *", description: "Daily sync", enabled: true, nudge: "existing" },
+          },
+        },
+        a2: {
+          jobs: {
+            cleanup: { cron: "0 18 * * *", enabled: false },
+          },
+        },
+      },
+    });
+    (updateDomainConfig as any).mockReturnValue({ ok: true });
+    (updateGlobalAgentConfig as any).mockReturnValue({ ok: true });
+    (upsertGlobalAgents as any).mockReturnValue({ ok: true });
+    (isDomainDisabled as any).mockReturnValue(false);
+    (isEmergencyStopActive as any).mockReturnValue(false);
+    (killStuckAgent as any).mockResolvedValue(false);
+    (getDb as any).mockReturnValue({
+      prepare: vi.fn(() => ({
+        run: vi.fn(() => ({ changes: 0 })),
+      })),
+    });
   });
 
   // --- Approvals ---
@@ -155,14 +411,57 @@ describe("handleAction", () => {
     expect(enableAgent).toHaveBeenCalledWith("test-project", "a1");
   });
 
-  it("returns 501 for agent message (deferred)", () => {
-    const result = handleAction("test-project", "agents/a1/message", { message: "hello" });
-    expect(result.status).toBe(501);
+  it("disables a domain", () => {
+    const result = handleAction("test-project", "disable", { reason: "maintenance", actor: "user" });
+    expect(result.status).toBe(200);
+    expect(disableDomain).toHaveBeenCalledWith("test-project", "maintenance", "user");
+    expect(writeAuditEntry).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "test-project",
+      actor: "user",
+      action: "disable_domain",
+    }));
   });
 
-  it("returns 501 for agent kill (deferred)", () => {
+  it("enables a domain and clears emergency stop when needed", () => {
+    (isDomainDisabled as any).mockReturnValue(true);
+    (isEmergencyStopActive as any).mockReturnValue(true);
+
+    const result = handleAction("test-project", "enable", { actor: "user" });
+    expect(result.status).toBe(200);
+    expect(deactivateEmergencyStop).toHaveBeenCalledWith("test-project");
+    expect(enableDomain).toHaveBeenCalledWith("test-project");
+    expect(writeAuditEntry).toHaveBeenCalledTimes(2);
+  });
+
+  it("persists a direct agent message through the sync action path", () => {
+    const result = handleAction("test-project", "agents/a1/message", { message: "hello" });
+    expect(result.status).toBe(201);
+    expect(result.body).toEqual(expect.objectContaining({
+      projectId: "test-project",
+      toAgent: "a1",
+      content: "hello",
+    }));
+  });
+
+  it("queues an agent kill through the sync action path", () => {
     const result = handleAction("test-project", "agents/a1/kill", {});
-    expect(result.status).toBe(501);
+    expect(result.status).toBe(202);
+    expect(result.body).toEqual({
+      ok: true,
+      queued: true,
+      agentId: "a1",
+    });
+  });
+
+  it("queues a domain kill through the sync action path", () => {
+    const result = handleAction("test-project", "kill", { reason: "panic" });
+    expect(result.status).toBe(202);
+    expect(result.body).toEqual({
+      ok: true,
+      queued: true,
+      domainEnabled: false,
+      emergencyStop: true,
+    });
   });
 
   // --- Meetings ---
@@ -230,9 +529,546 @@ describe("handleAction", () => {
     expect(result.status).toBe(400);
   });
 
-  it("returns 501 for budget allocate (deferred)", () => {
+  it("saves safety config using canonical core keys", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "safety",
+      data: {
+        circuit_breaker_multiplier: 2.5,
+        spawn_depth_limit: 6,
+        loop_detection_threshold: 8,
+      },
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(updateDomainConfig).toHaveBeenCalledWith(
+      "test-project",
+      "safety",
+      {
+        costCircuitBreaker: 2.5,
+        maxSpawnDepth: 6,
+        loopDetectionThreshold: 8,
+      },
+      "user",
+    );
+  });
+
+  it("saves budget limits while splitting profile and initiatives to canonical sections", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "budget",
+      data: {
+        daily: { cents: 2000, tokens: 50000, requests: 25 },
+        hourly: { cents: 200, tokens: 5000, requests: 5 },
+        operational_profile: "high",
+        initiatives: { existing: 55, new_one: 20 },
+      },
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(updateDomainConfig).toHaveBeenNthCalledWith(
+      1,
+      "test-project",
+      "budget",
+      {
+        daily: { cents: 2000, tokens: 50000, requests: 25 },
+        hourly: { cents: 200, tokens: 5000, requests: 5 },
+      },
+      "user",
+    );
+    expect(updateDomainConfig).toHaveBeenNthCalledWith(
+      2,
+      "test-project",
+      "operational_profile",
+      "high",
+      "user",
+    );
+    expect(updateDomainConfig).toHaveBeenNthCalledWith(
+      3,
+      "test-project",
+      "goals",
+      {
+        existing: { allocation: 55, description: "Existing goal" },
+        new_one: { allocation: 20 },
+      },
+      "user",
+    );
+  });
+
+  it("saves agents by upserting global config and updating the domain agent list", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "agents",
+      data: [
+        {
+          id: "a1",
+          title: "Ops Lead",
+          persona: "Runs the operation",
+          reports_to: "",
+          department: "ops",
+          team: "alpha",
+          channel: "ops-alpha",
+          briefing: ["file: context/ops.md", "direction"],
+          expectations: ["clawforce_task: transition, comment (min: 2)"],
+          performance_policy: { action: "alert", max_retries: 2, then: "terminate_and_alert" },
+        },
+      ],
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(upsertGlobalAgents).toHaveBeenCalledWith({
+      a1: {
+        jobs: {
+          standup: { cron: "0 9 * * *", description: "Daily sync", enabled: true, nudge: "existing" },
+        },
+        title: "Ops Lead",
+        persona: "Runs the operation",
+        department: "ops",
+        team: "alpha",
+        channel: "ops-alpha",
+        briefing: [
+          { source: "file", path: "context/ops.md" },
+          { source: "direction" },
+        ],
+        expectations: [
+          { tool: "clawforce_task", action: ["transition", "comment"], min_calls: 2 },
+        ],
+        performance_policy: { action: "alert", max_retries: 2, then: "terminate_and_alert" },
+      },
+    }, "user");
+    expect(updateDomainConfig).toHaveBeenCalledWith(
+      "test-project",
+      "agents",
+      ["a1"],
+      "user",
+    );
+  });
+
+  it("parses new file briefing labels into structured context sources", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "agents",
+      data: [
+        {
+          id: "a1",
+          briefing: ["file: docs/architecture.md", "direction"],
+        },
+      ],
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(upsertGlobalAgents).toHaveBeenCalledWith({
+      a1: expect.objectContaining({
+        briefing: [
+          { source: "file", path: "docs/architecture.md" },
+          { source: "direction" },
+        ],
+      }),
+    }, "user");
+  });
+
+  it("parses new expectation strings into structured core expectations", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "agents",
+      data: [
+        {
+          id: "a1",
+          expectations: ["clawforce_log: write, outcome (min: 3)"],
+        },
+      ],
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(upsertGlobalAgents).toHaveBeenCalledWith({
+      a1: expect.objectContaining({
+        expectations: [
+          { tool: "clawforce_log", action: ["write", "outcome"], min_calls: 3 },
+        ],
+      }),
+    }, "user");
+  });
+
+  it("saves profile config through operational_profile alias", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "profile",
+      data: { operational_profile: "high" },
+    });
+    expect(result.status).toBe(200);
+    expect(updateDomainConfig).toHaveBeenCalledWith(
+      "test-project",
+      "operational_profile",
+      "high",
+      "dashboard",
+    );
+  });
+
+  it("saves dashboard assistant config with canonical fields", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "dashboard_assistant",
+      data: {
+        enabled: false,
+        agentId: " a1 ",
+        model: " gpt-5.4-mini ",
+      },
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(updateDomainConfig).toHaveBeenCalledWith(
+      "test-project",
+      "dashboard_assistant",
+      {
+        enabled: false,
+        agentId: "a1",
+        model: "gpt-5.4-mini",
+      },
+      "user",
+    );
+  });
+
+  it("rejects dashboard assistant targets outside the domain", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "dashboard_assistant",
+      data: {
+        agentId: "other",
+      },
+      actor: "user",
+    });
+    expect(result.status).toBe(400);
+    expect(updateDomainConfig).not.toHaveBeenCalledWith(
+      "test-project",
+      "dashboard_assistant",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("saves initiatives by merging into goals", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "initiatives",
+      data: {
+        existing: { allocation_pct: 40 },
+        new_one: { allocation_pct: 15 },
+      },
+    });
+    expect(result.status).toBe(200);
+    expect(readDomainConfig).toHaveBeenCalledWith("test-project");
+    expect(updateDomainConfig).toHaveBeenCalledWith(
+      "test-project",
+      "goals",
+      {
+        existing: { allocation: 40, description: "Existing goal" },
+        new_one: { allocation: 15 },
+      },
+      "dashboard",
+    );
+  });
+
+  it("saves jobs by merging into global agent config", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "jobs",
+      data: [
+        {
+          id: "a1:standup",
+          agent: "a1",
+          cron: "0 10 * * *",
+          enabled: false,
+          description: "Updated daily sync",
+        },
+        {
+          id: "a2:cleanup",
+          agent: "a2",
+          cron: "0 19 * * *",
+          enabled: true,
+        },
+      ],
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(readGlobalConfig).toHaveBeenCalled();
+    expect(updateGlobalAgentConfig).toHaveBeenNthCalledWith(1, "a1", {
+      jobs: {
+        standup: {
+          cron: "0 10 * * *",
+          description: "Updated daily sync",
+          enabled: false,
+          nudge: "existing",
+        },
+      },
+    }, "user");
+    expect(updateGlobalAgentConfig).toHaveBeenNthCalledWith(2, "a2", {
+      jobs: {
+        cleanup: {
+          cron: "0 19 * * *",
+          enabled: true,
+        },
+      },
+    }, "user");
+  });
+
+  it("clears omitted jobs for project agents when saving the jobs section", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "jobs",
+      data: [],
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(updateGlobalAgentConfig).toHaveBeenNthCalledWith(1, "a1", {
+      jobs: {},
+    }, "user");
+    expect(updateGlobalAgentConfig).toHaveBeenNthCalledWith(2, "a2", {
+      jobs: {},
+    }, "user");
+  });
+
+  it("validates defaults as a partial agent config object", () => {
+    const result = handleAction("test-project", "config/validate", {
+      section: "defaults",
+      data: {
+        briefing: "direction",
+        performance_policy: [],
+      },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(expect.objectContaining({
+      valid: false,
+      section: "defaults",
+      errors: expect.arrayContaining([
+        "defaults.briefing: must be an array",
+        "defaults.performance_policy: must be an object",
+      ]),
+    }));
+  });
+
+  it("validates role_defaults and team_templates as maps of partial agent config objects", () => {
+    const roleDefaults = handleAction("test-project", "config/validate", {
+      section: "role_defaults",
+      data: {
+        manager: {
+          title: 42,
+        },
+      },
+    });
+    expect(roleDefaults.status).toBe(200);
+    expect(roleDefaults.body).toEqual(expect.objectContaining({
+      valid: false,
+      errors: expect.arrayContaining([
+        "role_defaults.manager.title: must be a string",
+      ]),
+    }));
+
+    const teamTemplates = handleAction("test-project", "config/validate", {
+      section: "team_templates",
+      data: {
+        eng: "bad",
+      },
+    });
+    expect(teamTemplates.status).toBe(200);
+    expect(teamTemplates.body).toEqual(expect.objectContaining({
+      valid: false,
+      errors: expect.arrayContaining([
+        "team_templates.eng: must be an object",
+      ]),
+    }));
+  });
+
+  it("validates workflows and knowledge section shapes", () => {
+    const workflows = handleAction("test-project", "config/validate", {
+      section: "workflows",
+      data: ["daily_review", ""],
+    });
+    expect(workflows.status).toBe(200);
+    expect(workflows.body).toEqual(expect.objectContaining({
+      valid: false,
+      errors: expect.arrayContaining([
+        "workflows[1]: must be a non-empty string",
+      ]),
+    }));
+
+    const knowledge = handleAction("test-project", "config/validate", {
+      section: "knowledge",
+      data: ["filesystem"],
+    });
+    expect(knowledge.status).toBe(200);
+    expect(knowledge.body).toEqual(expect.objectContaining({
+      valid: false,
+      errors: expect.arrayContaining([
+        "knowledge: must be an object",
+      ]),
+    }));
+  });
+
+  it("validates rules and warns on unknown rule agents", () => {
+    const malformed = handleAction("test-project", "config/validate", {
+      section: "rules",
+      data: [
+        {
+          name: "",
+          trigger: "ci_failed",
+          action: { agent: 42, prompt_template: 7 },
+        },
+      ],
+    });
+    expect(malformed.status).toBe(200);
+    expect(malformed.body).toEqual(expect.objectContaining({
+      valid: false,
+      errors: expect.arrayContaining([
+        "rules[0].name: name must be a non-empty string",
+        "rules[0].trigger: trigger must be an object",
+        "rules[0].action.agent: action.agent must be a string",
+        "rules[0].action.prompt_template: action.prompt_template must be a string",
+      ]),
+    }));
+
+    const unknownAgent = handleAction("test-project", "config/validate", {
+      section: "rules",
+      data: [
+        {
+          name: "route-ci",
+          trigger: { event: "ci_failed" },
+          action: { agent: "ghost", prompt_template: "Fix {{payload.error}}" },
+        },
+      ],
+    });
+    expect(unknownAgent.status).toBe(200);
+    expect(unknownAgent.body).toEqual(expect.objectContaining({
+      valid: true,
+      warnings: expect.arrayContaining([
+        'rules[0].action.agent: references unknown agent "ghost"',
+      ]),
+    }));
+  });
+
+  it("validates event_handlers action shapes", () => {
+    const result = handleAction("test-project", "config/validate", {
+      section: "event_handlers",
+      data: {
+        ci_failed: [
+          { action: "create_task", template: "" },
+          { action: "notify", message: 42 },
+          { action: "escalate", to: "ghost" },
+          { action: "emit_event", event_type: "", event_payload: { branch: 1 } },
+          { action: "dispatch_agent", session_type: "bad" },
+        ],
+      },
+    });
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(expect.objectContaining({
+      valid: false,
+      errors: expect.arrayContaining([
+        "event_handlers.ci_failed[0].template: must be a non-empty string",
+        "event_handlers.ci_failed[1].message: must be a non-empty string",
+        "event_handlers.ci_failed[3].event_type: must be a non-empty string",
+        "event_handlers.ci_failed[3].event_payload.branch: must be a string",
+        "event_handlers.ci_failed[4].agent_role: must be a non-empty string",
+        "event_handlers.ci_failed[4].session_type: must be one of reactive, active, planning",
+      ]),
+      warnings: expect.arrayContaining([
+        'event_handlers.ci_failed[2].to: references unknown agent "ghost"',
+      ]),
+    }));
+  });
+
+  it("returns 400 when budget allocation is missing required fields", () => {
     const result = handleAction("test-project", "budget/allocate", {});
-    expect(result.status).toBe(501);
+    expect(result.status).toBe(400);
+  });
+
+  it("allocates budget with camelCase fields", () => {
+    const result = handleAction("test-project", "budget/allocate", {
+      parentAgentId: "a1",
+      childAgentId: "a2",
+      dailyLimitCents: 500,
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(allocateBudget).toHaveBeenCalledWith({
+      projectId: "test-project",
+      parentAgentId: "a1",
+      childAgentId: "a2",
+      dailyLimitCents: 500,
+      allocationConfig: undefined,
+    });
+    expect(writeAuditEntry).toHaveBeenCalledWith(expect.objectContaining({
+      action: "allocate_budget",
+      actor: "user",
+      targetId: "a2",
+    }));
+    expect(emitSSE).toHaveBeenCalledWith("test-project", "budget:update", expect.objectContaining({
+      parentAgentId: "a1",
+      childAgentId: "a2",
+    }));
+  });
+
+  it("allocates budget with allocationConfig object", () => {
+    const result = handleAction("test-project", "budget/allocate", {
+      parent_agent_id: "a1",
+      child_agent_id: "a2",
+      allocation_config: {
+        daily: { cents: 600, tokens: 1000 },
+      },
+    });
+    expect(result.status).toBe(200);
+    expect(normalizeBudgetConfig).toHaveBeenCalledWith({
+      daily: { cents: 600, tokens: 1000 },
+    });
+    expect(allocateBudget).toHaveBeenCalledWith({
+      projectId: "test-project",
+      parentAgentId: "a1",
+      childAgentId: "a2",
+      dailyLimitCents: undefined,
+      allocationConfig: {
+        hourly: undefined,
+        daily: { cents: 600, tokens: 1000 },
+        monthly: undefined,
+      },
+    });
+  });
+
+  it("returns 400 when budget allocation fails", () => {
+    (allocateBudget as any).mockReturnValueOnce({ ok: false, reason: "Parent has no budget" });
+    const result = handleAction("test-project", "budget/allocate", {
+      parentAgentId: "a1",
+      childAgentId: "a2",
+      dailyLimitCents: 500,
+    });
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ ok: false, error: "Parent has no budget" });
+  });
+
+  it("kills an agent session through the async helper", async () => {
+    (killStuckAgent as any)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    const result = await handleAgentKillAction("test-project", "a1", { reason: "stop now", actor: "user" });
+    expect(result.status).toBe(200);
+    expect(killStuckAgent).toHaveBeenCalledTimes(2);
+    expect(writeAuditEntry).toHaveBeenCalledWith(expect.objectContaining({
+      action: "kill_agent",
+      targetId: "a1",
+    }));
+  });
+
+  it("returns 404 when killing an unknown agent", async () => {
+    const result = await handleAgentKillAction("test-project", "missing", {});
+    expect(result.status).toBe(404);
+  });
+
+  it("kills a domain through the async helper", async () => {
+    (killStuckAgent as any)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    (getDb as any).mockReturnValue({
+      prepare: vi.fn(() => ({
+        run: vi.fn(() => ({ changes: 3 })),
+      })),
+    });
+
+    const result = await handleDomainKillAction("test-project", { actor: "user", reason: "bad rollout" });
+    expect(result.status).toBe(200);
+    expect(disableDomain).toHaveBeenCalledWith("test-project", "EMERGENCY: bad rollout", "user");
+    expect(activateEmergencyStop).toHaveBeenCalledWith("test-project");
+    expect(killStuckAgent).toHaveBeenCalledTimes(8);
+    expect(writeAuditEntry).toHaveBeenCalledTimes(2);
   });
 
   // --- Unknown ---

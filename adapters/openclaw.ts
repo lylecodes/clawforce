@@ -220,6 +220,8 @@ type ClawforcePluginConfig = {
   syncAgents?: boolean;
   /** Override for domain config directory (defaults to projectsDir). */
   configDir?: string;
+  /** Start the standalone compatibility dashboard server alongside the embedded OpenClaw route. Default: true. */
+  standaloneDashboard?: boolean;
 };
 
 const DEFAULT_GHOST_RECALL: Required<GhostRecallConfig> = {
@@ -284,10 +286,23 @@ type ResolvedConfig = {
   ghostRecall: Required<GhostRecallConfig>;
   memoryFlush: Required<MemoryFlushConfig>;
   syncAgents: boolean;
+  standaloneDashboard: boolean;
 };
 
 function resolveConfig(raw?: Record<string, unknown>): ResolvedConfig {
-  if (!raw) return { ...DEFAULT_CONFIG, ghostRecall: { ...DEFAULT_GHOST_RECALL }, memoryFlush: { ...DEFAULT_MEMORY_FLUSH }, syncAgents: true };
+  const envStandalone = process.env.CLAWFORCE_DASHBOARD_STANDALONE;
+  const standaloneOverride = envStandalone === undefined
+    ? undefined
+    : !["0", "false", "no", "off"].includes(envStandalone.trim().toLowerCase());
+  if (!raw) {
+    return {
+      ...DEFAULT_CONFIG,
+      ghostRecall: { ...DEFAULT_GHOST_RECALL },
+      memoryFlush: { ...DEFAULT_MEMORY_FLUSH },
+      syncAgents: true,
+      standaloneDashboard: standaloneOverride ?? true,
+    };
+  }
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONFIG.enabled,
     projectsDir: typeof raw.projectsDir === "string" ? raw.projectsDir : DEFAULT_CONFIG.projectsDir,
@@ -300,6 +315,8 @@ function resolveConfig(raw?: Record<string, unknown>): ResolvedConfig {
     ghostRecall: resolveGhostRecall(raw.ghostRecall as Record<string, unknown> | undefined),
     memoryFlush: resolveMemoryFlush(raw.memoryFlush as Record<string, unknown> | undefined),
     syncAgents: typeof raw.syncAgents === "boolean" ? raw.syncAgents : true,
+    standaloneDashboard: standaloneOverride
+      ?? (typeof raw.standaloneDashboard === "boolean" ? raw.standaloneDashboard : true),
   };
 }
 
@@ -2197,9 +2214,28 @@ const clawforcePlugin = {
     api.logger.info(`Clawforce: dashboard dir candidates: ${JSON.stringify(dashboardDistCandidates)}`);
     api.logger.info(`Clawforce: resolved dashboard dir: ${resolvedDashboardDir} (exists: ${fs.existsSync(resolvedDashboardDir)})`);
 
+    const standaloneHost = process.env.CLAWFORCE_DASHBOARD_HOST ?? "127.0.0.1";
+    const standalonePort = process.env.CLAWFORCE_DASHBOARD_PORT
+      ? Number(process.env.CLAWFORCE_DASHBOARD_PORT)
+      : 3117;
+
     const dashboardHandler = createDashboardHandler({
       staticDir: resolvedDashboardDir,
       injectAgentMessage: (params) => cliInjectMessage(params),
+      runtime: {
+        mode: "openclaw-plugin",
+        authMode: "openclaw-plugin",
+        standaloneCompatibilityServer: cfg.standaloneDashboard,
+        ...(cfg.standaloneDashboard
+          ? { standaloneUrl: `http://${standaloneHost}:${standalonePort}/clawforce/` }
+          : {}),
+        notes: [
+          "This dashboard route is embedded in OpenClaw and uses OpenClaw plugin authentication.",
+          ...(cfg.standaloneDashboard
+            ? ["A standalone compatibility server is also enabled for direct browser access outside the OpenClaw Control UI shell."]
+            : ["The standalone compatibility server is disabled; use the embedded OpenClaw route."]),
+        ],
+      },
     });
 
     api.registerHttpRoute({
@@ -2213,7 +2249,6 @@ const clawforcePlugin = {
     // Serves the React SPA + API from a dedicated port, bypassing the
     // gateway's Control UI SPA catch-all that intercepts /clawforce/ paths.
     const dashboardServer = createDashboardServer({
-      port: 3117,
       dashboardDir: resolvedDashboardDir,
       injectAgentMessage: (params) => cliInjectMessage(params),
     });
@@ -2468,17 +2503,21 @@ const clawforcePlugin = {
       }
     });
 
-    api.registerService({
-      id: "clawforce-dashboard",
-      start: async () => {
-        await dashboardServer.start();
-        api.logger.info("Clawforce dashboard at http://localhost:3117");
-      },
-      stop: async () => {
-        await dashboardServer.stop();
-        api.logger.info("Clawforce dashboard server stopped");
-      },
-    });
+    if (cfg.standaloneDashboard) {
+      api.registerService({
+        id: "clawforce-dashboard",
+        start: async () => {
+          await dashboardServer.start();
+          api.logger.info(`Clawforce dashboard compatibility server at http://${standaloneHost}:${standalonePort}/clawforce/`);
+        },
+        stop: async () => {
+          await dashboardServer.stop();
+          api.logger.info("Clawforce dashboard server stopped");
+        },
+      });
+    } else {
+      api.logger.info("Clawforce: standalone dashboard compatibility server disabled; relying on the embedded OpenClaw route only");
+    }
 
     // --- Sweep service ---
     api.registerService({

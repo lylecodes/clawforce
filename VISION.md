@@ -18,15 +18,18 @@ ClawForce is the environment that makes agents effective. Agents get:
 - **Audit trail** — every action tracked, every decision logged, every outcome measured.
 
 ### For the human
-The human sets direction and budget. ClawForce handles the rest. The dashboard is a window into the system, not a control panel.
+The human sets direction and budget. Agents should handle explicitly modeled
+operations by default, but the dashboard is the default control plane and
+visibility surface for all ClawForce core capabilities.
 
 Human responsibilities:
 - Write DIRECTION.md (what to build, priorities, measurable targets)
 - Set budget
 - Approve high-stakes decisions (money, going live)
-- Watch the team work through the dashboard
+- Configure and intervene through the dashboard whenever needed
 
-Everything else is the agents.
+Everything else should be explicitly modeled in core and handled by agents by
+default.
 
 ### For optimization
 The same infrastructure that governs agents also enables systematic optimization:

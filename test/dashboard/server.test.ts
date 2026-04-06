@@ -74,6 +74,15 @@ describe("createDashboardServer", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe(`http://127.0.0.1:${port}`);
   });
 
+  it("sets baseline security headers on API responses", async () => {
+    const { port } = await startServer({ port: 0 });
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("permissions-policy")).toBe("camera=(), microphone=(), geolocation=()");
+  });
+
   it("sets CORS headers for configured origin", async () => {
     const { port } = await startServer({ port: 0, corsOrigin: "https://example.com" });
     const res = await fetch(`http://127.0.0.1:${port}/api/health`, {

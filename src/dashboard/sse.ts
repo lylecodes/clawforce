@@ -10,6 +10,7 @@ export type SSEEventType =
   | "budget:update"
   | "task:update"
   | "agent:status"
+  | "domain:status"
   | "approval:new"
   | "approval:resolved"
   | "message:new"

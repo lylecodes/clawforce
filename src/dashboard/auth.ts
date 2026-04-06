@@ -22,6 +22,10 @@ export type AuthOptions = {
   allowedOrigins?: string[];
 };
 
+export type SecurityHeaderOptions = {
+  csp?: string;
+};
+
 export type RateLimitEntry = {
   count: number;
   resetAt: number;
@@ -124,6 +128,26 @@ export function setCorsHeaders(
     }
   } catch {
     // Invalid origin URL — don't set header
+  }
+}
+
+/**
+ * Apply baseline security headers shared by standalone and embedded dashboard
+ * responses. Keep this lightweight so it does not fight OpenClaw's own auth
+ * model when the dashboard is embedded as a plugin route.
+ */
+export function setSecurityHeaders(
+  res: ServerResponse,
+  opts?: SecurityHeaderOptions,
+): void {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  if (opts?.csp) {
+    res.setHeader("Content-Security-Policy", opts.csp);
   }
 }
 

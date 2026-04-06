@@ -19,6 +19,7 @@ vi.mock("../../src/dashboard/queries.js", () => ({
     tasksInFlight: 0,
     pendingApprovals: 0,
   })),
+  queryConfigVersions: vi.fn(() => ({ versions: [], count: 0 })),
   queryApprovals: vi.fn(() => ({ proposals: [], count: 0 })),
   queryBudgetStatus: vi.fn(() => ({ windows: [], alerts: [] })),
   queryBudgetForecast: vi.fn(() => ({ daily: null, weekly: null, monthly: null })),
@@ -44,7 +45,6 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryTrackedSessions: vi.fn(() => ({ sessions: [], total: 0, count: 0, limit: 50, offset: 0 })),
   queryWorkerAssignments: vi.fn(() => ({ assignments: [], count: 0 })),
   queryQueueStatus: vi.fn(() => ({ queue: [], pending: 0, processing: 0 })),
-  queryExperiments: vi.fn(() => ({ experiments: [], count: 0 })),
   queryKnowledge: vi.fn(() => ({ entries: [], count: 0 })),
   queryKnowledgeFlags: vi.fn(() => ({ flags: [], count: 0 })),
   queryPromotionCandidates: vi.fn(() => ({ candidates: [], count: 0 })),
@@ -52,10 +52,28 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryWorkStreams: vi.fn(() => ({ workstreams: [], count: 0 })),
   queryUserInbox: vi.fn(() => ({ messages: [], count: 0 })),
   queryOperationalMetrics: vi.fn(() => ({ metrics: {} })),
+  readContextFile: vi.fn((_root: string, relativePath: string) => ({
+    content: `content for ${relativePath}`,
+    path: relativePath,
+    lastModified: 123,
+  })),
+  writeContextFile: vi.fn(() => ({ ok: true })),
+  ContextFileError: class ContextFileError extends Error {
+    status: number;
+
+    constructor(message: string, status: number) {
+      super(message);
+      this.status = status;
+    }
+  },
 }));
 
 vi.mock("../../src/dashboard/actions.js", () => ({
   handleAction: vi.fn(() => ({ status: 200, body: { ok: true } })),
+  handleAgentKillAction: vi.fn(async () => ({ status: 200, body: { ok: true, killedSessions: 1 } })),
+  handleDomainKillAction: vi.fn(async () => ({ status: 200, body: { ok: true, emergencyStop: true } })),
+  handleDemoCreate: vi.fn(() => ({ status: 201, body: { ok: true } })),
+  handleStarterDomainCreate: vi.fn(() => ({ status: 201, body: { ok: true, domainId: "starter-co" } })),
 }));
 
 vi.mock("../../src/dashboard/sse.js", () => ({
@@ -69,17 +87,47 @@ vi.mock("../../src/diagnostics.js", () => ({
   emitDiagnosticEvent: vi.fn(),
 }));
 
+vi.mock("../../src/project.js", () => {
+  const configs = new Map<string, any>([
+    ["lead-root", { projectId: "test-project", projectDir: "/tmp/test-project", config: { title: "Root Lead", coordination: { enabled: true } } }],
+    ["lead-child", { projectId: "test-project", projectDir: "/tmp/test-project", config: { title: "Child Lead", coordination: { enabled: true }, reports_to: "lead-root" } }],
+    ["worker-1", { projectId: "test-project", projectDir: "/tmp/test-project", config: { title: "Worker", reports_to: "lead-root" } }],
+  ]);
+  return {
+    getExtendedProjectConfig: vi.fn(() => null),
+    getRegisteredAgentIds: vi.fn(() => [...configs.keys()]),
+    getAgentConfig: vi.fn((id: string) => configs.get(id) ?? null),
+  };
+});
+
+vi.mock("../../src/config/api-service.js", () => ({
+  getDomainContextDir: vi.fn((projectId: string) => `/tmp/domain-context/${projectId}`),
+  readDomainConfig: vi.fn(() => null),
+}));
+
 const { createDashboardHandler } = await import("../../src/dashboard/gateway-routes.js");
+const {
+  registerDashboardExtension,
+  clearDashboardExtensions,
+} = await import("../../src/dashboard/extensions.js");
 const {
   queryAgents, queryDashboardSummary, querySessions, querySessionDetail,
   queryAuditLog, queryAuditRuns, queryEnforcementRetries,
   queryOnboardingState, queryTrackedSessions, queryWorkerAssignments,
-  queryQueueStatus, queryExperiments, queryKnowledge, queryKnowledgeFlags,
+  queryQueueStatus, queryKnowledge, queryKnowledgeFlags,
   queryPromotionCandidates, queryInterventions, queryWorkStreams,
   queryUserInbox, queryOperationalMetrics, queryTrustHistory, queryThreadMessages,
+  queryConfigVersions,
+  readContextFile, writeContextFile,
 } = await import("../../src/dashboard/queries.js");
-const { handleAction } = await import("../../src/dashboard/actions.js");
+const {
+  handleAction,
+  handleStarterDomainCreate,
+  handleAgentKillAction,
+  handleDomainKillAction,
+} = await import("../../src/dashboard/actions.js");
 const { getSSEManager } = await import("../../src/dashboard/sse.js");
+const { readDomainConfig } = await import("../../src/config/api-service.js");
 
 function createMockRequest(method: string, urlStr: string, body?: Record<string, unknown>, extraHeaders?: Record<string, string>): {
   req: IncomingMessage;
@@ -142,6 +190,8 @@ function createMockRequest(method: string, urlStr: string, body?: Record<string,
 describe("createDashboardHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearDashboardExtensions();
+    (readDomainConfig as any).mockReturnValue(null);
   });
 
   it("handles OPTIONS preflight", async () => {
@@ -167,6 +217,44 @@ describe("createDashboardHandler", () => {
     expect(res.statusCode).toBe(200);
   });
 
+  it("routes GET /clawforce/api/extensions to the extension registry", async () => {
+    registerDashboardExtension({
+      id: "clawforce-experiments",
+      title: "Experiments",
+      source: { kind: "openclaw-plugin", pluginId: "@clawforce/plugin-experiments" },
+      pages: [{ id: "experiments", title: "Experiments", route: "/experiments" }],
+    });
+
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/extensions");
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.bodyData)).toEqual({
+      count: 1,
+      extensions: [
+        expect.objectContaining({
+          id: "clawforce-experiments",
+          title: "Experiments",
+        }),
+      ],
+    });
+  });
+
+  it("routes GET /clawforce/api/runtime to runtime metadata", async () => {
+    const handler = createDashboardHandler({
+      auth: { skipAuth: true },
+      runtimeMode: "embedded",
+    });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/runtime");
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.bodyData);
+    expect(body.mode).toBe("embedded");
+    expect(body.auth).toBe("openclaw-delegated");
+  });
+
   it("routes GET /clawforce/api/:domain/dashboard to dashboard summary", async () => {
     const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/dashboard");
@@ -179,6 +267,31 @@ describe("createDashboardHandler", () => {
     const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/approvals/p1/approve", {});
     await handler(req, res);
     expect(handleAction).toHaveBeenCalledWith("test-project", "approvals/p1/approve", {});
+  });
+
+  it("routes POST /clawforce/api/domains/create to the starter domain handler", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const body = { domainId: "starter-co", mode: "new" };
+    const { req, res } = createMockRequest("POST", "/clawforce/api/domains/create", body);
+    await handler(req, res);
+    expect(handleStarterDomainCreate).toHaveBeenCalledWith(body);
+    expect(res.statusCode).toBe(201);
+  });
+
+  it("routes POST /clawforce/api/:domain/kill to the async domain kill handler", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/kill", { reason: "panic" });
+    await handler(req, res);
+    expect(handleDomainKillAction).toHaveBeenCalledWith("test-project", { reason: "panic" });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes POST /clawforce/api/:domain/agents/:id/kill to the async agent kill handler", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/a1/kill", { reason: "panic" });
+    await handler(req, res);
+    expect(handleAgentKillAction).toHaveBeenCalledWith("test-project", "a1", { reason: "panic" });
+    expect(res.statusCode).toBe(200);
   });
 
   it("routes GET /clawforce/api/sse?domain=test-project to SSE handler", async () => {
@@ -228,6 +341,41 @@ describe("createDashboardHandler", () => {
     const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/config");
     await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/config/versions to config version history", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/config/versions?limit=25");
+    await handler(req, res);
+    expect(queryConfigVersions).toHaveBeenCalledWith("test-project", 25);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/config-versions to the legacy config version history alias", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/config-versions?limit=10");
+    await handler(req, res);
+    expect(queryConfigVersions).toHaveBeenCalledWith("test-project", 10);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/context-files to the context file reader", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/context-files?path=DIRECTION.md");
+    await handler(req, res);
+    expect(readContextFile).toHaveBeenCalledWith("/tmp/test-project", "DIRECTION.md");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes POST /clawforce/api/:domain/context-files to the context file writer", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/context-files", {
+      path: "DIRECTION.md",
+      content: "# direction",
+    });
+    await handler(req, res);
+    expect(writeContextFile).toHaveBeenCalledWith("/tmp/test-project", "DIRECTION.md", "# direction");
     expect(res.statusCode).toBe(200);
   });
 
@@ -307,6 +455,136 @@ describe("createDashboardHandler", () => {
     expect(res.statusCode).toBe(404);
   });
 
+  it("streams an agent message acknowledgement when live injection is configured", async () => {
+    const injectAgentMessage = vi.fn(async () => ({}));
+    const handler = createDashboardHandler({
+      auth: { skipAuth: true },
+      injectAgentMessage,
+    });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/a1/message", {
+      content: "hello",
+    });
+    await handler(req, res);
+    expect(injectAgentMessage).toHaveBeenCalledWith({
+      sessionKey: "agent:a1:main",
+      message: "hello",
+    });
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+      "Content-Type": "text/event-stream",
+    }));
+  });
+
+  it("routes assistant messages to the default lead when no live session is wired", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/clawforce-assistant/message", {
+      content: "please review the org",
+    });
+    await handler(req, res);
+    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
+      to: "lead-root",
+      content: "please review the org",
+    }));
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+      "Content-Type": "text/event-stream",
+    }));
+  });
+
+  it("routes assistant messages to the configured dashboard assistant target", async () => {
+    (readDomainConfig as any).mockReturnValueOnce({
+      domain: "test-project",
+      dashboard_assistant: { agentId: "lead-child" },
+    });
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/clawforce-assistant/message", {
+      content: "review the roadmap",
+    });
+    await handler(req, res);
+    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
+      to: "lead-child",
+      content: "review the roadmap",
+    }));
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+      "Content-Type": "text/event-stream",
+    }));
+    expect(res.bodyData).toContain("configured assistant target");
+  });
+
+  it("injects assistant messages into the configured assistant target session", async () => {
+    (readDomainConfig as any).mockReturnValueOnce({
+      domain: "test-project",
+      dashboard_assistant: { agentId: "lead-child" },
+    });
+    const injectAgentMessage = vi.fn(async () => ({}));
+    const handler = createDashboardHandler({
+      auth: { skipAuth: true },
+      injectAgentMessage,
+    });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/clawforce-assistant/message", {
+      content: "check staffing",
+    });
+    await handler(req, res);
+    expect(injectAgentMessage).toHaveBeenCalledWith({
+      sessionKey: "agent:lead-child:main",
+      message: "check staffing",
+    });
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+      "Content-Type": "text/event-stream",
+    }));
+  });
+
+  it("supports @mentions inside the assistant route itself", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/clawforce-assistant/message", {
+      content: "@lead-child focus on auth",
+    });
+    await handler(req, res);
+    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
+      to: "lead-child",
+      content: "focus on auth",
+    }));
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+      "Content-Type": "text/event-stream",
+    }));
+  });
+
+  it("reports when the dashboard assistant is disabled for a domain", async () => {
+    (readDomainConfig as any).mockReturnValueOnce({
+      domain: "test-project",
+      dashboard_assistant: { enabled: false },
+    });
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/clawforce-assistant/message", {
+      content: "help me",
+    });
+    await handler(req, res);
+    expect(handleAction).not.toHaveBeenCalledWith("test-project", "messages/send", expect.anything());
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+      "Content-Type": "text/event-stream",
+    }));
+    expect(res.bodyData).toContain("dashboard assistant is disabled");
+  });
+
+  it("falls back to stored delivery when live agent injection fails", async () => {
+    const injectAgentMessage = vi.fn(async () => {
+      throw new Error("session offline");
+    });
+    const handler = createDashboardHandler({
+      auth: { skipAuth: true },
+      injectAgentMessage,
+    });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/worker-1/message", {
+      content: "check task t1",
+    });
+    await handler(req, res);
+    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
+      to: "worker-1",
+      content: "check task t1",
+    }));
+    expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
+      "Content-Type": "text/event-stream",
+    }));
+  });
+
   it("sets CORS method and header headers", async () => {
     const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents");
@@ -330,6 +608,16 @@ describe("createDashboardHandler", () => {
     const setHeaderCalls = (res.setHeader as ReturnType<typeof vi.fn>).mock.calls;
     const originCalls = setHeaderCalls.filter((c: unknown[]) => c[0] === "Access-Control-Allow-Origin");
     expect(originCalls).toHaveLength(0);
+  });
+
+  it("sets baseline security headers", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/agents");
+    await handler(req, res);
+    expect(res.setHeader).toHaveBeenCalledWith("X-Content-Type-Options", "nosniff");
+    expect(res.setHeader).toHaveBeenCalledWith("X-Frame-Options", "DENY");
+    expect(res.setHeader).toHaveBeenCalledWith("Referrer-Policy", "no-referrer");
+    expect(res.setHeader).toHaveBeenCalledWith("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   });
 
   it("allows configured CORS origins", async () => {
@@ -458,14 +746,6 @@ describe("createDashboardHandler", () => {
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/queue");
     await handler(req, res);
     expect(queryQueueStatus).toHaveBeenCalledWith("test-project");
-    expect(res.statusCode).toBe(200);
-  });
-
-  it("routes GET /clawforce/api/:domain/experiments to queryExperiments", async () => {
-    const handler = createDashboardHandler({ auth: { skipAuth: true } });
-    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/experiments");
-    await handler(req, res);
-    expect(queryExperiments).toHaveBeenCalledWith("test-project");
     expect(res.statusCode).toBe(200);
   });
 

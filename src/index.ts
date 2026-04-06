@@ -190,6 +190,24 @@ export { recordMetric } from "./metrics.js";
 // --- Diagnostics ---
 export { emitDiagnosticEvent, setDiagnosticEmitter } from "./diagnostics.js";
 
+// --- Dashboard Extensions ---
+export {
+  registerDashboardExtension,
+  unregisterDashboardExtension,
+  listDashboardExtensions,
+  getDashboardExtension,
+  clearDashboardExtensions,
+} from "./dashboard/extensions.js";
+export type {
+  DashboardExtensionContribution,
+  DashboardExtensionSource,
+  DashboardExtensionSurface,
+  DashboardExtensionPage,
+  DashboardExtensionPanel,
+  DashboardExtensionAction,
+  DashboardExtensionConfigSection,
+} from "./dashboard/extensions.js";
+
 // --- Pricing ---
 export { getPricing, registerModelPricing, registerModelPricingFromConfig, registerBulkPricing } from "./pricing.js";
 

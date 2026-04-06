@@ -238,6 +238,12 @@ The dashboard is optional. It should act as the base control plane for the
 common ClawForce surfaces that most builders share, not as the source of truth
 for the system.
 
+Canonical product stance:
+[`docs/DASHBOARD_PRODUCT_STANCE.md`](docs/DASHBOARD_PRODUCT_STANCE.md)
+
+Extension architecture:
+[`docs/DASHBOARD_EXTENSION_ARCHITECTURE.md`](docs/DASHBOARD_EXTENSION_ARCHITECTURE.md)
+
 That means:
 
 - you can adopt ClawForce without adopting the dashboard

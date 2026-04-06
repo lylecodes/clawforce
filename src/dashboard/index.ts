@@ -4,6 +4,22 @@
 
 export { createDashboardServer } from "./server.js";
 export type { DashboardOptions } from "./server.js";
+export {
+  registerDashboardExtension,
+  unregisterDashboardExtension,
+  listDashboardExtensions,
+  getDashboardExtension,
+  clearDashboardExtensions,
+} from "./extensions.js";
+export type {
+  DashboardExtensionContribution,
+  DashboardExtensionSource,
+  DashboardExtensionSurface,
+  DashboardExtensionPage,
+  DashboardExtensionPanel,
+  DashboardExtensionAction,
+  DashboardExtensionConfigSection,
+} from "./extensions.js";
 export { handleRequest } from "./routes.js";
 export type { RouteResult } from "./routes.js";
 export {

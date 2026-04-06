@@ -7,8 +7,16 @@ vi.mock("../../src/lifecycle.js", () => ({
 
 vi.mock("../../src/project.js", () => {
   const configs = new Map<string, any>([
-    ["agent-mgr", { projectId: "proj1", config: { extends: "manager", title: "Manager", department: "eng" } }],
-    ["agent-dev", { projectId: "proj1", config: { extends: "employee", title: "Developer", department: "eng" } }],
+    ["agent-mgr", {
+      projectId: "proj1",
+      config: {
+        extends: "manager",
+        title: "Manager",
+        department: "eng",
+        briefing: [{ source: "file", path: "context/manager.md" }, { source: "direction" }],
+      },
+    }],
+    ["agent-dev", { projectId: "proj1", config: { extends: "employee", title: "Developer", department: "eng", briefing: [] } }],
   ]);
   return {
     getAgentConfig: vi.fn((id: string) => configs.get(id) ?? null),
@@ -92,12 +100,17 @@ vi.mock("../../src/org.js", () => ({
 
 vi.mock("../../src/enforcement/disabled-store.js", () => ({
   listDisabledAgents: vi.fn(() => []),
+  isDomainDisabled: vi.fn(() => false),
 }));
 
 vi.mock("../../src/enforcement/tracker.js", () => ({
   getActiveSessions: vi.fn(() => [
     { agentId: "agent-dev", projectId: "proj1", sessionKey: "sk1", metrics: { startedAt: 0, toolCalls: [] } },
   ]),
+}));
+
+vi.mock("../../src/safety.js", () => ({
+  isEmergencyStopActive: vi.fn(() => false),
 }));
 
 vi.mock("../../src/approval/resolve.js", () => ({
@@ -155,9 +168,93 @@ vi.mock("../../src/channels/meeting.js", () => ({
 
 vi.mock("../../src/db.js", () => ({
   getDb: vi.fn(() => ({
-    prepare: vi.fn(() => ({
+    prepare: vi.fn((sql: string) => ({
       all: vi.fn(() => []),
+      get: vi.fn(() => {
+        if (sql.includes("FROM budgets")) {
+          return {
+            hourly_limit_cents: 1000,
+            hourly_limit_tokens: 10000,
+            hourly_limit_requests: 10,
+            daily_limit_cents: 10000,
+            daily_limit_tokens: 100000,
+            daily_limit_requests: 100,
+            monthly_limit_cents: null,
+            monthly_limit_tokens: null,
+            monthly_limit_requests: null,
+          };
+        }
+        return undefined;
+      }),
     })),
+  })),
+}));
+
+vi.mock("../../src/config/api-service.js", () => ({
+  readDomainConfig: vi.fn((projectId: string) => {
+    if (projectId === "proj1") {
+      return {
+        domain: "proj1",
+        agents: ["agent-mgr", "agent-dev"],
+        operational_profile: "medium",
+        defaults: {
+          briefing: [{ source: "direction" }],
+          performance_policy: { action: "alert" },
+        },
+        workflows: ["daily_review", "incident_response"],
+        knowledge: {
+          provider: "filesystem",
+          categories: ["ops", "product"],
+        },
+        event_handlers: {
+          task_created: {
+            type: "notify",
+            target: "agent-mgr",
+          },
+        },
+        role_defaults: {
+          manager: {
+            briefing: [{ source: "policies" }],
+          },
+        },
+        team_templates: {
+          eng: {
+            briefing: [{ source: "file", path: "context/eng.md" }],
+          },
+        },
+        dashboard_assistant: {
+          agentId: "agent-mgr",
+          model: "gpt-5.4-mini",
+        },
+        rules: [{ type: "budget_guard" }],
+        goals: {
+          launch: { allocation: 40, description: "Launch work" },
+          reserve: { description: "Unallocated reserve" },
+        },
+      };
+    }
+    return null;
+  }),
+  readGlobalConfig: vi.fn(() => ({
+    agents: {
+      "agent-mgr": {
+        jobs: {
+          standup: {
+            cron: "0 9 * * *",
+            description: "Daily standup",
+            enabled: true,
+          },
+        },
+      },
+      "agent-dev": {
+        jobs: {
+          cleanup: {
+            cron: "0 18 * * *",
+            enabled: false,
+          },
+        },
+      },
+    },
   })),
 }));
 
@@ -243,13 +340,87 @@ describe("queryConfig", () => {
     expect(result).toHaveProperty("tool_gates");
     expect(result).toHaveProperty("safety");
     expect(result).toHaveProperty("agents");
+    // briefing preserves full source objects so the SPA can round-trip edits
+    expect(result.agents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "agent-mgr",
+        briefing: [{ source: "file", path: "context/manager.md" }, { source: "direction" }],
+      }),
+    ]));
     expect(result).toHaveProperty("budget");
+    expect(result.budget).toEqual({
+      daily: { cents: 10000, tokens: 100000, requests: 100 },
+      hourly: { cents: 1000, tokens: 10000, requests: 10 },
+      monthly: undefined,
+      operational_profile: "medium",
+      initiatives: { launch: 40 },
+    });
+    expect(result.profile).toEqual({ operational_profile: "medium" });
+    expect(result.initiatives).toEqual({
+      launch: { allocation_pct: 40, goal: "launch" },
+    });
+    expect(result.dashboard_assistant).toEqual({
+      enabled: true,
+      agentId: "agent-mgr",
+      model: "gpt-5.4-mini",
+    });
+    expect(result.defaults).toEqual({
+      briefing: [{ source: "direction" }],
+      performance_policy: { action: "alert" },
+    });
+    expect(result.workflows).toEqual(["daily_review", "incident_response"]);
+    expect(result.knowledge).toEqual({
+      provider: "filesystem",
+      categories: ["ops", "product"],
+    });
+    expect(result.event_handlers).toEqual({
+      task_created: {
+        type: "notify",
+        target: "agent-mgr",
+      },
+    });
+    expect(result.role_defaults).toEqual({
+      manager: {
+        briefing: [{ source: "policies" }],
+      },
+    });
+    expect(result.team_templates).toEqual({
+      eng: {
+        briefing: [{ source: "file", path: "context/eng.md" }],
+      },
+    });
+    expect(result.jobs).toEqual([
+      {
+        id: "agent-mgr:standup",
+        agent: "agent-mgr",
+        cron: "0 9 * * *",
+        enabled: true,
+        description: "Daily standup",
+      },
+      {
+        id: "agent-dev:cleanup",
+        agent: "agent-dev",
+        cron: "0 18 * * *",
+        enabled: false,
+        description: undefined,
+      },
+    ]);
+    expect(result.rules).toEqual([{ type: "budget_guard" }]);
   });
 
   it("returns empty data for unknown project", () => {
     const result = queryConfig("unknown-project");
     expect(result).not.toBeNull();
     expect(result.agents).toHaveLength(0);
+    expect(result.dashboard_assistant).toEqual({ enabled: true });
+    expect(result.defaults).toEqual({});
+    expect(result.workflows).toEqual([]);
+    expect(result.knowledge).toEqual({});
+    expect(result.event_handlers).toEqual({});
+    expect(result.role_defaults).toEqual({});
+    expect(result.team_templates).toEqual({});
+    expect(result.profile).toEqual({});
+    expect(result.initiatives).toEqual({});
   });
 });
 

@@ -12,12 +12,19 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { handleAction, handleDemoCreate } from "./actions.js";
+import { listDashboardExtensions } from "./extensions.js";
+import {
+  handleAction,
+  handleDemoCreate,
+  handleStarterDomainCreate,
+  handleAgentKillAction,
+  handleDomainKillAction,
+} from "./actions.js";
 import { getSSEManager } from "./sse.js";
-import { checkAuth, setCorsHeaders, checkRateLimit } from "./auth.js";
+import { checkAuth, setCorsHeaders, setSecurityHeaders, checkRateLimit } from "./auth.js";
 import type { AuthOptions } from "./auth.js";
 import { safeLog } from "../diagnostics.js";
-import { getExtendedProjectConfig } from "../project.js";
+import { getExtendedProjectConfig, getRegisteredAgentIds, getAgentConfig } from "../project.js";
 import {
   queryAgents,
   queryAgentDetail,
@@ -61,17 +68,90 @@ import {
   queryWorkStreams,
   queryUserInbox,
   queryOperationalMetrics,
+  queryConfigVersions,
+  readContextFile,
+  writeContextFile,
+  ContextFileError,
 } from "./queries.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
 import { TASK_STATES, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
-import type { CapabilityResponse } from "../api/contract.js";
-import { getExtendedProjectConfig } from "../project.js";
+import type { CapabilityResponse, DashboardRuntimeResponse } from "../api/contract.js";
+import { getDomainContextDir, readDomainConfig as readDomainConfigViaService } from "../config/api-service.js";
 
 /** Parse an integer from a string, returning a default if NaN. */
 function safeParseInt(value: string, defaultValue: number): number {
   const parsed = parseInt(value, 10);
   return isNaN(parsed) ? defaultValue : parsed;
+}
+
+function resolveProjectDir(projectId: string): string | null {
+  const agentIds = getRegisteredAgentIds();
+  for (const agentId of agentIds) {
+    const entry = getAgentConfig(agentId);
+    if (entry?.projectId === projectId && entry.projectDir) {
+      return entry.projectDir;
+    }
+  }
+  return null;
+}
+
+function resolveContextRoots(projectId: string): string[] {
+  const roots = [
+    resolveProjectDir(projectId),
+    getDomainContextDir(projectId),
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  return Array.from(new Set(roots));
+}
+
+function readContextFileFromRoots(projectId: string, relativePath: string): RouteResult {
+  const roots = resolveContextRoots(projectId);
+  if (roots.length === 0) return notFound("Project directory not found");
+
+  for (const root of roots) {
+    try {
+      return ok(readContextFile(root, relativePath));
+    } catch (error) {
+      if (error instanceof ContextFileError && error.status === 404) continue;
+      if (error instanceof ContextFileError) {
+        return { status: error.status, body: { error: error.message } };
+      }
+      return { status: 500, body: { error: "Failed to read context file" } };
+    }
+  }
+
+  return { status: 404, body: { error: "File not found" } };
+}
+
+function resolveContextWriteRoot(projectId: string, relativePath: string): string | null {
+  const roots = resolveContextRoots(projectId);
+  if (roots.length === 0) return null;
+
+  for (const root of roots) {
+    try {
+      readContextFile(root, relativePath);
+      return root;
+    } catch (error) {
+      if (error instanceof ContextFileError && error.status === 404) continue;
+      return root;
+    }
+  }
+
+  return roots[0] ?? null;
+}
+
+function writeContextFileToRoot(projectId: string, relativePath: string, content: string): RouteResult {
+  const root = resolveContextWriteRoot(projectId, relativePath);
+  if (!root) return notFound("Project directory not found");
+
+  try {
+    return ok(writeContextFile(root, relativePath, content));
+  } catch (error) {
+    if (error instanceof ContextFileError) {
+      return { status: error.status, body: { error: error.message } };
+    }
+    return { status: 500, body: { error: "Failed to write context file" } };
+  }
 }
 
 const VALID_MESSAGE_STATUSES: readonly string[] = ["queued", "delivered", "read", "failed"];
@@ -98,7 +178,185 @@ export type DashboardHandlerOptions = {
    * Defaults to "embedded" when skipAuth=true, "standalone" otherwise.
    */
   runtimeMode?: "embedded" | "standalone";
+  /** Runtime metadata so the dashboard can explain whether OpenClaw or standalone auth is in effect. */
+  runtime?: DashboardRuntimeResponse;
 };
+
+function respondTextEventStream(
+  res: ServerResponse,
+  content: string,
+): void {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+  });
+  res.write(`data: ${JSON.stringify({ content })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+type AssistantFallbackTarget = {
+  agentId: string;
+  title?: string;
+  explicit: boolean;
+  source: "explicit" | "configured" | "lead";
+};
+
+type DashboardAssistantSettings = {
+  enabled: boolean;
+  agentId?: string;
+};
+
+function isLeadLikeAgent(projectId: string, agentId: string): boolean {
+  const entry = getAgentConfig(agentId);
+  if (!entry || entry.projectId !== projectId) return false;
+  return !!entry.config.coordination?.enabled || !!entry.config.extends?.includes("lead");
+}
+
+function getDashboardAssistantSettings(projectId: string): DashboardAssistantSettings {
+  try {
+    const raw = readDomainConfigViaService(projectId)?.dashboard_assistant;
+    if (!raw || typeof raw !== "object") return { enabled: true };
+    const config = raw as Record<string, unknown>;
+    return {
+      enabled: config.enabled !== false,
+      agentId: typeof config.agentId === "string" && config.agentId.trim()
+        ? config.agentId.trim()
+        : undefined,
+    };
+  } catch {
+    return { enabled: true };
+  }
+}
+
+function parseAssistantDirective(content: string): { requestedAgentId?: string; content: string } {
+  const trimmed = content.trim();
+  const mentionMatch = trimmed.match(/^@([\w-]+)\s+(.+)$/s);
+  if (!mentionMatch) return { content: trimmed };
+  return {
+    requestedAgentId: mentionMatch[1],
+    content: mentionMatch[2]?.trim() ?? "",
+  };
+}
+
+function resolveAssistantFallbackTarget(
+  projectId: string,
+  requestedAgentId?: string,
+  assistantSettings: DashboardAssistantSettings = getDashboardAssistantSettings(projectId),
+): AssistantFallbackTarget | null {
+  if (requestedAgentId) {
+    const requested = getAgentConfig(requestedAgentId);
+    if (requested?.projectId === projectId) {
+      return {
+        agentId: requestedAgentId,
+        title: requested.config.title,
+        explicit: true,
+        source: "explicit",
+      };
+    }
+  }
+
+  if (!assistantSettings.enabled) return null;
+
+  if (assistantSettings.agentId) {
+    const configured = getAgentConfig(assistantSettings.agentId);
+    if (configured?.projectId === projectId) {
+      return {
+        agentId: assistantSettings.agentId,
+        title: configured.config.title,
+        explicit: false,
+        source: "configured",
+      };
+    }
+  }
+
+  const allAgentIds = getRegisteredAgentIds();
+  const projectAgentIds = new Set(
+    allAgentIds.filter((agentId) => getAgentConfig(agentId)?.projectId === projectId),
+  );
+
+  const leads = allAgentIds
+    .filter((agentId) => isLeadLikeAgent(projectId, agentId))
+    .map((agentId) => {
+      const entry = getAgentConfig(agentId)!;
+      const reportsTo = entry.config.reports_to;
+      const isRootLead = !reportsTo || reportsTo === "parent" || !projectAgentIds.has(reportsTo);
+      return {
+        agentId,
+        title: entry.config.title,
+        explicit: false,
+        isRootLead,
+      };
+    })
+    .sort((a, b) => {
+      if (a.isRootLead !== b.isRootLead) return a.isRootLead ? -1 : 1;
+      return a.agentId.localeCompare(b.agentId);
+    });
+
+  if (leads.length === 0) return null;
+  const lead = leads[0]!;
+  return {
+    agentId: lead.agentId,
+    title: lead.title,
+    explicit: false,
+    source: "lead",
+  };
+}
+
+function persistDirectAgentMessage(
+  projectId: string,
+  agentId: string,
+  body: Record<string, unknown>,
+  content: string,
+): RouteResult {
+  return handleAction(projectId, "messages/send", {
+    ...body,
+    to: agentId,
+    content,
+  });
+}
+
+function persistAssistantFallbackMessage(
+  projectId: string,
+  target: AssistantFallbackTarget | null,
+  body: Record<string, unknown>,
+  content: string,
+): { target: AssistantFallbackTarget | null; result: RouteResult | null } {
+  if (!target) return { target: null, result: null };
+
+  return {
+    target,
+    result: persistDirectAgentMessage(projectId, target.agentId, body, content),
+  };
+}
+
+function renderAssistantStoredMessage(target: AssistantFallbackTarget): string {
+  if (target.source === "explicit") {
+    return `Stored your operator request for "${target.agentId}". They will see it in their next briefing.`;
+  }
+  if (target.source === "configured") {
+    return `No live assistant session is wired, so I routed your operator request to the configured assistant target "${target.agentId}". They will see it in their next briefing.`;
+  }
+  return `No live assistant session is wired, so I routed your operator request to "${target.agentId}". They will see it in their next briefing.`;
+}
+
+function renderAssistantLiveDeliveryMessage(requestedAgentId: string, deliveredAgentId: string): string {
+  if (requestedAgentId === deliveredAgentId) {
+    return `Delivered your message to "${deliveredAgentId}".`;
+  }
+  return `Delivered your operator request to "${deliveredAgentId}".`;
+}
+
+function renderAssistantUnavailableMessage(
+  projectId: string,
+  settings: DashboardAssistantSettings = getDashboardAssistantSettings(projectId),
+): string {
+  if (!settings.enabled) {
+    return "The dashboard assistant is disabled for this domain. Use @lead-id in chat to message a lead directly, or enable dashboard_assistant in domain config.";
+  }
+  return "The dashboard assistant does not have a live session wired right now, and no lead target could be resolved. Use @lead-id in chat to message a lead directly, or configure a live assistant session in your runtime.";
+}
 
 /**
  * Create the dashboard HTTP handler.
@@ -113,6 +371,7 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
 
     // CORS — origin-validated (localhost by default, configurable)
     setCorsHeaders(req, res, options.allowedOrigins);
+    setSecurityHeaders(res);
 
     // Identify runtime mode on every response so the SPA can adapt
     res.setHeader("X-ClawForce-Runtime", runtimeMode);
@@ -178,8 +437,29 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
         }
         return;
       }
+      if (url.pathname === "/clawforce/api/extensions" && req.method === "GET") {
+        const extensions = listDashboardExtensions();
+        respondJson(res, 200, { extensions, count: extensions.length });
+        return;
+      }
+      if (url.pathname === "/clawforce/api/runtime" && req.method === "GET") {
+        respondJson(res, 200, options.runtime ?? {
+          mode: "standalone",
+          authMode: "localhost-only",
+          notes: [
+            "Runtime metadata was not explicitly provided by the caller.",
+          ],
+        } satisfies DashboardRuntimeResponse);
+        return;
+      }
       if (url.pathname === "/clawforce/api/demo/create" && req.method === "POST") {
         const result = handleDemoCreate();
+        respondJson(res, result.status, result.body);
+        return;
+      }
+      if (url.pathname === "/clawforce/api/domains/create" && req.method === "POST") {
+        const body = await parseBody(req);
+        const result = handleStarterDomainCreate(body);
         respondJson(res, result.status, result.body);
         return;
       }
@@ -197,23 +477,127 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
       if (req.method === "POST") {
         const body = await parseBody(req);
 
-        // Special handling for assistant widget messages:
-        // Return an SSE-formatted acknowledgment response so the chat widget
-        // displays a helpful message instead of a cryptic error.
+        // Assistant/widget messages expect an SSE response body.
         if (resource.match(/^agents\/[^/]+\/message$/)) {
           const agentId = resource.split("/")[1]!;
-          const assistantResponse = agentId === "clawforce-assistant"
-            ? "The Clawforce assistant is not yet connected to a live AI backend. To enable AI-powered assistance, configure a `dashboard-assistant` agent in your domain config and connect it to an LLM provider.\n\nIn the meantime, you can use the dashboard directly to:\n- View and manage agents in the Org Chart\n- Approve or reject proposals in the Approval Queue\n- Monitor costs and trust scores in Analytics\n- Edit configuration in the Config Editor"
-            : `Message received by agent "${agentId}". Note: real-time agent messaging requires an active OpenClaw agent session with adapter wiring configured.`;
+          const rawContent = typeof body.content === "string"
+            ? body.content
+            : typeof body.message === "string"
+              ? body.message
+              : "";
+          const directive = agentId === "clawforce-assistant"
+            ? parseAssistantDirective(rawContent)
+            : { content: rawContent };
+          const content = directive.content;
+          const requestedTarget = typeof body.to === "string"
+            ? body.to
+            : typeof body.leadId === "string"
+              ? body.leadId
+              : directive.requestedAgentId;
+          const assistantSettings = agentId === "clawforce-assistant"
+            ? getDashboardAssistantSettings(domain)
+            : null;
+          const assistantTarget = agentId === "clawforce-assistant"
+            ? resolveAssistantFallbackTarget(domain, requestedTarget, assistantSettings ?? undefined)
+            : null;
+          if (!content.trim()) {
+            respondJson(res, 400, { error: "content is required" });
+            return;
+          }
 
-          res.writeHead(200, {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-          });
-          res.write(`data: ${JSON.stringify({ content: assistantResponse })}\n\n`);
-          res.write("data: [DONE]\n\n");
-          res.end();
+          if (agentId === "clawforce-assistant" && !requestedTarget && assistantSettings && !assistantSettings.enabled) {
+            respondTextEventStream(res, renderAssistantUnavailableMessage(domain, assistantSettings));
+            return;
+          }
+
+          if (options.injectAgentMessage) {
+            try {
+              const deliveryAgentId = agentId === "clawforce-assistant"
+                ? (assistantTarget?.agentId ?? agentId)
+                : agentId;
+              await options.injectAgentMessage({
+                sessionKey: `agent:${deliveryAgentId}:main`,
+                message: content,
+              });
+              respondTextEventStream(
+                res,
+                renderAssistantLiveDeliveryMessage(agentId, deliveryAgentId),
+              );
+            } catch (err) {
+              if (agentId === "clawforce-assistant") {
+                const fallback = persistAssistantFallbackMessage(domain, assistantTarget, body, content);
+                if (fallback.target && fallback.result && fallback.result.status < 400) {
+                  respondTextEventStream(res, renderAssistantStoredMessage(fallback.target));
+                  return;
+                }
+              } else {
+                const fallback = persistDirectAgentMessage(domain, agentId, body, content);
+                if (fallback.status < 400) {
+                  respondTextEventStream(
+                    res,
+                    `Live delivery failed, but your message was stored for "${agentId}". They will see it in their next briefing.`,
+                  );
+                  return;
+                }
+              }
+
+              respondJson(res, 502, {
+                error: err instanceof Error ? err.message : "Failed to deliver live message",
+              });
+            }
+            return;
+          }
+
+          if (agentId !== "clawforce-assistant") {
+            const result = handleAction(domain, "messages/send", {
+              ...body,
+              to: agentId,
+              content,
+            });
+            if (result.status >= 400) {
+              respondJson(res, result.status, result.body);
+              return;
+            }
+            respondTextEventStream(
+              res,
+              `Stored your message for "${agentId}". They will see it in their next briefing.`,
+            );
+            return;
+          }
+
+          const fallback = persistAssistantFallbackMessage(domain, assistantTarget, body, content);
+          if (fallback.target && fallback.result && fallback.result.status < 400) {
+            respondTextEventStream(res, renderAssistantStoredMessage(fallback.target));
+            return;
+          }
+
+          respondTextEventStream(
+            res,
+            renderAssistantUnavailableMessage(domain, assistantSettings ?? undefined),
+          );
+          return;
+        }
+
+        if (resource === "context-files") {
+          if (typeof body.path !== "string" || typeof body.content !== "string") {
+            respondJson(res, 400, { error: "Missing required fields: path, content" });
+            return;
+          }
+          const result = writeContextFileToRoot(domain, body.path, body.content);
+          respondJson(res, result.status, result.body);
+          return;
+        }
+
+        if (resource === "kill") {
+          const result = await handleDomainKillAction(domain, body);
+          respondJson(res, result.status, result.body);
+          return;
+        }
+
+        if (resource.match(/^agents\/[^/]+\/kill$/)) {
+          const agentId = resource.split("/")[1]!;
+          const result = await handleAgentKillAction(domain, agentId, body);
+          respondJson(res, result.status, result.body);
           return;
         }
 
@@ -384,7 +768,21 @@ function routeRead(
     }
 
     case "config":
+      if (segments[1] === "versions") {
+        return ok(queryConfigVersions(domain, params.limit ? safeParseInt(params.limit, 50) : undefined));
+      }
       return ok(queryConfig(domain));
+
+    case "config-versions":
+      return ok(queryConfigVersions(domain, params.limit ? safeParseInt(params.limit, 50) : undefined));
+
+    case "context-files": {
+      const requestedPath = params.path;
+      if (!requestedPath) {
+        return { status: 400, body: { error: "Missing required query param: path" } };
+      }
+      return readContextFileFromRoots(domain, requestedPath);
+    }
 
     case "org":
       return ok(queryOrgChart(domain));
@@ -585,6 +983,7 @@ function buildCapabilities(domain: string): CapabilityResponse {
       "worker-assignments", "queue", "knowledge",
       "knowledge-flags", "promotion-candidates", "interventions",
       "workstreams", "inbox", "operational-metrics", "capabilities",
+      "extensions", "runtime",
     ],
   };
 }

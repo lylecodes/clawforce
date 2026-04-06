@@ -15,7 +15,7 @@ import path from "node:path";
 import { handleRequest } from "./routes.js";
 import { createDashboardHandler } from "./gateway-routes.js";
 import type { DashboardHandlerOptions } from "./gateway-routes.js";
-import { checkAuth, setCorsHeaders, checkRateLimit, isLocalhost } from "./auth.js";
+import { checkAuth, setCorsHeaders, setSecurityHeaders, checkRateLimit, isLocalhost } from "./auth.js";
 import { safeLog } from "../diagnostics.js";
 
 export type DashboardOptions = {
@@ -95,11 +95,19 @@ export function createDashboardServer(options?: DashboardOptions) {
     injectAgentMessage: options?.injectAgentMessage,
     auth: { token, skipAuth: true },
     allowedOrigins,
+    runtime: {
+      mode: "standalone",
+      authMode: token ? "bearer-token" : "localhost-only",
+      notes: token
+        ? ["Standalone dashboard auth is enforced by the Clawforce server bearer token."]
+        : ["Standalone dashboard is restricted to localhost because no bearer token is configured."],
+    },
   });
 
   const server = http.createServer(async (req, res) => {
     // CORS — origin-validated
     setCorsHeaders(req, res, allowedOrigins);
+    setSecurityHeaders(res);
 
     // Security headers — applied to all responses
     res.setHeader("X-Content-Type-Options", "nosniff");

@@ -8,6 +8,12 @@
 import { safeLog } from "../diagnostics.js";
 import type { StuckAgent } from "./stuck-detector.js";
 
+type KillableAgent = {
+  sessionKey: string;
+  reason: string;
+  [key: string]: unknown;
+};
+
 /**
  * Callback type for killing an agent session.
  * Provided by the gateway at init time.
@@ -27,7 +33,7 @@ export function registerKillFunction(fn: AgentKillFn): void {
  * Attempt to kill a stuck agent.
  * Returns true if the kill was dispatched, false if no kill function is registered.
  */
-export async function killStuckAgent(agent: StuckAgent): Promise<boolean> {
+export async function killStuckAgent(agent: KillableAgent): Promise<boolean> {
   if (!killFn) return false;
 
   try {
@@ -42,7 +48,7 @@ export async function killStuckAgent(agent: StuckAgent): Promise<boolean> {
  * Kill all stuck agents.
  * Returns the count of agents where kill was dispatched.
  */
-export async function killAllStuckAgents(agents: StuckAgent[]): Promise<number> {
+export async function killAllStuckAgents(agents: KillableAgent[]): Promise<number> {
   let killed = 0;
   for (const agent of agents) {
     const result = await killStuckAgent(agent);
