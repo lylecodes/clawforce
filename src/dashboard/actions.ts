@@ -46,7 +46,7 @@ import { validateRuleDefinition } from "../config/schema.js";
 import { acquireLock, releaseLock } from "../locks/store.js";
 import { checkLock, applyOverridePolicy } from "../locks/enforce.js";
 import { createActionRecord, withActionTracking, withActionTrackingSync } from "./action-status.js";
-import { recordChange, type ChangeProvenance } from "../history/store.js";
+import { recordChange, getChange, type ChangeProvenance } from "../history/store.js";
 import { revertChange } from "../history/revert.js";
 
 /**
@@ -427,6 +427,7 @@ export async function handleDomainKillAction(
       reversible: false,
     });
   } catch { /* non-fatal */ }
+  try { const { notifyKillSwitchActivated } = await import("../notifications/integrations.js"); notifyKillSwitchActivated(projectId, reason, actor); } catch { /* non-fatal */ }
 
   return ok({
     ok: true,
@@ -2187,6 +2188,54 @@ function handleHistoryAction(
       return { status: 400, body: { ok: false, error: result.reason } };
     }
 
+    // Apply the restored state from the original change's before snapshot
+    let applied = false;
+    let applyReason: string | undefined;
+    try {
+      const original = getChange(changeId);
+      if (original?.before) {
+        const beforeState = JSON.parse(original.before);
+        const db = getDb(projectId);
+        switch (original.resourceType) {
+          case "config": {
+            updateDomainConfigViaService(projectId, original.resourceId, beforeState, actor);
+            applied = true;
+            break;
+          }
+          case "budget": {
+            // Budget reverts require the full AllocateBudgetParams shape
+            // which the before-snapshot may not capture fully. Mark as recorded-only.
+            applyReason = "Budget revert recorded — apply manually via budget allocation UI";
+            break;
+          }
+          case "agent": {
+            if (beforeState.disabled === true) {
+              disableAgent(projectId, original.resourceId, "Reverted to previous state");
+            } else {
+              enableAgent(projectId, original.resourceId);
+            }
+            applied = true;
+            break;
+          }
+          case "lock": {
+            if (beforeState.locked) {
+              acquireLock(projectId, original.resourceId, beforeState.lockedBy ?? actor, beforeState.reason, db);
+            } else {
+              releaseLock(projectId, original.resourceId, actor, db);
+            }
+            applied = true;
+            break;
+          }
+          default:
+            applyReason = `Automatic revert not supported for resource type "${original.resourceType}"`;
+        }
+      } else {
+        applyReason = "No before snapshot available";
+      }
+    } catch (err) {
+      applyReason = err instanceof Error ? err.message : String(err);
+    }
+
     try {
       writeAuditEntry({
         projectId,
@@ -2194,7 +2243,7 @@ function handleHistoryAction(
         action: "history_revert",
         targetType: "change_record",
         targetId: changeId,
-        detail: JSON.stringify({ changeId, revertChangeId: result.revertChangeId }),
+        detail: JSON.stringify({ changeId, revertChangeId: result.revertChangeId, applied }),
       });
     } catch { /* non-fatal */ }
 
@@ -2202,6 +2251,8 @@ function handleHistoryAction(
       ok: true,
       changeId: result.changeId,
       revertChangeId: result.revertChangeId,
+      applied,
+      ...(applyReason ? { applyReason } : {}),
     });
   }
 
