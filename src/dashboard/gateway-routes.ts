@@ -72,6 +72,8 @@ import {
   queryActionStatus,
   queryResourceHistory,
   queryRecentChanges,
+  queryAttentionSummary,
+  queryAttentionRollup,
   readContextFile,
   writeContextFile,
   ContextFileError,
@@ -456,6 +458,17 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
         const body = await parseBody(req);
         const result = handleStarterDomainCreate(body);
         respondJson(res, result.status, result.body);
+        return;
+      }
+      if (url.pathname === "/clawforce/api/attention" && req.method === "GET") {
+        try {
+          const { getActiveProjectIds } = await import("../lifecycle.js");
+          const projectIds = getActiveProjectIds();
+          const rollup = queryAttentionRollup(projectIds);
+          respondJson(res, 200, rollup);
+        } catch {
+          respondJson(res, 200, { businesses: [], totals: { actionNeeded: 0, watching: 0, fyi: 0 } });
+        }
         return;
       }
 
@@ -983,6 +996,9 @@ function routeRead(
         provenance: params.provenance as import("../history/store.js").ChangeProvenance | undefined,
       }));
     }
+
+    case "attention":
+      return ok(queryAttentionSummary(domain));
 
     default:
       return notFound("Unknown resource");

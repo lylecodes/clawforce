@@ -2374,3 +2374,31 @@ export function queryRecentChanges(
 
 // Re-export types for gateway-routes.ts
 export type { ChangeProvenance };
+
+// --- Attention queries ---
+
+import { buildAttentionSummary } from "../attention/builder.js";
+import type { AttentionSummary } from "../attention/types.js";
+
+/**
+ * Query attention summary for a single domain.
+ */
+export function queryAttentionSummary(projectId: string): AttentionSummary {
+  return buildAttentionSummary(projectId);
+}
+
+/**
+ * Query attention rollup across multiple domains.
+ */
+export function queryAttentionRollup(projectIds: string[]): {
+  businesses: AttentionSummary[];
+  totals: { actionNeeded: number; watching: number; fyi: number };
+} {
+  const businesses = projectIds.map((id) => buildAttentionSummary(id));
+  const totals = {
+    actionNeeded: businesses.reduce((sum, b) => sum + b.counts.actionNeeded, 0),
+    watching: businesses.reduce((sum, b) => sum + b.counts.watching, 0),
+    fyi: businesses.reduce((sum, b) => sum + b.counts.fyi, 0),
+  };
+  return { businesses, totals };
+}

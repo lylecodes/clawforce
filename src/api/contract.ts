@@ -297,6 +297,10 @@ export type DashboardRuntimeResponse = {
   notes: string[];
 };
 
+// --- Attention ---
+
+export type { AttentionUrgency, AttentionItem, AttentionSummary } from "../attention/types.js";
+
 // --- Lock types ---
 
 /** A lock entry as returned by the dashboard API. */

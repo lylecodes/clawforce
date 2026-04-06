@@ -297,6 +297,10 @@ export type { VerificationConfig, VerificationGate, GitIsolationConfig } from ".
 export { shouldDispatch } from "./dispatch/dispatcher.js";
 export { recoverProject, releaseStaleInProgressTasks, failStaleDispatchItems, releaseExpiredAssignedLeases } from "./dispatch/restart-recovery.js";
 
+// --- Attention ---
+export { buildAttentionSummary } from "./attention/builder.js";
+export type { AttentionItem, AttentionSummary, AttentionUrgency } from "./attention/types.js";
+
 // --- Dashboard ---
 export { createDashboardServer, handleRequest } from "./dashboard/index.js";
 
