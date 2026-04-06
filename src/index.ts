@@ -294,6 +294,9 @@ export { recoverProject, releaseStaleInProgressTasks, failStaleDispatchItems, re
 // --- Dashboard ---
 export { createDashboardServer, handleRequest } from "./dashboard/index.js";
 
+// --- Action Status ---
+export { createActionRecord, updateActionStatus, getActionRecord, listActionRecords } from "./dashboard/action-status.js";
+
 // --- Database ---
 export { getDb, getMemoryDb, closeDb, closeAllDbs, setProjectsDir, getProjectsDir, validateProjectId, getDbByDomain, setDataDir } from "./db.js";
 
@@ -380,3 +383,8 @@ export {
   writeDomainConfig as writeDomainConfigApi,
   reloadAllDomains,
 } from "./config/api-service.js";
+
+// --- Locks ---
+export { acquireLock, releaseLock, getLock, listLocks, isLocked } from "./locks/store.js";
+export type { LockEntry as LockStoreEntry, LockSurface } from "./locks/store.js";
+export { checkLock, requireUnlocked } from "./locks/enforce.js";

@@ -43,6 +43,10 @@ import {
 import { safeLog } from "../diagnostics.js";
 import type { DomainConfig, GlobalAgentDef } from "../config/schema.js";
 import { validateRuleDefinition } from "../config/schema.js";
+import { acquireLock, releaseLock } from "../locks/store.js";
+import { checkLock } from "../locks/enforce.js";
+import { withActionTracking, withActionTrackingSync } from "./action-status.js";
+import { getSSEManager } from "./sse.js";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -84,6 +88,8 @@ export function handleAction(
       return handleBudgetAction(projectId, segments, body);
     case "interventions":
       return handleInterventionAction(projectId, segments, body);
+    case "locks":
+      return handleLockAction(projectId, segments, body);
     default:
       return notFound(`Unknown action resource: ${resource}`);
   }
@@ -238,7 +244,41 @@ export async function handleAgentKillAction(
 
   const actor = (body.actor as string) ?? "dashboard";
   const reason = (body.reason as string) ?? "Killed via dashboard";
-  const killedSessions = await killAgentSessions(projectId, agentId, reason);
+
+  let actionId: string | undefined;
+  let killedSessions: number;
+
+  try {
+    const tracked = await withActionTracking(
+      projectId,
+      "agent_kill",
+      actor,
+      async () => {
+        const sessions = await killAgentSessions(projectId, agentId, reason);
+        return sessions;
+      },
+    );
+    actionId = tracked.actionId;
+    killedSessions = tracked.result;
+
+    getSSEManager()?.broadcast(projectId, "action_status", {
+      actionId,
+      status: "completed",
+    });
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    safeLog("dashboard.actions.agentKill", err);
+
+    // SSE with failed status — actionId may be undefined if tracking setup itself failed
+    if (actionId) {
+      getSSEManager()?.broadcast(projectId, "action_status", {
+        actionId,
+        status: "failed",
+        error: errMsg,
+      });
+    }
+    return { status: 500, body: { error: errMsg } };
+  }
 
   emitSSE(projectId, "agent:status", { agentId, status: "killed", killedSessions, reason });
   try {
@@ -257,6 +297,7 @@ export async function handleAgentKillAction(
     agentId,
     killedSessions,
     reason,
+    actionId,
   });
 }
 
@@ -268,13 +309,48 @@ export async function handleDomainKillAction(
   const rawReason = (body.reason as string) ?? "Emergency stop via dashboard";
   const reason = rawReason.startsWith("EMERGENCY:") ? rawReason : `EMERGENCY: ${rawReason}`;
 
-  disableDomain(projectId, reason, actor);
-  activateEmergencyStop(projectId);
-  const cancelledDispatches = cancelQueuedDispatches(projectId, reason);
+  let actionId: string | undefined;
+  let cancelledDispatches: number;
+  let killedSessions: number;
 
-  let killedSessions = 0;
-  for (const agentId of getProjectAgentIds(projectId)) {
-    killedSessions += await killAgentSessions(projectId, agentId, reason);
+  try {
+    const tracked = await withActionTracking(
+      projectId,
+      "domain_kill",
+      actor,
+      async () => {
+        disableDomain(projectId, reason, actor);
+        activateEmergencyStop(projectId);
+        const cancelled = cancelQueuedDispatches(projectId, reason);
+
+        let sessions = 0;
+        for (const agentId of getProjectAgentIds(projectId)) {
+          sessions += await killAgentSessions(projectId, agentId, reason);
+        }
+
+        return { cancelledDispatches: cancelled, killedSessions: sessions };
+      },
+    );
+    actionId = tracked.actionId;
+    cancelledDispatches = tracked.result.cancelledDispatches;
+    killedSessions = tracked.result.killedSessions;
+
+    getSSEManager()?.broadcast(projectId, "action_status", {
+      actionId,
+      status: "completed",
+    });
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    safeLog("dashboard.actions.domainKill", err);
+
+    if (actionId) {
+      getSSEManager()?.broadcast(projectId, "action_status", {
+        actionId,
+        status: "failed",
+        error: errMsg,
+      });
+    }
+    return { status: 500, body: { error: errMsg } };
   }
 
   emitSSE(projectId, "domain:status", {
@@ -311,6 +387,7 @@ export async function handleDomainKillAction(
     reason,
     cancelledDispatches,
     killedSessions,
+    actionId,
   });
 }
 
@@ -667,6 +744,35 @@ function handleConfigAction(
       let sectionToPersist = section;
       if (!section) return badRequest("section is required");
 
+      // Check if this config surface is locked before persisting
+      {
+        const actor = (body.actor as string) ?? "dashboard";
+        // Map config sections to lock surfaces
+        const lockSurfaceMap: Record<string, string> = {
+          agents: "agent-enabled",
+          budget: "budget",
+          jobs: "jobs",
+          tool_gates: "tool-gates",
+          rules: "rules",
+        };
+        const lockSurface = lockSurfaceMap[section] ?? section;
+        try {
+          const lockCheck = checkLock(projectId, lockSurface, actor);
+          if (lockCheck.locked && lockCheck.entry) {
+            return {
+              status: 423,
+              body: {
+                ok: false,
+                error: `Surface "${lockSurface}" is locked by "${lockCheck.entry.lockedBy}"` +
+                  (lockCheck.entry.reason ? `: ${lockCheck.entry.reason}` : ""),
+                lockedBy: lockCheck.entry.lockedBy,
+                surface: lockSurface,
+              },
+            };
+          }
+        } catch { /* non-fatal — lock check failure should not block saves */ }
+      }
+
       // Persist the config change via the config API service
       try {
         // Check domain exists first
@@ -743,25 +849,35 @@ function handleConfigAction(
           data = assistantConfig.value;
         }
 
-        const result = updateDomainConfigViaService(
-          projectId,
-          sectionToPersist,
-          data,
-          (body.actor as string) ?? "dashboard",
-        );
+        const actor = (body.actor as string) ?? "dashboard";
+        let actionId: string | undefined;
+        let result: ReturnType<typeof updateDomainConfigViaService>;
+        try {
+          const tracked = withActionTrackingSync(
+            projectId,
+            `config_save:${section}`,
+            actor,
+            () => updateDomainConfigViaService(projectId, sectionToPersist, data, actor),
+          );
+          actionId = tracked.actionId;
+          result = tracked.result;
+        } catch (err) {
+          return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+        }
 
         if (!result.ok) {
           return { status: 400, body: { error: result.error } };
         }
 
+        getSSEManager()?.broadcast(projectId, "action_status", { actionId, status: "completed" });
         emitSSE(projectId, "config:changed", { section });
         try {
           ingestEvent(projectId, "config_updated", "internal", {
             section,
-            actor: (body.actor as string) ?? "dashboard",
+            actor,
           }, `config-updated:${section}:${Date.now()}`);
         } catch { /* non-fatal */ }
-        return ok({ ok: true, section });
+        return ok({ ok: true, section, actionId });
       } catch (err) {
         return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
       }
@@ -845,17 +961,40 @@ function handleBudgetAction(
         return badRequest("Either allocationConfig or dailyLimitCents is required");
       }
 
-      const result = allocateBudget({
-        projectId,
-        parentAgentId,
-        childAgentId,
-        dailyLimitCents: dailyLimitCents ?? undefined,
-        allocationConfig,
-      });
+      let budgetActionId: string | undefined;
+      let result: ReturnType<typeof allocateBudget>;
+      try {
+        const tracked = withActionTrackingSync(
+          projectId,
+          "budget_allocate",
+          actor,
+          () => allocateBudget({
+            projectId,
+            parentAgentId,
+            childAgentId,
+            dailyLimitCents: dailyLimitCents ?? undefined,
+            allocationConfig,
+          }),
+        );
+        budgetActionId = tracked.actionId;
+        result = tracked.result;
+      } catch (err) {
+        return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
 
       if (!result.ok) {
+        getSSEManager()?.broadcast(projectId, "action_status", {
+          actionId: budgetActionId,
+          status: "failed",
+          error: result.reason,
+        });
         return { status: 400, body: { ok: false, error: result.reason } };
       }
+
+      getSSEManager()?.broadcast(projectId, "action_status", {
+        actionId: budgetActionId,
+        status: "completed",
+      });
 
       try {
         writeAuditEntry({
@@ -884,6 +1023,7 @@ function handleBudgetAction(
         parentAgentId,
         childAgentId,
         allocationConfig: allocationConfig ?? { daily: { cents: dailyLimitCents } },
+        actionId: budgetActionId,
       });
     }
     default:
@@ -1808,6 +1948,68 @@ function handleInterventionAction(
     }
     default:
       return notFound(`Unknown intervention action: ${action}`);
+  }
+}
+
+function handleLockAction(
+  projectId: string,
+  segments: string[],
+  body: Record<string, unknown>,
+): RouteResult {
+  const action = segments[1];
+  const actor = (body.actor as string) ?? "dashboard";
+
+  switch (action) {
+    case "acquire": {
+      const surface = body.surface as string;
+      if (!surface) return badRequest("surface is required");
+      try {
+        const lock = acquireLock(
+          projectId,
+          surface,
+          actor,
+          body.reason as string | undefined,
+        );
+        try {
+          writeAuditEntry({
+            projectId,
+            actor,
+            action: "lock_acquire",
+            targetType: "lock",
+            targetId: surface,
+            detail: JSON.stringify({ surface, reason: lock.reason }),
+          });
+        } catch { /* non-fatal */ }
+        emitSSE(projectId, "locks:changed", { surface, event: "acquired", lockedBy: actor });
+        return { status: 201, body: { ok: true, lock } };
+      } catch (err) {
+        return { status: 409, body: { ok: false, error: err instanceof Error ? err.message : String(err) } };
+      }
+    }
+    case "release": {
+      const surface = body.surface as string;
+      if (!surface) return badRequest("surface is required");
+      // Allow release if unlocked by the same actor or by an admin (no ownership check on release)
+      try {
+        releaseLock(projectId, surface, actor);
+        try {
+          writeAuditEntry({
+            projectId,
+            actor,
+            action: "lock_release",
+            targetType: "lock",
+            targetId: surface,
+            detail: JSON.stringify({ surface }),
+          });
+        } catch { /* non-fatal */ }
+        emitSSE(projectId, "locks:changed", { surface, event: "released", releasedBy: actor });
+        return ok({ ok: true, surface });
+      } catch (err) {
+        return { status: 500, body: { ok: false, error: err instanceof Error ? err.message : String(err) } };
+      }
+    }
+    default:
+      return notFound(`Unknown lock action: ${action}`);
   }
 }
 

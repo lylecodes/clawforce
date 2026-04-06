@@ -36,12 +36,15 @@ import { getDb } from "../db.js";
 import { writeAuditEntry } from "../audit.js";
 import { getAllOperationalMetrics } from "../metrics/operational.js";
 import type { OperationalMetrics } from "../metrics/operational.js";
+import { listActionRecords } from "./action-status.js";
+import type { ActionStatus } from "./action-status.js";
 import { isEmergencyStopActive } from "../safety.js";
 import {
   readDomainConfig as readDomainConfigViaService,
   readGlobalConfig as readGlobalConfigViaService,
 } from "../config/api-service.js";
 import type { ConfigQueryResult } from "../api/contract.js";
+import { listLocks } from "../locks/store.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -2296,4 +2299,31 @@ export function queryOperationalMetrics(
 ): OperationalMetrics {
   const windowHours = params?.windowHours ?? 24;
   return getAllOperationalMetrics(projectId, windowHours);
+}
+
+/** Query all active locks for a domain. */
+export function queryLocks(projectId: string) {
+  try {
+    const locks = listLocks(projectId);
+    return { locks, count: locks.length };
+  } catch {
+    return { locks: [], count: 0 };
+  }
+}
+
+/** Query recent action status records for a project. */
+export function queryActionStatus(
+  projectId: string,
+  opts?: {
+    status?: ActionStatus;
+    limit?: number;
+    offset?: number;
+  },
+) {
+  try {
+    const records = listActionRecords(projectId, opts);
+    return { records, count: records.length };
+  } catch {
+    return { records: [], count: 0 };
+  }
 }

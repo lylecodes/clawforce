@@ -19,7 +19,9 @@ export type SSEEventType =
   | "meeting:started"
   | "meeting:turn"
   | "meeting:ended"
-  | "config:changed";
+  | "config:changed"
+  | "action_status"
+  | "locks:changed";
 
 type Client = {
   id: string;
