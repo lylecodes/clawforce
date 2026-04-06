@@ -248,6 +248,12 @@ export { parseBudgetShorthand } from "./budget-parser.js";
 // --- Cost Auto-Capture ---
 export { recordCostFromLlmOutput } from "./cost.js";
 
+// --- Notification Delivery Adapters ---
+export type { NotificationRecord, DeliveryTarget, DeliveryResult, NotificationDeliveryAdapter } from "./notifications/delivery.js";
+export { registerDeliveryAdapter, getDeliveryAdapterForChannel, listAvailableChannels, clearDeliveryAdapters } from "./notifications/adapter-registry.js";
+export { createOpenClawDeliveryAdapter } from "./notifications/openclaw-adapter.js";
+export { createWebhookDeliveryAdapter } from "./notifications/webhook-adapter.js";
+
 // --- Scheduling ---
 export { getCostEstimate } from "./scheduling/cost-engine.js";
 export { createPlan, getPlan, startPlan, completePlan, abandonPlan, listPlans } from "./scheduling/plans.js";
