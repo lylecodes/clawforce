@@ -6,7 +6,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
-import { getDb, getMemoryDb } from "../db.js";
+import { getDb } from "../db.js";
 
 // ---------------------------------------------------------------------------
 // Types

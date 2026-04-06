@@ -244,7 +244,10 @@ describe("createDashboardHandler", () => {
   it("routes GET /clawforce/api/runtime to runtime metadata", async () => {
     const handler = createDashboardHandler({
       auth: { skipAuth: true },
-      runtimeMode: "embedded",
+      runtime: {
+        mode: "embedded",
+        authMode: "openclaw-delegated",
+      },
     });
     const { req, res } = createMockRequest("GET", "/clawforce/api/runtime");
     await handler(req, res);
@@ -252,7 +255,7 @@ describe("createDashboardHandler", () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.bodyData);
     expect(body.mode).toBe("embedded");
-    expect(body.auth).toBe("openclaw-delegated");
+    expect(body.authMode).toBe("openclaw-delegated");
   });
 
   it("routes GET /clawforce/api/:domain/dashboard to dashboard summary", async () => {
@@ -658,33 +661,27 @@ describe("createDashboardHandler", () => {
 
   // --- Runtime mode ---
 
-  it("GET /clawforce/api/runtime returns embedded mode when skipAuth=true", async () => {
-    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+  it("GET /clawforce/api/runtime returns provided runtime metadata", async () => {
+    const handler = createDashboardHandler({
+      auth: { skipAuth: true },
+      runtime: { mode: "embedded", authMode: "openclaw-delegated" },
+    });
     const { req, res } = createMockRequest("GET", "/clawforce/api/runtime");
     await handler(req, res);
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.bodyData);
     expect(body.mode).toBe("embedded");
-    expect(body.auth).toBe("openclaw-delegated");
-    expect(body.version).toBeTruthy();
+    expect(body.authMode).toBe("openclaw-delegated");
   });
 
-  it("GET /clawforce/api/runtime returns standalone mode when skipAuth=false", async () => {
+  it("GET /clawforce/api/runtime returns standalone fallback when no runtime provided", async () => {
     const handler = createDashboardHandler({ auth: { token: "tok" } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/runtime", undefined, { authorization: "Bearer tok" });
     await handler(req, res);
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.bodyData);
     expect(body.mode).toBe("standalone");
-    expect(body.auth).toBe("clawforce-managed");
-  });
-
-  it("GET /clawforce/api/runtime returns explicitly set runtimeMode", async () => {
-    const handler = createDashboardHandler({ auth: { skipAuth: true }, runtimeMode: "standalone" });
-    const { req, res } = createMockRequest("GET", "/clawforce/api/runtime");
-    await handler(req, res);
-    const body = JSON.parse(res.bodyData);
-    expect(body.mode).toBe("standalone");
+    expect(body.authMode).toBe("localhost-only");
   });
 
   it("sets X-ClawForce-Runtime header on all responses (embedded)", async () => {

@@ -409,23 +409,12 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
       return;
     }
 
-    // Runtime metadata endpoint: /clawforce/api/runtime
-    if (url.pathname === "/clawforce/api/runtime" && req.method === "GET") {
-      respondJson(res, 200, {
-        mode: runtimeMode,
-        auth: runtimeMode === "embedded" ? "openclaw-delegated" : "clawforce-managed",
-        version: "0.2.0",
-      });
-      return;
-    }
-
     // API routes: /clawforce/api/:domain/...
     if (url.pathname.startsWith("/clawforce/api/")) {
       // Handle non-domain-scoped endpoints first
       if (url.pathname === "/clawforce/api/domains" && req.method === "GET") {
         try {
-          const { getActiveProjectIds } = await import("../../src/lifecycle.js");
-          const { getRegisteredAgentIds, getAgentConfig } = await import("../../src/project.js");
+          const { getActiveProjectIds } = await import("../lifecycle.js");
           const projectIds = getActiveProjectIds();
           const allAgentIds = getRegisteredAgentIds();
           const domains = projectIds.map((id: string) => ({

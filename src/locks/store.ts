@@ -117,17 +117,22 @@ export function acquireLock(
 
 /**
  * Release a lock on a surface.
- * Only the actor who owns the lock (or a human/admin) should call this.
+ * Only the lock owner can release their own lock.
+ * Throws if the lock is held by a different actor.
  * Does not throw if no lock exists.
  */
 export function releaseLock(
   projectId: string,
   surface: string,
-  _actor: string,
+  actor: string,
   dbOverride?: DatabaseSync,
 ): void {
   const db = dbOverride ?? getDb(projectId);
   ensureLockTable(db);
+  const existing = getLock(projectId, surface, db);
+  if (existing && existing.lockedBy !== actor) {
+    throw new Error(`Cannot release lock on "${surface}" — held by "${existing.lockedBy}", not "${actor}"`);
+  }
   db.prepare(
     "DELETE FROM locks WHERE project_id = ? AND surface = ?",
   ).run(projectId, surface);

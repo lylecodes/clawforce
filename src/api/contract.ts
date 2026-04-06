@@ -306,6 +306,7 @@ export type LockEntry = {
   surface: string;
   lockedBy: string;
   lockedAt: number;
+  updatedAt?: number;
   reason?: string;
 };
 
