@@ -25,6 +25,7 @@ const EXPERIMENTS_EXTENSION = {
   description: "A/B experiment framework for ClawForce agent teams",
   version: "0.1.0",
   source: { kind: "openclaw-plugin" as const, pluginId: "@clawforce/openclaw-plugin-experiments" },
+  requiredEndpoints: ["experiments"],
   pages: [
     {
       id: "experiments",
@@ -43,6 +44,29 @@ const EXPERIMENTS_EXTENSION = {
       slot: "sidebar" as const,
       description: "Active experiments and variant performance at a glance",
       route: "/experiments",
+      domainScoped: true,
+    },
+  ],
+  actions: [
+    {
+      id: "pause-experiment",
+      label: "Pause Experiment",
+      surface: "experiments" as const,
+      actionId: "pause-experiment",
+      domainScoped: true,
+    },
+    {
+      id: "complete-experiment",
+      label: "Complete Experiment",
+      surface: "experiments" as const,
+      actionId: "complete-experiment",
+      domainScoped: true,
+    },
+    {
+      id: "kill-experiment",
+      label: "Kill Experiment",
+      surface: "experiments" as const,
+      actionId: "kill-experiment",
       domainScoped: true,
     },
   ],
@@ -130,6 +154,36 @@ describe("extension proving — experiments plugin", () => {
     });
   });
 
+  it("extension has action contributions", () => {
+    registerDashboardExtension(EXPERIMENTS_EXTENSION);
+    const ext = getDashboardExtension("clawforce-experiments")!;
+    expect(ext.actions).toHaveLength(3);
+  });
+
+  it("extension actions are all scoped to the experiments surface", () => {
+    registerDashboardExtension(EXPERIMENTS_EXTENSION);
+    const ext = getDashboardExtension("clawforce-experiments")!;
+    for (const action of ext.actions!) {
+      expect(action.surface).toBe("experiments");
+      expect(action.domainScoped).toBe(true);
+    }
+  });
+
+  it("extension actions include pause, complete, and kill", () => {
+    registerDashboardExtension(EXPERIMENTS_EXTENSION);
+    const ext = getDashboardExtension("clawforce-experiments")!;
+    const ids = ext.actions!.map((a) => a.id);
+    expect(ids).toContain("pause-experiment");
+    expect(ids).toContain("complete-experiment");
+    expect(ids).toContain("kill-experiment");
+  });
+
+  it("extension declares requiredEndpoints for degraded-state detection", () => {
+    registerDashboardExtension(EXPERIMENTS_EXTENSION);
+    const ext = getDashboardExtension("clawforce-experiments")!;
+    expect(ext.requiredEndpoints).toEqual(["experiments"]);
+  });
+
   it("registration is idempotent — registering twice does not duplicate", () => {
     registerDashboardExtension(EXPERIMENTS_EXTENSION);
     registerDashboardExtension(EXPERIMENTS_EXTENSION);
@@ -196,7 +250,27 @@ describe("GET /api/extensions response shape", () => {
     expect(response.extensions[0]!.id).toBe("clawforce-experiments");
     expect(response.extensions[0]!.pages).toHaveLength(1);
     expect(response.extensions[0]!.panels).toHaveLength(1);
+    expect(response.extensions[0]!.actions).toHaveLength(3);
     expect(response.extensions[0]!.configSections).toHaveLength(1);
+  });
+
+  it("response includes action contributions on the experiments surface", () => {
+    registerDashboardExtension(EXPERIMENTS_EXTENSION);
+    const extensions = listDashboardExtensions();
+    const actions = extensions[0]!.actions!;
+    expect(actions.map((a) => a.id)).toEqual(
+      expect.arrayContaining(["pause-experiment", "complete-experiment", "kill-experiment"]),
+    );
+    for (const action of actions) {
+      expect(action.surface).toBe("experiments");
+      expect(action.domainScoped).toBe(true);
+    }
+  });
+
+  it("response includes requiredEndpoints degraded-state metadata", () => {
+    registerDashboardExtension(EXPERIMENTS_EXTENSION);
+    const extensions = listDashboardExtensions();
+    expect(extensions[0]!.requiredEndpoints).toEqual(["experiments"]);
   });
 
   it("response includes source metadata", () => {
