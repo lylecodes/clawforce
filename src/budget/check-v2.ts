@@ -23,12 +23,24 @@ export function checkBudgetV2(
   // Check agent-level budget (if agent specified)
   if (params.agentId) {
     agentResult = checkBudgetRow(params.projectId, params.agentId, db);
-    if (agentResult && !agentResult.ok) return agentResult;
+    if (agentResult && !agentResult.ok) {
+      void import("../notifications/integrations.js").then(({ notifyBudgetExceeded }) => {
+        const win = agentResult!.reason?.split(" ")[0] ?? "unknown";
+        notifyBudgetExceeded(params.projectId, win, 0, 0);
+      }).catch(() => { /* non-fatal */ });
+      return agentResult;
+    }
   }
 
   // Check project-level budget
   const projectResult = checkBudgetRow(params.projectId, undefined, db);
-  if (projectResult && !projectResult.ok) return projectResult;
+  if (projectResult && !projectResult.ok) {
+    void import("../notifications/integrations.js").then(({ notifyBudgetExceeded }) => {
+      const win = projectResult!.reason?.split(" ")[0] ?? "unknown";
+      notifyBudgetExceeded(params.projectId, win, 0, 0);
+    }).catch(() => { /* non-fatal */ });
+    return projectResult;
+  }
 
   // Both pass — return minimum remaining
   const agentRemaining = agentResult?.remaining ?? Infinity;

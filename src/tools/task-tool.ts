@@ -407,6 +407,10 @@ export function createClawforceTaskTool(options?: {
             VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
           `).run(id, projectId, title, description, actor, options?.agentSessionKey ?? null, policy?.policy ?? null, now);
 
+          void import("../notifications/integrations.js").then(({ notifyApprovalCreated }) => {
+            notifyApprovalCreated(projectId, id, title, actor);
+          }).catch(() => { /* non-fatal */ });
+
           return jsonResult({
             ok: true,
             proposal: { id, title, description, status: "pending", created_at: now },

@@ -691,6 +691,12 @@ export function transitionTask(
     safeLog("transition.diagnostic", err);
   }
 
+  if (params.toState === "FAILED") {
+    void import("../notifications/integrations.js").then(({ notifyTaskFailed }) => {
+      notifyTaskFailed(params.projectId, params.taskId, updatedTask.title ?? params.taskId, updatedTask.assignedTo);
+    }).catch(() => { /* non-fatal */ });
+  }
+
   return { ok: true, task: updatedTask, transition };
 }
 
