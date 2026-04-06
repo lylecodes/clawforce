@@ -404,3 +404,17 @@ export {
 export { acquireLock, releaseLock, getLock, listLocks, isLocked } from "./locks/store.js";
 export type { LockEntry as LockStoreEntry, LockSurface } from "./locks/store.js";
 export { checkLock, requireUnlocked } from "./locks/enforce.js";
+
+// --- Notifications ---
+export {
+  createNotification,
+  getNotificationByProject,
+  listNotifications,
+  markRead as markNotificationRead,
+  markDismissed as markNotificationDismissed,
+  markAllRead as markAllNotificationsRead,
+  getUnreadCount,
+  cleanupOldNotifications,
+} from "./notifications/store.js";
+export { emitNotification, setNotificationDeliveryAdapter } from "./notifications/emitter.js";
+export type { NotificationRecord, NotificationCategory, NotificationSeverity, NotificationActionability, NotificationDeliveryStatus, NotificationPreferences } from "./notifications/types.js";

@@ -74,11 +74,19 @@ import {
   queryRecentChanges,
   queryAttentionSummary,
   queryAttentionRollup,
+  queryNotifications,
+  queryUnreadCount,
   readContextFile,
   writeContextFile,
   ContextFileError,
 } from "./queries.js";
 import type { ActionStatusQuery } from "../api/contract.js";
+import {
+  markRead as markNotificationRead,
+  markDismissed as markNotificationDismissed,
+  markAllRead as markAllNotificationsRead,
+  getNotificationByProject,
+} from "../notifications/store.js";
 import { getActionRecord } from "./action-status.js";
 import { getDb } from "../db.js";
 import type { RouteResult } from "./routes.js";
@@ -609,6 +617,42 @@ export function createDashboardHandler(options: DashboardHandlerOptions) {
           return;
         }
 
+        // Notification mutation endpoints
+        if (resource === "notifications/read-all") {
+          const db = getDb(domain);
+          const count = markAllNotificationsRead(domain, db);
+          respondJson(res, 200, { ok: true, marked: count });
+          return;
+        }
+
+        const notifReadMatch = resource.match(/^notifications\/([^/]+)\/read$/);
+        if (notifReadMatch) {
+          const notifId = notifReadMatch[1]!;
+          const db = getDb(domain);
+          const notif = getNotificationByProject(domain, notifId, db);
+          if (!notif) {
+            respondJson(res, 404, { error: "Notification not found" });
+            return;
+          }
+          markNotificationRead(notifId, db);
+          respondJson(res, 200, { ok: true });
+          return;
+        }
+
+        const notifDismissMatch = resource.match(/^notifications\/([^/]+)\/dismiss$/);
+        if (notifDismissMatch) {
+          const notifId = notifDismissMatch[1]!;
+          const db = getDb(domain);
+          const notif = getNotificationByProject(domain, notifId, db);
+          if (!notif) {
+            respondJson(res, 404, { error: "Notification not found" });
+            return;
+          }
+          markNotificationDismissed(notifId, db);
+          respondJson(res, 200, { ok: true });
+          return;
+        }
+
         const result = handleAction(domain, resource, body);
         respondJson(res, result.status, result.body);
         return;
@@ -999,6 +1043,28 @@ function routeRead(
 
     case "attention":
       return ok(queryAttentionSummary(domain));
+
+    case "notifications": {
+      // GET /clawforce/api/:domain/notifications/unread-count
+      if (segments[1] === "unread-count") {
+        return ok(queryUnreadCount(domain));
+      }
+      // GET /clawforce/api/:domain/notifications
+      const validCategories = ["approval", "task", "budget", "health", "comms", "compliance", "system"];
+      const validSeverities = ["critical", "warning", "info"];
+      return ok(queryNotifications(domain, {
+        category: params.category && validCategories.includes(params.category)
+          ? params.category as import("../notifications/types.js").NotificationCategory
+          : undefined,
+        severity: params.severity && validSeverities.includes(params.severity)
+          ? params.severity as import("../notifications/types.js").NotificationSeverity
+          : undefined,
+        read: params.read === "true" ? true : params.read === "false" ? false : undefined,
+        dismissed: params.dismissed === "true" ? true : params.dismissed === "false" ? false : undefined,
+        limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+      }));
+    }
 
     default:
       return notFound("Unknown resource");

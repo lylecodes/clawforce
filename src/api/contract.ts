@@ -374,3 +374,26 @@ export type ChangeHistoryResponse = {
   records: ChangeRecord[];
   count: number;
 };
+
+// --- Notification contract types ---
+
+export type {
+  NotificationCategory,
+  NotificationSeverity,
+  NotificationActionability,
+  NotificationDeliveryStatus,
+  NotificationRecord,
+  NotificationPreferences,
+} from "../notifications/types.js";
+
+/** Response for GET /notifications */
+export type NotificationListResponse = {
+  notifications: import("../notifications/types.js").NotificationRecord[];
+  count: number;
+  unreadCount: number;
+};
+
+/** Response for GET /notifications/unread-count */
+export type NotificationUnreadCountResponse = {
+  unreadCount: number;
+};

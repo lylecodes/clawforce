@@ -2375,6 +2375,42 @@ export function queryRecentChanges(
 // Re-export types for gateway-routes.ts
 export type { ChangeProvenance };
 
+// --- Notification queries ---
+
+import {
+  listNotifications,
+  getUnreadCount,
+  type ListNotificationsOptions,
+} from "../notifications/store.js";
+import type { NotificationRecord } from "../notifications/types.js";
+
+/**
+ * Query notifications for a project with optional filters.
+ */
+export function queryNotifications(
+  projectId: string,
+  opts?: ListNotificationsOptions,
+): { notifications: NotificationRecord[]; count: number; unreadCount: number } {
+  try {
+    const notifications = listNotifications(projectId, opts);
+    const unreadCount = getUnreadCount(projectId);
+    return { notifications, count: notifications.length, unreadCount };
+  } catch {
+    return { notifications: [], count: 0, unreadCount: 0 };
+  }
+}
+
+/**
+ * Query just the unread notification count for a project.
+ */
+export function queryUnreadCount(projectId: string): { unreadCount: number } {
+  try {
+    return { unreadCount: getUnreadCount(projectId) };
+  } catch {
+    return { unreadCount: 0 };
+  }
+}
+
 // --- Attention queries ---
 
 import { buildAttentionSummary } from "../attention/builder.js";
