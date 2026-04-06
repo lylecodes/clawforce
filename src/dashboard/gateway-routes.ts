@@ -69,10 +69,12 @@ import {
   queryUserInbox,
   queryOperationalMetrics,
   queryConfigVersions,
+  queryActionStatus,
   readContextFile,
   writeContextFile,
   ContextFileError,
 } from "./queries.js";
+import type { ActionStatusQuery } from "../api/contract.js";
 import type { RouteResult } from "./routes.js";
 import type { TaskState, TaskPriority, EventStatus, MessageType, MessageStatus, ProtocolStatus, GoalStatus } from "../types.js";
 import { TASK_STATES, TASK_PRIORITIES, EVENT_STATUSES, MESSAGE_TYPES } from "../types.js";
@@ -933,6 +935,15 @@ function routeRead(
 
     case "capabilities":
       return ok(buildCapabilities(domain));
+
+    case "action-records": {
+      const query: ActionStatusQuery = {
+        status: params.status as ActionStatusQuery["status"] | undefined,
+        limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
+        offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
+      };
+      return ok(queryActionStatus(domain, query));
+    }
 
     default:
       return notFound("Unknown resource");

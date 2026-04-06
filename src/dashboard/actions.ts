@@ -46,7 +46,6 @@ import { validateRuleDefinition } from "../config/schema.js";
 import { acquireLock, releaseLock } from "../locks/store.js";
 import { checkLock } from "../locks/enforce.js";
 import { withActionTracking, withActionTrackingSync } from "./action-status.js";
-import { getSSEManager } from "./sse.js";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -261,7 +260,7 @@ export async function handleAgentKillAction(
     actionId = tracked.actionId;
     killedSessions = tracked.result;
 
-    getSSEManager()?.broadcast(projectId, "action_status", {
+    emitSSE(projectId, "action_status", {
       actionId,
       status: "completed",
     });
@@ -271,7 +270,7 @@ export async function handleAgentKillAction(
 
     // SSE with failed status — actionId may be undefined if tracking setup itself failed
     if (actionId) {
-      getSSEManager()?.broadcast(projectId, "action_status", {
+      emitSSE(projectId, "action_status", {
         actionId,
         status: "failed",
         error: errMsg,
@@ -335,7 +334,7 @@ export async function handleDomainKillAction(
     cancelledDispatches = tracked.result.cancelledDispatches;
     killedSessions = tracked.result.killedSessions;
 
-    getSSEManager()?.broadcast(projectId, "action_status", {
+    emitSSE(projectId, "action_status", {
       actionId,
       status: "completed",
     });
@@ -344,7 +343,7 @@ export async function handleDomainKillAction(
     safeLog("dashboard.actions.domainKill", err);
 
     if (actionId) {
-      getSSEManager()?.broadcast(projectId, "action_status", {
+      emitSSE(projectId, "action_status", {
         actionId,
         status: "failed",
         error: errMsg,
@@ -869,7 +868,7 @@ function handleConfigAction(
           return { status: 400, body: { error: result.error } };
         }
 
-        getSSEManager()?.broadcast(projectId, "action_status", { actionId, status: "completed" });
+        emitSSE(projectId, "action_status", { actionId, status: "completed" });
         emitSSE(projectId, "config:changed", { section });
         try {
           ingestEvent(projectId, "config_updated", "internal", {
@@ -983,7 +982,7 @@ function handleBudgetAction(
       }
 
       if (!result.ok) {
-        getSSEManager()?.broadcast(projectId, "action_status", {
+        emitSSE(projectId, "action_status", {
           actionId: budgetActionId,
           status: "failed",
           error: result.reason,
@@ -991,7 +990,7 @@ function handleBudgetAction(
         return { status: 400, body: { ok: false, error: result.reason } };
       }
 
-      getSSEManager()?.broadcast(projectId, "action_status", {
+      emitSSE(projectId, "action_status", {
         actionId: budgetActionId,
         status: "completed",
       });
