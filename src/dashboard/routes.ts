@@ -35,15 +35,6 @@ const VALID_PROTOCOL_STATUSES: readonly string[] = [
 ];
 const VALID_GOAL_STATUSES: readonly string[] = ["active", "achieved", "abandoned"];
 import {
-  queryAttentionSummary,
-  queryNotifications,
-  queryUnreadCount,
-  queryRecentChanges,
-  queryResourceHistory,
-} from "./queries.js";
-import { listActionRecords, getActionRecord } from "./action-status.js";
-import { listNotifications, markRead as markNotificationRead, markDismissed, markAllRead } from "../notifications/store.js";
-import {
   queryProjects,
   queryAgents,
   queryAgentDetail,
@@ -483,61 +474,6 @@ export function handleRequest(pathname: string, params: Record<string, string>, 
           }
           return { status: 500, body: { error: "Failed to read context file" } };
         }
-      }
-
-      case "attention":
-        return ok(queryAttentionSummary(projectId));
-
-      case "notifications": {
-        if (segments[4] === "unread-count") {
-          return ok(queryUnreadCount(projectId));
-        }
-        if (segments[4] && segments[5] === "read" && method === "POST") {
-          try { markNotificationRead(segments[4], getDb(projectId)); } catch { /* */ }
-          return ok({ ok: true });
-        }
-        if (segments[4] && segments[5] === "dismiss" && method === "POST") {
-          try { markDismissed(segments[4], getDb(projectId)); } catch { /* */ }
-          return ok({ ok: true });
-        }
-        if (segments[4] === "read-all" && method === "POST") {
-          try { markAllRead(projectId, getDb(projectId)); } catch { /* */ }
-          return ok({ ok: true });
-        }
-        return ok(queryNotifications(projectId, {
-          category: params.category as any,
-          severity: params.severity as any,
-          read: params.read === "true" ? true : params.read === "false" ? false : undefined,
-          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
-          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
-        }));
-      }
-
-      case "action-records": {
-        if (segments[4]) {
-          const record = getActionRecord(segments[4], getDb(projectId));
-          return record ? ok(record) : notFound(`Action record not found: ${segments[4]}`);
-        }
-        return ok(listActionRecords(projectId, {
-          status: params.status as any,
-          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
-          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
-        }, getDb(projectId)));
-      }
-
-      case "history": {
-        if (segments[4] && segments[5]) {
-          // /api/projects/:id/history/:resourceType/:resourceId
-          return ok(queryResourceHistory(projectId, segments[4], segments[5], {
-            limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
-            offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
-          }));
-        }
-        return ok(queryRecentChanges(projectId, {
-          limit: params.limit ? safeParseInt(params.limit, 50) : undefined,
-          offset: params.offset ? safeParseInt(params.offset, 0) : undefined,
-          resourceType: params.resourceType,
-        }));
       }
 
       default:
