@@ -533,6 +533,25 @@ export type OperatorCommsResponse = {
 
 export type { AttentionUrgency, AttentionItem, AttentionSummary } from "../attention/types.js";
 
+// --- Workspace v2 (Phase A) ---
+
+export type {
+  WorkspaceScope,
+  WorkspaceScopeKind,
+  ProjectWorkspace,
+  ProjectOperatorSummary,
+  WorkflowMiniTopology,
+  WorkflowTopology,
+  WorkflowStageSummary,
+  WorkflowStageEdge,
+  WorkflowStageInspector,
+  WorkflowStageInspectorTask,
+  ScopedWorkspaceFeed,
+  ScopedFeedItem,
+  StageLiveState,
+  WorkflowLiveState,
+} from "../workspace/types.js";
+
 // --- Lock types ---
 
 /** A lock entry as returned by the dashboard API. */

@@ -48,6 +48,29 @@ export {
   queryDecisionInbox,
   queryOperatorComms,
 } from "./queries.js";
+export {
+  queryProjectWorkspace,
+  queryWorkflowTopology,
+  queryWorkflowStageInspector,
+  queryScopedWorkspaceFeed,
+} from "../workspace/queries.js";
+export type {
+  WorkspaceScope,
+  WorkspaceScopeKind,
+  ProjectWorkspace,
+  ProjectOperatorSummary,
+  WorkflowMiniTopology,
+  WorkflowTopology,
+  WorkflowStageSummary,
+  WorkflowStageEdge,
+  WorkflowStageInspector,
+  WorkflowStageInspectorTask,
+  ScopedWorkspaceFeed,
+  ScopedFeedItem,
+  StageLiveState,
+  WorkflowLiveState,
+} from "../workspace/types.js";
+export { deriveStageKey, parseStageKey, WORKSPACE_SCOPE_KINDS } from "../workspace/types.js";
 export { SSEManager, getSSEManager, emitSSE } from "./sse.js";
 export type { SSEEventType } from "./sse.js";
 export { handleAction } from "./actions.js";

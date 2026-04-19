@@ -83,6 +83,13 @@ import {
 } from "./context-files.js";
 import { queryDashboardAssistantStatus } from "./dashboard-assistant.js";
 import { queryDomainCapabilities } from "./dashboard-meta.js";
+import {
+  queryProjectWorkspace,
+  queryScopedWorkspaceFeed,
+  queryWorkflowStageInspector,
+  queryWorkflowTopology,
+  type ScopedFeedParams,
+} from "../../workspace/queries.js";
 import { getDb } from "../../db.js";
 import { getActionRecord } from "../../dashboard/action-status.js";
 import { getExtendedProjectConfig } from "../../project.js";
@@ -819,7 +826,77 @@ export function routeGatewayDomainRead(
     case "reviews":
       return ok(queryManagerReviews(domain, params.task, params.limit ? safeParseInt(params.limit, 50) : undefined));
 
+    case "workspace": {
+      const sub = segments[1] ?? "";
+      if (sub === "" || sub === "overview") {
+        return ok(queryProjectWorkspace(domain));
+      }
+      if (sub === "feed") {
+        const feedParams = parseScopedFeedParams(domain, params);
+        if (!feedParams) {
+          return { status: 400, body: { error: "Invalid scope — workflow and stage scope require workflowId" } };
+        }
+        return ok(queryScopedWorkspaceFeed(feedParams));
+      }
+      return notFound(`Unknown workspace resource: ${sub}`);
+    }
+
+    case "workflows": {
+      const workflowId = segments[1];
+      if (!workflowId) {
+        return notFound("workflowId required");
+      }
+      const kind = segments[2];
+      if (!kind || kind === "topology") {
+        const topology = queryWorkflowTopology(domain, workflowId);
+        return topology ? ok(topology) : notFound("Workflow not found");
+      }
+      if (kind === "stages") {
+        const stageKey = segments[3];
+        if (!stageKey) {
+          return notFound("stageKey required");
+        }
+        const inspector = queryWorkflowStageInspector(domain, workflowId, decodeURIComponent(stageKey));
+        return inspector ? ok(inspector) : notFound("Workflow stage not found");
+      }
+      return notFound(`Unknown workflow resource: ${kind}`);
+    }
+
     default:
       return notFound("Unknown resource");
   }
+}
+
+/**
+ * Parse query-string inputs for `workspace/feed` into a `ScopedFeedParams`.
+ *
+ * Accepts:
+ * - `?scope=project` (or no params)                   → project scope
+ * - `?scope=workflow&workflowId=X`                    → workflow scope
+ * - `?scope=stage&workflowId=X&stageKey=Y`            → stage scope
+ * - bare `?workflowId=X&stageKey=Y` (scope inferred)  → stage scope
+ * - bare `?workflowId=X`                              → workflow scope
+ *
+ * Returns `null` on inconsistent inputs (e.g. stage scope without workflowId).
+ */
+function parseScopedFeedParams(
+  domain: string,
+  params: Record<string, string>,
+): ScopedFeedParams | null {
+  const scope = params.scope;
+  const workflowId = params.workflowId;
+  const stageKey = params.stageKey;
+
+  if (scope === "stage" || (scope == null && workflowId && stageKey)) {
+    if (!workflowId || !stageKey) return null;
+    return { kind: "stage", domainId: domain, workflowId, stageKey };
+  }
+  if (scope === "workflow" || (scope == null && workflowId)) {
+    if (!workflowId) return null;
+    return { kind: "workflow", domainId: domain, workflowId };
+  }
+  if (scope == null || scope === "project") {
+    return { kind: "project", domainId: domain };
+  }
+  return null;
 }
