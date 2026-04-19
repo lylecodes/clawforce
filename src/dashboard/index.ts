@@ -45,6 +45,8 @@ export {
   queryConfig,
   queryMeetings,
   queryMeetingDetail,
+  queryDecisionInbox,
+  queryOperatorComms,
 } from "./queries.js";
 export { SSEManager, getSSEManager, emitSSE } from "./sse.js";
 export type { SSEEventType } from "./sse.js";

@@ -5,7 +5,7 @@
  * initiative + agent + model → initiative + model → initiative only → global → hardcoded default.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 
 const DEFAULT_COST_CENTS = 150;

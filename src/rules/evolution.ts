@@ -1,12 +1,12 @@
 /**
  * Clawforce — Evolution Pipeline
  *
- * Provides the evolution prompt injected into orchestrator ghost turns,
+ * Provides the evolution prompt injected into manager ghost turns,
  * encouraging them to flag repeated decisions for rule codification.
  */
 
 /**
- * Format the evolution prompt for orchestrator agents.
+ * Format the evolution prompt for manager agents.
  * This gets injected into ghost turns alongside expectations reminders.
  */
 export function formatEvolutionPrompt(): string {

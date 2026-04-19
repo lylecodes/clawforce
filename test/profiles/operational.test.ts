@@ -35,8 +35,8 @@ describe("operational profile types", () => {
         reflectionSchedule: "0 9 * * FRI",
       },
       models: {
-        managerRecommended: "anthropic/claude-sonnet-4-6",
-        employeeRecommended: "anthropic/claude-haiku-4-5",
+        managerRecommended: "gpt-5.4",
+        employeeRecommended: "gpt-5.4-mini",
       },
     };
     expect(config.profile).toBe("medium");
@@ -58,8 +58,8 @@ describe("expandProfile", () => {
     expect(config.memory.expectations).toBe(false);
     expect(config.meetings.standupSchedule).toBeUndefined();
     expect(config.meetings.reflectionSchedule).toBe("0 9 * * FRI");
-    expect(config.models.managerRecommended).toBe("anthropic/claude-haiku-4-5");
-    expect(config.models.employeeRecommended).toBe("anthropic/claude-haiku-4-5");
+    expect(config.models.managerRecommended).toBe("gpt-5.4-mini");
+    expect(config.models.employeeRecommended).toBe("gpt-5.4-mini");
     expect(config.sessionReset).toBeUndefined();
   });
 
@@ -79,8 +79,8 @@ describe("expandProfile", () => {
     expect(config.memory.expectations).toBe(true);
     expect(config.meetings.standupSchedule).toBe("0 9 * * MON-FRI");
     expect(config.meetings.reflectionSchedule).toBe("0 9 * * FRI");
-    expect(config.models.managerRecommended).toBe("anthropic/claude-sonnet-4-6");
-    expect(config.models.employeeRecommended).toBe("anthropic/claude-haiku-4-5");
+    expect(config.models.managerRecommended).toBe("gpt-5.4");
+    expect(config.models.employeeRecommended).toBe("gpt-5.4-mini");
     expect(config.sessionReset?.enabled).toBe(true);
     expect(config.sessionReset?.schedule).toBe("0 0 * * *");
   });
@@ -100,8 +100,8 @@ describe("expandProfile", () => {
     expect(config.memory.expectations).toBe(true);
     expect(config.meetings.standupSchedule).toBe("0 9,14 * * MON-FRI");
     expect(config.meetings.reflectionSchedule).toBe("0 9 * * WED,FRI");
-    expect(config.models.managerRecommended).toBe("anthropic/claude-sonnet-4-6");
-    expect(config.models.employeeRecommended).toBe("anthropic/claude-sonnet-4-6");
+    expect(config.models.managerRecommended).toBe("gpt-5.4");
+    expect(config.models.employeeRecommended).toBe("gpt-5.4");
     expect(config.sessionReset?.enabled).toBe(true);
     expect(config.sessionReset?.schedule).toBe("59 23 * * *");
   });
@@ -121,8 +121,8 @@ describe("expandProfile", () => {
     expect(config.memory.expectations).toBe(true);
     expect(config.meetings.standupSchedule).toBe("0 9,12,16 * * MON-FRI");
     expect(config.meetings.reflectionSchedule).toBe("0 18 * * *");
-    expect(config.models.managerRecommended).toBe("anthropic/claude-opus-4-6");
-    expect(config.models.employeeRecommended).toBe("anthropic/claude-sonnet-4-6");
+    expect(config.models.managerRecommended).toBe("gpt-5.4");
+    expect(config.models.employeeRecommended).toBe("gpt-5.4");
     expect(config.sessionReset?.enabled).toBe(true);
   });
 });

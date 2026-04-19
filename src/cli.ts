@@ -27,50 +27,276 @@
  *   inbox           User messages from/to agents
  *   approve <id>    Approve a pending proposal
  *   reject <id>     Reject a pending proposal with optional feedback
+ *   review <id>     Inspect review evidence, linked issues, and recent runs
+ *   verdict <id>    Submit PASS/FAIL for a task in REVIEW
  *   message <agent> Send a message to an agent
  *   replay <key>    Replay session tool calls with full input/output
+ *   feed            Canonical operator feed
+ *   decisions       Human decision inbox
  *   watch           Curated feed — only what changed since last check
+ *   host            Hosted-runtime root bindings for OpenClaw
  *
  * Runtime Control:
  *   disable         Disable domain via DB (blocks new dispatches)
  *   enable          Enable domain via DB (resume dispatches)
  *   kill            Emergency stop: disable + cancel queue + block ALL tool calls
  *   kill --resume   Clear emergency stop and re-enable domain
+ *   controller      Run a persistent local controller for one domain
  *
  * Config:
  *   config get      Read a config value using dot-notation
  *   config set      Write a config value (auto-detects type)
  *   config show     Show full config or a section
  *
+ * Entities:
+ *   entities status Show live entity/task status for a committed manifest
+ *   entities sync   Reconcile a committed manifest into entities + linked tasks
+ *   entities snapshot Capture a dogfood experiment snapshot for one entity
+ *   entities events Inspect or admin the event queue during experiments
+ *
  * Verification:
+ *   sweep          Run one background sweep pass on demand
  *   running         Show what's actually running right now
  *   health          Comprehensive health check
  */
 
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "./sqlite-driver.js";
 import crypto from "node:crypto";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
 import YAML from "yaml";
 import { cmdOrg, cmdOrgSet, cmdOrgCheck } from "./cli/org.js";
 import { getAgentSaturation, getQueueWaitTime, getAgentThroughput, getCostEfficiency, getSessionEfficiency, getTaskCycleTime, getFailureRate, getRetryRate } from "./metrics/operational.js";
-import { getClawforceHome } from "./paths.js";
+import { getClawforceHome, resolveClawforceHomeHint } from "./paths.js";
+import { getDb as getProjectDb, setProjectsDir } from "./db.js";
+import { extractAgentIdFromReference, parseAgentSessionKey } from "./session-keys.js";
+import {
+  initClawforce,
+  isClawforceInitialized,
+  registerProject,
+  shutdownClawforce,
+  unregisterProject,
+} from "./lifecycle.js";
+import { initializeAllDomains, reloadDomain } from "./config/init.js";
+import { startConfigWatcher, stopConfigWatcher } from "./config/watcher.js";
+import { buildAttentionSummary, buildDecisionInboxSummary } from "./attention/builder.js";
+import type { AttentionItem } from "./attention/types.js";
+import { processAndDispatch } from "./dispatch/dispatcher.js";
+import { sweep as runSweep } from "./sweep/actions.js";
+import { releaseActiveItem, retryFailedItem } from "./dispatch/queue.js";
+import { submitVerdict } from "./tasks/verify.js";
+import { queryTaskDetail } from "./dashboard/queries.js";
+import { approveProposal, rejectProposal } from "./approval/resolve.js";
+import {
+  collectEntityManifestStatus,
+  loadEntityManifest,
+  syncEntityManifest,
+  type EntityManifestStatusRow,
+} from "./entities/manifest.js";
+import { listEntityCheckRuns, runEntityChecks } from "./entities/checks.js";
+import {
+  clearEntityCheckRuns,
+  collectEntityExperimentSnapshot,
+  collectProjectEventQueueSnapshot,
+  replayWorkflowMutationImplementationTask,
+  reopenEntityIssue,
+  resetIssueRemediationTasks,
+  shapeEntityExperimentSnapshot,
+  shapeEventQueueSnapshot,
+} from "./entities/admin.js";
+import { reclaimStaleEvents, requeueEvents } from "./events/store.js";
+import { getSessionHeartbeatStatus } from "./enforcement/tracker.js";
+import { processEvents } from "./events/router.js";
+import {
+  acquireControllerLease,
+  clearControllerGenerationRequest,
+  getControllerLease,
+  getCurrentControllerGeneration,
+  getCurrentControllerOwnerId,
+  releaseControllerLease,
+  requestControllerGeneration,
+} from "./runtime/controller-leases.js";
+import {
+  buildSetupReport,
+  buildSetupExplanation,
+  renderSetupExplain,
+  renderSetupStatus,
+  renderSetupValidate,
+  resolveSetupRoot,
+} from "./setup/report.js";
+import { runCreateStarterDomainCommand } from "./app/commands/domain-setup.js";
 
 const DEFAULT_PROJECT = "clawforce-dev";
-const DB_DIR = getClawforceHome();
+
+export function applyCliRootOverrideFromArgs(args: string[]): string | null {
+  const rootArg = args.find((arg) => arg.startsWith("--root="))?.split("=").slice(1).join("=");
+  if (!rootArg) return null;
+  const resolvedRoot = resolveClawforceHomeHint(rootArg) ?? path.resolve(rootArg);
+  process.env.CLAWFORCE_HOME = resolvedRoot;
+  return resolvedRoot;
+}
 
 function getDb(projectId: string): DatabaseSync {
-  const dbPath = path.join(DB_DIR, projectId, "clawforce.db");
+  const dbPath = path.join(getClawforceHome(), projectId, "clawforce.db");
   if (!fs.existsSync(dbPath)) {
     console.error(`Database not found: ${dbPath}`);
     process.exit(2);
   }
-  return new DatabaseSync(dbPath, { open: true });
+  setProjectsDir(getClawforceHome());
+  return getProjectDb(projectId);
+}
+
+function ensureProjectConfigLoaded(): void {
+  initializeAllDomains(getClawforceHome());
+}
+
+function callOpenClawGateway(method: string, params?: Record<string, unknown>): unknown {
+  const args = ["gateway", "call", method, "--json"];
+  if (params && Object.keys(params).length > 0) {
+    args.push("--params", JSON.stringify(params));
+  }
+  const raw = execFileSync("openclaw", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return JSON.parse(raw);
+}
+
+export function shouldFallbackToLocalSweep(
+  result: Record<string, unknown>,
+  now = Date.now(),
+): boolean {
+  if (result.mode !== "gateway") return false;
+  const controller = (result.controller ?? null) as Record<string, unknown> | null;
+  if (!controller || controller.skipped !== true) return false;
+  const expiresAt = controller.expiresAt;
+  return typeof expiresAt === "number" && expiresAt <= now;
+}
+
+function cmdHost(args: string[], json = false): void {
+  const sub = args[1];
+  if (!sub || sub === "status" || sub === "roots") {
+    const result = callOpenClawGateway("clawforce.roots") as { roots?: string[] };
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    const roots = result.roots ?? [];
+    console.log(`Managed roots: ${roots.length}`);
+    for (const root of roots) {
+      console.log(`- ${root}`);
+    }
+    return;
+  }
+
+  const pathArg = args.find((arg) => arg.startsWith("--path="))?.split("=").slice(1).join("=");
+  const explicitRootArg = args.find((arg) => arg.startsWith("--root="))?.split("=").slice(1).join("=");
+  const pathHint = explicitRootArg ?? pathArg ?? process.cwd();
+  const resolvedRoot = resolveClawforceHomeHint(pathHint);
+  if (!resolvedRoot) {
+    console.error(`Could not resolve a ClawForce home from: ${pathHint}`);
+    process.exit(1);
+  }
+
+  if (sub === "bind") {
+    const result = callOpenClawGateway("clawforce.bind_root", { path: resolvedRoot });
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Bound host root: ${resolvedRoot}`);
+    }
+    return;
+  }
+
+  if (sub === "unbind") {
+    const result = callOpenClawGateway("clawforce.unbind_root", { path: resolvedRoot });
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Unbound host root: ${resolvedRoot}`);
+    }
+    return;
+  }
+
+  console.error("Usage: cf host [roots|bind|unbind] [--root=/path/to/.clawforce]");
+  process.exit(1);
 }
 
 function fmt$(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+type WorkflowDrainResult = {
+  eventsProcessed: number;
+  dispatched: number;
+  controller?: {
+    skipped: boolean;
+    ownerId: string;
+    ownerLabel: string;
+    purpose: string;
+    expiresAt: number;
+  };
+};
+
+type VerdictCommandResult = {
+  taskId: string;
+  taskTitle: string;
+  passed: boolean;
+  result: import("./types.js").TransitionResult;
+};
+
+function renderFeedItems(items: AttentionItem[]): void {
+  for (const item of items) {
+    const kind = item.kind.toUpperCase();
+    const severity = item.severity.toUpperCase();
+    const automation = item.automationState.replace(/_/g, " ");
+    console.log(`- [${kind}/${severity}] ${item.title}`);
+    console.log(`  ${item.summary}`);
+    console.log(`  actionability=${item.actionability}  automation=${automation}  destination=${item.destination}`);
+    if (item.entityType && item.entityId) {
+      console.log(`  entity=${item.entityType}:${item.entityId}`);
+    }
+    if (item.issueId) {
+      console.log(`  issue=${item.issueId}`);
+    }
+    if (item.proposalId) {
+      console.log(`  proposal=${item.proposalId}`);
+    }
+    if (item.recommendedAction) {
+      console.log(`  next=${item.recommendedAction}`);
+    }
+  }
+}
+
+function cmdFeed(db: DatabaseSync, projectId: string, json = false): void {
+  const summary = buildAttentionSummary(projectId, db);
+  if (json) {
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  console.log(`## Feed (${summary.counts.actionNeeded} needs action, ${summary.counts.watching} watching, ${summary.counts.fyi} FYI)\n`);
+  if (summary.items.length === 0) {
+    console.log("No feed items.");
+    return;
+  }
+  renderFeedItems(summary.items);
+}
+
+function cmdDecisionInbox(db: DatabaseSync, projectId: string, json = false): void {
+  const summary = buildDecisionInboxSummary(projectId, db);
+  if (json) {
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  console.log(`## Decision Inbox (${summary.items.length} item${summary.items.length === 1 ? "" : "s"})\n`);
+  if (summary.items.length === 0) {
+    console.log("No decisions pending.");
+    return;
+  }
+  renderFeedItems(summary.items);
 }
 
 function fmtAge(ms: number): string {
@@ -99,6 +325,10 @@ function fmtAgo(epochMs: number): string {
   return `${days}d ago`;
 }
 
+function fmtHeartbeatAgo(ageMs: number | null): string {
+  return ageMs == null ? "unknown" : `${fmtAge(ageMs)} ago`;
+}
+
 function fmtTime(epochMs: number): string {
   return new Date(epochMs).toLocaleTimeString("en-US", { hour12: false });
 }
@@ -106,6 +336,11 @@ function fmtTime(epochMs: number): string {
 function truncate(s: string, len: number): string {
   if (s.length <= len) return s;
   return s.slice(0, len - 1) + "\u2026";
+}
+
+function fmtBoolFlag(value: boolean | undefined): string | null {
+  if (value === undefined) return null;
+  return value ? "yes" : "no";
 }
 
 function pad(s: string, len: number): string {
@@ -117,13 +352,11 @@ function pad(s: string, len: number): string {
  * Returns e.g. "cf-lead" (agent name) and "cron" (session type).
  */
 function parseSessionKey(key: string): { agent: string; type: string } {
-  // Format: agent:<agentName>:<sessionType>:<uuid>
-  const parts = key.split(":");
-  if (parts.length >= 3 && parts[0] === "agent") {
-    return { agent: parts[1]!, type: parts[2]! };
+  const parsed = parseAgentSessionKey(key);
+  if (parsed) {
+    return { agent: parsed.agentId, type: parsed.sessionType };
   }
-  // Fallback: just return the whole thing
-  return { agent: key, type: "?" };
+  return { agent: extractAgentIdFromReference(key), type: "?" };
 }
 
 /**
@@ -132,18 +365,14 @@ function parseSessionKey(key: string): { agent: string; type: string } {
  * "cf-lead" -> "cf-lead"
  */
 function extractAgentName(key: string): string {
-  if (key.startsWith("agent:")) {
-    const parts = key.split(":");
-    return parts[1] ?? key;
-  }
-  return key;
+  return extractAgentIdFromReference(key);
 }
 
 /**
  * Load agent list from domain YAML config.
  */
 function loadDomainAgents(domainId: string): string[] {
-  const yamlPath = path.join(DB_DIR, "domains", `${domainId}.yaml`);
+  const yamlPath = path.join(getClawforceHome(), "domains", `${domainId}.yaml`);
   if (!fs.existsSync(yamlPath)) return [];
   try {
     const raw = fs.readFileSync(yamlPath, "utf-8");
@@ -153,6 +382,1004 @@ function loadDomainAgents(domainId: string): string[] {
     }
   } catch { /* ignore */ }
   return [];
+}
+
+function renderEntityManifestRows(rows: EntityManifestStatusRow[]): void {
+  if (rows.length === 0) {
+    console.log("No manifest rows found.");
+    return;
+  }
+
+  for (const row of rows) {
+    const tasks = row.tasks.length > 0
+      ? row.tasks.map((task) => `${task.title}:${task.state ?? "missing"}`).join(", ")
+      : "none";
+    console.log(
+      [
+        `${row.title} [${row.key}]`,
+        `state=${row.liveState ?? "-"}`,
+        `health=${row.liveHealth ?? "-"}`,
+        `owner=${row.ownerAgentId ?? "-"}`,
+        `parent=${row.parentKey ?? "-"}`,
+        `tasks=${tasks}`,
+      ].join(" | "),
+    );
+  }
+}
+
+function renderEntitySnapshot(snapshot: ReturnType<typeof shapeEntityExperimentSnapshot>): void {
+  console.log(`${snapshot.entity.title} [${snapshot.entity.kind}]`);
+  console.log(
+    [
+      `state=${snapshot.entity.state}`,
+      `health=${snapshot.entity.health ?? "-"}`,
+      `owner=${snapshot.entity.ownerAgentId ?? "-"}`,
+      `issues=${snapshot.issueSummary.openCount}`,
+      `blocking=${snapshot.issueSummary.blockingOpenCount}`,
+      `decisions=${snapshot.decisionItems.length}`,
+    ].join(" | "),
+  );
+
+  if (snapshot.issues.length > 0) {
+    console.log("");
+    console.log("Issues");
+    for (const issue of snapshot.issues) {
+      console.log(
+        [
+          `- ${issue.issueType}`,
+          `status=${issue.status}`,
+          `severity=${issue.severity}`,
+          `blocking=${issue.blocking ? "yes" : "no"}`,
+        ].join(" | "),
+      );
+      console.log(`  ${issue.title}`);
+    }
+  }
+
+  if (snapshot.reactiveTasks.length > 0) {
+    console.log("");
+    console.log("Reactive tasks");
+    for (const task of snapshot.reactiveTasks) {
+      console.log(
+        [
+          `- ${task.title}`,
+          `id=${task.id.slice(0, 8)}`,
+          `state=${task.state}`,
+          `assigned=${task.assignedTo ?? "-"}`,
+        ].join(" | "),
+      );
+    }
+  }
+
+  if (snapshot.feedItems.length > 0) {
+    console.log("");
+    console.log("Feed");
+    renderFeedItems(snapshot.feedItems);
+  }
+}
+
+function renderEventQueueSnapshot(snapshot: ReturnType<typeof shapeEventQueueSnapshot>): void {
+  console.log(`Event queue${snapshot.focus === "all" ? "" : ` (focus=${snapshot.focus})`}`);
+  for (const [status, count] of Object.entries(snapshot.counts)) {
+    console.log(`  ${status.padEnd(10)} ${count}`);
+  }
+  if (snapshot.items.length === 0) return;
+  console.log("");
+  for (const event of snapshot.items) {
+    console.log(
+      [
+        `${event.type}`,
+        `id=${event.id.slice(0, 8)}`,
+        `status=${event.status}`,
+        `source=${event.source}`,
+        `at=${fmtDate(event.createdAt)}`,
+      ].join(" | "),
+    );
+    if (event.error) {
+      console.log(`  error=${truncate(event.error, 180)}`);
+    }
+    if (event.payloadSummary) {
+      console.log(`  payload=${event.payloadSummary}`);
+    }
+  }
+}
+
+export async function drainProjectWorkflow(
+  projectId: string,
+  maxPasses = 10,
+  options: {
+    db?: DatabaseSync;
+    dispatchMode?: "full" | "events_only";
+    preferCurrentGeneration?: boolean;
+    reason?: string;
+    requestedBy?: string;
+    metadata?: Record<string, unknown>;
+  } = {},
+): Promise<WorkflowDrainResult> {
+  const db = options.db ?? getDb(projectId);
+  const dispatchMode = options.dispatchMode ?? "full";
+  const preferCurrentGeneration = options.preferCurrentGeneration !== false;
+  const currentGeneration = preferCurrentGeneration ? getCurrentControllerGeneration() : null;
+  if (currentGeneration) {
+    requestControllerGeneration(projectId, {
+      generation: currentGeneration,
+      requestedBy: options.requestedBy ?? "system:cli",
+      reason: options.reason ?? "cli_workflow_drain",
+      metadata: {
+        origin: "cli",
+        ...(options.metadata ?? {}),
+      },
+    }, db);
+  }
+
+  let totalProcessed = 0;
+  let totalDispatched = 0;
+  let controller: WorkflowDrainResult["controller"];
+  try {
+    for (let pass = 0; pass < maxPasses; pass++) {
+      if (dispatchMode === "events_only") {
+        const eventsProcessed = processEvents(projectId, db);
+        totalProcessed += eventsProcessed;
+        controller = undefined;
+        if (eventsProcessed === 0) {
+          break;
+        }
+        continue;
+      }
+
+      const result = await processAndDispatch(projectId, db);
+      const { eventsProcessed, dispatched } = result;
+      totalProcessed += eventsProcessed;
+      totalDispatched += dispatched;
+      controller = result.controller;
+      if (result.controller?.skipped) {
+        break;
+      }
+      if (eventsProcessed === 0 && dispatched === 0) {
+        break;
+      }
+    }
+  } finally {
+    if (currentGeneration) {
+      clearControllerGenerationRequest(projectId, { generation: currentGeneration }, db);
+    }
+  }
+  return { eventsProcessed: totalProcessed, dispatched: totalDispatched, controller };
+}
+
+async function runOperatorFollowOn(
+  projectId: string,
+  waitForFollowOn: boolean,
+): Promise<WorkflowDrainResult> {
+  initClawforce({
+    enabled: true,
+    projectsDir: getClawforceHome(),
+    sweepIntervalMs: 0,
+    defaultMaxRetries: 3,
+    verificationRequired: false,
+  });
+  try {
+    return await drainProjectWorkflow(projectId, 10, {
+      dispatchMode: waitForFollowOn ? "full" : "events_only",
+    });
+  } finally {
+    await shutdownClawforce();
+  }
+}
+
+async function runLocalSweepWithTakeover(projectId: string): Promise<Record<string, unknown>> {
+  const db = getDb(projectId);
+  const currentGeneration = getCurrentControllerGeneration();
+  requestControllerGeneration(projectId, {
+    generation: currentGeneration,
+    requestedBy: "system:cli",
+    reason: "cli_local_sweep",
+    metadata: { origin: "cli", localOnly: true },
+  }, db);
+  try {
+    return {
+      mode: "local",
+      ...(await runSweep({ projectId, dbOverride: db, backstopDispatchMode: "events_only" })),
+    };
+  } finally {
+    clearControllerGenerationRequest(projectId, { generation: currentGeneration }, db);
+  }
+}
+
+function waitForControllerStop(signal?: AbortSignal): Promise<"abort" | NodeJS.Signals> {
+  if (signal?.aborted) {
+    return Promise.resolve("abort");
+  }
+
+  return new Promise((resolve) => {
+    const onSigint = () => done("SIGINT");
+    const onSigterm = () => done("SIGTERM");
+    const onAbort = () => done("abort");
+
+    const cleanup = () => {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    const done = (reason: "abort" | NodeJS.Signals) => {
+      cleanup();
+      resolve(reason);
+    };
+
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function cmdController(
+  projectId: string,
+  options?: {
+    intervalMs?: number;
+    json?: boolean;
+    initialSweep?: boolean;
+    signal?: AbortSignal;
+    onStarted?: (info: { projectId: string; intervalMs: number }) => void;
+  },
+): Promise<void> {
+  const intervalMs = options?.intervalMs ?? 5000;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error(`Invalid controller interval: ${intervalMs}`);
+  }
+
+  ensureProjectConfigLoaded();
+  const configRoot = getClawforceHome();
+
+  const runtimeWasInitialized = isClawforceInitialized();
+  if (!runtimeWasInitialized) {
+    initClawforce({
+      enabled: true,
+      projectsDir: getClawforceHome(),
+      sweepIntervalMs: intervalMs,
+      defaultMaxRetries: 3,
+      verificationRequired: false,
+      autoInitialize: false,
+    });
+  }
+
+  registerProject(projectId);
+  let controllerDomainActive = true;
+  const stopController = new AbortController();
+  let controllerStopReason: string | null = null;
+  const requestControllerStop = (reason: string) => {
+    if (controllerStopReason) return;
+    controllerStopReason = reason;
+    controllerDomainActive = false;
+    stopController.abort();
+  };
+  const refreshControllerLease = (startup: boolean = false) => {
+    if (!controllerDomainActive) return;
+    try {
+      const result = acquireControllerLease(projectId, {
+        purpose: "controller",
+        ttlMs: Math.max(intervalMs * 3, 30_000),
+      });
+      if (!result.ok && result.lease.ownerId !== getCurrentControllerOwnerId()) {
+        const reason = `Controller lease already held by ${result.lease.ownerLabel}; refusing duplicate controller for ${projectId}.`;
+        if (startup) {
+          throw new Error(reason);
+        }
+        console.error(reason);
+        requestControllerStop(reason);
+      }
+    } catch (err) {
+      console.error(`Controller lease refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (startup) {
+        throw err;
+      }
+    }
+  };
+  refreshControllerLease(true);
+  const leaseHeartbeat = setInterval(refreshControllerLease, Math.max(1000, Math.min(30_000, intervalMs)));
+  leaseHeartbeat.unref();
+  startConfigWatcher(configRoot, (event) => {
+    if (event.type === "domain" && event.domainId && event.domainId !== projectId) {
+      return;
+    }
+
+    const result = event.type === "global"
+      ? initializeAllDomains(configRoot)
+      : reloadDomain(configRoot, projectId);
+
+    if (result.domains.includes(projectId)) {
+      controllerDomainActive = true;
+      registerProject(projectId);
+      refreshControllerLease();
+    } else {
+      controllerDomainActive = false;
+      releaseControllerLease(projectId);
+      unregisterProject(projectId);
+    }
+
+    if (!options?.json) {
+      const scope = event.type === "global" ? "global" : `domain:${projectId}`;
+      console.log(`Config reload: scope=${scope} loaded=${result.domains.includes(projectId)} errors=${result.errors.length} warnings=${result.warnings.length}`);
+    }
+  });
+  const keepAlive = setInterval(() => {}, 60_000);
+  const abortFromCaller = () => stopController.abort();
+  options?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  try {
+    const initialSweep = options?.initialSweep !== false
+      ? await runLocalSweepWithTakeover(projectId)
+      : null;
+
+    if (options?.json) {
+      console.log(JSON.stringify({
+        ok: true,
+        mode: "controller",
+        projectId,
+        intervalMs,
+        initialSweep,
+      }, null, 2));
+    } else {
+      console.log("## Controller\n");
+      console.log(`Project: ${projectId}`);
+      console.log(`Interval: ${intervalMs}ms`);
+      if (initialSweep) {
+        console.log(`Initial events processed: ${String(initialSweep.eventsProcessed ?? 0)}`);
+        console.log(`Initial dispatched: ${String(initialSweep.dispatched ?? 0)}`);
+      } else {
+        console.log("Initial sweep: skipped");
+      }
+      console.log("State: running");
+      console.log("Stop with Ctrl-C");
+    }
+
+    options?.onStarted?.({ projectId, intervalMs });
+    await waitForControllerStop(stopController.signal);
+  } finally {
+    options?.signal?.removeEventListener("abort", abortFromCaller);
+    clearInterval(keepAlive);
+    clearInterval(leaseHeartbeat);
+    stopConfigWatcher(configRoot);
+    releaseControllerLease(projectId);
+    unregisterProject(projectId);
+    if (!runtimeWasInitialized) {
+      await shutdownClawforce();
+    }
+  }
+}
+
+function resolveTaskForCli(db: DatabaseSync, projectId: string, taskIdPrefix: string): { id: string; title: string } {
+  const matches = db.prepare(
+    "SELECT id, title FROM tasks WHERE project_id = ? AND id LIKE ? ORDER BY created_at DESC LIMIT 10",
+  ).all(projectId, `${taskIdPrefix}%`) as Array<{ id: string; title: string }>;
+
+  if (matches.length === 0) {
+    console.error(`No task found matching "${taskIdPrefix}"`);
+    process.exit(2);
+  }
+
+  const exact = matches.find((task) => task.id === taskIdPrefix);
+  if (exact) return exact;
+  if (matches.length === 1) return matches[0]!;
+
+  console.error(`Task id "${taskIdPrefix}" is ambiguous. Matches:`);
+  for (const task of matches.slice(0, 5)) {
+    console.error(`  ${(task.id).slice(0, 8)}  ${truncate(task.title, 60)}`);
+  }
+  process.exit(2);
+}
+
+function resolveProposalForCli(db: DatabaseSync, projectId: string, proposalIdPrefix: string): { id: string; title: string; status: string } {
+  const matches = db.prepare(
+    "SELECT id, title, status FROM proposals WHERE project_id = ? AND id LIKE ? ORDER BY created_at DESC LIMIT 10",
+  ).all(projectId, `${proposalIdPrefix}%`) as Array<{ id: string; title: string; status: string }>;
+
+  if (matches.length === 0) {
+    console.error(`No proposal found matching "${proposalIdPrefix}"`);
+    process.exit(2);
+  }
+
+  const exact = matches.find((proposal) => proposal.id === proposalIdPrefix);
+  if (exact) return exact;
+  if (matches.length === 1) return matches[0]!;
+
+  console.error(`Proposal id "${proposalIdPrefix}" is ambiguous. Matches:`);
+  for (const proposal of matches.slice(0, 5)) {
+    console.error(`  ${proposal.id.slice(0, 8)}  ${truncate(proposal.title, 60)}`);
+  }
+  process.exit(2);
+}
+
+function applyVerdict(
+  db: DatabaseSync,
+  projectId: string,
+  taskIdPrefix: string,
+  passed: boolean,
+  actor: string,
+  reason?: string,
+  reasonCode?: import("./types.js").ReviewReasonCode,
+): VerdictCommandResult {
+  const task = resolveTaskForCli(db, projectId, taskIdPrefix);
+  const result = submitVerdict({
+    projectId,
+    taskId: task.id,
+    verifier: actor,
+    passed,
+    reason,
+    reasonCode,
+  }, db);
+
+  return {
+    taskId: task.id,
+    taskTitle: task.title,
+    passed,
+    result,
+  };
+}
+
+export async function cmdVerdict(
+  db: DatabaseSync,
+  projectId: string,
+  taskIdPrefix: string,
+  passed: boolean,
+  options?: {
+    actor?: string;
+    reason?: string;
+    reasonCode?: import("./types.js").ReviewReasonCode;
+    json?: boolean;
+    processFollowOn?: boolean;
+    waitForFollowOn?: boolean;
+  },
+): Promise<void> {
+  const actor = options?.actor ?? "operator:cli";
+  ensureProjectConfigLoaded();
+  const outcome = applyVerdict(db, projectId, taskIdPrefix, passed, actor, options?.reason, options?.reasonCode);
+
+  let followOn: WorkflowDrainResult | null = null;
+  if (outcome.result.ok && options?.processFollowOn !== false) {
+    followOn = await runOperatorFollowOn(projectId, options?.waitForFollowOn === true);
+  }
+
+  if (options?.json) {
+    console.log(JSON.stringify({
+      taskId: outcome.taskId,
+      taskTitle: outcome.taskTitle,
+      passed,
+      actor,
+      reasonCode: options?.reasonCode ?? null,
+      result: outcome.result,
+      followOnEventsProcessed: followOn?.eventsProcessed ?? 0,
+      followOnDispatches: followOn?.dispatched ?? 0,
+      followOnController: followOn?.controller ?? null,
+    }, null, 2));
+    return;
+  }
+
+  if (!outcome.result.ok) {
+    console.log(`Verdict rejected for "${truncate(outcome.taskTitle, 60)}" (${outcome.taskId.slice(0, 8)}): ${outcome.result.reason}`);
+    return;
+  }
+
+  console.log(
+    `${passed ? "Passed" : "Failed"} review: "${truncate(outcome.taskTitle, 60)}" (${outcome.taskId.slice(0, 8)}) → ${outcome.result.task.state}`,
+  );
+  if (options?.reason) {
+    console.log(`Reason: ${options.reason}`);
+  }
+  if (options?.reasonCode) {
+    console.log(`Reason code: ${options.reasonCode}`);
+  }
+  if (followOn) {
+    console.log(`follow_on_events=${followOn.eventsProcessed}`);
+    console.log(`follow_on_dispatches=${followOn.dispatched}`);
+    if (followOn.controller?.skipped) {
+      console.log(`follow_on_controller=skipped (${followOn.controller.ownerLabel})`);
+    }
+  }
+}
+
+export function cmdReview(
+  db: DatabaseSync,
+  projectId: string,
+  taskIdPrefix: string,
+  json = false,
+): void {
+  ensureProjectConfigLoaded();
+  const task = resolveTaskForCli(db, projectId, taskIdPrefix);
+  const detail = queryTaskDetail(projectId, task.id, db);
+  if (!detail) {
+    console.error(`Task not found: ${task.id}`);
+    process.exit(2);
+  }
+
+  if (json) {
+    console.log(JSON.stringify(detail, null, 2));
+    return;
+  }
+
+  console.log(`## Review: ${detail.task.title}`);
+  console.log(`task=${detail.task.id}`);
+  console.log(`state=${detail.task.state}`);
+  if (detail.task.assignedTo) console.log(`assigned_to=${detail.task.assignedTo}`);
+  if (detail.task.entityType && detail.task.entityId) {
+    console.log(`entity=${detail.task.entityType}:${detail.task.entityId}`);
+  }
+  if (detail.linkedIssue) {
+    console.log(`linked_issue=${detail.linkedIssue.issueType} [${detail.linkedIssue.severity}] ${detail.linkedIssue.title}`);
+    if (detail.linkedIssue.recommendedAction) {
+      console.log(`linked_issue_next=${detail.linkedIssue.recommendedAction}`);
+    }
+  }
+  if (detail.entityIssueSummary) {
+    console.log(`open_entity_issues=${detail.entityIssueSummary.openCount}`);
+    if (detail.entityIssueSummary.highestSeverity) {
+      console.log(`highest_entity_issue_severity=${detail.entityIssueSummary.highestSeverity}`);
+    }
+  }
+  console.log("");
+
+  console.log("Evidence:");
+  if (detail.evidence.length === 0) {
+    console.log("- none");
+  } else {
+    for (const item of detail.evidence.slice(0, 5)) {
+      const preview = item.content.replace(/\s+/g, " ").slice(0, 160);
+      console.log(`- [${item.type}] ${preview}${item.content.length > 160 ? "..." : ""}`);
+    }
+  }
+  console.log("");
+
+  console.log("Active Sessions:");
+  if (!detail.activeSessions || detail.activeSessions.length === 0) {
+    console.log("- none");
+  } else {
+    for (const session of detail.activeSessions) {
+      const heartbeat = session.heartbeatAgeMs != null
+        ? `${Math.max(0, Math.round(session.heartbeatAgeMs / 1000))}s ago`
+        : "unknown";
+      console.log(`- ${session.sessionKey} state=${session.heartbeatState} heartbeat=${heartbeat} tool_calls=${session.toolCallCount ?? 0}`);
+    }
+  }
+  console.log("");
+
+  console.log("Recent Sessions:");
+  if (detail.recentSessions.length === 0) {
+    console.log("- none");
+  } else {
+    for (const session of detail.recentSessions) {
+      console.log(`- ${session.sessionKey} outcome=${session.outcome} tool_calls=${session.toolCallCount ?? 0} cost_cents=${session.totalCostCents ?? 0}`);
+      const diagnostics = session.diagnostics;
+      if (diagnostics) {
+        const diagParts = [
+          diagnostics.resultSource ? `source=${diagnostics.resultSource}` : null,
+          diagnostics.exitCode !== undefined ? `exit_code=${diagnostics.exitCode}` : null,
+          diagnostics.signal !== undefined ? `signal=${diagnostics.signal ?? "none"}` : null,
+          diagnostics.terminatedReason ? `terminated_reason=${diagnostics.terminatedReason}` : null,
+          diagnostics.timeoutMs !== undefined ? `timeout_ms=${diagnostics.timeoutMs}` : null,
+          diagnostics.logicalCompletion !== undefined ? `logical_completion=${diagnostics.logicalCompletion ? "yes" : "no"}` : null,
+          diagnostics.summarySynthetic !== undefined ? `synthetic=${diagnostics.summarySynthetic ? "yes" : "no"}` : null,
+          diagnostics.observedWork !== undefined ? `observed_work=${diagnostics.observedWork ? "yes" : "no"}` : null,
+          diagnostics.complianceObserved !== undefined ? `telemetry_seen=${diagnostics.complianceObserved ? "yes" : "no"}` : null,
+          diagnostics.outputChars !== undefined ? `output_chars=${diagnostics.outputChars}` : null,
+          diagnostics.stdoutChars !== undefined ? `stdout_chars=${diagnostics.stdoutChars}` : null,
+          diagnostics.stderrChars !== undefined ? `stderr_chars=${diagnostics.stderrChars}` : null,
+          diagnostics.promptChars !== undefined ? `prompt_chars=${diagnostics.promptChars}` : null,
+          diagnostics.finalPromptChars !== undefined ? `final_prompt_chars=${diagnostics.finalPromptChars}` : null,
+          diagnostics.binary ? `binary=${diagnostics.binary}` : null,
+          diagnostics.cwd !== undefined ? `cwd=${diagnostics.cwd ?? "none"}` : null,
+          diagnostics.configOverrideCount !== undefined ? `config_overrides=${diagnostics.configOverrideCount}` : null,
+          diagnostics.mcpBridgeDisabled !== undefined ? `mcp_disabled=${diagnostics.mcpBridgeDisabled ? "yes" : "no"}` : null,
+        ].filter(Boolean);
+        if (diagParts.length > 0) {
+          console.log(`  diag=${diagParts.join(" ")}`);
+        }
+
+        const launchParts = [
+          fmtBoolFlag(diagnostics.outputLooksLikeLaunchTranscript),
+          fmtBoolFlag(diagnostics.stdoutLooksLikeLaunchTranscript),
+          fmtBoolFlag(diagnostics.stderrLooksLikeLaunchTranscript),
+        ];
+        if (launchParts.some((value) => value !== null)) {
+          console.log(`  launch_transcript=output:${launchParts[0] ?? "unknown"} stdout:${launchParts[1] ?? "unknown"} stderr:${launchParts[2] ?? "unknown"}`);
+        }
+        if (diagnostics.stderrPreview) {
+          console.log(`  stderr_preview=${truncate(diagnostics.stderrPreview, 160)}`);
+        }
+        if (diagnostics.stdoutPreview) {
+          console.log(`  stdout_preview=${truncate(diagnostics.stdoutPreview, 160)}`);
+        }
+      }
+    }
+  }
+  console.log("");
+
+  console.log("Reviews:");
+  if (detail.reviews.length === 0) {
+    console.log("- none");
+  } else {
+    for (const review of detail.reviews.slice(0, 5)) {
+      const summary = review.reasoning ? review.reasoning.replace(/\s+/g, " ").slice(0, 160) : "";
+      console.log(`- ${review.verdict} by ${review.reviewerAgentId}${review.reasonCode ? ` [${review.reasonCode}]` : ""}`);
+      if (summary) {
+        console.log(`  ${summary}${(review.reasoning?.length ?? 0) > 160 ? "..." : ""}`);
+      }
+    }
+  }
+}
+
+export async function cmdEntitiesManifest(projectId: string, args: string[], json = false): Promise<void> {
+  const sub = args[1];
+  const supported = new Set([
+    "status",
+    "sync",
+    "check",
+    "check-runs",
+    "snapshot",
+    "reopen-issue",
+    "replay-workflow-mutation",
+    "reset-remediation",
+    "clear-check-runs",
+    "events",
+  ]);
+  if (!sub || !supported.has(sub)) {
+    console.error("Usage: cf entities <status|sync|check|check-runs|snapshot|reopen-issue|replay-workflow-mutation|reset-remediation|clear-check-runs|events> ...");
+    process.exit(1);
+  }
+
+  const actorArg = args.find((arg) => arg.startsWith("--actor="));
+  const actor = actorArg?.split("=").slice(1).join("=") ?? "cli:cf";
+  const projectsDir = getClawforceHome();
+
+  initClawforce({
+    enabled: true,
+    projectsDir,
+    sweepIntervalMs: 0,
+    defaultMaxRetries: 3,
+    verificationRequired: false,
+  });
+
+  try {
+    if (sub === "check" || sub === "check-runs" || sub === "snapshot" || sub === "clear-check-runs") {
+      const entityIdArg = args.find((arg) => arg.startsWith("--entity-id="));
+      const entityId = entityIdArg?.split("=").slice(1).join("=");
+      if (!entityId) {
+        console.error(`Missing required flag: --entity-id=ID`);
+        process.exit(1);
+      }
+
+      const limitArg = args.find((arg) => arg.startsWith("--limit="));
+      const limit = limitArg ? Number(limitArg.split("=").slice(1).join("=")) : 20;
+      const checkIds = args
+        .filter((arg) => arg.startsWith("--check="))
+        .map((arg) => arg.split("=").slice(1).join("="))
+        .filter(Boolean);
+
+      if (sub === "check") {
+        const result = runEntityChecks(projectId, entityId, {
+          actor,
+          trigger: "cli",
+          sourceType: "cli_command",
+          sourceId: "cf entities check",
+          checkIds: checkIds.length > 0 ? checkIds : undefined,
+        });
+        const followOn = await drainProjectWorkflow(projectId);
+        if (json) {
+          console.log(JSON.stringify({
+            ...result,
+            followOnEventsProcessed: followOn.eventsProcessed,
+            followOnDispatches: followOn.dispatched,
+            followOnController: followOn.controller ?? null,
+          }, null, 2));
+        } else {
+          console.log(`${result.entity.title} [${result.entity.kind}]`);
+          for (const run of result.results) {
+            console.log(
+              [
+                `check=${run.checkId}`,
+                `status=${run.status}`,
+                `issues=${run.issueCount}`,
+                `exit=${run.exitCode}`,
+                `duration=${run.durationMs}ms`,
+              ].join(" | "),
+            );
+            for (const issue of run.issues) {
+              console.log(`  - ${issue.issueType} (${issue.severity}): ${issue.title}`);
+            }
+          }
+          console.log(`follow_on_events=${followOn.eventsProcessed}`);
+          console.log(`follow_on_dispatches=${followOn.dispatched}`);
+          if (followOn.controller?.skipped) {
+            console.log(`follow_on_controller=skipped (${followOn.controller.ownerLabel})`);
+          }
+        }
+        return;
+      }
+
+      if (sub === "check-runs") {
+        const runs = listEntityCheckRuns(projectId, entityId, Number.isFinite(limit) ? limit : 20);
+        if (json) {
+          console.log(JSON.stringify({ projectId, entityId, runs }, null, 2));
+        } else if (runs.length === 0) {
+          console.log("No entity check runs found.");
+        } else {
+          for (const run of runs) {
+            console.log(
+              [
+                `${run.checkId}`,
+                `status=${run.status}`,
+                `issues=${run.issueCount}`,
+                `exit=${run.exitCode}`,
+                `at=${fmtDate(run.createdAt)}`,
+              ].join(" | "),
+            );
+          }
+        }
+        return;
+      }
+
+      if (sub === "snapshot") {
+        const full = args.includes("--full");
+        const includeResolvedIssues = full || args.includes("--include-resolved");
+        const rawSnapshot = collectEntityExperimentSnapshot(projectId, entityId, {
+          issueLimit: 100,
+          taskLimit: 200,
+          checkRunLimit: Number.isFinite(limit) ? limit : 20,
+          eventLimit: Number.isFinite(limit) ? limit : 20,
+          simulatedActionLimit: Number.isFinite(limit) ? limit : 20,
+        });
+        const snapshot = shapeEntityExperimentSnapshot(rawSnapshot, {
+          full,
+          includeResolvedIssues,
+        });
+        if (json) {
+          console.log(JSON.stringify(snapshot, null, 2));
+        } else {
+          renderEntitySnapshot(snapshot);
+        }
+        return;
+      }
+
+      const result = clearEntityCheckRuns({
+        projectId,
+        entityId,
+        actor,
+      });
+      if (json) {
+        console.log(JSON.stringify({ projectId, entityId, ...result }, null, 2));
+      } else {
+        console.log(`Cleared ${result.cleared} check run(s) for ${entityId}.`);
+      }
+      return;
+    }
+
+    if (sub === "reopen-issue") {
+      const issueIdArg = args.find((arg) => arg.startsWith("--issue-id="));
+      const issueId = issueIdArg?.split("=").slice(1).join("=");
+      if (!issueId) {
+        console.error("Missing required flag: --issue-id=ID");
+        process.exit(1);
+      }
+      const reason = args.find((arg) => arg.startsWith("--reason="))?.split("=").slice(1).join("=");
+      const issue = reopenEntityIssue({ projectId, issueId, actor, reason });
+      const followOn = await drainProjectWorkflow(projectId);
+      if (json) {
+        console.log(JSON.stringify({
+          projectId,
+          issue,
+          followOnEventsProcessed: followOn.eventsProcessed,
+          followOnDispatches: followOn.dispatched,
+          followOnController: followOn.controller ?? null,
+        }, null, 2));
+      } else {
+        console.log(`Reopened issue ${issue.id} (${issue.issueType}) for entity ${issue.entityId}.`);
+        console.log(`follow_on_events=${followOn.eventsProcessed}`);
+        console.log(`follow_on_dispatches=${followOn.dispatched}`);
+        if (followOn.controller?.skipped) {
+          console.log(`follow_on_controller=skipped (${followOn.controller.ownerLabel})`);
+        }
+      }
+      return;
+    }
+
+    if (sub === "replay-workflow-mutation") {
+      const taskIdArg = args.find((arg) => arg.startsWith("--task-id="));
+      const taskId = taskIdArg?.split("=").slice(1).join("=");
+      if (!taskId) {
+        console.error("Missing required flag: --task-id=ID");
+        process.exit(1);
+      }
+      const reason = args.find((arg) => arg.startsWith("--reason="))?.split("=").slice(1).join("=");
+      const result = replayWorkflowMutationImplementationTask({
+        projectId,
+        taskId,
+        actor,
+        reason,
+      });
+      const followOn = await drainProjectWorkflow(projectId, 10, {
+        dispatchMode: "events_only",
+        reason: "cli:replay_workflow_mutation",
+        metadata: {
+          command: "entities replay-workflow-mutation",
+          taskId,
+          proposalId: result.proposalId,
+        },
+      });
+      if (json) {
+        console.log(JSON.stringify({
+          projectId,
+          ...result,
+          followOnEventsProcessed: followOn.eventsProcessed,
+          followOnDispatches: followOn.dispatched,
+          followOnController: followOn.controller ?? null,
+        }, null, 2));
+      } else {
+        console.log(`Workflow-mutation replay task ${result.replayedTaskId} is now active for proposal ${result.proposalId}.`);
+        console.log(`created=${result.created} sourceTask=${result.sourceTaskId}`);
+        console.log(`follow_on_events=${followOn.eventsProcessed}`);
+        console.log(`follow_on_dispatches=${followOn.dispatched}`);
+        if (followOn.controller?.skipped) {
+          console.log(`follow_on_controller=skipped (${followOn.controller.ownerLabel})`);
+        }
+      }
+      return;
+    }
+
+    if (sub === "reset-remediation") {
+      const entityIdArg = args.find((arg) => arg.startsWith("--entity-id="));
+      const issueIdArg = args.find((arg) => arg.startsWith("--issue-id="));
+      const entityId = entityIdArg?.split("=").slice(1).join("=");
+      const issueId = issueIdArg?.split("=").slice(1).join("=");
+      if (!entityId && !issueId) {
+        console.error("Missing required flag: --entity-id=ID or --issue-id=ID");
+        process.exit(1);
+      }
+      const reason = args.find((arg) => arg.startsWith("--reason="))?.split("=").slice(1).join("=");
+      const result = resetIssueRemediationTasks({
+        projectId,
+        actor,
+        entityId: entityId ?? undefined,
+        issueId: issueId ?? undefined,
+        reason,
+      });
+      const followOn = await drainProjectWorkflow(projectId);
+      if (json) {
+        console.log(JSON.stringify({
+          projectId,
+          ...result,
+          followOnEventsProcessed: followOn.eventsProcessed,
+          followOnDispatches: followOn.dispatched,
+          followOnController: followOn.controller ?? null,
+        }, null, 2));
+      } else {
+        console.log(`Reset remediation for ${result.issueIds.length} issue(s).`);
+        console.log(`cancelled=${result.cancelledTaskIds.length} recreated=${result.recreatedTaskIds.length}`);
+        console.log(`follow_on_events=${followOn.eventsProcessed}`);
+        console.log(`follow_on_dispatches=${followOn.dispatched}`);
+        if (followOn.controller?.skipped) {
+          console.log(`follow_on_controller=skipped (${followOn.controller.ownerLabel})`);
+        }
+      }
+      return;
+    }
+
+    if (sub === "events") {
+      const limitArg = args.find((arg) => arg.startsWith("--limit="));
+      const limit = limitArg ? Number(limitArg.split("=").slice(1).join("=")) : 20;
+      const status = args.find((arg) => arg.startsWith("--status="))?.split("=").slice(1).join("=") as import("./types.js").EventStatus | undefined;
+      const type = args.find((arg) => arg.startsWith("--type="))?.split("=").slice(1).join("=");
+      const focus = args.find((arg) => arg.startsWith("--focus="))?.split("=").slice(1).join("=") as import("./entities/admin.js").EventQueueFocus | undefined;
+      const full = args.includes("--full");
+      const reclaim = args.includes("--reclaim-stale");
+      const requeue = args.includes("--requeue");
+      const process = args.includes("--process");
+      const staleMsArg = args.find((arg) => arg.startsWith("--stale-ms="));
+      const staleMs = staleMsArg ? Number(staleMsArg.split("=").slice(1).join("=")) : undefined;
+
+      const before = collectProjectEventQueueSnapshot(projectId, {
+        status,
+        type,
+        limit: Number.isFinite(limit) ? limit : 20,
+        focus,
+      });
+      const defaultRequeueStatus = status ?? "failed";
+      const reclaimed = reclaim ? reclaimStaleEvents(projectId, Number.isFinite(staleMs) ? staleMs : undefined) : 0;
+      const requeued = requeue
+        ? requeueEvents(projectId, {
+          status: defaultRequeueStatus,
+          type,
+          limit: Number.isFinite(limit) ? limit : 20,
+        })
+        : [];
+      const workflowResult = process
+        ? await drainProjectWorkflow(projectId, 10, {
+          dispatchMode: "events_only",
+          reason: "cli:entities_events_process",
+          metadata: {
+            command: "entities events",
+            status: status ?? defaultRequeueStatus,
+            type: type ?? null,
+          },
+        })
+        : { eventsProcessed: 0, dispatched: 0 };
+      const after = collectProjectEventQueueSnapshot(projectId, {
+        status,
+        type,
+        limit: Number.isFinite(limit) ? limit : 20,
+        focus,
+      });
+      const shapedBefore = shapeEventQueueSnapshot(before, { full });
+      const shapedAfter = shapeEventQueueSnapshot(after, { full });
+      if (json) {
+        console.log(JSON.stringify({
+          projectId,
+          before: shapedBefore,
+          actions: {
+            reclaimed,
+            requeued: requeued.map((event) => ({ id: event.id, type: event.type, previousStatus: event.status })),
+            processed: workflowResult.eventsProcessed,
+            dispatched: workflowResult.dispatched,
+            controller: workflowResult.controller ?? null,
+          },
+          after: shapedAfter,
+        }, null, 2));
+      } else {
+        renderEventQueueSnapshot(shapedAfter);
+        console.log("");
+        console.log(`actions: reclaimed=${reclaimed} requeued=${requeued.length} processed=${workflowResult.eventsProcessed} dispatched=${workflowResult.dispatched}`);
+        if (workflowResult.controller?.skipped) {
+          console.log(`controller=skipped (${workflowResult.controller.ownerLabel})`);
+        }
+      }
+      return;
+    }
+
+    const manifestArg = args.find((arg) => arg.startsWith("--manifest="));
+    const manifestPath = manifestArg?.split("=").slice(1).join("=");
+    if (!manifestPath) {
+      console.error("Missing required flag: --manifest=PATH");
+      process.exit(1);
+    }
+
+    const applyState = args.includes("--apply-state");
+    const applyHealth = args.includes("--apply-health");
+    const reasonArg = args.find((arg) => arg.startsWith("--reason="));
+    const reason = reasonArg?.split("=").slice(1).join("=");
+    const manifest = loadEntityManifest(manifestPath);
+    if (sub === "sync") {
+      const result = syncEntityManifest(projectId, manifest, {
+        actor,
+        applyState,
+        applyHealth,
+        transitionReason: reason,
+      });
+      if (json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        renderEntityManifestRows(result.rows);
+        if (result.syncReport.length > 0) {
+          console.log("");
+          console.log("Sync actions");
+          for (const entry of result.syncReport) {
+            console.log(JSON.stringify(entry));
+          }
+        }
+      }
+      return;
+    }
+
+    const rows = collectEntityManifestStatus(projectId, manifest);
+    if (json) {
+      console.log(JSON.stringify({
+        projectId,
+        manifest,
+        rows,
+      }, null, 2));
+    } else {
+      renderEntityManifestRows(rows);
+    }
+  } finally {
+    await shutdownClawforce();
+  }
 }
 
 // ─── Commands ────────────────────────────────────────────────────────
@@ -226,16 +1453,23 @@ export function cmdStatus(db: DatabaseSync, json = false) {
 }
 
 export function cmdTasks(db: DatabaseSync, filter?: string, json = false) {
-  const where = filter
-    ? `WHERE state = '${filter.toUpperCase()}'`
-    : "WHERE state NOT IN ('DONE', 'CANCELLED')";
-
-  const tasks = db.prepare(`
-    SELECT id, title, state, assigned_to, priority,
-           datetime(created_at/1000, 'unixepoch') as created,
-           datetime(updated_at/1000, 'unixepoch') as updated
-    FROM tasks ${where} ORDER BY state, created_at
-  `).all() as Array<Record<string, unknown>>;
+  const tasks: Array<Record<string, unknown>> = filter
+    ? db.prepare(`
+        SELECT id, title, state, assigned_to, priority,
+               datetime(created_at/1000, 'unixepoch') as created,
+               datetime(updated_at/1000, 'unixepoch') as updated
+        FROM tasks
+        WHERE state = ?
+        ORDER BY state, created_at
+      `).all(filter.toUpperCase()) as Array<Record<string, unknown>>
+    : db.prepare(`
+        SELECT id, title, state, assigned_to, priority,
+               datetime(created_at/1000, 'unixepoch') as created,
+               datetime(updated_at/1000, 'unixepoch') as updated
+        FROM tasks
+        WHERE state NOT IN ('DONE', 'CANCELLED')
+        ORDER BY state, created_at
+      `).all() as Array<Record<string, unknown>>;
 
   if (json) {
     console.log(JSON.stringify({ filter: filter?.toUpperCase() ?? "active", tasks }, null, 2));
@@ -378,6 +1612,145 @@ export function cmdQueue(db: DatabaseSync, json = false) {
       const err = r.last_error ? ` — ${(r.last_error as string).slice(0, 60)}` : "";
       console.log(`  [${r.status}] ${r.created}${title}${err}`);
     }
+  }
+}
+
+export async function cmdQueueRetry(projectId: string, db: DatabaseSync, options: {
+  taskId?: string;
+  queueItemId?: string;
+  actor?: string;
+  process?: boolean;
+  json?: boolean;
+}): Promise<void> {
+  ensureProjectConfigLoaded();
+  const result = retryFailedItem(projectId, {
+    taskId: options.taskId,
+    queueItemId: options.queueItemId,
+    actor: options.actor,
+  }, db);
+
+  if (!result.ok) {
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.error(result.reason);
+    process.exitCode = 1;
+    return;
+  }
+
+  let workflowResult:
+    | {
+      eventsProcessed: number;
+      dispatched: number;
+      controller?: {
+        skipped: boolean;
+        ownerId: string;
+        ownerLabel: string;
+        purpose: string;
+        expiresAt: number;
+      };
+    }
+    | undefined;
+
+  if (options.process) {
+    const lease = getControllerLease(projectId, db);
+    const dispatchMode = lease && lease.expiresAt > Date.now() ? "events_only" : "full";
+    workflowResult = await drainProjectWorkflow(projectId, 10, {
+      db,
+      dispatchMode,
+      reason: "queue_retry_process",
+      metadata: {
+        origin: "queue_retry",
+        taskId: result.queueItem.taskId,
+        queueItemId: result.queueItem.id,
+      },
+    });
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify({
+      ok: true,
+      previousItem: result.previousItem,
+      queueItem: result.queueItem,
+      processed: workflowResult,
+    }, null, 2));
+    return;
+  }
+
+  console.log(`Requeued task ${result.previousItem.taskId} from failed item ${result.previousItem.id} to new queue item ${result.queueItem.id}.`);
+  if (workflowResult) {
+    console.log(`processed: events=${workflowResult.eventsProcessed} dispatched=${workflowResult.dispatched}`);
+  }
+}
+
+export async function cmdQueueRelease(projectId: string, db: DatabaseSync, options: {
+  taskId?: string;
+  queueItemId?: string;
+  actor?: string;
+  reason?: string;
+  process?: boolean;
+  json?: boolean;
+}): Promise<void> {
+  const result = releaseActiveItem(projectId, {
+    taskId: options.taskId,
+    queueItemId: options.queueItemId,
+    actor: options.actor,
+    reason: options.reason,
+  }, db);
+
+  if (!result.ok) {
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.error(result.reason);
+    process.exitCode = 1;
+    return;
+  }
+
+  let workflowResult:
+    | {
+      eventsProcessed: number;
+      dispatched: number;
+      controller?: {
+        skipped: boolean;
+        ownerId: string;
+        ownerLabel: string;
+        purpose: string;
+        expiresAt: number;
+      };
+    }
+    | undefined;
+
+  if (options.process) {
+    const lease = getControllerLease(projectId, db);
+    const dispatchMode = lease && lease.expiresAt > Date.now() ? "events_only" : "full";
+    workflowResult = await drainProjectWorkflow(projectId, 10, {
+      db,
+      dispatchMode,
+      reason: "queue_release_process",
+      metadata: {
+        origin: "queue_release",
+        taskId: result.queueItem.taskId,
+        queueItemId: result.queueItem.id,
+      },
+    });
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify({
+      ok: true,
+      previousItem: result.previousItem,
+      queueItem: result.queueItem,
+      processed: workflowResult,
+    }, null, 2));
+    return;
+  }
+
+  console.log(`Released queue item ${result.previousItem.id} for task ${result.previousItem.taskId} back to queued.`);
+  if (workflowResult) {
+    console.log(`processed: events=${workflowResult.eventsProcessed} dispatched=${workflowResult.dispatched}`);
   }
 }
 
@@ -540,7 +1913,7 @@ export function cmdStreams(db: DatabaseSync, domainId: string) {
 
   // Load domain YAML to check which streams are configured in default briefings
   const activeSources = new Set<string>();
-  const yamlPath = path.join(DB_DIR, "domains", `${domainId}.yaml`);
+  const yamlPath = path.join(getClawforceHome(), "domains", `${domainId}.yaml`);
   try {
     if (fs.existsSync(yamlPath)) {
       const raw = fs.readFileSync(yamlPath, "utf-8");
@@ -1186,7 +2559,8 @@ export function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: 
   }
 
   const proposals = db.prepare(`
-    SELECT id, title, proposed_by, status, origin, reasoning, created_at, resolved_at
+    SELECT id, title, proposed_by, status, origin, reasoning, created_at, resolved_at,
+           execution_status, execution_updated_at, execution_error, execution_task_id
     FROM proposals ${where}
     ORDER BY created_at DESC LIMIT 50
   `).all(...params) as Array<Record<string, unknown>>;
@@ -1210,9 +2584,13 @@ export function cmdProposals(db: DatabaseSync, projectId: string, statusFilter: 
     const age = fmtAgo(p.created_at as number);
     const reasoning = p.reasoning ? `  ${truncate(p.reasoning as string, 80)}` : "";
     const proposer = extractAgentName(p.proposed_by as string);
-    console.log(`  ${id}  ${p.status?.toString().padEnd(10)}  ${title.padEnd(47)} by ${proposer}  ${origin.padEnd(12)} ${age}`);
+    const execution = p.execution_status ? ` exec=${p.execution_status}` : "";
+    console.log(`  ${id}  ${p.status?.toString().padEnd(10)}${execution.padEnd(14)} ${title.padEnd(47)} by ${proposer}  ${origin.padEnd(12)} ${age}`);
     if (reasoning) {
       console.log(`           ${reasoning}`);
+    }
+    if (p.execution_error) {
+      console.log(`           error: ${truncate(p.execution_error as string, 100)}`);
     }
   }
 }
@@ -1694,70 +3072,111 @@ export function cmdInbox(db: DatabaseSync, projectId: string, opts?: { agent?: s
   }
 }
 
-export function cmdApprove(db: DatabaseSync, projectId: string, proposalId: string): void {
-  // Find proposal by prefix
-  const proposal = db.prepare(
-    "SELECT id, title, status FROM proposals WHERE project_id = ? AND id LIKE ?",
-  ).get(projectId, `${proposalId}%`) as Record<string, unknown> | undefined;
-
-  if (!proposal) {
-    console.error(`No proposal found matching "${proposalId}"`);
-    process.exit(2);
-  }
-
+export async function cmdApprove(
+  db: DatabaseSync,
+  projectId: string,
+  proposalId: string,
+  options?: {
+    feedback?: string;
+    json?: boolean;
+    processFollowOn?: boolean;
+    waitForFollowOn?: boolean;
+  },
+): Promise<void> {
+  ensureProjectConfigLoaded();
+  const proposal = resolveProposalForCli(db, projectId, proposalId);
   if (proposal.status !== "pending") {
-    console.error(`Proposal "${(proposal.id as string).slice(0, 8)}" is already ${proposal.status}`);
+    console.error(`Proposal "${proposal.id.slice(0, 8)}" is already ${proposal.status}`);
     process.exit(2);
   }
 
-  const now = Date.now();
-  db.prepare(
-    "UPDATE proposals SET status = 'approved', user_feedback = ?, resolved_at = ? WHERE id = ?",
-  ).run("Approved via CLI", now, proposal.id as string);
+  const result = approveProposal(projectId, proposal.id, options?.feedback ?? "Approved via CLI", db);
+  if (!result) {
+    console.error(`Proposal "${proposal.id.slice(0, 8)}" could not be approved`);
+    process.exit(2);
+  }
 
-  // Emit approval event
-  try {
-    const id = crypto.randomUUID();
-    db.prepare(`
-      INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
-      VALUES (?, ?, 'proposal_approved', 'cli', ?, ?, 'pending', ?)
-    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id }), `proposal-approved:${proposal.id as string}`, now);
-  } catch { /* ignore */ }
+  let followOn: WorkflowDrainResult | null = null;
+  if (options?.processFollowOn !== false) {
+    followOn = await runOperatorFollowOn(projectId, options?.waitForFollowOn === true);
+  }
 
-  console.log(`Approved: "${truncate(proposal.title as string, 60)}" (${(proposal.id as string).slice(0, 8)})`);
+  if (options?.json) {
+    console.log(JSON.stringify({
+      proposalId: result.id,
+      title: result.title,
+      status: result.status,
+      followOnEventsProcessed: followOn?.eventsProcessed ?? 0,
+      followOnDispatches: followOn?.dispatched ?? 0,
+      followOnController: followOn?.controller ?? null,
+    }, null, 2));
+    return;
+  }
+
+  console.log(`Approved: "${truncate(result.title, 60)}" (${result.id.slice(0, 8)})`);
+  if (options?.feedback) {
+    console.log(`Feedback: ${options.feedback}`);
+  }
+  if (followOn) {
+    console.log(`follow_on_events=${followOn.eventsProcessed}`);
+    console.log(`follow_on_dispatches=${followOn.dispatched}`);
+    if (followOn.controller?.skipped) {
+      console.log(`follow_on_controller=skipped (${followOn.controller.ownerLabel})`);
+    }
+  }
 }
 
-export function cmdReject(db: DatabaseSync, projectId: string, proposalId: string, feedback?: string): void {
-  const proposal = db.prepare(
-    "SELECT id, title, status FROM proposals WHERE project_id = ? AND id LIKE ?",
-  ).get(projectId, `${proposalId}%`) as Record<string, unknown> | undefined;
-
-  if (!proposal) {
-    console.error(`No proposal found matching "${proposalId}"`);
-    process.exit(2);
-  }
-
+export async function cmdReject(
+  db: DatabaseSync,
+  projectId: string,
+  proposalId: string,
+  feedback?: string,
+  options?: {
+    json?: boolean;
+    processFollowOn?: boolean;
+    waitForFollowOn?: boolean;
+  },
+): Promise<void> {
+  ensureProjectConfigLoaded();
+  const proposal = resolveProposalForCli(db, projectId, proposalId);
   if (proposal.status !== "pending") {
-    console.error(`Proposal "${(proposal.id as string).slice(0, 8)}" is already ${proposal.status}`);
+    console.error(`Proposal "${proposal.id.slice(0, 8)}" is already ${proposal.status}`);
     process.exit(2);
   }
 
-  const now = Date.now();
-  db.prepare(
-    "UPDATE proposals SET status = 'rejected', user_feedback = ?, resolved_at = ? WHERE id = ?",
-  ).run(feedback ?? "Rejected via CLI", now, proposal.id as string);
+  const result = rejectProposal(projectId, proposal.id, feedback ?? "Rejected via CLI", db);
+  if (!result) {
+    console.error(`Proposal "${proposal.id.slice(0, 8)}" could not be rejected`);
+    process.exit(2);
+  }
 
-  // Emit rejection event
-  try {
-    const id = crypto.randomUUID();
-    db.prepare(`
-      INSERT INTO events (id, project_id, type, source, payload, dedup_key, status, created_at)
-      VALUES (?, ?, 'proposal_rejected', 'cli', ?, ?, 'pending', ?)
-    `).run(id, projectId, JSON.stringify({ proposalId: proposal.id as string, feedback }), `proposal-rejected:${proposal.id as string}`, now);
-  } catch { /* ignore */ }
+  let followOn: WorkflowDrainResult | null = null;
+  if (options?.processFollowOn !== false) {
+    followOn = await runOperatorFollowOn(projectId, options?.waitForFollowOn === true);
+  }
 
-  console.log(`Rejected: "${truncate(proposal.title as string, 60)}" (${(proposal.id as string).slice(0, 8)})`);
+  if (options?.json) {
+    console.log(JSON.stringify({
+      proposalId: result.id,
+      title: result.title,
+      status: result.status,
+      feedback: result.user_feedback,
+      followOnEventsProcessed: followOn?.eventsProcessed ?? 0,
+      followOnDispatches: followOn?.dispatched ?? 0,
+      followOnController: followOn?.controller ?? null,
+    }, null, 2));
+    return;
+  }
+
+  console.log(`Rejected: "${truncate(result.title, 60)}" (${result.id.slice(0, 8)})`);
   if (feedback) console.log(`Feedback: ${feedback}`);
+  if (followOn) {
+    console.log(`follow_on_events=${followOn.eventsProcessed}`);
+    console.log(`follow_on_dispatches=${followOn.dispatched}`);
+    if (followOn.controller?.skipped) {
+      console.log(`follow_on_controller=skipped (${followOn.controller.ownerLabel})`);
+    }
+  }
 }
 
 export function cmdMessage(db: DatabaseSync, projectId: string, toAgent: string, content: string): void {
@@ -2073,21 +3492,30 @@ export function cmdRunning(db: DatabaseSync, projectId: string): void {
   }
   console.log("");
 
-  // 3. Active sessions (tracked_sessions where ended_at IS NULL)
+  // 3. Active sessions (tracked_sessions rows represent active sessions)
   let activeSessions: Array<Record<string, unknown>> = [];
   try {
     activeSessions = db.prepare(`
-      SELECT session_key, agent_id, started_at
+      SELECT session_key, agent_id, started_at, tool_call_count, last_persisted_at
       FROM tracked_sessions
-      WHERE project_id = ? AND ended_at IS NULL
+      WHERE project_id = ?
       ORDER BY started_at DESC
     `).all(projectId) as Array<Record<string, unknown>>;
   } catch { /* table may not exist */ }
+  activeSessions = activeSessions.filter((s) => {
+    const heartbeat = getSessionHeartbeatStatus(s.last_persisted_at as number | null | undefined);
+    return heartbeat.state !== "stale";
+  });
 
   console.log(`Active Sessions: ${activeSessions.length}`);
   for (const s of activeSessions.slice(0, 15)) {
     const age = Date.now() - (s.started_at as number);
-    console.log(`  ${s.agent_id} (${fmtAge(age)}) key=${(s.session_key as string).slice(0, 20)}...`);
+    const heartbeat = getSessionHeartbeatStatus(s.last_persisted_at as number | null | undefined);
+    const toolCount = Number(s.tool_call_count ?? 0);
+    console.log(
+      `  ${s.agent_id} (${fmtAge(age)}) key=${(s.session_key as string).slice(0, 20)}... `
+      + `heartbeat=${fmtHeartbeatAgo(heartbeat.ageMs)} [${heartbeat.state}] tools=${toolCount}`,
+    );
   }
   if (activeSessions.length > 15) {
     console.log(`  ... and ${activeSessions.length - 15} more`);
@@ -2175,6 +3603,52 @@ export function cmdRunning(db: DatabaseSync, projectId: string): void {
       }
     }
   } catch { /* ignore */ }
+}
+
+export async function cmdSweep(
+  projectId: string,
+  jsonMode = false,
+  options?: { localOnly?: boolean; gatewayOnly?: boolean },
+): Promise<void> {
+  ensureProjectConfigLoaded();
+  let result: Record<string, unknown>;
+  try {
+    if (options?.gatewayOnly) {
+      result = callOpenClawGateway("clawforce.sweep", {
+        projectId,
+        storageDir: getClawforceHome(),
+        backstopDispatchMode: "events_only",
+      }) as Record<string, unknown>;
+      if (shouldFallbackToLocalSweep(result)) {
+        result = {
+          mode: "local",
+          gatewayFallbackReason: "stale_controller",
+          ...(await runSweep({ projectId, backstopDispatchMode: "events_only" })),
+        };
+      }
+    } else {
+      result = await runLocalSweepWithTakeover(projectId);
+    }
+  } catch {
+    result = {
+      mode: "local",
+      ...(await runSweep({ projectId, backstopDispatchMode: "events_only" })),
+    };
+  }
+
+  if (jsonMode) {
+    console.log(JSON.stringify({ projectId, ...result }, null, 2));
+    return;
+  }
+
+  console.log("## Sweep\n");
+  console.log(`Project: ${projectId}`);
+  console.log(`Mode: ${String(result.mode ?? "local")}`);
+  console.log(`Events processed: ${String(result.eventsProcessed ?? 0)}`);
+  console.log(`Dispatched: ${String(result.dispatched ?? 0)}`);
+  console.log(`Stale dispatch recovered: ${String(result.staleDispatchRecovered ?? 0)}`);
+  console.log(`Orphaned cron recovered: ${String(result.orphanedCronRecovered ?? 0)}`);
+  console.log(`Reservations released: ${String(result.reservationsReleased ?? 0)}`);
 }
 
 // ─── Health command ──────────────────────────────────────────────────
@@ -2299,14 +3773,125 @@ export function cmdHealth(db: DatabaseSync, projectId: string): void {
 
 // ─── Config commands ─────────────────────────────────────────────────
 
-const DOMAINS_DIR = path.join(DB_DIR, "domains");
+function resolveSetupCliRoot(rootArg?: string, options: { allowCreate?: boolean } = {}): string {
+  if (!rootArg) {
+    const cwdRoot = resolveSetupRoot(process.cwd());
+    if (!cwdRoot && options.allowCreate) {
+      return getClawforceHome();
+    }
+    return cwdRoot ?? getClawforceHome();
+  }
+  const resolved = resolveSetupRoot(rootArg);
+  if (!resolved && !options.allowCreate) {
+    console.error(`Could not resolve a ClawForce config root from: ${rootArg}`);
+    process.exit(2);
+  }
+  return resolved ?? path.resolve(rootArg);
+}
+
+export function cmdSetup(args: string[], json = false): void {
+  const subcommand = args[1] ?? "status";
+  const rootArg = args.find((arg) => arg.startsWith("--root="))?.split("=").slice(1).join("=");
+  const setupRoot = resolveSetupCliRoot(rootArg, { allowCreate: subcommand === "scaffold" });
+  const domainId = args.find((arg) => arg.startsWith("--domain="))?.split("=").slice(1).join("=") ?? null;
+  const report = buildSetupReport(setupRoot, domainId);
+
+  switch (subcommand) {
+    case "status":
+      if (json) {
+        console.log(JSON.stringify(report, null, 2));
+        return;
+      }
+      console.log(renderSetupStatus(report));
+      return;
+    case "validate":
+      if (json) {
+        console.log(JSON.stringify(report, null, 2));
+        return;
+      }
+      console.log(renderSetupValidate(report));
+      return;
+    case "explain":
+      if (json) {
+        console.log(JSON.stringify({
+          ...report,
+          explanation: buildSetupExplanation(report),
+        }, null, 2));
+        return;
+      }
+      console.log(renderSetupExplain(report));
+      return;
+    case "scaffold": {
+      const mode = args.find((arg) => arg.startsWith("--mode="))?.split("=").slice(1).join("=");
+      if (mode !== "new" && mode !== "governance") {
+        console.error("Usage: cf setup scaffold --domain=ID --mode=new|governance [--workflow=data-source-onboarding] [--path=PATH]... [--operational-profile=PROFILE] [--mission=TEXT] [--existing-agent=ID]... [--lead-agent=ID] [--json]");
+        process.exit(2);
+      }
+      if (!domainId) {
+        console.error("cf setup scaffold requires --domain=ID");
+        process.exit(2);
+      }
+      const paths = args
+        .filter((arg) => arg.startsWith("--path="))
+        .map((arg) => arg.split("=").slice(1).join("="))
+        .filter((value) => value.length > 0);
+      const existingAgents = args
+        .filter((arg) => arg.startsWith("--existing-agent="))
+        .map((arg) => arg.split("=").slice(1).join("="))
+        .filter((value) => value.length > 0);
+      const result = runCreateStarterDomainCommand({
+        domainId,
+        mode,
+        workflow: args.find((arg) => arg.startsWith("--workflow="))?.split("=").slice(1).join("="),
+        paths,
+        mission: args.find((arg) => arg.startsWith("--mission="))?.split("=").slice(1).join("="),
+        operational_profile: args.find((arg) => arg.startsWith("--operational-profile="))?.split("=").slice(1).join("="),
+        existingAgents,
+        leadAgentId: args.find((arg) => arg.startsWith("--lead-agent="))?.split("=").slice(1).join("="),
+      }, "cli:setup", { baseDir: setupRoot });
+      if (!result.ok) {
+        console.error(result.error);
+        process.exit(2);
+      }
+      const scaffoldReport = buildSetupReport(setupRoot, result.domainId);
+      if (json) {
+        console.log(JSON.stringify({
+          ok: true,
+          domainId: result.domainId,
+          mode: result.mode,
+          createdAgentIds: result.createdAgentIds,
+          reusedAgentIds: result.reusedAgentIds,
+          reloadErrors: result.reloadErrors,
+          report: scaffoldReport,
+        }, null, 2));
+        return;
+      }
+      console.log(`Created starter domain "${result.domainId}" (${result.mode}).`);
+      if (result.createdAgentIds.length > 0) {
+        console.log(`Created agents: ${result.createdAgentIds.join(", ")}`);
+      }
+      if (result.reusedAgentIds.length > 0) {
+        console.log(`Reused agents: ${result.reusedAgentIds.join(", ")}`);
+      }
+      if (result.reloadErrors.length > 0) {
+        console.log(`Reload errors: ${result.reloadErrors.join("; ")}`);
+      }
+      console.log("");
+      console.log(renderSetupStatus(scaffoldReport));
+      return;
+    }
+    default:
+      console.error(`Unknown setup subcommand: ${subcommand}`);
+      process.exit(2);
+  }
+}
 
 function getDomainYamlPath(domainId: string): string {
-  return path.join(DOMAINS_DIR, `${domainId}.yaml`);
+  return path.join(getClawforceHome(), "domains", `${domainId}.yaml`);
 }
 
 function getGlobalConfigPath(): string {
-  return path.join(DB_DIR, "config.yaml");
+  return path.join(getClawforceHome(), "config.yaml");
 }
 
 function loadYamlDocument(filePath: string): YAML.Document {
@@ -2404,6 +3989,24 @@ function cmdConfigSet(domainId: string, dotPath: string, rawValue: string, useGl
 
   fs.writeFileSync(filePath, String(doc), "utf-8");
   console.log(`Set ${dotPath} = ${JSON.stringify(value)} in ${target}`);
+  const configRoot = getClawforceHome();
+
+  if (useGlobal) {
+    const result = initializeAllDomains(configRoot);
+    console.log(`Reloaded domains=${result.domains.length} errors=${result.errors.length} warnings=${result.warnings.length}`);
+    if (result.errors.length > 0) {
+      for (const error of result.errors) console.log(`reload_error=${error}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  const result = reloadDomain(configRoot, domainId);
+  console.log(`Reloaded domain=${domainId} loaded=${result.domains.includes(domainId)} errors=${result.errors.length} warnings=${result.warnings.length}`);
+  if (result.errors.length > 0) {
+    for (const error of result.errors) console.log(`reload_error=${error}`);
+    process.exitCode = 1;
+  }
 }
 
 function cmdConfigShow(domainId: string, section: string | undefined, useGlobal: boolean): void {
@@ -2432,7 +4035,7 @@ function cmdConfigShow(domainId: string, section: string | undefined, useGlobal:
   }
 }
 
-function cmdConfig(domainId: string, args: string[], configDryRun = false): void {
+export function cmdConfig(domainId: string, args: string[], configDryRun = false): void {
   const subcommand = args[1]; // args[0] is "config"
   const useGlobal = args.includes("--global");
 
@@ -2496,7 +4099,7 @@ Examples:
 // ─── Watch command ──────────────────────────────────────────────────
 
 function getWatchStatePath(projectId: string): string {
-  return path.join(DB_DIR, projectId, ".watch_state");
+  return path.join(getClawforceHome(), projectId, ".watch_state");
 }
 
 interface WatchState {
@@ -2643,16 +4246,20 @@ export function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, js
     }
   } catch { /* ignore */ }
 
-  // 9. Currently active sessions (for "Active" section)
+  // 9. Currently active sessions (tracked_sessions rows represent active sessions)
   let activeSessions: Array<Record<string, unknown>> = [];
   try {
     activeSessions = db.prepare(`
-      SELECT session_key, agent_id, started_at
+      SELECT session_key, agent_id, started_at, tool_call_count, last_persisted_at
       FROM tracked_sessions
-      WHERE project_id = ? AND ended_at IS NULL
+      WHERE project_id = ?
       ORDER BY started_at DESC
     `).all(projectId) as Array<Record<string, unknown>>;
   } catch { /* table may not exist */ }
+  activeSessions = activeSessions.filter((s) => {
+    const heartbeat = getSessionHeartbeatStatus(s.last_persisted_at as number | null | undefined);
+    return heartbeat.state !== "stale";
+  });
 
   // ── Check if anything changed ──
 
@@ -2791,6 +4398,8 @@ export function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, js
     console.log("Active:");
     for (const s of activeSessions) {
       const age = fmtAge(now - (s.started_at as number));
+      const heartbeat = getSessionHeartbeatStatus(s.last_persisted_at as number | null | undefined, now);
+      const toolCount = Number(s.tool_call_count ?? 0);
       // Get running cost
       let runningCost = 0;
       try {
@@ -2804,12 +4413,15 @@ export function cmdWatch(db: DatabaseSync, projectId: string, reset: boolean, js
       try {
         const taskRow = db.prepare(`
           SELECT tk.title FROM tracked_sessions ts
-          LEFT JOIN tasks tk ON ts.task_id = tk.id
+          LEFT JOIN tasks tk ON json_extract(ts.dispatch_context, '$.taskId') = tk.id
           WHERE ts.session_key = ? AND ts.project_id = ?
         `).get(s.session_key as string, projectId) as { title: string | null } | undefined;
         if (taskRow?.title) taskInfo = ` working on "${truncate(taskRow.title, 35)}"`;
       } catch { /* ignore */ }
-      console.log(`  ${s.agent_id}${taskInfo} (${age}, ${fmt$(runningCost)} so far)`);
+      console.log(
+        `  ${s.agent_id}${taskInfo} (${age}, ${fmt$(runningCost)} so far, `
+        + `heartbeat ${fmtHeartbeatAgo(heartbeat.ageMs)} [${heartbeat.state}], tools=${toolCount})`,
+      );
     }
     console.log("");
   }
@@ -2959,6 +4571,90 @@ Examples:
   cf watch
   cf watch --reset
 `,
+  sweep: `
+sweep — Run one admin sweep pass for the current domain
+
+Usage: cf sweep [--local|--gateway] [--json]
+
+Options:
+  --local      Force the current local control-plane code path (default)
+  --gateway    Route through the hosted gateway/control-plane instead
+
+Examples:
+  cf sweep
+  cf sweep --gateway
+  cf sweep --json
+`,
+  controller: `
+controller — Persistent local control plane for one domain
+
+Usage: cf controller [--interval-ms=N] [--no-initial-sweep] [--json]
+
+Options:
+  --interval-ms=N      Sweep interval in milliseconds (default: 5000)
+  --no-initial-sweep   Start the controller without an immediate takeover sweep
+
+Examples:
+  cf controller
+  cf controller --domain=rentright-data --interval-ms=3000
+  cf controller --no-initial-sweep
+`,
+  feed: `
+feed — Canonical operator feed
+
+Usage: cf feed [--json]
+
+Examples:
+  cf feed
+  cf feed --json
+`,
+  decisions: `
+decisions — Human decision inbox (approvals + human-needed alerts)
+
+Usage: cf decisions [--json]
+
+Examples:
+  cf decisions
+  cf decisions --json
+`,
+  review: `
+review — Inspect the operator review surface for one task
+
+Usage: cf review <task_id_prefix> [--json]
+
+Shows:
+  - task state and owner
+  - linked entity issue context
+  - recent evidence
+  - recent archived sessions for the task
+  - recorded review verdicts and structured reason codes
+
+Examples:
+  cf review 0f10e6b3
+  cf review 0f10e6b3 --json
+`,
+  verdict: `
+verdict — Submit a human/operator review verdict for a task in REVIEW
+
+Usage: cf verdict <task_id_prefix> --pass|--fail [--reason=MSG] [--reason-code=CODE] [--actor=X] [--json]
+
+Options:
+  --pass          Mark review as passed (REVIEW → DONE)
+  --fail          Send task back for rework (usually REVIEW → IN_PROGRESS; some reason codes intentionally block instead)
+  --reason=MSG    Optional reasoning recorded with the review
+  --reason-code=CODE  Structured review reason code (for example: verification_environment_blocked)
+  --actor=X       Actor id recorded for the verdict (default: operator:cli)
+
+Notes:
+  This is the operator-facing review lever for tasks awaiting human judgment.
+  verification_environment_blocked intentionally drives REVIEW → BLOCKED and can raise a follow-on workflow-mutation proposal.
+  Successful verdicts drain follow-on workflow so entity issues and feed state stay current.
+
+Examples:
+  cf verdict 0f10e6b3 --pass --reason="Evidence is sufficient"
+  cf verdict 0f10e6b3 --fail --reason="Pipeline still failing locally" --reason-code=verification_environment_blocked
+  cf verdict 0f10e6b3 --pass --json
+`,
   disable: `
 disable — Disable domain via DB (blocks new dispatches)
 
@@ -3007,6 +4703,97 @@ Examples:
   cf config get dispatch.mode
   cf config set budget.project.daily.cents 40000 --dry-run
   cf config show dispatch
+`,
+  setup: `
+setup — Validate and explain the user-facing setup surface
+
+Usage:
+  cf setup status [--root=PATH] [--domain=ID] [--json]
+  cf setup validate [--root=PATH] [--domain=ID] [--json]
+  cf setup explain [--root=PATH] [--domain=ID] [--json]
+  cf setup scaffold --domain=ID --mode=new|governance [--root=PATH] [--workflow=data-source-onboarding] [--path=PATH]... [--operational-profile=PROFILE] [--mission=TEXT] [--existing-agent=ID]... [--lead-agent=ID] [--json]
+
+Options:
+  --root=PATH    Config root, config.yaml, domain yaml, or repo root containing .clawforce
+  --domain=ID    Limit the report to one domain
+
+Examples:
+  cf setup status
+  cf setup validate --root=/Users/you/workspace/app/.clawforce
+  cf setup explain --domain=rentright-data
+  cf setup scaffold --domain=demo-startup --mode=new --path=/Users/you/workspace/app
+  cf setup scaffold --domain=demo-onboarding --mode=new --workflow=data-source-onboarding --path=/Users/you/workspace/app
+`,
+  host: `
+host — Manage hosted ClawForce roots in OpenClaw
+
+Usage:
+  cf host roots [--json]
+  cf host bind [--root=PATH] [--json]
+  cf host unbind [--root=PATH] [--json]
+
+Options:
+  --root=PATH    Repo root or .clawforce directory to bind/unbind (default: cwd)
+  --path=PATH    Alias for --root
+
+Examples:
+  cf host roots
+  cf host bind --root=/Users/you/workspace/app
+  cf host unbind --root=/Users/you/workspace/app/.clawforce
+`,
+  entities: `
+entities — Inspect or reconcile a committed entity manifest
+
+Usage:
+  cf entities status --manifest=PATH [--domain=ID] [--json]
+  cf entities sync --manifest=PATH [--domain=ID] [--actor=X] [--reason=MSG] [--apply-state] [--apply-health] [--json]
+  cf entities check --entity-id=ID [--domain=ID] [--check=CHECK_ID]... [--actor=X] [--json]
+  cf entities check-runs --entity-id=ID [--domain=ID] [--limit=N] [--json]
+  cf entities snapshot --entity-id=ID [--domain=ID] [--limit=N] [--include-resolved] [--full] [--json]
+  cf entities reopen-issue --issue-id=ID [--domain=ID] [--actor=X] [--reason=MSG] [--json]
+  cf entities replay-workflow-mutation --task-id=ID [--domain=ID] [--actor=X] [--reason=MSG] [--json]
+  cf entities reset-remediation (--entity-id=ID|--issue-id=ID) [--domain=ID] [--actor=X] [--reason=MSG] [--json]
+  cf entities clear-check-runs --entity-id=ID [--domain=ID] [--actor=X] [--json]
+  cf entities events [--domain=ID] [--status=STATUS] [--type=TYPE] [--focus=FOCUS] [--limit=N] [--reclaim-stale] [--stale-ms=N] [--requeue] [--process] [--full] [--json]
+
+Options:
+  --manifest=PATH   Path to a JSON or YAML entity manifest
+  --entity-id=ID    Target entity instance for check operations
+  --issue-id=ID     Target entity issue for reopen or remediation reset
+  --task-id=ID      Target workflow-mutation implementation task for replay
+  --check=CHECK_ID  Restrict execution to one configured check (repeatable)
+  --actor=X         Actor recorded on sync mutations (default: cli:cf)
+  --reason=MSG      Transition reason when applying state/health changes
+  --apply-state     Apply desired manifest lifecycle state to live entities
+  --apply-health    Apply desired manifest health to live entities
+  --limit=N         Max check runs returned by check-runs (default: 20)
+  --include-resolved Include resolved issues in snapshot output
+  --full            Include raw evidence, payloads, and verbose output
+  --status=STATUS   Event queue status filter for entities events
+  --type=TYPE       Event type filter for entities events
+  --focus=FOCUS     Event queue focus: all, actionable, entity, dispatch, budget, task, simulation
+  --reclaim-stale   Move stale processing events back to pending
+  --requeue         Requeue matching events (defaults to failed when --status is omitted)
+  --process         Drain pending events after queue mutations
+  --stale-ms=N      Override stale threshold in milliseconds for reclaim
+
+Notes:
+  Sync always reconciles structure: entity existence, owner, parent, metadata, and linked tasks.
+  State and health are preserved by default unless explicitly applied.
+  Snapshot defaults to an operator-shaped compact view. Use --full when you need raw evidence and payloads.
+
+Examples:
+  cf entities status --domain=rentright-data --manifest=.clawforce/domains/rentright-data/entities/jurisdictions.json
+  cf entities sync --domain=rentright-data --manifest=./entities.json
+  cf entities sync --domain=rentright-data --manifest=./entities.json --apply-health --reason="verified"
+  cf entities check --domain=rentright-data --entity-id=jurisdiction-los-angeles
+  cf entities check-runs --domain=rentright-data --entity-id=jurisdiction-los-angeles --limit=10 --json
+  cf entities snapshot --domain=rentright-data --entity-id=jurisdiction-los-angeles --json
+  cf entities snapshot --domain=rentright-data --entity-id=jurisdiction-los-angeles --include-resolved --full --json
+  cf entities replay-workflow-mutation --domain=rentright-data --task-id=828d8068-7faa-45ee-bf7b-ba9ecdb01910 --json
+  cf entities reset-remediation --domain=rentright-data --entity-id=jurisdiction-los-angeles --json
+  cf entities events --domain=rentright-data --focus=actionable --json
+  cf entities events --domain=rentright-data --status=failed --requeue --process --json
 `,
   dashboard: `
 dashboard — Single-command overview with anomaly detection
@@ -3069,7 +4856,10 @@ Examples:
   queue: `
 queue — Dispatch queue health and failure reasons
 
-Usage: cf queue [--json]
+Usage:
+  cf queue [--json]
+  cf queue retry (--task-id=ID|--queue-item-id=ID) [--process] [--actor=X] [--json]
+  cf queue release (--task-id=ID|--queue-item-id=ID) [--reason=MSG] [--process] [--actor=X] [--json]
 `,
 };
 
@@ -3093,6 +4883,7 @@ const __isMain = process.argv[1] && (
 if (__isMain) {
 
 const args = process.argv.slice(2);
+applyCliRootOverrideFromArgs(args);
 const command = args[0];
 const projectId =
   (args.find(a => a.startsWith("--domain="))?.split("=")[1]) ??
@@ -3128,10 +4919,14 @@ Visibility Suite:
   budget                    Budget pacing status and projections
   trust                     Per-agent trust overview with recent events
   inbox [--agent=X] [--unread] [--expand]  User messages from/to agents
-  approve <id>              Approve a pending proposal
-  reject <id> [--feedback="reason"]  Reject a pending proposal
+  approve <id> [--reason="note"]    Approve a pending proposal
+  reject <id> [--reason="note"]     Reject a pending proposal
+  review <id> [--json]      Inspect review detail for a task
+  verdict <id> --pass|--fail [--reason="note"] [--reason-code=CODE] [--actor=X]  Submit task review verdict
   message <agent> "text"    Send a user message to an agent
   replay <key>              Replay session tool calls with full I/O
+  feed                      Canonical operator feed
+  decisions                 Human decision inbox
   watch [--reset]           Curated feed — only what changed since last check
 
 Runtime Control:
@@ -3139,11 +4934,31 @@ Runtime Control:
   enable                    Enable domain via DB (resume dispatches)
   kill [--reason=MSG]       Emergency stop: disable + cancel queue + block ALL tool calls
   kill --resume             Clear emergency stop and re-enable domain
+  controller                Run a persistent local controller for one domain
+  host [roots|bind|unbind]  Manage hosted ClawForce roots in OpenClaw
 
 Config:
   config get <dotpath>      Read a config value using dot-notation
   config set <dotpath> <v>  Write a config value (auto-detects type)
   config show [section]     Show full config or a section
+  setup [status|validate|explain]  Validate and explain setup
+
+Entities:
+  entities status --manifest=PATH  Show live entity/task status for a manifest
+  entities sync --manifest=PATH    Reconcile a manifest into live entities/tasks
+  entities check --entity-id=ID    Run configured checks for one entity
+  entities check-runs --entity-id=ID  Show recent entity check runs
+  entities snapshot --entity-id=ID  Capture an experiment snapshot for one entity
+  entities reopen-issue --issue-id=ID  Reopen a resolved or dismissed entity issue
+  entities replay-workflow-mutation --task-id=ID  Replay a terminal workflow-mutation implementation task
+  entities reset-remediation ...    Cancel and recreate reactive remediation tasks
+  entities clear-check-runs --entity-id=ID  Clear stored check-run history
+  entities events                   Inspect or admin the event queue for dogfood loops
+
+Host:
+  host roots                Show hosted ClawForce roots managed by OpenClaw
+  host bind [--root=PATH]   Bind a repo-local .clawforce root into the hosted runtime
+  host unbind [--root=PATH] Remove a hosted root binding
 
 Org:
   org [--team=X] [--agent=X]  Live org tree with runtime status
@@ -3151,11 +4966,13 @@ Org:
   org check                 Structural + operational audit
 
 Verification:
+  sweep [--gateway]         Run one admin sweep pass (local by default)
   running                   Show what's actually running right now
   health                    Comprehensive health check
 
 Options:
   --project=ID, --domain=ID Project/domain ID (default: clawforce-dev)
+  --root=PATH               Resolve config and databases from this .clawforce home
   --global                  (config only) Target config.yaml instead of domain yaml
   --json                    Output as JSON instead of formatted text
   --dry-run, -n             Preview mutating commands without applying changes
@@ -3173,6 +4990,49 @@ if (command === "config") {
     process.exit(0);
   }
   cmdConfig(projectId, args, dryRun);
+  process.exit(0);
+}
+
+if (command === "setup") {
+  if (args.includes("--help")) {
+    showCommandHelp("setup");
+    process.exit(0);
+  }
+  cmdSetup(args, jsonMode);
+  process.exit(0);
+}
+
+if (command === "host") {
+  if (args.includes("--help")) {
+    showCommandHelp("host");
+    process.exit(0);
+  }
+  cmdHost(args, jsonMode);
+  process.exit(0);
+}
+
+if (command === "controller") {
+  if (args.includes("--help")) {
+    showCommandHelp("controller");
+    process.exit(0);
+  }
+  const intervalArg = args.find(a => a.startsWith("--interval-ms="));
+  const intervalMs = intervalArg ? Number(intervalArg.split("=").slice(1).join("=")) : undefined;
+  await cmdController(projectId, {
+    intervalMs,
+    json: jsonMode,
+    initialSweep: !args.includes("--no-initial-sweep"),
+  });
+  process.exit(0);
+}
+
+// Entity manifest commands don't need the database handle directly
+if (command === "entities") {
+  if (args.includes("--help")) {
+    showCommandHelp("entities");
+    process.exit(0);
+  }
+  await cmdEntitiesManifest(projectId, args, jsonMode);
   process.exit(0);
 }
 
@@ -3205,7 +5065,7 @@ if (command === "org") {
 
   // org and org check can use DB optionally
   let orgDb: DatabaseSync | null = null;
-  const orgDbPath = path.join(DB_DIR, projectId, "clawforce.db");
+  const orgDbPath = path.join(getClawforceHome(), projectId, "clawforce.db");
   if (fs.existsSync(orgDbPath)) {
     orgDb = new DatabaseSync(orgDbPath, { open: true });
   }
@@ -3236,17 +5096,18 @@ const agentFilter = agentArg?.split("=")[1];
 const statusArg = args.find(a => a.startsWith("--status="));
 const statusFilter = statusArg?.split("=")[1];
 const feedbackArg = args.find(a => a.startsWith("--feedback="));
-const feedbackValue = feedbackArg?.split("=").slice(1).join("=");
+const proposalReasonArg = args.find(a => a.startsWith("--reason="));
+const feedbackValue = feedbackArg?.split("=").slice(1).join("=") ?? proposalReasonArg?.split("=").slice(1).join("=");
 const expandFlag = args.includes("--expand");
 
 // ─── Unknown flag detection ──────────────────────────────────────────
 
 const KNOWN_FLAGS: Record<string, string[]> = {
-  _global: ["--domain", "--project", "--json", "--dry-run", "-n", "--help", "--expand"],
+  _global: ["--domain", "--project", "--root", "--json", "--dry-run", "-n", "--help", "--expand"],
   status: ["--json"],
   tasks: ["--json"],
   costs: ["--by", "--hours", "--json"],
-  queue: ["--json"],
+  queue: ["--json", "--task-id", "--queue-item-id", "--process", "--actor"],
   transitions: ["--hours"],
   errors: ["--hours"],
   agents: ["--json"],
@@ -3261,8 +5122,14 @@ const KNOWN_FLAGS: Record<string, string[]> = {
   budget: ["--json"],
   trust: ["--json"],
   inbox: ["--agent", "--unread", "--expand"],
-  approve: [],
-  reject: ["--feedback"],
+  feed: ["--json"],
+  decisions: ["--json"],
+  approve: ["--feedback", "--reason"],
+  reject: ["--feedback", "--reason"],
+  review: ["--json"],
+  verdict: ["--pass", "--fail", "--reason", "--reason-code", "--actor", "--json"],
+  controller: ["--interval-ms", "--no-initial-sweep", "--json"],
+  sweep: ["--local", "--gateway"],
   message: [],
   replay: [],
   watch: ["--reset", "--json"],
@@ -3272,6 +5139,9 @@ const KNOWN_FLAGS: Record<string, string[]> = {
   running: [],
   health: [],
   config: ["--global"],
+  setup: ["--root"],
+  host: ["--root", "--path", "--json"],
+  entities: ["--manifest", "--entity-id", "--check", "--actor", "--reason", "--apply-state", "--apply-health", "--limit"],
   org: ["--team", "--agent", "--reports-to", "--yes"],
 };
 
@@ -3341,6 +5211,42 @@ switch (command) {
     cmdCosts(db, groupBy, hours, jsonMode);
     break;
   case "queue":
+    if (args[1] === "retry") {
+      const taskId = args.find(a => a.startsWith("--task-id="))?.split("=")[1];
+      const queueItemId = args.find(a => a.startsWith("--queue-item-id="))?.split("=")[1];
+      const actor = args.find(a => a.startsWith("--actor="))?.split("=")[1];
+      if (!taskId && !queueItemId) {
+        console.error("Usage: cf queue retry (--task-id=ID|--queue-item-id=ID) [--process] [--actor=X] [--json]");
+        process.exit(1);
+      }
+      await cmdQueueRetry(projectId, db, {
+        taskId,
+        queueItemId,
+        actor,
+        process: args.includes("--process"),
+        json: jsonMode,
+      });
+      break;
+    }
+    if (args[1] === "release") {
+      const taskId = args.find(a => a.startsWith("--task-id="))?.split("=")[1];
+      const queueItemId = args.find(a => a.startsWith("--queue-item-id="))?.split("=")[1];
+      const actor = args.find(a => a.startsWith("--actor="))?.split("=")[1];
+      const reason = args.find(a => a.startsWith("--reason="))?.split("=")[1];
+      if (!taskId && !queueItemId) {
+        console.error("Usage: cf queue release (--task-id=ID|--queue-item-id=ID) [--reason=MSG] [--process] [--actor=X] [--json]");
+        process.exit(1);
+      }
+      await cmdQueueRelease(projectId, db, {
+        taskId,
+        queueItemId,
+        actor,
+        reason,
+        process: args.includes("--process"),
+        json: jsonMode,
+      });
+      break;
+    }
     cmdQueue(db, jsonMode);
     break;
   case "transitions":
@@ -3398,20 +5304,62 @@ switch (command) {
   }
   case "approve": {
     const approveId = args[1];
+    const waitFlag = args.includes("--wait");
     if (!approveId || approveId.startsWith("--")) {
-      console.error("Usage: cf approve <proposal_id>");
+      console.error("Usage: cf approve <proposal_id> [--reason=\"note\"] [--wait]");
       process.exit(1);
     }
-    cmdApprove(db, projectId, approveId);
+    await cmdApprove(db, projectId, approveId, {
+      feedback: feedbackValue,
+      json: jsonMode,
+      processFollowOn: true,
+      waitForFollowOn: waitFlag,
+    });
     break;
   }
   case "reject": {
     const rejectId = args[1];
+    const waitFlag = args.includes("--wait");
     if (!rejectId || rejectId.startsWith("--")) {
-      console.error("Usage: cf reject <proposal_id> [--feedback=\"reason\"]");
+      console.error("Usage: cf reject <proposal_id> [--reason=\"note\"] [--wait]");
       process.exit(1);
     }
-    cmdReject(db, projectId, rejectId, feedbackValue);
+    await cmdReject(db, projectId, rejectId, feedbackValue, {
+      json: jsonMode,
+      processFollowOn: true,
+      waitForFollowOn: waitFlag,
+    });
+    break;
+  }
+  case "review": {
+    const taskId = args[1];
+    if (!taskId || taskId.startsWith("--")) {
+      console.error("Usage: cf review <task_id_prefix> [--json]");
+      process.exit(1);
+    }
+    cmdReview(db, projectId, taskId, jsonMode);
+    break;
+  }
+  case "verdict": {
+    const taskId = args[1];
+    const passFlag = args.includes("--pass");
+    const failFlag = args.includes("--fail");
+    const waitFlag = args.includes("--wait");
+    const actorValue = args.find(a => a.startsWith("--actor="))?.split("=").slice(1).join("=");
+    const reasonValue = args.find(a => a.startsWith("--reason="))?.split("=").slice(1).join("=");
+    const reasonCodeValue = args.find(a => a.startsWith("--reason-code="))?.split("=").slice(1).join("=");
+    if (!taskId || taskId.startsWith("--") || passFlag === failFlag) {
+      console.error("Usage: cf verdict <task_id_prefix> --pass|--fail [--reason=\"note\"] [--reason-code=CODE] [--actor=X] [--wait]");
+      process.exit(1);
+    }
+    await cmdVerdict(db, projectId, taskId, passFlag, {
+      actor: actorValue ?? "operator:cli",
+      reason: reasonValue,
+      reasonCode: reasonCodeValue as import("./types.js").ReviewReasonCode | undefined,
+      json: jsonMode,
+      processFollowOn: true,
+      waitForFollowOn: waitFlag,
+    });
     break;
   }
   case "message": {
@@ -3424,6 +5372,12 @@ switch (command) {
     cmdMessage(db, projectId, toAgent, msgContent);
     break;
   }
+  case "feed":
+    cmdFeed(db, projectId, jsonMode);
+    break;
+  case "decisions":
+    cmdDecisionInbox(db, projectId, jsonMode);
+    break;
   case "replay": {
     const replayKey = args[1];
     if (!replayKey || replayKey.startsWith("--")) {
@@ -3451,6 +5405,12 @@ switch (command) {
     break;
   case "running":
     cmdRunning(db, projectId);
+    break;
+  case "sweep":
+    await cmdSweep(projectId, jsonMode, {
+      localOnly: !args.includes("--gateway"),
+      gatewayOnly: args.includes("--gateway"),
+    });
     break;
   case "health":
     cmdHealth(db, projectId);

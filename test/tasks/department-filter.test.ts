@@ -13,7 +13,7 @@ vi.mock("../../src/identity.js", () => ({
   resetIdentitiesForTest: vi.fn(),
 }));
 
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 import { createTask, listTasks } from "../../src/tasks/ops.js";
 import { runMigrations } from "../../src/migrations.js";
 

@@ -10,6 +10,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { safeLog } from "../diagnostics.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -158,24 +159,31 @@ export function setSecurityHeaders(
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX = 100; // requests per window per IP
 
-const rateLimitMap = new Map<string, RateLimitEntry>();
+type DashboardAuthRuntimeState = {
+  rateLimitMap: Map<string, RateLimitEntry>;
+  cleanupTimer: ReturnType<typeof setInterval> | null;
+};
 
-/** Periodic cleanup of expired entries (every 2 minutes). */
-let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+const runtime = getDefaultRuntimeState();
+
+function getDashboardAuthState(): DashboardAuthRuntimeState {
+  return runtime.dashboardAuth as DashboardAuthRuntimeState;
+}
 
 function ensureCleanupTimer(): void {
-  if (cleanupTimer) return;
-  cleanupTimer = setInterval(() => {
+  const state = getDashboardAuthState();
+  if (state.cleanupTimer) return;
+  state.cleanupTimer = setInterval(() => {
     const now = Date.now();
-    for (const [key, entry] of rateLimitMap) {
+    for (const [key, entry] of state.rateLimitMap) {
       if (now >= entry.resetAt) {
-        rateLimitMap.delete(key);
+        state.rateLimitMap.delete(key);
       }
     }
   }, 2 * RATE_LIMIT_WINDOW_MS);
   // Don't prevent process exit
-  if (cleanupTimer && typeof cleanupTimer === "object" && "unref" in cleanupTimer) {
-    cleanupTimer.unref();
+  if (state.cleanupTimer && typeof state.cleanupTimer === "object" && "unref" in state.cleanupTimer) {
+    state.cleanupTimer.unref();
   }
 }
 
@@ -189,13 +197,14 @@ export function checkRateLimit(
 ): boolean {
   ensureCleanupTimer();
 
+  const state = getDashboardAuthState();
   const ip = getRemoteIp(req);
   const now = Date.now();
-  let entry = rateLimitMap.get(ip);
+  let entry = state.rateLimitMap.get(ip);
 
   if (!entry || now >= entry.resetAt) {
     entry = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
-    rateLimitMap.set(ip, entry);
+    state.rateLimitMap.set(ip, entry);
     return true;
   }
 
@@ -211,10 +220,11 @@ export function checkRateLimit(
  * Reset rate limit state (for testing).
  */
 export function resetRateLimits(): void {
-  rateLimitMap.clear();
-  if (cleanupTimer) {
-    clearInterval(cleanupTimer);
-    cleanupTimer = null;
+  const state = getDashboardAuthState();
+  state.rateLimitMap.clear();
+  if (state.cleanupTimer) {
+    clearInterval(state.cleanupTimer);
+    state.cleanupTimer = null;
   }
 }
 
@@ -222,7 +232,7 @@ export function resetRateLimits(): void {
  * Get the rate limit map (for testing).
  */
 export function getRateLimitMap(): Map<string, RateLimitEntry> {
-  return rateLimitMap;
+  return getDashboardAuthState().rateLimitMap;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,10 +13,11 @@
  * in-memory for fast lookups. On cache miss, the DB is consulted.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite-driver.js";
 import { getDb } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import { getActiveProjectIds } from "./lifecycle.js";
+import { getDefaultRuntimeState } from "./runtime/default-runtime.js";
 
 type WorkerAssignment = {
   projectId: string;
@@ -24,15 +25,28 @@ type WorkerAssignment = {
   assignedAt: number;
 };
 
-/** assignedTo (agent identifier) → assignment info */
-const assignments = new Map<string, WorkerAssignment>();
+type LeaseAcquirer = (
+  projectId: string,
+  taskId: string,
+  holder: string,
+  durationMs: number,
+  db?: DatabaseSync,
+) => boolean;
 
-// Lazy import to avoid circular dependency — set via setLeaseAcquirer at init time
-let acquireLease: ((projectId: string, taskId: string, holder: string, durationMs: number, db?: DatabaseSync) => boolean) | null = null;
+type WorkerRegistryRuntimeState = {
+  assignments: Map<string, WorkerAssignment>;
+  acquireLease: LeaseAcquirer | null;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getWorkerRegistryState(): WorkerRegistryRuntimeState {
+  return runtime.workerRegistry as WorkerRegistryRuntimeState;
+}
 
 /** Set the lease acquisition function. Called during init to break circular imports. */
-export function setLeaseAcquirer(fn: typeof acquireLease): void {
-  acquireLease = fn;
+export function setLeaseAcquirer(fn: LeaseAcquirer | null): void {
+  getWorkerRegistryState().acquireLease = fn;
 }
 
 const DEFAULT_WORKER_LEASE_MS = 30 * 60 * 1000; // 30 minutes
@@ -49,7 +63,8 @@ export function registerWorkerAssignment(
   dbOverride?: DatabaseSync,
 ): void {
   const now = Date.now();
-  assignments.set(assignedTo, { projectId, taskId, assignedAt: now });
+  const state = getWorkerRegistryState();
+  state.assignments.set(assignedTo, { projectId, taskId, assignedAt: now });
 
   // Persist to DB
   try {
@@ -63,9 +78,9 @@ export function registerWorkerAssignment(
   }
 
   // Also acquire a task lease for durability
-  if (acquireLease) {
+  if (state.acquireLease) {
     try {
-      acquireLease(projectId, taskId, assignedTo, DEFAULT_WORKER_LEASE_MS, dbOverride);
+      state.acquireLease(projectId, taskId, assignedTo, DEFAULT_WORKER_LEASE_MS, dbOverride);
     } catch (err) {
       safeLog("worker-registry.lease", err);
     }
@@ -83,7 +98,8 @@ export function getWorkerAssignment(
   dbOverride?: DatabaseSync,
 ): { projectId: string; taskId: string } | null {
   // Check in-memory cache first
-  const entry = assignments.get(agentId);
+  const state = getWorkerRegistryState();
+  const entry = state.assignments.get(agentId);
   if (entry) return { projectId: entry.projectId, taskId: entry.taskId };
 
   // Cache miss — try DB recovery
@@ -102,10 +118,10 @@ export function getWorkerAssignment(
           "SELECT state FROM tasks WHERE id = ?",
         ).get(taskId) as Record<string, unknown> | undefined;
 
-        const state = taskRow?.state as string | undefined;
-        if (state && state !== "DONE" && state !== "FAILED" && state !== "CANCELLED") {
+        const taskState = taskRow?.state as string | undefined;
+        if (taskState && taskState !== "DONE" && taskState !== "FAILED" && taskState !== "CANCELLED") {
           // Re-populate cache
-          assignments.set(agentId, {
+          state.assignments.set(agentId, {
             projectId: row.project_id as string,
             taskId,
             assignedAt: row.assigned_at as number,
@@ -131,8 +147,9 @@ export function getWorkerAssignment(
  * Clear the assignment for an agent (task completed or failed).
  */
 export function clearWorkerAssignment(assignedTo: string, dbOverride?: DatabaseSync): void {
-  const entry = assignments.get(assignedTo);
-  assignments.delete(assignedTo);
+  const state = getWorkerRegistryState();
+  const entry = state.assignments.get(assignedTo);
+  state.assignments.delete(assignedTo);
 
   // Remove from DB
   try {
@@ -160,7 +177,7 @@ export function clearWorkerAssignment(assignedTo: string, dbOverride?: DatabaseS
 export function listAllAssignments(): Array<{
   agentId: string; projectId: string; taskId: string; assignedAt: number;
 }> {
-  return [...assignments.entries()].map(([agentId, entry]) => ({
+  return [...getWorkerRegistryState().assignments.entries()].map(([agentId, entry]) => ({
     agentId, ...entry,
   }));
 }
@@ -169,5 +186,7 @@ export function listAllAssignments(): Array<{
  * Clear all assignments (for testing).
  */
 export function resetWorkerRegistryForTest(): void {
-  assignments.clear();
+  const state = getWorkerRegistryState();
+  state.assignments.clear();
+  state.acquireLease = null;
 }

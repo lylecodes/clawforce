@@ -6,7 +6,7 @@
  * Per-initiative breakdowns walk the goal tree (BFS) to sum task-level costs.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type {
   DailyBudgetSnapshot,
   MonthlyProjection,

@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { assembleContext } from "../../src/context/assembler.js";
 import { buildInstructions } from "../../src/context/sources/instructions.js";
 import { getMemoryDb, closeAllDbs } from "../../src/db.js";

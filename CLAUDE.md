@@ -5,10 +5,10 @@ Governance SDK for autonomous AI agent teams. Budget enforcement, trust scoring,
 ## Quick Reference
 
 - **Language:** TypeScript (strict mode)
-- **Runtime:** Node.js 22+ (uses `node:sqlite`)
-- **Test framework:** Vitest (`npx vitest --run`)
-- **Build:** `npx tsc --noEmit` (type check only, no build step)
-- **CLI:** `npx tsx src/cli.ts <command>` (aliased as `cf` when running via OpenClaw)
+- **Runtime:** Node.js 22.22+ for consumers; repo development pinned to `.nvmrc` (`25.6.1`)
+- **Test framework:** Vitest (`pnpm test` or `./scripts/with-runtime-node.sh ./node_modules/vitest/vitest.mjs run`)
+- **Build:** `pnpm build` / `pnpm typecheck`
+- **CLI:** `./bin/cf <command>` (aliased as `cf` when running via OpenClaw)
 - **DB:** SQLite via `DatabaseSync` — schema version 41, migrations in `src/migrations.ts`
 - **Config:** YAML files in `~/.clawforce/` (config.yaml for agents, domains/*.yaml for domains)
 

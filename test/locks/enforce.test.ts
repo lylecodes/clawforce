@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { getMemoryDb } from "../../src/db.js";
 import { acquireLock, ensureLockTable, getOverridePolicy, setOverridePolicy, isLocked } from "../../src/locks/store.js";
 import { checkLock, requireUnlocked, checkAgentMutation, applyOverridePolicy } from "../../src/locks/enforce.js";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 
 describe("locks/enforce", () => {
   let db: DatabaseSync;

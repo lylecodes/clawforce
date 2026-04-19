@@ -5,7 +5,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { aggregateMetrics, type MetricType } from "../metrics.js";
 import { safeLog } from "../diagnostics.js";

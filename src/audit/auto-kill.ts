@@ -6,6 +6,11 @@
  */
 
 import { safeLog } from "../diagnostics.js";
+import { killPersistedSessionProcess } from "../enforcement/tracker.js";
+import {
+  getAgentKillPort,
+  setAgentKillPort,
+} from "../runtime/integrations.js";
 import type { StuckAgent } from "./stuck-detector.js";
 
 type KillableAgent = {
@@ -20,13 +25,11 @@ type KillableAgent = {
  */
 export type AgentKillFn = (sessionKey: string, reason: string) => Promise<boolean>;
 
-let killFn: AgentKillFn | null = null;
-
 /**
  * Register the kill function (provided by the plugin API / gateway).
  */
 export function registerKillFunction(fn: AgentKillFn): void {
-  killFn = fn;
+  setAgentKillPort(fn);
 }
 
 /**
@@ -34,14 +37,22 @@ export function registerKillFunction(fn: AgentKillFn): void {
  * Returns true if the kill was dispatched, false if no kill function is registered.
  */
 export async function killStuckAgent(agent: KillableAgent): Promise<boolean> {
-  if (!killFn) return false;
-
-  try {
-    return await killFn(agent.sessionKey, `Clawforce auto-kill: ${agent.reason}`);
-  } catch (err) {
-    safeLog("auto-kill.kill", err);
-    return false;
+  const killFn = getAgentKillPort();
+  const reason = `Clawforce auto-kill: ${agent.reason}`;
+  if (killFn) {
+    try {
+      const killed = await killFn(agent.sessionKey, reason);
+      if (killed) return true;
+    } catch (err) {
+      safeLog("auto-kill.kill", err);
+    }
   }
+
+  if (typeof agent.projectId === "string" && agent.projectId) {
+    return killPersistedSessionProcess(agent.projectId, agent.sessionKey, reason);
+  }
+
+  return false;
 }
 
 /**
@@ -61,5 +72,5 @@ export async function killAllStuckAgents(agents: KillableAgent[]): Promise<numbe
  * Clear registered kill function (for testing).
  */
 export function resetAutoKillForTest(): void {
-  killFn = null;
+  setAgentKillPort(null);
 }

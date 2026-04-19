@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getProjectsDir } from "./db.js";
+import { getDefaultRuntimeState } from "./runtime/default-runtime.js";
 
 export type AgentIdentity = {
   agentId: string;
@@ -18,29 +19,38 @@ export type AgentIdentity = {
   issuedAt: number;
 };
 
-let platformSecret: string | null = null;
-const identities: Map<string, AgentIdentity> = new Map();
+type IdentityRuntimeState = {
+  platformSecret: string | null;
+  identities: Map<string, AgentIdentity>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getIdentityState(): IdentityRuntimeState {
+  return runtime.identity as IdentityRuntimeState;
+}
 
 function secretPath(): string {
   return path.join(getProjectsDir(), "platform-secret");
 }
 
 function ensurePlatformSecret(): string {
-  if (platformSecret) return platformSecret;
+  const state = getIdentityState();
+  if (state.platformSecret) return state.platformSecret;
 
   const sp = secretPath();
   try {
-    platformSecret = fs.readFileSync(sp, "utf-8").trim();
-    if (platformSecret) return platformSecret;
+    state.platformSecret = fs.readFileSync(sp, "utf-8").trim();
+    if (state.platformSecret) return state.platformSecret;
   } catch {
     // Generate new
   }
 
-  platformSecret = crypto.randomBytes(64).toString("hex");
+  state.platformSecret = crypto.randomBytes(64).toString("hex");
   const dir = path.dirname(sp);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(sp, platformSecret, { mode: 0o600 });
-  return platformSecret;
+  fs.writeFileSync(sp, state.platformSecret, { mode: 0o600 });
+  return state.platformSecret;
 }
 
 function deriveHmacKey(agentId: string): string {
@@ -49,7 +59,8 @@ function deriveHmacKey(agentId: string): string {
 }
 
 export function getAgentIdentity(agentId: string): AgentIdentity {
-  const existing = identities.get(agentId);
+  const state = getIdentityState();
+  const existing = state.identities.get(agentId);
   if (existing) return existing;
 
   const hmacKey = deriveHmacKey(agentId);
@@ -65,7 +76,7 @@ export function getAgentIdentity(agentId: string): AgentIdentity {
     identityToken,
     issuedAt: Date.now(),
   };
-  identities.set(agentId, identity);
+  state.identities.set(agentId, identity);
   return identity;
 }
 
@@ -87,6 +98,7 @@ export function verifyAction(agentId: string, data: string, signature: string): 
 }
 
 export function resetIdentitiesForTest(): void {
-  identities.clear();
-  platformSecret = null;
+  const state = getIdentityState();
+  state.identities.clear();
+  state.platformSecret = null;
 }

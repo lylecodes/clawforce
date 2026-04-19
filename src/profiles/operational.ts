@@ -33,8 +33,8 @@ const PROFILE_DEFINITIONS: Record<OperationalProfile, Omit<OperationalProfileCon
       reflectionSchedule: "0 9 * * FRI",
     },
     models: {
-      managerRecommended: "anthropic/claude-haiku-4-5",
-      employeeRecommended: "anthropic/claude-haiku-4-5",
+      managerRecommended: "gpt-5.4-mini",
+      employeeRecommended: "gpt-5.4-mini",
     },
   },
 
@@ -57,8 +57,8 @@ const PROFILE_DEFINITIONS: Record<OperationalProfile, Omit<OperationalProfileCon
       reflectionSchedule: "0 9 * * FRI",
     },
     models: {
-      managerRecommended: "anthropic/claude-sonnet-4-6",
-      employeeRecommended: "anthropic/claude-haiku-4-5",
+      managerRecommended: "gpt-5.4",
+      employeeRecommended: "gpt-5.4-mini",
     },
     sessionReset: {
       enabled: true,
@@ -85,8 +85,8 @@ const PROFILE_DEFINITIONS: Record<OperationalProfile, Omit<OperationalProfileCon
       reflectionSchedule: "0 9 * * WED,FRI",
     },
     models: {
-      managerRecommended: "anthropic/claude-sonnet-4-6",
-      employeeRecommended: "anthropic/claude-sonnet-4-6",
+      managerRecommended: "gpt-5.4",
+      employeeRecommended: "gpt-5.4",
     },
     sessionReset: {
       enabled: true,
@@ -113,8 +113,8 @@ const PROFILE_DEFINITIONS: Record<OperationalProfile, Omit<OperationalProfileCon
       reflectionSchedule: "0 18 * * *",
     },
     models: {
-      managerRecommended: "anthropic/claude-opus-4-6",
-      employeeRecommended: "anthropic/claude-sonnet-4-6",
+      managerRecommended: "gpt-5.4",
+      employeeRecommended: "gpt-5.4",
     },
     sessionReset: {
       enabled: true,

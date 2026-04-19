@@ -10,7 +10,6 @@
 const FIELD_ALIASES: Record<string, string> = {
   group: "department",
   subgroup: "team",
-  role: "extends",
 };
 
 /**

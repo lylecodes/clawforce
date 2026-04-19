@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/diagnostics.js", () => ({
@@ -98,8 +101,43 @@ describe("db-migration", () => {
     db1.close();
   });
 
+  it("skips a version that was recorded after stale pre-lock state", async () => {
+    const { DatabaseSync } = await import("../src/sqlite-driver.js");
+    const dir = mkdtempSync(join(tmpdir(), "clawforce-migrate-race-"));
+    const dbPath = join(dir, "race.sqlite");
+    const db = new DatabaseSync(dbPath);
+    try {
+      runMigrations(db);
+
+      db.prepare("DELETE FROM schema_version WHERE version = ?").run(SCHEMA_VERSION);
+      expect(getCurrentVersion(db)).toBe(SCHEMA_VERSION - 1);
+
+      const second = new DatabaseSync(dbPath);
+      const originalPrepare = db.prepare.bind(db);
+      let injected = false;
+
+      db.prepare = ((sql: string) => {
+        if (!injected && sql === "BEGIN IMMEDIATE") {
+          injected = true;
+          second.prepare(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+          ).run(SCHEMA_VERSION, Date.now());
+        }
+        return originalPrepare(sql);
+      }) as typeof db.prepare;
+
+      expect(() => runMigrations(db)).not.toThrow();
+      expect(getCurrentVersion(db)).toBe(SCHEMA_VERSION);
+
+      second.close();
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("all migrations apply cleanly from scratch", async () => {
-    const { DatabaseSync } = await import("node:sqlite");
+    const { DatabaseSync } = await import("../src/sqlite-driver.js");
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys = ON");
 
@@ -272,5 +310,17 @@ describe("db-migration", () => {
 
     const row2 = db.prepare("SELECT allocation FROM goals WHERE id = 'g-alloc-2'").get() as Record<string, unknown>;
     expect(row2.allocation).toBe(null);
+  });
+
+  it("V54 adds durable controller config apply markers", () => {
+    const db = getMemoryDb();
+
+    const columns = db.prepare("PRAGMA table_info(controller_leases)").all() as { name: string }[];
+    const columnNames = columns.map((column) => column.name);
+    expect(columnNames).toContain("applied_config_version_id");
+    expect(columnNames).toContain("applied_config_hash");
+    expect(columnNames).toContain("applied_config_applied_at");
+
+    db.close();
   });
 });

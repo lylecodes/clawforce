@@ -5,6 +5,7 @@ import { BudgetNamespace } from "./budget.js";
 import { AgentsNamespace } from "./agents.js";
 import { TrustNamespace } from "./trust.js";
 import { GoalsNamespace } from "./goals.js";
+import { EntitiesNamespace } from "./entities.js";
 import { KnowledgeNamespace } from "./knowledge.js";
 import { MessagesNamespace } from "./messages.js";
 import { MonitoringNamespace } from "./monitoring.js";
@@ -26,6 +27,7 @@ export class Clawforce {
   private _agents?: AgentsNamespace;
   private _trust?: TrustNamespace;
   private _goals?: GoalsNamespace;
+  private _entities?: EntitiesNamespace;
   private _knowledge?: KnowledgeNamespace;
   private _messages?: MessagesNamespace;
   private _monitoring?: MonitoringNamespace;
@@ -63,6 +65,9 @@ export class Clawforce {
   }
   get goals(): GoalsNamespace {
     return (this._goals ??= new GoalsNamespace(this.domain));
+  }
+  get entities(): EntitiesNamespace {
+    return (this._entities ??= new EntitiesNamespace(this.domain));
   }
   get knowledge(): KnowledgeNamespace {
     return (this._knowledge ??= new KnowledgeNamespace(this.domain));

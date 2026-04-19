@@ -192,6 +192,38 @@ describe("assistant config validation", () => {
 
     expect(warnings.some((w) => w.level === "error" && w.message.includes("path"))).toBe(true);
   });
+
+  it("treats clawforce_setup as a known tool in expectations", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        helper: {
+          extends: "assistant",
+          briefing: [],
+          expectations: [{ tool: "clawforce_setup", action: "status", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(warnings.some((w) => w.message.includes("unknown tool"))).toBe(false);
+  });
+
+  it("treats clawforce_config as a known tool in expectations", () => {
+    const warnings = validateWorkforceConfig({
+      name: "test",
+      agents: {
+        helper: {
+          extends: "manager",
+          briefing: [],
+          expectations: [{ tool: "clawforce_config", action: "get_config", min_calls: 1 }],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(warnings.some((w) => w.message.includes("unknown tool"))).toBe(false);
+  });
 });
 
 describe("assistant config loading", () => {
@@ -208,17 +240,17 @@ describe("assistant config loading", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
 
-  it("loads assistant agent from project.yaml", () => {
+  it("loads assistant agent from workforce config", () => {
     const configPath = writeYaml(`
 name: personal
 agents:
   helper:
-    role: assistant
+    extends: assistant
 `);
 
     const config = loadWorkforceConfig(configPath);
@@ -237,7 +269,7 @@ agents:
 name: personal
 agents:
   helper:
-    role: assistant
+    extends: assistant
 `);
 
     const config = loadWorkforceConfig(configPath);

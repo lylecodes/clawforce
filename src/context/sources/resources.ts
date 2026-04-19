@@ -5,7 +5,7 @@
  * as markdown for manager briefing.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../sqlite-driver.js";
 import { getCapacityReport } from "../../capacity.js";
 
 export function buildResourcesContext(

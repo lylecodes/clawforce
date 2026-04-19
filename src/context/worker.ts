@@ -6,7 +6,7 @@
  * and the specific instructions — not the full task board.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { getTask, getTaskEvidence } from "../tasks/ops.js";
 import { buildRetryContext } from "../tasks/retry.js";

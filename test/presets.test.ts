@@ -203,7 +203,7 @@ describe("builtin agent presets", () => {
     expect(keys).toContain("manager");
     expect(keys).toContain("employee");
     expect(keys).toContain("assistant");
-    expect(keys).toContain("scheduled");
+    expect(keys).toContain("verifier");
   });
 });
 

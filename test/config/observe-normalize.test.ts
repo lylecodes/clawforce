@@ -8,7 +8,7 @@ const { loadWorkforceConfig } = await import("../../src/project.js");
 describe("observe field normalization", () => {
   it("preserves observe field from YAML config", () => {
     const dir = mkdtempSync(join(tmpdir(), "cf-test-"));
-    const configPath = join(dir, "project.yaml");
+    const configPath = join(dir, "workforce.yaml");
     writeFileSync(configPath, `
 name: test-observe
 agents:
@@ -43,7 +43,7 @@ agents:
 
   it("handles missing observe field", () => {
     const dir = mkdtempSync(join(tmpdir(), "cf-test-"));
-    const configPath = join(dir, "project.yaml");
+    const configPath = join(dir, "workforce.yaml");
     writeFileSync(configPath, `
 name: test-no-observe
 agents:

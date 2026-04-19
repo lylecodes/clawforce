@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -164,6 +164,27 @@ describe("context sources", () => {
       expect(result).toContain("Implement auth");
       expect(result).toContain("Add JWT auth");
       expect(result).toContain("auth.ts file created");
+    });
+
+    it("prefers the dispatched task id over the agent-global assignment", () => {
+      const staleTask = createTask({ projectId: PROJECT, title: "Old assignment", description: "stale", createdBy: "agent:a" }, db);
+      const liveTask = createTask({ projectId: PROJECT, title: "Live dispatch", description: "current", createdBy: "agent:a" }, db);
+      registerWorkerAssignment("worker-1", PROJECT, staleTask.id);
+
+      const config: AgentConfig = {
+        extends: "employee",
+        briefing: [{ source: "assigned_task" }],
+        expectations: [],
+        performance_policy: { action: "alert" },
+      };
+
+      const result = assembleContext("worker-1", config, {
+        projectId: PROJECT,
+        taskId: liveTask.id,
+      });
+      expect(result).toContain("Live dispatch");
+      expect(result).toContain("current");
+      expect(result).not.toContain("Old assignment");
     });
 
     it("returns empty when not assigned", () => {

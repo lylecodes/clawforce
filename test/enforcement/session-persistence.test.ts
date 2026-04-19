@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   endSession,
+  listPersistedTrackedSessions,
   persistSession,
   recoverOrphanedSessions,
   recordToolCall,
   resetTrackerForTest,
+  setSessionProcessId,
   startTracking,
 } from "../../src/enforcement/tracker.js";
 import type { AgentConfig } from "../../src/types.js";
@@ -88,6 +90,18 @@ describe("session persistence (crash recovery)", () => {
 
     rows = db.prepare("SELECT * FROM tracked_sessions WHERE session_key = ?").all("sess1") as Record<string, unknown>[];
     expect(rows).toHaveLength(0);
+  });
+
+  it("persists direct executor process ids for cross-process recovery", () => {
+    startTracking("sess1", "coder", "proj1", workerConfig);
+
+    setSessionProcessId("sess1", 4242);
+
+    const rows = db.prepare("SELECT process_id FROM tracked_sessions WHERE session_key = ?").all("sess1") as Record<string, unknown>[];
+    expect(rows[0]!.process_id).toBe(4242);
+
+    const sessions = listPersistedTrackedSessions("proj1", db);
+    expect(sessions[0]!.processId).toBe(4242);
   });
 
   it("recoverOrphanedSessions finds and cleans up orphaned rows", () => {

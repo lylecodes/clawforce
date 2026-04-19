@@ -190,7 +190,7 @@ describe("GlobalConfig adapter fields", () => {
     expect(result.errors.some((e) => e.field === "claude_code")).toBe(true);
   });
 
-  it("accepts config without adapter field (defaults to openclaw)", async () => {
+  it("accepts config without adapter field (defaults to codex)", async () => {
     const { validateGlobalConfig } = await import("../../src/config/schema.js");
     const config = {
       agents: { "my-agent": {} },

@@ -6,6 +6,11 @@
  */
 
 import { safeLog } from "../diagnostics.js";
+import {
+  clearDeliveryAdapterPort,
+  getDeliveryAdapterPort,
+  setDeliveryAdapterPort,
+} from "../runtime/integrations.js";
 
 export type DeliveryAdapter = {
   send(
@@ -37,21 +42,20 @@ export type DeliveryResult = {
   fallback?: string;
 };
 
-let adapter: DeliveryAdapter | null = null;
-
 export function setDeliveryAdapter(a: DeliveryAdapter | null): void {
-  adapter = a;
+  setDeliveryAdapterPort(a);
 }
 
 export function getDeliveryAdapter(): DeliveryAdapter | null {
-  return adapter;
+  return getDeliveryAdapterPort();
 }
 
 export function clearDeliveryAdapter(): void {
-  adapter = null;
+  clearDeliveryAdapterPort();
 }
 
 export async function deliverMessage(req: DeliveryRequest): Promise<DeliveryResult> {
+  const adapter = getDeliveryAdapter();
   if (!adapter) {
     safeLog("deliver", `No delivery adapter set — logging message for channel "${req.channel}": ${req.content.slice(0, 100)}`);
     return { delivered: false, fallback: "log" };

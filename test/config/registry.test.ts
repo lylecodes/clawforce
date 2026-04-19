@@ -80,4 +80,13 @@ describe("agent global roster registry", () => {
     expect(getGlobalAgent("bot")).toBeNull();
     expect(getDomainAgents("domain")).toHaveLength(0);
   });
+
+  it("public entry point favors replacement-style registry helpers", async () => {
+    const core = await import("../../src/internal.js");
+    expect(typeof core.syncGlobalAgents).toBe("function");
+    expect(typeof core.setAgentsForDomain).toBe("function");
+    expect(typeof core.removeDomain).toBe("function");
+    expect("registerGlobalAgents" in core).toBe(false);
+    expect("assignAgentsToDomain" in core).toBe(false);
+  });
 });

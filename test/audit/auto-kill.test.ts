@@ -5,6 +5,7 @@ import {
   registerKillFunction,
   resetAutoKillForTest,
 } from "../../src/audit/auto-kill.js";
+import * as tracker from "../../src/enforcement/tracker.js";
 import type { StuckAgent } from "../../src/audit/stuck-detector.js";
 
 const mockAgent: StuckAgent = {
@@ -42,6 +43,23 @@ describe("auto-kill", () => {
 
     const result = await killStuckAgent(mockAgent);
     expect(result).toBe(false);
+  });
+
+  it("falls back to persisted session kill when no kill function is registered", async () => {
+    const fallback = vi.spyOn(tracker, "killPersistedSessionProcess").mockReturnValue(true);
+
+    const result = await killStuckAgent(mockAgent);
+    expect(result).toBe(true);
+    expect(fallback).toHaveBeenCalledWith("proj1", "sess1", expect.stringContaining("auto-kill"));
+  });
+
+  it("falls back to persisted session kill when gateway kill returns false", async () => {
+    registerKillFunction(async () => false);
+    const fallback = vi.spyOn(tracker, "killPersistedSessionProcess").mockReturnValue(true);
+
+    const result = await killStuckAgent(mockAgent);
+    expect(result).toBe(true);
+    expect(fallback).toHaveBeenCalledWith("proj1", "sess1", expect.stringContaining("auto-kill"));
   });
 
   it("kills all stuck agents and returns count", async () => {

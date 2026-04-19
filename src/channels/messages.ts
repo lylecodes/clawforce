@@ -5,7 +5,7 @@
  * and building transcripts for context injection.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { createMessage } from "../messaging/store.js";
 import type { Message, MessageType } from "../types.js";
 import { getChannel, getChannelMessages } from "./store.js";

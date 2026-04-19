@@ -5,7 +5,7 @@
  * so the SPA can show real status instead of relying on optimistic assumptions.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 
 // ---------------------------------------------------------------------------

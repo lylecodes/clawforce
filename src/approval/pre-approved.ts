@@ -7,7 +7,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour

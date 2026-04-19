@@ -8,7 +8,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "./sqlite-driver.js";
 import { getDb } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import { signAction, verifyAction } from "./identity.js";

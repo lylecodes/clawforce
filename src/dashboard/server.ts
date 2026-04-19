@@ -17,6 +17,7 @@ import { createDashboardHandler } from "./gateway-routes.js";
 import type { DashboardHandlerOptions } from "./gateway-routes.js";
 import { checkAuth, setCorsHeaders, setSecurityHeaders, checkRateLimit, isLocalhost } from "./auth.js";
 import { safeLog } from "../diagnostics.js";
+import { initializeAllDomains } from "../config/init.js";
 
 export type DashboardOptions = {
   /** Port to listen on (default 3117). */
@@ -36,6 +37,17 @@ export type DashboardOptions = {
   /** Function to inject a message into an agent session */
   injectAgentMessage?: DashboardHandlerOptions["injectAgentMessage"];
 };
+
+export function resolveDefaultDashboardDir(baseDir = import.meta.dirname): string {
+  const relativeCandidates = [
+    "../clawforce-dashboard/dist",
+    "../../clawforce-dashboard/dist",
+    "../../../clawforce-dashboard/dist",
+    "../../../../clawforce-dashboard/dist",
+  ];
+  const candidates = relativeCandidates.map((relativePath) => path.resolve(baseDir, relativePath));
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[candidates.length - 1]!;
+}
 
 // --- MIME types ---
 
@@ -78,13 +90,17 @@ export function createDashboardServer(options?: DashboardOptions) {
 
   // Resolve static dir — use the provided dashboardDir or look for
   // clawforce-dashboard/dist as a sibling project (the extracted dashboard repo)
-  const candidates = [
-    path.resolve(import.meta.dirname, "../../../clawforce-dashboard/dist"),
-    // Sibling project when running from source (adapters/ or src/)
-    path.resolve(import.meta.dirname, "../../clawforce-dashboard/dist"),
-  ];
-  const defaultDir = candidates.find(d => fs.existsSync(d)) ?? candidates[0]!;
-  const staticDir = options?.dashboardDir ?? defaultDir;
+  const staticDir = options?.dashboardDir ?? resolveDefaultDashboardDir();
+
+  // Load domain configs so agent registry is populated for standalone mode.
+  // Without this, queryAgents() returns [] because no agents are registered in memory.
+  try {
+    const configDir = process.env.CLAWFORCE_CONFIG_DIR
+      ?? path.join(process.env.HOME ?? "", ".clawforce");
+    initializeAllDomains(configDir);
+  } catch (err) {
+    safeLog("dashboard-server", `Config initialization failed (agents may not appear): ${err}`);
+  }
 
   // Create the gateway-routes handler for /api/* requests.
   // The gateway-routes handler expects paths prefixed with /clawforce/api/,

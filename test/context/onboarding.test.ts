@@ -40,9 +40,11 @@ describe("buildOnboardingContext", () => {
 });
 
 describe("buildExplainContent", () => {
-  it("includes project.yaml format example", () => {
+  it("includes config directory format example", () => {
     const result = buildExplainContent("/tmp/clawforce");
 
+    expect(result).toContain("config.yaml");
+    expect(result).toContain("domains/");
     expect(result).toContain("extends: manager");
     expect(result).toContain("extends: employee");
     expect(result).toContain("expectations");
@@ -55,7 +57,7 @@ describe("buildExplainContent", () => {
 
     expect(result).toContain("manager");
     expect(result).toContain("employee");
-    expect(result).toContain("scheduled");
+    expect(result).toContain("verifier");
   });
 
   it("includes context source descriptions", () => {

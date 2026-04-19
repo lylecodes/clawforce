@@ -6,7 +6,7 @@
  * Accounts for reservations from active dispatch plans.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type { BudgetCheckResult } from "../types.js";
 import { ensureWindowsCurrent } from "./reset.js";
 

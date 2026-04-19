@@ -6,7 +6,7 @@
  * External delivery (Telegram, email, etc.) is pluggable via setNotificationDeliveryAdapter.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import {
   createNotification,
   updateDeliveryStatus,
@@ -14,14 +14,16 @@ import {
 } from "./store.js";
 import type { NotificationRecord } from "./types.js";
 import { safeLog } from "../diagnostics.js";
+import {
+  getNotificationDeliveryAdapterPort,
+  setNotificationDeliveryAdapterPort,
+} from "../runtime/integrations.js";
 
 // --- Delivery adapter ---
 
 export type NotificationDeliveryAdapter = (
   record: NotificationRecord,
 ) => Promise<void>;
-
-let deliveryAdapter: NotificationDeliveryAdapter | null = null;
 
 /**
  * Register a delivery adapter for external channels (Telegram, email, etc.).
@@ -31,14 +33,14 @@ let deliveryAdapter: NotificationDeliveryAdapter | null = null;
 export function setNotificationDeliveryAdapter(
   fn: NotificationDeliveryAdapter | null,
 ): void {
-  deliveryAdapter = fn;
+  setNotificationDeliveryAdapterPort(fn);
 }
 
 /**
  * Get the currently registered delivery adapter (for testing).
  */
 export function getNotificationDeliveryAdapter(): NotificationDeliveryAdapter | null {
-  return deliveryAdapter;
+  return getNotificationDeliveryAdapterPort();
 }
 
 // --- Emitter ---
@@ -68,6 +70,7 @@ export function emitNotification(
   );
 
   // Attempt external delivery asynchronously — never blocks the caller
+  const deliveryAdapter = getNotificationDeliveryAdapter();
   if (deliveryAdapter) {
     const adapter = deliveryAdapter;
     Promise.resolve()

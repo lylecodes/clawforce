@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
+import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -21,7 +22,6 @@ const { getMemoryDb } = await import("../../src/db.js");
 const dbModule = await import("../../src/db.js");
 const lifecycleModule = await import("../../src/lifecycle.js");
 const projectModule = await import("../../src/project.js");
-const trackerModule = await import("../../src/enforcement/tracker.js");
 const { createClawforceSetupTool } = await import("../../src/tools/setup-tool.js");
 const { getPolicies, resetPolicyRegistryForTest } = await import("../../src/policy/registry.js");
 
@@ -35,9 +35,11 @@ describe("clawforce_setup tool", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawforce-test-"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await lifecycleModule.shutdownClawforce();
     try { db.close(); } catch {}
     try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    projectModule.resetEnforcementConfigForTest();
     resetPolicyRegistryForTest();
     vi.restoreAllMocks();
   });
@@ -57,7 +59,10 @@ describe("clawforce_setup tool", () => {
       const result = await execute({ action: "explain" });
 
       expect(result.ok).toBe(true);
-      expect(result.reference).toContain("project.yaml");
+      expect(result.explanation.summary).toBeDefined();
+      expect(result.setup.root).toBe(tmpDir);
+      expect(result.reference).toContain("config.yaml");
+      expect(result.reference).toContain("domains/");
       expect(result.reference).toContain("manager");
       expect(result.reference).toContain("employee");
       expect(result.reference).toContain("expectations");
@@ -96,7 +101,7 @@ describe("clawforce_setup tool", () => {
 
       expect(result.ok).toBe(true);
       expect(result.topic).toBeUndefined();
-      expect(result.reference).toContain("project.yaml");
+      expect(result.reference).toContain("config.yaml");
     });
   });
 
@@ -169,10 +174,9 @@ describe("clawforce_setup tool", () => {
     });
 
     it("detects inactive projects on disk", async () => {
-      // Create a project dir with a project.yaml
-      const projectDir = path.join(tmpDir, "my-project");
-      fs.mkdirSync(projectDir, { recursive: true });
-      fs.writeFileSync(path.join(projectDir, "project.yaml"), "id: my-project\nname: Test", "utf-8");
+      const domainsDir = path.join(tmpDir, "domains");
+      fs.mkdirSync(domainsDir, { recursive: true });
+      fs.writeFileSync(path.join(domainsDir, "my-project.yaml"), "domain: my-project\nagents: []\n", "utf-8");
 
       vi.spyOn(lifecycleModule, "isClawforceInitialized").mockReturnValue(true);
       vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue([]);
@@ -187,12 +191,10 @@ describe("clawforce_setup tool", () => {
   describe("validate", () => {
     it("validates valid yaml content", async () => {
       const yaml = `
-id: test-project
 name: Test Project
-dir: /tmp/test
 
 agents:
-  orchestrator:
+  manager:
     extends: manager
     briefing:
       - source: instructions
@@ -204,7 +206,7 @@ agents:
       action: alert
   worker:
     extends: employee
-    reports_to: orchestrator
+    reports_to: manager
     briefing:
       - source: instructions
     expectations:
@@ -221,7 +223,7 @@ agents:
       expect(result.ok).toBe(true);
       expect(result.valid).toBe(true);
       expect(result.agent_preview).toHaveLength(2);
-      expect(result.agent_preview[0].id).toBe("orchestrator");
+      expect(result.agent_preview[0].id).toBe("manager");
       expect(result.agent_preview[0].extends).toBe("manager");
       expect(result.agent_preview[1].id).toBe("worker");
       expect(result.agent_preview[1].extends).toBe("employee");
@@ -229,14 +231,12 @@ agents:
 
     it("catches missing agents section", async () => {
       const yaml = `
-id: test-project
 name: Test Project
-dir: /tmp/test
 `;
       const result = await execute({ action: "validate", yaml_content: yaml });
 
-      expect(result.ok).toBe(true); // No hard errors, just warnings
-      expect(result.issues.some((i: { message: string }) => i.message.includes("No workforce agents found") || i.message.includes("Use 'extends'"))).toBe(true);
+      expect(result.ok).toBe(false);
+      expect(result.issues.some((i: { message: string }) => i.message.includes("agents object"))).toBe(true);
     });
 
     it("catches invalid YAML", async () => {
@@ -246,39 +246,39 @@ dir: /tmp/test
       expect(result.reason).toContain("YAML parse error");
     });
 
-    it("catches missing id field", async () => {
+    it("catches missing extends field", async () => {
       const yaml = `
 name: Test
 agents:
   worker:
-    role: worker
-    required_outputs:
+    briefing:
+      - source: instructions
+    expectations:
       - tool: clawforce_task
         action: transition
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `;
       const result = await execute({ action: "validate", yaml_content: yaml });
 
       expect(result.issues.some((i: { level: string; message: string }) =>
-        i.level === "error" && i.message.includes("id")
+        i.level === "error" && i.message.includes("missing required field \"extends\"")
       )).toBe(true);
     });
 
     it("catches reports_to referencing non-existent agent", async () => {
       const yaml = `
-id: test
 name: Test
 agents:
   worker:
-    role: worker
+    extends: employee
     reports_to: nonexistent
-    required_outputs:
+    expectations:
       - tool: clawforce_task
         action: transition
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `;
       const result = await execute({ action: "validate", yaml_content: yaml });
@@ -290,20 +290,18 @@ agents:
 
     it("validates from config_path", async () => {
       const yaml = `
-id: test-project
 name: Test
-dir: /tmp/test
 agents:
   worker:
-    role: worker
-    required_outputs:
+    extends: employee
+    expectations:
       - tool: clawforce_task
         action: transition
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `;
-      const configPath = path.join(tmpDir, "project.yaml");
+      const configPath = path.join(tmpDir, "workforce.yaml");
       fs.writeFileSync(configPath, yaml, "utf-8");
 
       const result = await execute({ action: "validate", config_path: configPath });
@@ -320,14 +318,14 @@ agents:
     });
 
     it("returns error for non-existent config_path outside projects dir", async () => {
-      const result = await execute({ action: "validate", config_path: "/nonexistent/project.yaml" });
+      const result = await execute({ action: "validate", config_path: "/nonexistent/workforce.yaml" });
 
       expect(result.ok).toBe(false);
       expect(result.reason).toContain("config_path must be within the projects directory");
     });
 
     it("returns error for non-existent config_path within projects dir", async () => {
-      const configPath = path.join(tmpDir, "nonexistent", "project.yaml");
+      const configPath = path.join(tmpDir, "nonexistent", "workforce.yaml");
       const result = await execute({ action: "validate", config_path: configPath });
 
       expect(result.ok).toBe(false);
@@ -350,20 +348,18 @@ agents:
 
     it("allows config_path within projects dir", async () => {
       const yaml = `
-id: test-project
 name: Test
-dir: /tmp/test
 agents:
   worker:
-    role: worker
-    required_outputs:
+    extends: employee
+    expectations:
       - tool: clawforce_task
         action: transition
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `;
-      const configPath = path.join(tmpDir, "project.yaml");
+      const configPath = path.join(tmpDir, "workforce.yaml");
       fs.writeFileSync(configPath, yaml, "utf-8");
 
       const result = await execute({ action: "validate", config_path: configPath });
@@ -372,29 +368,26 @@ agents:
   });
 
   describe("activate", () => {
-    it("activates a valid project", async () => {
-      const projectId = "test-project";
-      const projectDir = path.join(tmpDir, projectId);
-      fs.mkdirSync(projectDir, { recursive: true });
-      fs.writeFileSync(path.join(projectDir, "project.yaml"), `
-id: ${projectId}
-name: Test Project
-dir: ${tmpDir}
+    function writeDomainConfig(projectId: string, opts?: { policies?: unknown[] }) {
+      const domainsDir = path.join(tmpDir, "domains");
+      fs.mkdirSync(domainsDir, { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, "config.yaml"), `
 agents:
   worker:
-    role: worker
-    required_outputs:
-      - tool: clawforce_task
-        action: transition
-        min_calls: 1
-    on_failure:
-      action: alert
+    extends: employee
 `, "utf-8");
+      fs.writeFileSync(path.join(domainsDir, `${projectId}.yaml`), YAML.stringify({
+        domain: projectId,
+        agents: ["worker"],
+        ...(opts?.policies ? { policies: opts.policies } : {}),
+      }), "utf-8");
+    }
+
+    it("activates a valid project", async () => {
+      const projectId = "test-project";
+      writeDomainConfig(projectId);
 
       vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue([]);
-      vi.spyOn(projectModule, "registerWorkforceConfig").mockImplementation(() => {});
-      vi.spyOn(projectModule, "initProject").mockImplementation(() => {});
-      vi.spyOn(trackerModule, "recoverOrphanedSessions").mockReturnValue([]);
 
       const result = await execute({ action: "activate", project_id: projectId });
 
@@ -408,26 +401,9 @@ agents:
 
     it("reloads an already-active project", async () => {
       const projectId = "active-project";
-      const projectDir = path.join(tmpDir, projectId);
-      fs.mkdirSync(projectDir, { recursive: true });
-      fs.writeFileSync(path.join(projectDir, "project.yaml"), `
-id: ${projectId}
-name: Test
-dir: ${tmpDir}
-agents:
-  worker:
-    role: worker
-    required_outputs:
-      - tool: clawforce_task
-        action: transition
-        min_calls: 1
-    on_failure:
-      action: alert
-`, "utf-8");
+      writeDomainConfig(projectId);
 
       vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue([projectId]);
-      vi.spyOn(projectModule, "registerWorkforceConfig").mockImplementation(() => {});
-      vi.spyOn(trackerModule, "recoverOrphanedSessions").mockReturnValue([]);
 
       const result = await execute({ action: "activate", project_id: projectId });
 
@@ -436,64 +412,29 @@ agents:
       expect(result.message).toContain("reloaded");
     });
 
-    it("does not call initProject on reload", async () => {
+    it("reloads the requested domain on activate", async () => {
       const projectId = "active-project";
-      const projectDir = path.join(tmpDir, projectId);
-      fs.mkdirSync(projectDir, { recursive: true });
-      fs.writeFileSync(path.join(projectDir, "project.yaml"), `
-id: ${projectId}
-name: Test
-dir: ${tmpDir}
-agents:
-  worker:
-    role: worker
-    required_outputs:
-      - tool: clawforce_task
-        action: transition
-        min_calls: 1
-    on_failure:
-      action: alert
-`, "utf-8");
+      writeDomainConfig(projectId);
 
       vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue([projectId]);
-      vi.spyOn(projectModule, "registerWorkforceConfig").mockImplementation(() => {});
-      const initSpy = vi.spyOn(projectModule, "initProject").mockImplementation(() => {});
-      vi.spyOn(trackerModule, "recoverOrphanedSessions").mockReturnValue([]);
+      const reloadSpy = vi.spyOn(await import("../../src/config/init.js"), "reloadDomain");
 
       await execute({ action: "activate", project_id: projectId });
 
-      expect(initSpy).not.toHaveBeenCalled();
+      expect(reloadSpy).toHaveBeenCalledWith(tmpDir, projectId);
     });
 
     it("registers policies on activate", async () => {
       const projectId = "policy-project";
-      const projectDir = path.join(tmpDir, projectId);
-      fs.mkdirSync(projectDir, { recursive: true });
-      fs.writeFileSync(path.join(projectDir, "project.yaml"), `
-id: ${projectId}
-name: Policy Project
-dir: ${tmpDir}
-agents:
-  worker:
-    role: worker
-    required_outputs:
-      - tool: clawforce_task
-        action: transition
-        min_calls: 1
-    on_failure:
-      action: alert
-policies:
-  - name: test-policy
-    type: action_scope
-    config:
-      allowed_tools:
-        - clawforce_task
-`, "utf-8");
+      writeDomainConfig(projectId, {
+        policies: [{
+          name: "test-policy",
+          type: "action_scope",
+          config: { allowed_tools: ["clawforce_task"] },
+        }],
+      });
 
       vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue([]);
-      vi.spyOn(projectModule, "registerWorkforceConfig").mockImplementation(() => {});
-      vi.spyOn(projectModule, "initProject").mockImplementation(() => {});
-      vi.spyOn(trackerModule, "recoverOrphanedSessions").mockReturnValue([]);
 
       const result = await execute({ action: "activate", project_id: projectId });
 
@@ -507,13 +448,39 @@ policies:
       expect(policyNames.some((n: string) => n.startsWith("default-scope:"))).toBe(true);
     });
 
-    it("returns error when project.yaml not found", async () => {
+    it("replaces config-backed policies on reload instead of duplicating rows", async () => {
+      const projectId = "policy-reload-project";
+      writeDomainConfig(projectId, {
+        policies: [{
+          name: "test-policy",
+          type: "action_scope",
+          config: { allowed_tools: ["clawforce_task"] },
+        }],
+      });
+
+      vi.spyOn(lifecycleModule, "getActiveProjectIds")
+        .mockReturnValueOnce([])
+        .mockReturnValueOnce([projectId]);
+
+      const first = await execute({ action: "activate", project_id: projectId });
+      const second = await execute({ action: "activate", project_id: projectId });
+
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+
+      const row = db.prepare(
+        "SELECT COUNT(*) AS count FROM policies WHERE project_id = ?",
+      ).get(projectId) as { count: number };
+      expect(row.count).toBe(2);
+    });
+
+    it("returns error when domain config is not found", async () => {
       vi.spyOn(lifecycleModule, "getActiveProjectIds").mockReturnValue([]);
 
       const result = await execute({ action: "activate", project_id: "nonexistent" });
 
       expect(result.ok).toBe(false);
-      expect(result.reason).toContain("No project.yaml found");
+      expect(result.reason).toContain("No domain config found");
     });
 
     it("returns error for missing project_id param", async () => {
@@ -572,6 +539,61 @@ policies:
   });
 
   describe("scaffold", () => {
+    it("creates a starter domain when scaffold mode is provided", async () => {
+      const result = await execute({
+        action: "scaffold",
+        project_id: "starter-demo",
+        mode: "new",
+        paths: [tmpDir],
+        mission: "Dogfood a clean starter workflow",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.project_id).toBe("starter-demo");
+      expect(result.mode).toBe("new");
+      expect(result.created_agent_ids).toContain("starter-demo-lead");
+      expect(result.setup.targetDomainId).toBe("starter-demo");
+      expect(fs.existsSync(path.join(tmpDir, "domains", "starter-demo.yaml"))).toBe(true);
+
+      const globalConfig = YAML.parse(fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8"));
+      expect(globalConfig.agents["starter-demo-lead"]).toBeDefined();
+      expect(globalConfig.agents["starter-demo-builder"]).toBeDefined();
+      expect(globalConfig.agents["starter-demo-lead"]?.workspace_paths).toEqual([tmpDir]);
+      expect(globalConfig.agents["starter-demo-builder"]?.workspace_paths).toEqual([tmpDir]);
+    });
+
+    it("creates a workflow-capable onboarding starter domain", async () => {
+      const result = await execute({
+        action: "scaffold",
+        project_id: "starter-onboarding",
+        mode: "new",
+        workflow: "data-source-onboarding",
+        paths: [tmpDir],
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.project_id).toBe("starter-onboarding");
+      expect(result.setup.targetDomainId).toBe("starter-onboarding");
+
+      const domainConfig = YAML.parse(fs.readFileSync(path.join(tmpDir, "domains", "starter-onboarding.yaml"), "utf-8"));
+      expect(domainConfig.workflows).toEqual(["data-source-onboarding"]);
+      expect(domainConfig.execution).toEqual({
+        mode: "dry_run",
+        default_mutation_policy: "simulate",
+      });
+      expect(domainConfig.entities?.jurisdiction?.runtimeCreate).toBe(true);
+      expect(domainConfig.entities?.jurisdiction?.issues?.types?.onboarding_request?.task?.enabled).toBe(true);
+      expect(domainConfig.entities?.jurisdiction?.issues?.stateSignals?.[0]?.ownerAgentId).toBe("starter-onboarding-data-director");
+
+      const globalConfig = YAML.parse(fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8"));
+      expect(globalConfig.agents["starter-onboarding-data-director"]?.jobs?.["intake-triage"]).toBeDefined();
+      expect(globalConfig.agents["starter-onboarding-source-onboarding-steward"]?.jobs?.["onboarding-backlog-sweep"]).toBeDefined();
+      expect(globalConfig.agents["starter-onboarding-integrity-gatekeeper"]?.jobs?.["integrity-sweep"]).toBeDefined();
+      expect(globalConfig.agents["starter-onboarding-production-sentinel"]?.jobs?.["production-watch"]).toBeDefined();
+      expect(globalConfig.agents["starter-onboarding-data-director"]?.workspace_paths).toEqual([tmpDir]);
+      expect(globalConfig.agents["starter-onboarding-source-onboarding-steward"]?.workspace_paths).toEqual([tmpDir]);
+    });
+
     it("creates SOUL.md template for single agent", async () => {
       const projectDir = path.join(tmpDir, "my-project");
       fs.mkdirSync(projectDir, { recursive: true });

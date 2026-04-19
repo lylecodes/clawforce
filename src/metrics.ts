@@ -6,7 +6,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "./sqlite-driver.js";
 import { getDb } from "./db.js";
 
 export type MetricType = "task_cycle" | "task" | "agent_performance" | "dispatch" | "sweep" | "system" | "cost" | "assignment";

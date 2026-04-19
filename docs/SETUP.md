@@ -1,6 +1,6 @@
 # ClawForce Setup Guide
 
-Comprehensive onboarding documentation for setting up ClawForce on a project. Written for coding agents (Claude, Codex, etc.) helping users bootstrap their AI workforce.
+Comprehensive onboarding documentation for setting up ClawForce on a project. Written for technical operators and coding agents helping them bootstrap a real governed team.
 
 ---
 
@@ -21,7 +21,11 @@ Comprehensive onboarding documentation for setting up ClawForce on a project. Wr
 
 ## Overview
 
-ClawForce is a team coordination SDK for autonomous AI agents. It adds governance, accountability, and structure on top of agent platforms like OpenClaw or Claude Code. Agents run their normal workflows, but ClawForce provides:
+ClawForce is the governance and control plane for agent teams: budgets,
+approvals, trust, audit, and operator control above any runtime.
+
+Direct Codex/OpenAI execution is the canonical start path. OpenClaw remains an
+optional compatibility bridge, not the default.
 
 - **Task lifecycle management** -- tasks move through OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE/FAILED states with full audit trails
 - **Budget enforcement** -- per-project and per-agent spend limits (daily, session, task)
@@ -31,7 +35,22 @@ ClawForce is a team coordination SDK for autonomous AI agents. It adds governanc
 - **Policy enforcement** -- action scopes, transition gates, spend limits, approval requirements
 - **Coordination scheduling** -- managers wake on cron schedules to triage, plan, and review
 
-ClawForce does NOT replace your agent platform. It layers governance on top of it.
+ClawForce does NOT replace your agent platform. It layers governance on top of
+it.
+
+That boundary matters:
+
+- your runtime/framework should own execution
+- ClawForce should own budgets, approvals, trust, task state, and operator
+  control
+
+The canonical onboarding path is:
+
+1. start with direct Codex execution
+2. scaffold the domain in `dry_run`
+3. verify routing, intended mutations, and decision surfaces
+4. use the dashboard as the primary operator surface
+5. move the domain to `live` only when the control plane is boring and honest
 
 ### Architecture at a Glance
 
@@ -57,7 +76,8 @@ User / Dashboard
 
 | File | Purpose |
 | --- | --- |
-| `project.yaml` | Main project configuration (agents, budgets, policies, channels, goals) |
+| `config.yaml` | Shared agent roster, mixins, and global defaults |
+| `domains/<domain>.yaml` | Domain membership plus domain-specific budgets, policies, rules, and paths |
 | `agents/<id>/SOUL.md` | Per-agent identity and domain expertise (auto-scaffolded) |
 | `DIRECTION.md` | Team vision, constraints, and autonomy level |
 | `STANDARDS.md` | Coding and quality standards for the team |
@@ -71,9 +91,12 @@ The fastest path to a working ClawForce setup. This uses the `startup` template 
 
 ### Prerequisites
 
-- Node.js 22+
-- An agent platform configured (OpenClaw or Claude Code)
+- Node.js 22.22+
+- Codex CLI configured and authenticated
+- Optional: OpenClaw configured only if you explicitly want its gateway or plugin runtime
 - Agent IDs for each agent you want to govern (these must match your platform's agent configuration)
+
+For ClawForce repo development, use the pinned runtime from `.nvmrc` (`25.6.1`). The package scripts enforce that runtime automatically.
 
 ### Step 1: Install ClawForce
 
@@ -81,23 +104,19 @@ The fastest path to a working ClawForce setup. This uses the `startup` template 
 npm install clawforce
 ```
 
-### Step 2: Create the Project Directory
+### Step 2: Create the Config Directory
 
-ClawForce projects live under a configurable `projectsDir`. Each project is a subdirectory containing a `project.yaml` file.
+ClawForce config lives under a configurable `projectsDir`. Each environment has a shared `config.yaml` plus one file per domain under `domains/`.
 
 ```bash
 mkdir -p <projectsDir>/my-project
 ```
 
-### Step 3: Write project.yaml
+### Step 3: Write config.yaml and the Domain File
 
-Create `<projectsDir>/my-project/project.yaml`:
+Create `<projectsDir>/config.yaml`:
 
 ```yaml
-id: my-project
-name: My Project
-dir: /path/to/your/project/code
-
 agents:
   lead:
     extends: manager
@@ -107,15 +126,25 @@ agents:
     extends: employee
     title: Developer
     reports_to: lead
+```
 
-budgets:
-  project:
-    dailyLimitCents: 5000    # $50/day
+Create `<projectsDir>/domains/my-project.yaml`:
 
+```yaml
+domain: my-project
+paths:
+  - /path/to/your/project/code
+execution:
+  mode: dry_run
+agents:
+  - lead
+  - dev-1
 manager:
   enabled: true
   agentId: lead
-  cronSchedule: "*/30 * * * *"
+budget:
+  project:
+    daily: { cents: 5000 }
 ```
 
 ### Step 4: Validate the Config
@@ -129,7 +158,7 @@ clawforce_setup action=validate yaml_content="<paste your YAML>"
 Or validate from a file path:
 
 ```
-clawforce_setup action=validate config_path="<projectsDir>/my-project/project.yaml"
+clawforce_setup action=validate config_path="<projectsDir>"
 ```
 
 ### Step 5: Activate the Project
@@ -147,6 +176,26 @@ clawforce_setup action=scaffold project_id="my-project"
 ```
 
 This creates `agents/<agent-id>/SOUL.md` files for each agent. Edit these to customize each agent's persona and domain knowledge.
+
+Starter domains and onboarding scaffolds now default to:
+
+```yaml
+execution:
+  mode: dry_run
+  default_mutation_policy: simulate
+```
+
+That is intentional. The expected setup flow is configure first, verify routing
+and intended mutations in `dry_run`, then move the domain to `live` once the
+control plane is boring and trustworthy.
+
+`dry_run` and `shadow` are different:
+
+- `dry_run` controls whether side effects are simulated or blocked
+- `shadow` is a workflow or entity state meaning "real workflow, not yet authoritative"
+
+Do not present `shadow` as a top-level product mode. It is part of rollout and
+authority modeling, not a substitute for domain execution mode.
 
 ### What Happens Next
 
@@ -168,6 +217,14 @@ An agent is an AI model instance governed by ClawForce. Each agent has:
 - A **reporting chain** (who they report to)
 - **Briefing sources** (context injected at session start)
 - **Expectations** (minimum tool calls required per session)
+
+ClawForce owns the governed identity for that agent. Your runtime or agent
+framework should own the executable profile for that same agent, including model
+selection, concrete tool wiring, sandbox details, and memory/loop settings.
+
+The shared key is the agent ID. The model should not be "two full agent
+definitions that happen to match"; it should be one governed worker record in
+ClawForce bound to one executable worker record in the runtime.
 
 ### Roles
 
@@ -374,26 +431,21 @@ Autonomy levels:
 
 ## Configuration Reference
 
-### project.yaml -- Top-Level Fields
+### config.yaml + domains/*.yaml -- Top-Level Fields
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `id` | string | yes | -- | Unique project identifier |
-| `name` | string | recommended | `"unnamed"` | Human-readable project name |
-| `dir` | string | recommended | `"."` | Absolute path to project code directory (supports `~`) |
+| `config.yaml` | file | yes | -- | Shared global config file |
+| `domains/<domain>.yaml` | file | yes | -- | One config file per domain |
 | `agents` | object | yes | -- | Agent configurations, keyed by agent ID |
-| `budgets` | object | no | -- | Budget limits for project and per-agent |
-| `policies` | array | no | -- | Policy enforcement rules |
-| `approval` | object | no | -- | Human approval policy |
-| `goals` | object | no | -- | Goal definitions with optional budget allocation |
-| `channels` | array | no | -- | Communication channel definitions |
-| `manager` | object | no | -- | Manager/orchestrator cron configuration |
-| `lifecycle` | object | no | -- | Auto-lifecycle settings |
-| `manager_behavior` | object | no | -- | Manager planning and escalation settings |
-| `telemetry` | object | no | -- | Session archiving and tool I/O capture |
-| `context_ownership` | object | no | -- | Who can update shared context files |
-| `dispatch` | object | no | -- | Dispatch throttle and concurrency |
-| `assignment` | object | no | -- | Auto-assignment engine |
+| `manager` | object | no | -- | Domain manager config with `agentId` and optional schedule overrides |
+| `budget` | object | no | -- | Domain budget limits |
+| `policies` | array | no | -- | Domain policy enforcement rules |
+| `approval` | object | no | -- | Shared human approval policy in `config.yaml` |
+| `goals` | object | no | -- | Domain goal definitions with optional budget allocation |
+| `channels` | array | no | -- | Domain communication channel definitions |
+| `lifecycle` | object | no | -- | Domain lifecycle settings |
+| `dispatch` | object | no | -- | Domain dispatch throttle and concurrency |
 | `review` | object | no | -- | Review gate configuration |
 | `safety` | object | no | -- | Safety guardrails |
 | `verification` | object | no | -- | Verification gates and git isolation |
@@ -401,10 +453,10 @@ Autonomy levels:
 | `risk_tiers` | object | no | -- | Risk classification policies |
 | `event_handlers` | object | no | -- | Event-to-action mappings |
 | `triggers` | object | no | -- | External trigger definitions |
-| `skills` | object | no | -- | Custom skill topics (domain-specific docs) |
-| `skill_packs` | object | no | -- | Reusable config bundles for agents |
+| `skills` | object | no | -- | Custom skill topics in `config.yaml` |
+| `skill_packs` | object | no | -- | Reusable config bundles for agents in `config.yaml` |
 | `knowledge` | object | no | -- | Knowledge lifecycle config |
-| `bootstrap_defaults` | object | no | -- | Default bootstrap config for all agents |
+| `bootstrap_defaults` | object | no | -- | Default bootstrap config for all agents in `config.yaml` |
 
 ### Agent Config Fields
 
@@ -415,7 +467,8 @@ agents:
   <agent-id>:
     extends: manager | employee | verifier | assistant
     title: "Job Title"
-    model: "anthropic/claude-sonnet-4-6"
+    codex:
+      model: "gpt-5.4"
     persona: "Custom system prompt personality"
     reports_to: <manager-agent-id>
     department: engineering
@@ -445,12 +498,14 @@ agents:
     contextBudgetChars: 30000
     maxTurnsPerSession: 50
 
-    # Cost optimization
-    bootstrapConfig:
-      maxChars: 12000
-      totalMaxChars: 50000
-    bootstrapExcludeFiles: [HEARTBEAT.md, IDENTITY.md, BOOTSTRAP.md]
-    allowedTools: [Bash, Read, Edit, Write, WebSearch]
+    # Runtime-scoped execution envelope
+    runtime:
+      bootstrapConfig:
+        maxChars: 12000
+        totalMaxChars: 50000
+      bootstrapExcludeFiles: [HEARTBEAT.md, IDENTITY.md, BOOTSTRAP.md]
+      allowedTools: [Bash, Read, Edit, Write, WebSearch]
+      workspacePaths: [packages/core, packages/shared]
 
     # Coordination (managers only)
     coordination:
@@ -502,7 +557,7 @@ agents:
 | --- | --- | --- | --- | --- |
 | `extends` | string | -- | -- | Preset to inherit from. Required for role detection. |
 | `title` | string | `"Manager"` | `"Employee"` | Human-readable job title |
-| `model` | string | -- | -- | AI model override (e.g. `"anthropic/claude-opus-4-6"`) |
+| `codex.model` | string | -- | -- | Codex/OpenAI model override (e.g. `"gpt-5.4"`) |
 | `persona` | string | (preset default) | (preset default) | System prompt personality. Overridden by SOUL.md if present. |
 | `reports_to` | string | -- | -- | Agent ID of this agent's manager. Determines escalation chain. |
 | `department` | string | -- | -- | Organizational department |
@@ -515,18 +570,22 @@ agents:
 | `compactBriefing` | boolean | `true` (managers) | -- | Render briefing as compact previews |
 | `contextBudgetChars` | number | `30000` | `30000` | Context window budget in characters |
 | `maxTurnsPerSession` | number | `50` | `50` | Max turns before session wrap-up |
+| `runtime` | object | preset-scoped | preset-scoped | Runtime-scoped execution envelope (`bootstrapConfig`, `bootstrapExcludeFiles`, `allowedTools`, `workspacePaths`) |
 | `coordination` | object | `{enabled: true, schedule: "*/30 * * * *"}` | `{enabled: false}` | Coordination scheduling |
 | `scheduling` | object | (see preset) | -- | Adaptive wake and planning |
 | `permissions` | object | -- | -- | Hiring, firing, budget permissions |
-| `bootstrapConfig` | object | `{maxChars: 12000, totalMaxChars: 50000}` | `{maxChars: 8000, totalMaxChars: 30000}` | Bootstrap context budget |
-| `bootstrapExcludeFiles` | string[] | (see preset) | (see preset) | Files to exclude from workspace bootstrap |
-| `allowedTools` | string[] | (all) | `[Bash, Read, Edit, Write, WebSearch]` | Platform tools available in sessions |
+| `bootstrapConfig` | object | `{maxChars: 12000, totalMaxChars: 50000}` | `{maxChars: 8000, totalMaxChars: 30000}` | Compatibility alias for `runtime.bootstrapConfig` |
+| `bootstrapExcludeFiles` | string[] | (see preset) | (see preset) | Compatibility alias for `runtime.bootstrapExcludeFiles` |
+| `allowedTools` | string[] | (all) | `[Bash, Read, Edit, Write, WebSearch]` | Compatibility alias for `runtime.allowedTools` |
+| `workspacePaths` | string[] | project root | project root | Compatibility alias for `runtime.workspacePaths` |
 | `jobs` | object | -- | -- | Scoped session definitions |
 | `memory` | object | -- | -- | Memory governance config |
 | `observe` | string[] | -- | -- | Event patterns to monitor |
 | `auto_recovery` | object | -- | -- | Auto-re-enable after failures |
 | `skill_pack` | string | -- | -- | Named config bundle to apply |
 | `skillCap` | number | `12` | `8` | Max skills an agent can hold |
+
+ClawForce now prefers the nested `runtime` block for these execution-envelope fields. The top-level aliases remain supported for compatibility while configs migrate.
 
 ### Job Definition Fields
 
@@ -540,7 +599,7 @@ jobs:
     cronTimezone: America/New_York
     sessionTarget: isolated     # "isolated" (default) or "main"
     wakeMode: now               # "now" (default) or "next-heartbeat"
-    model: anthropic/claude-sonnet-4-6
+    model: gpt-5.4
     timeoutSeconds: 300
     maxTurns: 20
     lightContext: false
@@ -601,16 +660,16 @@ These are approximate costs per session for budget planning:
 
 | Model | Cost per Session (cents) |
 | --- | --- |
-| `anthropic/claude-opus-4-6` | ~150 |
-| `anthropic/claude-sonnet-4-6` | ~30 |
-| `anthropic/claude-haiku-4-5` | ~8 |
+| `gpt-5.4` | ~80 |
+| `gpt-5.4-mini` | ~12 |
+| `gpt-5.4-nano` | ~3 |
 
 Default sessions per day: managers ~6, employees ~4.
 
-**Budget planning formula**: For a team with 1 manager (Sonnet) + 2 employees (Haiku):
-- Manager: 6 sessions x 30 cents = 180 cents/day
-- 2 Employees: 2 x 4 sessions x 8 cents = 64 cents/day
-- Recommended: ~$2.44/day, comfortable: ~$3.90/day
+**Budget planning formula**: For a team with 1 manager (GPT-5.4) + 2 employees (GPT-5.4 mini):
+- Manager: 6 sessions x 80 cents = 480 cents/day
+- 2 Employees: 2 x 4 sessions x 12 cents = 96 cents/day
+- Recommended: ~$5.76/day, comfortable: ~$9.22/day
 
 ### Policy Config
 
@@ -1073,8 +1132,6 @@ The assistant helps users interact with ClawForce through conversation. It manag
 
 **`onboarding`** -- Extends `assistant`. Guides users through first-time setup. Transitions to regular dashboard assistant after onboarding.
 
-**`scheduled`** -- Deprecated alias for `employee`.
-
 ---
 
 ## Operational Profiles
@@ -1188,7 +1245,8 @@ agents:
   lead:
     extends: manager
     title: Project Lead
-    model: anthropic/claude-haiku-4-5
+    codex:
+      model: gpt-5.4-mini
     jobs:
       coordination:
         cron: "0 */2 * * *"
@@ -1323,7 +1381,8 @@ agents:
     department: research
     team: ml
     reports_to: ml-lead
-    model: anthropic/claude-sonnet-4-6
+    codex:
+      model: gpt-5.4
 
   researcher-2:
     extends: employee
@@ -1331,7 +1390,8 @@ agents:
     department: research
     team: ml
     reports_to: ml-lead
-    model: anthropic/claude-sonnet-4-6
+    codex:
+      model: gpt-5.4
 
   analyst:
     extends: employee
@@ -1407,7 +1467,7 @@ ClawForce exposes these tools to agents based on their role's action scope. Empl
 
 | Action | Description |
 | --- | --- |
-| `explain` | Full reference docs -- project.yaml format, roles, examples. Pass `topic` for specific topics. |
+| `explain` | Full reference docs -- `config.yaml` + `domains/*.yaml` format, roles, examples. Pass `topic` for specific topics. |
 | `status` | Show current projects and registered agents. |
 | `validate` | Check a config before writing. Pass `yaml_content` or `config_path`. |
 | `activate` | Register or reload a project. Pass `project_id`. |
@@ -1555,11 +1615,11 @@ Available to all roles. Used for knowledge retrieval and avoiding duplicate work
 
 ### "No projects configured"
 
-Run `clawforce_setup action=status` to see what's registered. If nothing, create a `project.yaml` and activate it.
+Run `clawforce_setup action=status` to see what's registered. If nothing, create `config.yaml` plus a domain file and activate it.
 
 ### Agent ID Mismatch
 
-Agent IDs in `project.yaml` must exactly match the agent IDs configured in your platform (OpenClaw, Claude Code, etc.). Check your platform's agent configuration.
+Agent IDs in `config.yaml` must exactly match the agent IDs available in the execution environment you are dispatching through. Check that runtime or adapter configuration if there is a mismatch.
 
 ### Budget Exceeded
 
@@ -1585,7 +1645,7 @@ Common issues:
 
 ### Re-loading Config Changes
 
-After editing `project.yaml`, re-activate to pick up changes:
+After editing `config.yaml` or a domain file, re-activate to pick up changes:
 ```
 clawforce_setup action=activate project_id="my-project"
 ```

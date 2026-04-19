@@ -6,7 +6,7 @@
  * an agent keeps failing after recovery.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { enableAgent, listDisabledAgents, isAgentEffectivelyDisabled } from "./disabled-store.js";
@@ -35,7 +35,7 @@ export function checkAutoRecovery(
   const disabledAgents = listDisabledAgents(projectId, db);
 
   for (const agent of disabledAgents) {
-    const config = getAgentConfig(agent.agentId);
+    const config = getAgentConfig(agent.agentId, projectId);
     if (!config?.config.auto_recovery?.enabled) continue;
 
     const cooldownMs = (config.config.auto_recovery.cooldown_minutes ?? 10) * 60 * 1000;

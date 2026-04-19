@@ -32,6 +32,21 @@ describe("openclaw-reader", () => {
     expect(getAgentModel("worker")).toBe("claude-sonnet-4-6");
   });
 
+  it("flattens default model objects to their primary model", () => {
+    setOpenClawConfig({
+      agents: {
+        list: [{ id: "worker" }],
+        defaults: {
+          model: {
+            primary: "openai-codex/gpt-5.4",
+            fallbacks: ["openai-codex/gpt-4.1"],
+          },
+        },
+      },
+    });
+    expect(getAgentModel("worker")).toBe("openai-codex/gpt-5.4");
+  });
+
   it("returns null for unknown agent", () => {
     setOpenClawConfig({ agents: { list: [], defaults: {} } });
     expect(getAgentModel("nobody")).toBeNull();

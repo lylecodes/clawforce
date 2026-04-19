@@ -29,6 +29,42 @@ vi.mock("../../src/channels/messages.js", () => ({
   sendChannelMessage: vi.fn(),
 }));
 
+vi.mock("../../src/app/commands/operator-messages.js", () => ({
+  runSendDirectMessageCommand: vi.fn((_projectId: string, input: Record<string, unknown>) => ({
+    ok: true,
+    status: 201,
+    message: {
+      id: "msg-1",
+      projectId: "test-project",
+      fromAgent: "user",
+      toAgent: input.toAgent,
+      content: input.content,
+      type: "direct",
+      priority: input.priority ?? "normal",
+      status: "queued",
+      channelId: null,
+      parentMessageId: null,
+      createdAt: 123,
+      deliveredAt: null,
+      readAt: null,
+      protocolStatus: null,
+      responseDeadline: null,
+      metadata: input.proposalId ? { proposalId: input.proposalId } : null,
+    },
+  })),
+}));
+
+vi.mock("../../src/app/commands/setup-controls.js", () => ({
+  runRequestControllerHandoffCommand: vi.fn((_projectId: string) => ({
+    status: 200,
+    body: { ok: true, actionId: "setup-handoff-1", mode: "handoff_requested" },
+  })),
+  runRecoverRecurringRunCommand: vi.fn((_projectId: string, taskId: string) => ({
+    status: 200,
+    body: { ok: true, actionId: "setup-recovery-1", taskId, mode: "replayed" },
+  })),
+}));
+
 vi.mock("../../src/dashboard/sse.js", () => ({
   emitSSE: vi.fn(),
 }));
@@ -59,20 +95,26 @@ vi.mock("../../src/budget/normalize.js", () => ({
   normalizeBudgetConfig: vi.fn((config: unknown) => config ?? {}),
 }));
 
-vi.mock("../../src/config/api-service.js", () => ({
-  updateDomainConfig: vi.fn(() => ({ ok: true })),
-  updateGlobalAgentConfig: vi.fn(() => ({ ok: true })),
-  upsertGlobalAgents: vi.fn(() => ({ ok: true })),
-  writeDomainConfig: vi.fn(() => ({ ok: true })),
-  reloadAllDomains: vi.fn(() => ({ domains: ["test-project"], errors: [] })),
-  readDomainConfig: vi.fn(() => ({
+vi.mock("../../src/config/api-service.js", () => {
+  const saveDomainConfigSection = vi.fn(() => ({ ok: true }));
+  const previewDomainConfigSectionChange = vi.fn((_projectId: string, section: string) => ({
+    ok: true,
+    preview: {
+      before: {},
+      after: {},
+      valid: true,
+      changedPaths: [section],
+      changedKeys: [section],
+    },
+  }));
+  const readDomainConfig = vi.fn(() => ({
     domain: "test-project",
     agents: ["a1", "a2"],
     goals: {
       existing: { allocation: 25, description: "Existing goal" },
     },
-  })),
-  readGlobalConfig: vi.fn(() => ({
+  }));
+  const readGlobalConfig = vi.fn(() => ({
     agents: {
       a1: {
         briefing: [
@@ -92,8 +134,34 @@ vi.mock("../../src/config/api-service.js", () => ({
         },
       },
     },
-  })),
-}));
+  }));
+  const reloadDomainRuntime = vi.fn(() => ({ domains: ["test-project"], errors: [] }));
+  const reloadDomainRuntimes = vi.fn(() => ({ domains: ["test-project"], errors: [] }));
+  const updateGlobalAgentConfig = vi.fn(() => ({ ok: true }));
+  const upsertGlobalAgents = vi.fn(() => ({ ok: true }));
+  const writeDomainConfig = vi.fn(() => ({ ok: true }));
+  return {
+    createConfigService: vi.fn(() => ({
+      readDomainConfig,
+      readGlobalConfig,
+      reloadDomainRuntime,
+      reloadDomainRuntimes,
+      updateGlobalAgentConfig,
+      upsertGlobalAgents,
+      writeDomainConfig,
+    })),
+    saveDomainConfigSection,
+    previewDomainConfigSectionChange,
+    updateDomainConfig: saveDomainConfigSection,
+    reloadDomainRuntime,
+    reloadDomainRuntimes,
+    updateGlobalAgentConfig,
+    upsertGlobalAgents,
+    writeDomainConfig,
+    readDomainConfig,
+    readGlobalConfig,
+  };
+});
 
 vi.mock("../../src/db.js", () => ({
   getDb: vi.fn(() => ({
@@ -135,6 +203,7 @@ const {
 } = await import("../../src/enforcement/disabled-store.js");
 const { startMeeting, concludeMeeting } = await import("../../src/channels/meeting.js");
 const { sendChannelMessage } = await import("../../src/channels/messages.js");
+const { runSendDirectMessageCommand } = await import("../../src/app/commands/operator-messages.js");
 const { emitSSE } = await import("../../src/dashboard/sse.js");
 const { writeAuditEntry } = await import("../../src/audit.js");
 const {
@@ -148,13 +217,18 @@ const { normalizeBudgetConfig } = await import("../../src/budget/normalize.js");
 const { getDb } = await import("../../src/db.js");
 const {
   updateDomainConfig,
+  reloadDomainRuntime,
+  reloadDomainRuntimes,
   readDomainConfig,
   updateGlobalAgentConfig,
   readGlobalConfig,
   upsertGlobalAgents,
   writeDomainConfig,
-  reloadAllDomains,
 } = await import("../../src/config/api-service.js");
+const {
+  runRequestControllerHandoffCommand,
+  runRecoverRecurringRunCommand,
+} = await import("../../src/app/commands/setup-controls.js");
 
 describe("handleStarterDomainCreate", () => {
   beforeEach(() => {
@@ -163,7 +237,7 @@ describe("handleStarterDomainCreate", () => {
     (readGlobalConfig as any).mockReturnValue({ agents: {} });
     (upsertGlobalAgents as any).mockReturnValue({ ok: true });
     (writeDomainConfig as any).mockReturnValue({ ok: true });
-    (reloadAllDomains as any).mockReturnValue({ domains: ["starter-co"], errors: [] });
+    (reloadDomainRuntime as any).mockReturnValue({ domains: ["starter-co"], errors: [] });
   });
 
   it("creates a starter domain for a new business", () => {
@@ -189,11 +263,16 @@ describe("handleStarterDomainCreate", () => {
     expect(writeDomainConfig).toHaveBeenCalledWith("starter-co", expect.objectContaining({
       domain: "starter-co",
       agents: ["starter-co-lead", "starter-co-builder"],
-      orchestrator: "starter-co-lead",
+      manager: { enabled: true, agentId: "starter-co-lead" },
       paths: ["~/work/starter"],
       operational_profile: "high",
       template: "startup",
+      execution: {
+        mode: "dry_run",
+        default_mutation_policy: "simulate",
+      },
     }));
+    expect(reloadDomainRuntime).toHaveBeenCalledWith("starter-co");
   });
 
   it("rejects starter creation when the domain already exists", () => {
@@ -215,7 +294,7 @@ describe("handleStarterDomainCreate", () => {
         lead: { extends: "manager", title: "Existing Lead" },
       },
     });
-    (reloadAllDomains as any).mockReturnValue({ domains: ["governed"], errors: [] });
+    (reloadDomainRuntime as any).mockReturnValue({ domains: ["governed"], errors: [] });
 
     const result = handleStarterDomainCreate({
       domainId: "governed",
@@ -238,8 +317,13 @@ describe("handleStarterDomainCreate", () => {
     expect(writeDomainConfig).toHaveBeenCalledWith("governed", expect.objectContaining({
       domain: "governed",
       agents: ["lead", "worker-a", "worker-b"],
-      orchestrator: "lead",
+      manager: { enabled: true, agentId: "lead" },
+      execution: {
+        mode: "dry_run",
+        default_mutation_policy: "simulate",
+      },
     }));
+    expect(reloadDomainRuntime).toHaveBeenCalledWith("governed");
   });
 
   it("rejects governance starter creation without existing agents", () => {
@@ -436,6 +520,12 @@ describe("handleAction", () => {
   it("persists a direct agent message through the sync action path", () => {
     const result = handleAction("test-project", "agents/a1/message", { message: "hello" });
     expect(result.status).toBe(201);
+    expect(runSendDirectMessageCommand).toHaveBeenCalledWith("test-project", {
+      toAgent: "a1",
+      content: "hello",
+      priority: undefined,
+      proposalId: undefined,
+    });
     expect(result.body).toEqual(expect.objectContaining({
       projectId: "test-project",
       toAgent: "a1",
@@ -586,6 +676,7 @@ describe("handleAction", () => {
         hourly: { cents: 200, tokens: 5000, requests: 5 },
       },
       "user",
+      { reload: "none" },
     );
     expect(updateDomainConfig).toHaveBeenNthCalledWith(
       2,
@@ -593,6 +684,7 @@ describe("handleAction", () => {
       "operational_profile",
       "high",
       "user",
+      { reload: "none" },
     );
     expect(updateDomainConfig).toHaveBeenNthCalledWith(
       3,
@@ -603,7 +695,9 @@ describe("handleAction", () => {
         new_one: { allocation: 20 },
       },
       "user",
+      { reload: "none" },
     );
+    expect(reloadDomainRuntimes).toHaveBeenCalledWith(["test-project"]);
   });
 
   it("saves agents by upserting global config and updating the domain agent list", () => {
@@ -651,7 +745,9 @@ describe("handleAction", () => {
       "agents",
       ["a1"],
       "user",
+      { reload: "none" },
     );
+    expect(reloadDomainRuntimes).toHaveBeenCalledWith(["test-project"]);
   });
 
   it("parses new file briefing labels into structured context sources", () => {
@@ -693,6 +789,33 @@ describe("handleAction", () => {
         expectations: [
           { tool: "clawforce_log", action: ["write", "outcome"], min_calls: 3 },
         ],
+      }),
+    }, "user");
+  });
+
+  it("saves runtime envelope and binding through the agents config surface", () => {
+    const result = handleAction("test-project", "config/save", {
+      section: "agents",
+      data: [
+        {
+          id: "a1",
+          runtimeRef: "existing-openclaw-a1",
+          runtime: {
+            allowedTools: ["Read", "Edit"],
+            workspacePaths: ["packages/core"],
+          },
+        },
+      ],
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(upsertGlobalAgents).toHaveBeenCalledWith({
+      a1: expect.objectContaining({
+        runtime_ref: "existing-openclaw-a1",
+        runtime: {
+          allowedTools: ["Read", "Edit"],
+          workspacePaths: ["packages/core"],
+        },
       }),
     }, "user");
   });
@@ -812,6 +935,7 @@ describe("handleAction", () => {
         },
       },
     }, "user");
+    expect(reloadDomainRuntimes).toHaveBeenCalledWith(["test-project"]);
   });
 
   it("clears omitted jobs for project agents when saving the jobs section", () => {
@@ -827,6 +951,7 @@ describe("handleAction", () => {
     expect(updateGlobalAgentConfig).toHaveBeenNthCalledWith(2, "a2", {
       jobs: {},
     }, "user");
+    expect(reloadDomainRuntimes).toHaveBeenCalledWith(["test-project"]);
   });
 
   it("validates defaults as a partial agent config object", () => {
@@ -1083,6 +1208,18 @@ describe("handleAction", () => {
     expect(killStuckAgent).toHaveBeenCalledTimes(8);
     // 3 audit entries: disable_domain, emergency_stop, lock_bypassed
     expect(writeAuditEntry).toHaveBeenCalledTimes(3);
+  });
+
+  it("routes setup controller handoff actions", () => {
+    const result = handleAction("test-project", "setup/controller/handoff", { actor: "user" });
+    expect(result.status).toBe(200);
+    expect(runRequestControllerHandoffCommand).toHaveBeenCalledWith("test-project", { actor: "user" });
+  });
+
+  it("routes setup recurring recovery actions", () => {
+    const result = handleAction("test-project", "setup/recurring/task-123/recover", { actor: "user" });
+    expect(result.status).toBe(200);
+    expect(runRecoverRecurringRunCommand).toHaveBeenCalledWith("test-project", "task-123", { actor: "user" });
   });
 
   // --- Unknown ---

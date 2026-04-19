@@ -58,7 +58,7 @@ let shutdownRequested = false;
 const activeProcesses = new Set<ChildProcess>();
 
 // --- MCP server script path ---
-const mcpServerPath = path.resolve(import.meta.dirname, "mcp-server.js");
+const mcpServerPath = path.resolve(import.meta.dirname, "../mcp-server.js");
 
 // --- Temp dir for per-dispatch MCP configs ---
 const tmpDir = path.join(projectsDir, "tmp");
@@ -151,6 +151,8 @@ async function dispatchViaClaude(
       projectId: item.projectId,
       projectDir: agentEntry.projectDir,
       sessionKey: `dispatch:${item.id}`,
+      taskId: item.taskId,
+      queueItemId: item.id,
     });
     if (systemContext) {
       contextParts.push(systemContext);

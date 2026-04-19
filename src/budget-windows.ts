@@ -5,7 +5,7 @@
  * Provides budget status with remaining capacity and alert thresholds.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite-driver.js";
 import { getDb } from "./db.js";
 import { checkBudgetV2 } from "./budget/check-v2.js";
 import type { BudgetCheckResult } from "./types.js";

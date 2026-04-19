@@ -5,7 +5,7 @@
  * into a forward-looking capacity report for manager briefing.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite-driver.js";
 import { getDb } from "./db.js";
 import { getBudgetStatus, type BudgetStatus } from "./budget-windows.js";
 import { getAllProviderUsage, type ProviderUsage } from "./rate-limits.js";

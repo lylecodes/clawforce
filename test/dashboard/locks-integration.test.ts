@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { getMemoryDb } from "../../src/db.js";
 import { ensureLockTable, setOverridePolicy } from "../../src/locks/store.js";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 
 // We test lock actions and queryLocks using the store directly (not via HTTP routing)
 // to keep the test self-contained. Integration with actions.ts is verified via mocking.

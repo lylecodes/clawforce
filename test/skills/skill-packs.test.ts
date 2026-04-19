@@ -43,7 +43,7 @@ agents:
     extends: employee
     skill_pack: code_reviewer
 `;
-    const configPath = path.join(tmpDir, "project.yaml");
+    const configPath = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(configPath, yaml, "utf-8");
 
     const config = loadWorkforceConfig(configPath);
@@ -79,7 +79,7 @@ agents:
   agent1:
     extends: employee
 `;
-    const configPath = path.join(tmpDir, "project.yaml");
+    const configPath = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(configPath, yaml, "utf-8");
 
     const config = loadWorkforceConfig(configPath);
@@ -105,7 +105,7 @@ agents:
   agent1:
     extends: employee
 `;
-    const configPath = path.join(tmpDir, "project.yaml");
+    const configPath = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(configPath, yaml, "utf-8");
 
     const config = loadWorkforceConfig(configPath);

@@ -56,7 +56,7 @@ describe("operational profile — config integration", () => {
           domain: "test",
           agents: ["bot"],
           operational_profile: profile,
-          orchestrator: "lead",
+          manager: { enabled: true, agentId: "lead" },
           paths: ["/tmp"],
           rules: [{ name: "r", trigger: { event: "e" }, action: { agent: "a", prompt_template: "p" } }],
         } as any);
@@ -74,7 +74,7 @@ describe("operational profile — config integration", () => {
       const warnings = validateDomainQuality({
         domain: "test",
         agents: ["bot"],
-        orchestrator: "lead",
+        manager: { enabled: true, agentId: "lead" },
         paths: ["/tmp"],
         rules: [{ name: "r", trigger: { event: "e" }, action: { agent: "a", prompt_template: "p" } }],
       });

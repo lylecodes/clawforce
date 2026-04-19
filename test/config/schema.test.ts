@@ -4,7 +4,7 @@ describe("config schema types", () => {
   it("validates a minimal global config", async () => {
     const { validateGlobalConfig } = await import("../../src/config/schema.js");
     const config = {
-      defaults: { model: "anthropic/claude-opus-4-6" },
+      defaults: { model: "gpt-5.4" },
       agents: {
         "my-agent": { extends: "employee" },
       },
@@ -24,12 +24,52 @@ describe("config schema types", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("validates a domain config with execution settings", async () => {
+    const { validateDomainConfig } = await import("../../src/config/schema.js");
+    const config = {
+      domain: "rentright",
+      agents: ["my-agent"],
+      execution: {
+        mode: "dry_run",
+        default_mutation_policy: "simulate",
+        policies: {
+          tools: {
+            clawforce_entity: {
+              create: "allow",
+              transition: "require_approval",
+            },
+          },
+          commands: [
+            { match: "npm run data:validate*", effect: "allow" },
+          ],
+        },
+      },
+    };
+    const result = validateDomainConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
   it("rejects domain config without domain name", async () => {
     const { validateDomainConfig } = await import("../../src/config/schema.js");
     const config = { agents: ["my-agent"] } as any;
     const result = validateDomainConfig(config);
     expect(result.valid).toBe(false);
     expect(result.errors[0].message).toContain("domain");
+  });
+
+  it("rejects domain config with invalid execution mode", async () => {
+    const { validateDomainConfig } = await import("../../src/config/schema.js");
+    const config = {
+      domain: "rentright",
+      agents: ["my-agent"],
+      execution: {
+        mode: "staging",
+      },
+    } as any;
+    const result = validateDomainConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((error) => error.field === "execution")).toBe(true);
   });
 
   it("validates a rule definition", async () => {

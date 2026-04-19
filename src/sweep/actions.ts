@@ -13,26 +13,47 @@
  * - Process events + drain dispatch queue (backstop)
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { killAllStuckAgents } from "../audit/auto-kill.js";
-import { detectStuckAgents } from "../audit/stuck-detector.js";
+import { detectPersistedStuckAgents, detectStuckAgents } from "../audit/stuck-detector.js";
 import { getActiveSessions } from "../enforcement/tracker.js";
 import { resetDailyBudgets } from "../budget.js";
 import { getDb } from "../db.js";
-import { transitionTask } from "../tasks/ops.js";
+import { releaseTaskLease, transitionTask } from "../tasks/ops.js";
 import { getUnresolvedBlockers } from "../tasks/deps.js";
 import type { Task, TaskState } from "../types.js";
 import { getExtendedProjectConfig } from "../project.js";
 import { enforceWorkerCompliance, getIncompliantWorkers } from "../tasks/compliance.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { advanceWorkflow, getPhaseStatus, listWorkflows } from "../workflow.js";
-import { ingestEvent, reclaimStaleEvents } from "../events/store.js";
-import { enqueue, failItem as failQueueItem, reclaimExpiredLeases } from "../dispatch/queue.js";
+import { ingestEvent, reclaimStaleEvents, requeueEvents } from "../events/store.js";
+import {
+  enqueue,
+  failItem as failQueueItem,
+  reclaimExpiredLeases,
+  releaseToQueued,
+} from "../dispatch/queue.js";
+import { parseDispatchCronJobName } from "../dispatch/cron-job-name.js";
 import { releaseStaleReservations } from "../budget/reservation-cleanup.js";
 import { createMessage } from "../messaging/store.js";
 import { findManagerAgent } from "../events/actions.js";
 import { processAndDispatch } from "../dispatch/dispatcher.js";
+import { processEvents } from "../events/router.js";
 import { checkSpendRateWarning } from "../safety.js";
+import { getCronService } from "../manager-cron.js";
+import { getTask } from "../tasks/ops.js";
+import { getResolvedLinkedIssueForTask } from "../entities/remediation.js";
+import {
+  acquireControllerLease,
+  getCurrentControllerGeneration,
+  requestControllerGeneration,
+  releaseControllerLease,
+} from "../runtime/controller-leases.js";
+import {
+  markProposalExecutionApplied,
+  markProposalExecutionPending,
+} from "../approval/resolve.js";
+import { replayRecurringJobTask, scheduleDueRecurringJobs } from "../scheduling/recurring-jobs.js";
 
 export type SweepResult = {
   stale: number;
@@ -43,6 +64,7 @@ export type SweepResult = {
   complianceBlocked: number;
   stuckKilled: number;
   proposalsExpired: number;
+  proposalExecutionsRecovered: number;
   protocolsExpired: number;
   goalsNeedingPlan: number;
   goalsCascadeAchieved: number;
@@ -59,10 +81,18 @@ export type SweepResult = {
   meetingsStale: number;
   frequencyDispatched: number;
   staleDispatchRecovered: number;
+  orphanedDispatchRecovered: number;
   reservationsReleased: number;
   orphanedCronRecovered: number;
   agentsRecovered: number;
   agentsEscalated: number;
+  controller?: {
+    skipped: boolean;
+    ownerId: string;
+    ownerLabel: string;
+    purpose: string;
+    expiresAt: number;
+  };
 };
 
 export type SweepOptions = {
@@ -72,12 +102,15 @@ export type SweepOptions = {
   proposalTtlMs?: number;
   /** How long a dispatch queue item can sit in 'dispatched' status with no active session before recovery. Default 10 minutes. */
   staleDispatchTimeoutMs?: number;
+  backstopDispatchMode?: "full" | "events_only";
   dbOverride?: DatabaseSync;
 };
 
 const DEFAULT_STALE_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 hours
 const DEFAULT_PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const DEFAULT_STALE_DISPATCH_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const DEFAULT_WORKFLOW_DRAIN_PASSES = 10;
+const MISSING_ACCEPTANCE_CRITERIA_PREFIX = "Task description missing acceptance criteria";
 
 /** Generate a stable dedup key from finding type + entity ID.
  * No timestamp component — the same condition produces the same event ID
@@ -86,35 +119,327 @@ function sweepDedupKey(prefix: string, id: string): string {
   return `${prefix}:${id}`;
 }
 
+function collectActiveSessionDispatchIds(projectId: string, db: DatabaseSync): Set<string> {
+  const activeSessionDispatchIds = new Set<string>();
+
+  for (const session of getActiveSessions()) {
+    if (session.dispatchContext?.queueItemId) {
+      activeSessionDispatchIds.add(session.dispatchContext.queueItemId);
+    }
+  }
+
+  try {
+    const trackedRows = db.prepare(
+      "SELECT dispatch_context FROM tracked_sessions WHERE project_id = ? AND dispatch_context IS NOT NULL",
+    ).all(projectId) as { dispatch_context?: string | null }[];
+
+    for (const row of trackedRows) {
+      if (!row.dispatch_context) continue;
+      try {
+        const parsed = JSON.parse(row.dispatch_context) as { queueItemId?: string };
+        if (parsed.queueItemId) activeSessionDispatchIds.add(parsed.queueItemId);
+      } catch {
+        // Ignore malformed persisted session state during recovery.
+      }
+    }
+  } catch (err) {
+    safeLog("sweep.collectActiveSessionDispatchIds", err);
+  }
+
+  return activeSessionDispatchIds;
+}
+
+function recoverStrandedRecurringDispatches(projectId: string, db: DatabaseSync): number {
+  let recovered = 0;
+  const strandedRecurringTasks = db.prepare(
+    `SELECT t.id
+     FROM tasks t
+     WHERE t.project_id = ?
+       AND t.state IN ('OPEN', 'ASSIGNED', 'BLOCKED')
+       AND json_extract(COALESCE(t.metadata, '{}'), '$.recurringJob.agentId') IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM dispatch_queue q
+         WHERE q.project_id = t.project_id
+           AND q.task_id = t.id
+           AND q.status IN ('queued', 'leased', 'dispatched')
+       )
+       AND EXISTS (
+         SELECT 1
+         FROM dispatch_queue q
+         WHERE q.project_id = t.project_id
+           AND q.task_id = t.id
+           AND q.status = 'failed'
+           AND q.last_error LIKE ?
+       )`,
+  ).all(projectId, `${MISSING_ACCEPTANCE_CRITERIA_PREFIX}%`) as Array<{ id: string }>;
+
+  for (const row of strandedRecurringTasks) {
+    const failedItem = db.prepare(
+      `SELECT id, priority, payload
+       FROM dispatch_queue
+       WHERE project_id = ?
+         AND task_id = ?
+         AND status = 'failed'
+       ORDER BY completed_at DESC, created_at DESC
+       LIMIT 1`,
+    ).get(projectId, row.id) as {
+      id?: string;
+      priority?: number;
+      payload?: string | null;
+    } | undefined;
+    if (!failedItem?.id) continue;
+
+    const replay = replayRecurringJobTask(projectId, row.id, "system:sweep", db);
+    if (!replay.ok) {
+      safeLog("sweep.recurringDispatchRecovery", replay.reason);
+      continue;
+    }
+
+    const payload = failedItem.payload ? JSON.parse(failedItem.payload) as Record<string, unknown> : undefined;
+    const queueItem = enqueue(
+      projectId,
+      replay.task.id,
+      payload,
+      failedItem.priority,
+      db,
+      undefined,
+      false,
+      true,
+    );
+    if (!queueItem) {
+      safeLog("sweep.recurringDispatchRecovery", `Failed to enqueue replayed recurring task ${replay.task.id}`);
+      continue;
+    }
+
+    emitDiagnosticEvent({
+      type: "recurring_dispatch_recovered",
+      projectId,
+      taskId: row.id,
+      previousQueueItemId: failedItem.id,
+      replayTaskId: replay.task.id,
+      queueItemId: queueItem.id,
+    });
+
+    ingestEvent(projectId, "sweep_finding", "cron", {
+      finding: "recurring_dispatch_recovered",
+      taskId: row.id,
+      previousQueueItemId: failedItem.id,
+      replayTaskId: replay.task.id,
+      queueItemId: queueItem.id,
+    }, sweepDedupKey("recurring-dispatch", row.id), db);
+
+    recovered++;
+  }
+
+  return recovered;
+}
+
+function reconcileApprovedWorkflowMutationExecutions(projectId: string, db: DatabaseSync): number {
+  const rows = db.prepare(`
+    SELECT
+      p.id,
+      p.execution_status,
+      p.execution_task_id,
+      lead.id AS lead_task_id,
+      lead.state AS lead_task_state,
+      source.id AS source_task_id,
+      source.state AS source_task_state,
+      evt.id AS event_id,
+      evt.status AS event_status
+    FROM proposals p
+    LEFT JOIN tasks lead
+      ON lead.id = (
+        SELECT t.id
+        FROM tasks t
+        WHERE t.project_id = p.project_id
+          AND t.origin = 'lead_proposal'
+          AND t.origin_id = p.id
+        ORDER BY t.created_at DESC
+        LIMIT 1
+      )
+    LEFT JOIN tasks source
+      ON source.project_id = p.project_id
+     AND source.id = json_extract(p.approval_policy_snapshot, '$.sourceTaskId')
+    LEFT JOIN events evt
+      ON evt.id = (
+        SELECT e.id
+        FROM events e
+        WHERE e.project_id = p.project_id
+          AND e.type = 'proposal_approved'
+          AND json_extract(e.payload, '$.proposalId') = p.id
+        ORDER BY e.created_at DESC
+        LIMIT 1
+      )
+    WHERE p.project_id = ?
+      AND p.status = 'approved'
+      AND p.origin = 'workflow_mutation'
+      AND (p.execution_status IS NULL OR p.execution_status = 'pending')
+    ORDER BY COALESCE(p.execution_updated_at, p.resolved_at, p.created_at) DESC
+    LIMIT 25
+  `).all(projectId) as Array<Record<string, unknown>>;
+
+  let recovered = 0;
+  const currentGeneration = getCurrentControllerGeneration();
+  const activeSourceStates = new Set(["OPEN", "ASSIGNED", "IN_PROGRESS", "REVIEW"]);
+
+  for (const row of rows) {
+    const proposalId = row.id as string;
+    const leadTaskId = typeof row.lead_task_id === "string" ? row.lead_task_id : null;
+    const sourceTaskState = typeof row.source_task_state === "string" ? row.source_task_state : null;
+    const sourceStillActive = !!sourceTaskState && activeSourceStates.has(sourceTaskState);
+    const alreadyApplied = !!leadTaskId && !sourceStillActive;
+
+    if (alreadyApplied) {
+      markProposalExecutionApplied(projectId, proposalId, {
+        taskId: (typeof row.execution_task_id === "string" ? row.execution_task_id : null) ?? leadTaskId,
+      }, db);
+      recovered++;
+      continue;
+    }
+
+    requestControllerGeneration(projectId, {
+      generation: currentGeneration,
+      requestedBy: "system:sweep",
+      reason: `proposal_reconcile:${proposalId}`,
+      metadata: { proposalId, origin: "workflow_mutation" },
+    }, db, true);
+    markProposalExecutionPending(projectId, proposalId, {
+      requiredGeneration: currentGeneration,
+      taskId: leadTaskId,
+    }, db);
+
+    const eventId = typeof row.event_id === "string" ? row.event_id : null;
+    const eventStatus = typeof row.event_status === "string" ? row.event_status : null;
+    if (eventId && eventStatus && !["pending", "processing"].includes(eventStatus)) {
+      requeueEvents(projectId, { ids: [eventId] }, db);
+      recovered++;
+      continue;
+    }
+
+    if (!eventId) {
+      ingestEvent(projectId, "proposal_approved", "internal", {
+        proposalId,
+      }, `proposal-approved:${proposalId}`, db);
+      recovered++;
+    }
+  }
+
+  return recovered;
+}
+
+async function drainWorkflowBackstop(
+  projectId: string,
+  db: DatabaseSync,
+  options: {
+    maxPasses?: number;
+    dispatchMode?: "full" | "events_only";
+  } = {},
+): Promise<{
+  eventsProcessed: number;
+  dispatched: number;
+}> {
+  let eventsProcessed = 0;
+  let dispatched = 0;
+  const maxPasses = options.maxPasses ?? DEFAULT_WORKFLOW_DRAIN_PASSES;
+  const dispatchMode = options.dispatchMode ?? "full";
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    if (dispatchMode === "events_only") {
+      const processed = processEvents(projectId, db);
+      eventsProcessed += processed;
+      if (processed === 0) break;
+      continue;
+    }
+
+    const result = await processAndDispatch(projectId, db);
+    eventsProcessed += result.eventsProcessed;
+    dispatched += result.dispatched;
+
+    if (result.controller?.skipped) break;
+    if (result.eventsProcessed === 0 && result.dispatched === 0) break;
+  }
+
+  return { eventsProcessed, dispatched };
+}
+
 export async function sweep(options: SweepOptions): Promise<SweepResult> {
   const { projectId, dbOverride } = options;
   const db = dbOverride ?? getDb(projectId);
+  const controllerLease = acquireControllerLease(projectId, {
+    purpose: "sweep",
+  }, db);
 
-  // Read sweep config from domain yaml, falling back to options, then defaults
-  const extConfig = getExtendedProjectConfig(projectId);
-  const sweepConfig = extConfig?.sweep;
-  const staleThreshold = options.staleThresholdMs ?? sweepConfig?.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
-  const proposalTtl = options.proposalTtlMs ?? sweepConfig?.proposalTtlMs ?? DEFAULT_PROPOSAL_TTL_MS;
-  const staleDispatchTimeout = options.staleDispatchTimeoutMs ?? sweepConfig?.staleDispatchTimeoutMs ?? DEFAULT_STALE_DISPATCH_TIMEOUT_MS;
-  const now = Date.now();
+  if (!controllerLease.ok) {
+    return {
+      stale: 0,
+      autoBlocked: 0,
+      deadlineExpired: 0,
+      workflowsAdvanced: 0,
+      escalated: 0,
+      complianceBlocked: 0,
+      stuckKilled: 0,
+      proposalsExpired: 0,
+      proposalExecutionsRecovered: 0,
+      protocolsExpired: 0,
+      goalsNeedingPlan: 0,
+      goalsCascadeAchieved: 0,
+      leasesReclaimed: 0,
+      eventsProcessed: 0,
+      dispatched: 0,
+      budgetsReset: 0,
+      autoAssigned: 0,
+      sloChecked: 0,
+      sloBreach: 0,
+      alertsFired: 0,
+      anomaliesDetected: 0,
+      reviewEscalated: 0,
+      meetingsStale: 0,
+      frequencyDispatched: 0,
+      staleDispatchRecovered: 0,
+      orphanedDispatchRecovered: 0,
+      reservationsReleased: 0,
+      orphanedCronRecovered: 0,
+      agentsRecovered: 0,
+      agentsEscalated: 0,
+      controller: {
+        skipped: true,
+        ownerId: controllerLease.lease.ownerId,
+        ownerLabel: controllerLease.lease.ownerLabel,
+        purpose: controllerLease.lease.purpose,
+        expiresAt: controllerLease.lease.expiresAt,
+      },
+    };
+  }
 
-  let stale = 0;
-  let autoBlocked = 0;
-  let deadlineExpired = 0;
-  let workflowsAdvanced = 0;
-  let escalated = 0;
-  let complianceBlocked = 0;
-  let proposalsExpired = 0;
-  let protocolsExpired = 0;
-  let goalsNeedingPlan = 0;
-  let goalsCascadeAchieved = 0;
-  let leasesReclaimed = 0;
-  let staleDispatchRecoveredCount = 0;
-  let reservationsReleased = 0;
-  let budgetsReset = 0;
-  let reviewEscalated = 0;
-  let meetingsStale = 0;
-  let orphanedCronRecovered = 0;
+  try {
+    // Read sweep config from domain yaml, falling back to options, then defaults
+    const extConfig = getExtendedProjectConfig(projectId);
+    const sweepConfig = extConfig?.sweep;
+    const staleThreshold = options.staleThresholdMs ?? sweepConfig?.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
+    const proposalTtl = options.proposalTtlMs ?? sweepConfig?.proposalTtlMs ?? DEFAULT_PROPOSAL_TTL_MS;
+    const staleDispatchTimeout = options.staleDispatchTimeoutMs ?? sweepConfig?.staleDispatchTimeoutMs ?? DEFAULT_STALE_DISPATCH_TIMEOUT_MS;
+    const now = Date.now();
+
+    let stale = 0;
+    let autoBlocked = 0;
+    let deadlineExpired = 0;
+    let workflowsAdvanced = 0;
+    let escalated = 0;
+    let complianceBlocked = 0;
+    let proposalsExpired = 0;
+    let proposalExecutionsRecovered = 0;
+    let protocolsExpired = 0;
+    let goalsNeedingPlan = 0;
+    let goalsCascadeAchieved = 0;
+    let leasesReclaimed = 0;
+    let staleDispatchRecoveredCount = 0;
+    let orphanedDispatchRecoveredCount = 0;
+    let reservationsReleased = 0;
+    let budgetsReset = 0;
+    let reviewEscalated = 0;
+    let meetingsStale = 0;
+    let orphanedCronRecovered = 0;
 
   // Reclaim events stuck in 'processing' (e.g. from a previous crash)
   try {
@@ -276,8 +601,6 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
         }
       }
     }
-
-    safeLog("sweep.unblockStale", `Unblocked ${staleUnblocked} stale-blocked tasks`);
 
     // 1.6. Recover orphaned tasks assigned to dead cron session agent IDs.
     // Tasks get assigned to session-specific IDs like "agent:cf-worker:cron:uuid".
@@ -468,6 +791,12 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       } catch { /* non-fatal */ }
     }
 
+    try {
+      proposalExecutionsRecovered = reconcileApprovedWorkflowMutationExecutions(projectId, db);
+    } catch (err) {
+      safeLog("sweep.proposalExecutionRecovery", err);
+    }
+
     // 5.5. Expire timed-out protocols
     try {
       const { getExpiredProtocols, expireProtocol, escalateProtocol } = await import("../messaging/protocols.js");
@@ -580,23 +909,146 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     const staleComplianceThreshold = 30 * 60_000; // 30 min — give workers time to finish
     for (const worker of incompliant) {
       if (now - worker.trackedAt > staleComplianceThreshold) {
-        if (enforceWorkerCompliance(worker.sessionKey, db)) {
+        if (enforceWorkerCompliance(worker.sessionKey, db, { withinTransaction: true })) {
           complianceBlocked++;
         }
       }
     }
 
     // 7. Reclaim expired dispatch queue leases
-    leasesReclaimed = reclaimExpiredLeases(projectId, db);
+    leasesReclaimed = reclaimExpiredLeases(projectId, db, { withinTransaction: true });
 
     // 7.0.1 Release stale budget reservations from leased items that never completed
     try {
-      reservationsReleased = releaseStaleReservations(db, projectId);
+      reservationsReleased = releaseStaleReservations(db, projectId, undefined, { withinTransaction: true });
       if (reservationsReleased > 0) {
         safeLog("sweep.reservationCleanup", `Released ${reservationsReleased} stale reservations`);
       }
     } catch (err) {
       safeLog("sweep.reservationCleanup", err);
+    }
+
+    // 7.0.2 Recover orphaned one-shot dispatch cron jobs before queue recovery.
+    //
+    // In the hosted OpenClaw path, dispatch currently works by creating delete-after-run
+    // cron jobs named `dispatch:<projectId>:<queueItemId>`. Legacy jobs used
+    // `dispatch:<queueItemId>`. If those jobs never start, or get stuck in
+    // `runningAtMs` with no tracked session, they block later isolated dispatches for the
+    // same agent. Recover them here instead of waiting for the generic stale-dispatch timeout.
+    try {
+      const cronService = getCronService();
+      if (cronService?.list && cronService.remove) {
+        const cronMisfireGraceMs = 60_000;
+        const activeSessionDispatchIds = collectActiveSessionDispatchIds(projectId, db);
+        const jobs = await cronService.list({ includeDisabled: true });
+
+        for (const job of jobs) {
+          if (!job.deleteAfterRun) continue;
+          const parsedJob = parseDispatchCronJobName(job.name);
+          if (!parsedJob) continue;
+          if (parsedJob.projectId && parsedJob.projectId !== projectId) continue;
+
+          const queueItemId = parsedJob.queueItemId;
+          if (activeSessionDispatchIds.has(queueItemId)) continue;
+
+          const queueRow = db.prepare(
+            "SELECT task_id, status, dispatch_attempts, max_dispatch_attempts FROM dispatch_queue WHERE id = ? AND project_id = ? LIMIT 1",
+          ).get(queueItemId, projectId) as {
+            task_id?: string;
+            status?: string;
+            dispatch_attempts?: number;
+            max_dispatch_attempts?: number;
+          } | undefined;
+
+          const taskId = queueRow?.task_id ?? null;
+          const queueStatus = queueRow?.status ?? null;
+          const dispatchAttempts = queueRow?.dispatch_attempts ?? 0;
+          const maxDispatchAttempts = queueRow?.max_dispatch_attempts ?? 0;
+          const isTerminal = queueStatus != null && ["completed", "failed", "cancelled"].includes(queueStatus);
+          const isMissingForCurrentProject = queueStatus == null;
+          const runningAtMs = job.state?.runningAtMs;
+          const nextRunAtMs = job.state?.nextRunAtMs;
+          const staleRunning = typeof runningAtMs === "number" && now - runningAtMs > staleDispatchTimeout;
+          const missedStart = typeof nextRunAtMs === "number" && now - nextRunAtMs > cronMisfireGraceMs;
+
+          if (isMissingForCurrentProject && parsedJob.legacy) continue;
+          if (!isTerminal && !isMissingForCurrentProject && !staleRunning && !missedStart) continue;
+
+          await cronService.remove(job.id);
+
+          if (taskId && queueStatus && ["leased", "dispatched"].includes(queueStatus)) {
+            const reason = staleRunning
+              ? `Recovered stale dispatch cron job after ${Math.round((now - runningAtMs!) / 60_000)}m with no active session`
+              : `Recovered missed dispatch cron job after ${Math.round((now - nextRunAtMs!) / 1000)}s with no active session`;
+            const exhausted = maxDispatchAttempts > 0 && dispatchAttempts >= maxDispatchAttempts;
+
+            if (exhausted) {
+              failQueueItem(
+                queueItemId,
+                `${reason}; exhausted dispatch retries`,
+                db,
+                projectId,
+                { withinTransaction: true },
+              );
+              ingestEvent(projectId, "dispatch_dead_letter", "internal", {
+                taskId,
+                queueItemId,
+                attempts: dispatchAttempts,
+                lastError: `${reason}; exhausted dispatch retries`,
+              }, `dead-letter:${queueItemId}`, db);
+            } else {
+              releaseToQueued(queueItemId, reason, db, projectId, {
+                withinTransaction: true,
+                undoDispatchAttempt: false,
+              });
+            }
+
+            try {
+              const taskRow = db.prepare(
+                "SELECT lease_holder FROM tasks WHERE project_id = ? AND id = ?",
+              ).get(projectId, taskId) as { lease_holder?: string | null } | undefined;
+              const expectedHolder = `dispatch:${queueItemId}`;
+              if (taskRow?.lease_holder === expectedHolder) {
+                releaseTaskLease(projectId, taskId, expectedHolder, db);
+              }
+            } catch (err) {
+              safeLog("sweep.dispatchCronReleaseLease", err);
+            }
+
+            emitDiagnosticEvent({
+              type: exhausted ? "dispatch_cron_dead_lettered" : "dispatch_cron_recovered",
+              projectId,
+              taskId,
+              queueItemId,
+              queueStatus,
+              recovery: staleRunning ? "stale_running" : "missed_start",
+              attempts: dispatchAttempts,
+              maxAttempts: maxDispatchAttempts,
+            });
+
+            ingestEvent(projectId, "sweep_finding", "cron", {
+              finding: exhausted ? "dispatch_cron_dead_lettered" : "dispatch_cron_recovered",
+              taskId,
+              queueItemId,
+              queueStatus,
+              recovery: staleRunning ? "stale_running" : "missed_start",
+              attempts: dispatchAttempts,
+              maxAttempts: maxDispatchAttempts,
+            }, sweepDedupKey("dispatch-cron", queueItemId), db);
+          } else {
+            emitDiagnosticEvent({
+              type: "dispatch_cron_removed",
+              projectId,
+              queueItemId,
+              queueStatus: queueStatus ?? "missing",
+            });
+          }
+
+          orphanedCronRecovered++;
+        }
+      }
+    } catch (err) {
+      safeLog("sweep.dispatchCronRecovery", err);
     }
 
     // 7.1. Recover dispatch queue items stuck in 'dispatched' state with no active session
@@ -607,14 +1059,7 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       ).all(projectId) as Record<string, unknown>[];
 
       if (dispatchedItems.length > 0) {
-        // Build a set of session keys that are currently active
-        const activeSessions = getActiveSessions();
-        const activeSessionDispatchIds = new Set<string>();
-        for (const session of activeSessions) {
-          if (session.dispatchContext?.queueItemId) {
-            activeSessionDispatchIds.add(session.dispatchContext.queueItemId);
-          }
-        }
+        const activeSessionDispatchIds = collectActiveSessionDispatchIds(projectId, db);
 
         for (const row of dispatchedItems) {
           const itemId = row.id as string;
@@ -635,10 +1080,23 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
             `Stale dispatched item: no active session after ${Math.round(staleDurationMs / 60_000)}m`,
             db,
             projectId,
+            { withinTransaction: true },
           );
 
+          try {
+            const taskRow = db.prepare(
+              "SELECT lease_holder FROM tasks WHERE project_id = ? AND id = ?",
+            ).get(projectId, taskId) as { lease_holder?: string | null } | undefined;
+            const expectedHolder = `dispatch:${itemId}`;
+            if (taskRow?.lease_holder === expectedHolder) {
+              releaseTaskLease(projectId, taskId, expectedHolder, db);
+            }
+          } catch (err) {
+            safeLog("sweep.staleDispatchReleaseLease", err);
+          }
+
           // Re-enqueue the task for retry (skip failed dedup — this IS the recovery)
-          enqueue(projectId, taskId, undefined, undefined, db, undefined, undefined, true);
+          enqueue(projectId, taskId, undefined, undefined, db, undefined, undefined, true, true);
 
           emitDiagnosticEvent({
             type: "dispatch_stale_recovered",
@@ -662,6 +1120,106 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       safeLog("sweep.staleDispatchRecovery", err);
     }
 
+    // 7.1.1 Recover ASSIGNED tasks still holding a dispatch lease after the
+    // owning queue item has already reached a terminal state or disappeared.
+    try {
+      const activeSessionDispatchIds = collectActiveSessionDispatchIds(projectId, db);
+
+      const leasedAssignedTasks = db.prepare(
+        `SELECT id, lease_holder FROM tasks
+         WHERE project_id = ? AND state = 'ASSIGNED' AND lease_holder LIKE 'dispatch:%'`,
+      ).all(projectId) as { id: string; lease_holder: string }[];
+
+      for (const row of leasedAssignedTasks) {
+        const taskId = row.id;
+        const leaseHolder = row.lease_holder;
+        const queueItemId = leaseHolder.slice("dispatch:".length);
+
+        if (!queueItemId) continue;
+        if (activeSessionDispatchIds.has(queueItemId)) continue;
+
+        const queueRow = db.prepare(
+          "SELECT status FROM dispatch_queue WHERE id = ? AND project_id = ? LIMIT 1",
+        ).get(queueItemId, projectId) as { status?: string } | undefined;
+
+        const queueStatus = queueRow?.status ?? null;
+        const isTerminalOrMissing = queueStatus == null || ["completed", "failed", "cancelled"].includes(queueStatus);
+        if (!isTerminalOrMissing) continue;
+
+        releaseTaskLease(projectId, taskId, leaseHolder, db);
+        enqueue(projectId, taskId, undefined, undefined, db, undefined, undefined, true, true);
+
+        emitDiagnosticEvent({
+          type: "dispatch_orphaned_lease_recovered",
+          projectId,
+          taskId,
+          queueItemId,
+          queueStatus: queueStatus ?? "missing",
+        });
+
+        ingestEvent(projectId, "sweep_finding", "cron", {
+          finding: "orphaned_dispatch_lease_recovered",
+          taskId,
+          queueItemId,
+          queueStatus: queueStatus ?? "missing",
+        }, sweepDedupKey("orphaned-dispatch", `${taskId}:${queueItemId}`), db);
+
+        orphanedDispatchRecoveredCount++;
+      }
+    } catch (err) {
+      safeLog("sweep.orphanedDispatchLeaseRecovery", err);
+    }
+
+    // 7.1.2 Backstop dead-lettered active tasks into BLOCKED.
+    //
+    // The event router handles this immediately for new dispatch_dead_letter
+    // events, but sweep also needs to reconcile existing domains so the task
+    // lifecycle matches the feed lifecycle even after upgrades or missed
+    // events.
+    try {
+      const deadLetteredActiveTasks = db.prepare(
+        `SELECT id FROM tasks
+         WHERE project_id = ?
+           AND state IN ('ASSIGNED', 'IN_PROGRESS', 'BLOCKED')
+           AND (
+             json_extract(COALESCE(metadata, '{}'), '$.dispatch_dead_letter') = 1
+             OR json_extract(COALESCE(metadata, '{}'), '$.\"$.dispatch_dead_letter\"') = 1
+           )`,
+      ).all(projectId) as Array<{ id: string }>;
+
+      for (const row of deadLetteredActiveTasks) {
+        const task = getTask(projectId, row.id, db);
+        if (!task) continue;
+        const resolvedIssue = getResolvedLinkedIssueForTask(projectId, task, db);
+        if (resolvedIssue) {
+          transitionTask({
+            projectId,
+            taskId: row.id,
+            toState: "CANCELLED",
+            actor: "system:sweep",
+            reason: "Linked entity issue already resolved; clearing dead-letter remediation task",
+            verificationRequired: false,
+            withinTransaction: true,
+          }, db);
+          continue;
+        }
+
+        if (task.state === "ASSIGNED" || task.state === "IN_PROGRESS") {
+          transitionTask({
+            projectId,
+            taskId: row.id,
+            toState: "BLOCKED",
+            actor: "system:sweep",
+            reason: "Dispatch retries exhausted; operator review required",
+            verificationRequired: false,
+            withinTransaction: true,
+          }, db);
+        }
+      }
+    } catch (err) {
+      safeLog("sweep.deadLetterBackstop", err);
+    }
+
     db.exec("COMMIT");
 
     // 7.5 Reset daily budgets (outside transaction — idempotent)
@@ -681,13 +1239,27 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
   });
   // Filter to agents belonging to this project
   const projectStuck = stuck.filter((s) => s.projectId === projectId);
-  const stuckKilled = await killAllStuckAgents(projectStuck);
+  const persistedStuck = detectPersistedStuckAgents(projectId, db, {
+    stuckTimeoutMs: options.stuckTimeoutMs,
+  });
+  const mergedStuck = [...new Map(
+    [...projectStuck, ...persistedStuck].map((session) => [session.sessionKey, session]),
+  ).values()];
+  const stuckKilled = await killAllStuckAgents(mergedStuck);
+
+  try {
+    orphanedDispatchRecoveredCount += recoverStrandedRecurringDispatches(projectId, db);
+  } catch (err) {
+    safeLog("sweep.recurringDispatchRecovery", err);
+  }
 
   // 9. Backstop: process pending events + drain dispatch queue
   let eventsProcessed = 0;
   let dispatched = 0;
   try {
-    const result = await processAndDispatch(projectId, db);
+    const result = await drainWorkflowBackstop(projectId, db, {
+      dispatchMode: options.backstopDispatchMode ?? "full",
+    });
     eventsProcessed = result.eventsProcessed;
     dispatched = result.dispatched;
   } catch (err) {
@@ -790,22 +1362,22 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     safeLog("sweep.staleMeetings", err);
   }
 
-  // 13. Check frequency-based jobs and enqueue dispatches
+  // 13. Schedule due recurring jobs (cron + frequency) through the normal task workflow
   let frequencyDispatched = 0;
   try {
-    const { checkFrequencyJobs } = await import("../scheduling/scheduler.js");
-    const frequencyJobs = checkFrequencyJobs(projectId, db);
-    for (const job of frequencyJobs) {
+    const recurringJobs = scheduleDueRecurringJobs(projectId, db, now);
+    for (const job of recurringJobs) {
       ingestEvent(projectId, "sweep_finding", "cron", {
-        finding: "frequency_job_due",
+        finding: "recurring_job_scheduled",
         agentId: job.agentId,
         jobName: job.jobName,
         reason: job.reason,
-      }, sweepDedupKey("freq-job", `${job.agentId}:${job.jobName}`), db);
+        taskId: job.task.id,
+      }, sweepDedupKey("recurring-job", `${job.agentId}:${job.jobName}:${job.task.id}`), db);
       frequencyDispatched++;
     }
   } catch (err) {
-    safeLog("sweep.frequencyJobs", err);
+    safeLog("sweep.recurringJobs", err);
   }
 
   // 14. Auto-recovery for disabled agents
@@ -820,14 +1392,29 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
     safeLog("sweep.autoRecovery", err);
   }
 
-  return {
-    stale, autoBlocked, deadlineExpired, workflowsAdvanced, escalated,
-    complianceBlocked, stuckKilled, proposalsExpired, protocolsExpired,
-    goalsNeedingPlan, goalsCascadeAchieved,
-    leasesReclaimed, staleDispatchRecovered: staleDispatchRecoveredCount, reservationsReleased,
-    eventsProcessed, dispatched, budgetsReset, autoAssigned,
-    sloChecked, sloBreach, alertsFired, anomaliesDetected,
-    reviewEscalated, meetingsStale, frequencyDispatched,
-    orphanedCronRecovered, agentsRecovered, agentsEscalated,
-  };
+    return {
+      stale, autoBlocked, deadlineExpired, workflowsAdvanced, escalated,
+      complianceBlocked, stuckKilled, proposalsExpired, protocolsExpired,
+      proposalExecutionsRecovered,
+      goalsNeedingPlan, goalsCascadeAchieved,
+      leasesReclaimed, staleDispatchRecovered: staleDispatchRecoveredCount, orphanedDispatchRecovered: orphanedDispatchRecoveredCount, reservationsReleased,
+      eventsProcessed, dispatched, budgetsReset, autoAssigned,
+      sloChecked, sloBreach, alertsFired, anomaliesDetected,
+      reviewEscalated, meetingsStale, frequencyDispatched,
+      orphanedCronRecovered, agentsRecovered, agentsEscalated,
+      controller: {
+        skipped: false,
+        ownerId: controllerLease.lease.ownerId,
+        ownerLabel: controllerLease.lease.ownerLabel,
+        purpose: controllerLease.lease.purpose,
+        expiresAt: controllerLease.lease.expiresAt,
+      },
+    };
+  } finally {
+    try {
+      releaseControllerLease(projectId, controllerLease.lease.ownerId, db);
+    } catch (err) {
+      safeLog("sweep.releaseControllerLease", err);
+    }
+  }
 }

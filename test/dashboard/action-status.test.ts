@@ -10,7 +10,7 @@ import {
   withActionTrackingSync,
   ensureActionStatusTable,
 } from "../../src/dashboard/action-status.js";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 
 function makeDb(): DatabaseSync {
   const db = getMemoryDb();

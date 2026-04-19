@@ -14,46 +14,14 @@ import { isCompactionEnabled, buildCompactionInstructions } from "./sources/comp
 import { resolveSoulDoc } from "./sources/agent-docs.js";
 import { resolveRegisteredSource } from "./registry.js";
 import { getExtendedProjectConfig } from "../project.js";
+import {
+  CONTEXT_SOURCE_PRIORITIES,
+  DEFAULT_CONTEXT_SOURCE_PRIORITY,
+  STATIC_CONTEXT_SOURCES,
+} from "./catalog.js";
 
 // Side-effect import: registers all context sources with the registry.
 import "./register-sources.js";
-
-/**
- * Priority tiers for context sources (lower number = higher priority = kept first).
- * When truncation is needed, lowest-priority (highest number) sources are dropped first.
- */
-const SOURCE_PRIORITY: Record<string, number> = {
-  // Tier 1: Always keep — identity and instructions
-  instructions: 1, soul: 1, direction: 1, policies: 1, standards: 1,
-  custom: 1, project_md: 1, memory_instructions: 1, onboarding_welcome: 1,
-  architecture: 1,
-
-  // Tier 2: Current work context
-  task_board: 2, assigned_task: 2, task_creation_standards: 2,
-  execution_standards: 2, review_standards: 2, rejection_standards: 2,
-
-  // Tier 3: Communication and escalations
-  escalations: 3, pending_messages: 3, user_messages: 3, proposals: 3,
-  channel_messages: 3, worker_findings: 3, intervention_suggestions: 3,
-
-  // Tier 4: Planning and goals
-  planning_delta: 4, goal_hierarchy: 4, initiative_status: 4,
-  workflows: 4, recent_decisions: 4, budget_plan: 4, budget_guidance: 4,
-
-  // Tier 5: Team and performance
-  team_status: 5, team_performance: 5, agent_status: 5, trust_scores: 5,
-  velocity: 5, cost_summary: 5, cost_forecast: 5, available_capacity: 5,
-
-  // Tier 6: Observational / drop first
-  health_status: 6, sweep_status: 6, activity: 6, observed_events: 6,
-  clawforce_health_report: 6, weekly_digest: 6, policy_status: 6,
-  knowledge: 6, knowledge_candidates: 6, memory_review_context: 6,
-  preferences: 6, resources: 6, skill: 6, tools_reference: 6, file: 6,
-  custom_stream: 6,
-};
-
-/** Default priority for sources not explicitly listed. */
-const DEFAULT_SOURCE_PRIORITY = 4;
 
 // Re-export the shared implementations so existing consumers keep working.
 export {
@@ -64,37 +32,39 @@ export {
 } from "./register-sources.js";
 
 import { getAgentConfig } from "../project.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 export type AssemblerContext = {
   agentId: string;
   config: AgentConfig;
   projectId?: string;
   projectDir?: string;
+  sessionKey?: string;
+  taskId?: string;
+  queueItemId?: string;
 };
 
 /**
  * Sources that are static within a session — their content does not change between turns.
  * These are cached per session key to avoid redundant re-resolution on every turn.
  */
-const STATIC_SOURCES = new Set<string>([
-  "soul",
-  "project_md",
-  "skill",
-  "tools_reference",
-  "memory_instructions",
-  "instructions",
-]);
+type ContextAssemblerRuntimeState = {
+  cache: Map<string, string | null>;
+};
 
-/** Session-scoped cache: `${sessionKey}:${sourceName}` → content */
-const assemblerCache = new Map<string, string | null>();
+const runtime = getDefaultRuntimeState();
+
+function getAssemblerCache(): ContextAssemblerRuntimeState["cache"] {
+  return (runtime.contextAssembler as ContextAssemblerRuntimeState).cache;
+}
 
 /**
  * Clear the assembler cache for a given session at session end.
  */
 export function clearAssemblerCache(sessionKey: string): void {
-  for (const key of assemblerCache.keys()) {
+  for (const key of getAssemblerCache().keys()) {
     if (key.startsWith(`${sessionKey}:`)) {
-      assemblerCache.delete(key);
+      getAssemblerCache().delete(key);
     }
   }
 }
@@ -106,9 +76,24 @@ export function clearAssemblerCache(sessionKey: string): void {
 export function assembleContext(
   agentId: string,
   config: AgentConfig,
-  opts?: { projectId?: string; projectDir?: string; budgetChars?: number; sessionKey?: string },
+  opts?: {
+    projectId?: string;
+    projectDir?: string;
+    budgetChars?: number;
+    sessionKey?: string;
+    taskId?: string;
+    queueItemId?: string;
+  },
 ): string {
-  const ctx: AssemblerContext = { agentId, config, projectId: opts?.projectId, projectDir: opts?.projectDir };
+  const ctx: AssemblerContext = {
+    agentId,
+    config,
+    projectId: opts?.projectId,
+    projectDir: opts?.projectDir,
+    sessionKey: opts?.sessionKey,
+    taskId: opts?.taskId,
+    queueItemId: opts?.queueItemId,
+  };
 
   // Read default budget from project config, fall back to agent config, then hardcoded default
   let defaultBudgetChars = 15_000;
@@ -141,7 +126,7 @@ export function assembleContext(
       : rawSource;
     const content = resolveSource(source, ctx, sessionKey);
     if (content) {
-      const priority = SOURCE_PRIORITY[source.source] ?? DEFAULT_SOURCE_PRIORITY;
+      const priority = CONTEXT_SOURCE_PRIORITIES[source.source] ?? DEFAULT_CONTEXT_SOURCE_PRIORITY;
       sections.push({ content, priority, idx: idx++ });
     }
   }
@@ -215,13 +200,13 @@ export function assembleContext(
  */
 function resolveSource(source: ContextSource, ctx: AssemblerContext, sessionKey?: string): string | null {
   // Cache lookup for static sources
-  if (sessionKey && STATIC_SOURCES.has(source.source)) {
+  if (sessionKey && STATIC_CONTEXT_SOURCES.has(source.source)) {
     const cacheKey = `${sessionKey}:${source.source}`;
-    if (assemblerCache.has(cacheKey)) {
-      return assemblerCache.get(cacheKey) ?? null;
+    if (getAssemblerCache().has(cacheKey)) {
+      return getAssemblerCache().get(cacheKey) ?? null;
     }
     const result = resolveRegisteredSource(source.source, ctx, source);
-    assemblerCache.set(cacheKey, result);
+    getAssemblerCache().set(cacheKey, result);
     return result;
   }
   return resolveRegisteredSource(source.source, ctx, source);
@@ -255,7 +240,7 @@ function buildProfileHeader(agentId: string, config: AgentConfig, projectDir?: s
  * Resolve a single briefing source for the context tool (expand action).
  */
 export function resolveSourceForTool(projectId: string, agentId: string, sourceName: string): string | null {
-  const agentEntry = getAgentConfig(agentId);
+  const agentEntry = getAgentConfig(agentId, projectId);
   if (!agentEntry) return null;
 
   const source: ContextSource = { source: sourceName as ContextSource["source"] };

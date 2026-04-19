@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -17,12 +17,17 @@ vi.mock("../../src/identity.js", () => ({
   })),
 }));
 
+vi.mock("../../src/enforcement/tracker.js", () => ({
+  killPersistedSessionProcess: vi.fn(() => false),
+}));
+
 const { getMemoryDb } = await import("../../src/db.js");
 const { createTask, transitionTask, attachEvidence, getTask, listTasks, getTaskEvidence, getTaskTransitions } =
   await import("../../src/tasks/ops.js");
 const { queryAuditLog } = await import("../../src/audit.js");
 const { listEvents, ingestEvent } = await import("../../src/events/store.js");
 const { enqueue } = await import("../../src/dispatch/queue.js");
+const { killPersistedSessionProcess } = await import("../../src/enforcement/tracker.js");
 
 describe("clawforce/ops", () => {
   let db: DatabaseSync;
@@ -33,6 +38,7 @@ describe("clawforce/ops", () => {
   });
 
   afterEach(() => {
+    vi.clearAllMocks();
     try {
       db.close();
     } catch {
@@ -204,6 +210,31 @@ describe("clawforce/ops", () => {
     );
     expect(approve.ok).toBe(true);
     if (approve.ok) expect(approve.task.state).toBe("DONE");
+  });
+
+  it("re-enqueues work when review sends a task back to IN_PROGRESS", () => {
+    const task = createTask(
+      { projectId: PROJECT, title: "Needs rework", createdBy: "agent:pm", assignedTo: "agent:worker" },
+      db,
+    );
+
+    transitionTask({ projectId: PROJECT, taskId: task.id, toState: "IN_PROGRESS", actor: "agent:worker" }, db);
+    attachEvidence(
+      { projectId: PROJECT, taskId: task.id, type: "output", content: "attempt 1", attachedBy: "agent:worker" },
+      db,
+    );
+    transitionTask({ projectId: PROJECT, taskId: task.id, toState: "REVIEW", actor: "agent:worker" }, db);
+
+    const reject = transitionTask(
+      { projectId: PROJECT, taskId: task.id, toState: "IN_PROGRESS", actor: "agent:verifier", reason: "needs fixes" },
+      db,
+    );
+    expect(reject.ok).toBe(true);
+
+    const queueItems = db.prepare(
+      "SELECT status FROM dispatch_queue WHERE project_id = ? AND task_id = ? ORDER BY created_at DESC",
+    ).all(PROJECT, task.id) as Array<{ status: string }>;
+    expect(queueItems[0]?.status).toBe("queued");
   });
 
   it("enforces retry limit on FAILED → OPEN", () => {
@@ -565,6 +596,29 @@ describe("clawforce/ops", () => {
     expect(after.status).toBe("cancelled");
   });
 
+  it("kills leased direct-executor sessions when a task is cancelled", () => {
+    const task = createTask(
+      { projectId: PROJECT, title: "Kill executor on cancel", createdBy: "agent:pm", assignedTo: "agent:worker" },
+      db,
+    );
+
+    const queueItem = enqueue(PROJECT, task.id, undefined, undefined, db);
+    expect(queueItem).not.toBeNull();
+
+    db.prepare(
+      "UPDATE dispatch_queue SET status = 'leased', leased_at = ? WHERE id = ?",
+    ).run(Date.now(), queueItem!.id);
+
+    transitionTask({ projectId: PROJECT, taskId: task.id, toState: "CANCELLED", actor: "agent:operator" }, db);
+
+    expect(killPersistedSessionProcess).toHaveBeenCalledWith(
+      PROJECT,
+      `dispatch:${queueItem!.id}`,
+      "Task transitioned to CANCELLED",
+      db,
+    );
+  });
+
   it("records task_cycle metric on DONE transition", () => {
     const task = createTask(
       { projectId: PROJECT, title: "Metrics test", createdBy: "agent:pm", assignedTo: "agent:worker" },
@@ -611,7 +665,7 @@ describe("clawforce/ops", () => {
     expect(child.parentTaskId).toBe(parent.id);
   });
 
-  it("blocks IN_PROGRESS transition when parent is not DONE", () => {
+  it("creates child tasks in BLOCKED state when parent is not DONE", () => {
     const parent = createTask({
       projectId: PROJECT, title: "Parent task", createdBy: "agent:pm", assignedTo: "agent:lead",
     }, db);
@@ -620,15 +674,7 @@ describe("clawforce/ops", () => {
       parentTaskId: parent.id,
     }, db);
 
-    // Child is ASSIGNED — try to start it while parent is still ASSIGNED
-    const result = transitionTask({
-      projectId: PROJECT, taskId: child.id, toState: "IN_PROGRESS", actor: "agent:worker",
-    }, db);
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toMatch(/Cannot start: parent task .+ is still in state ASSIGNED/);
-    }
+    expect(child.state).toBe("BLOCKED");
   });
 
   it("allows IN_PROGRESS transition when parent is DONE", () => {
@@ -646,6 +692,9 @@ describe("clawforce/ops", () => {
     transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "REVIEW", actor: "agent:lead" }, db);
     transitionTask({ projectId: PROJECT, taskId: parent.id, toState: "DONE", actor: "agent:verifier" }, db);
 
+    const unblocked = getTask(PROJECT, child.id, db)!;
+    expect(unblocked.state).toBe("ASSIGNED");
+
     // Now child should be able to start
     const result = transitionTask({
       projectId: PROJECT, taskId: child.id, toState: "IN_PROGRESS", actor: "agent:worker",
@@ -662,9 +711,6 @@ describe("clawforce/ops", () => {
       projectId: PROJECT, title: "Child blocked", createdBy: "agent:pm", assignedTo: "agent:worker",
       parentTaskId: parent.id,
     }, db);
-
-    // Manually block the child (simulating dependency blocking)
-    transitionTask({ projectId: PROJECT, taskId: child.id, toState: "BLOCKED", actor: "system:dependency", reason: "Waiting for parent" }, db);
 
     const blockedChild = getTask(PROJECT, child.id, db)!;
     expect(blockedChild.state).toBe("BLOCKED");

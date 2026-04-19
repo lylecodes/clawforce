@@ -6,10 +6,10 @@
  * have been applied.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite-driver.js";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 42;
+export const SCHEMA_VERSION = 54;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -56,6 +56,18 @@ const migrations: Record<number, Migration> = {
   40: migrateV40,
   41: migrateV41,
   42: migrateV42,
+  43: migrateV43,
+  44: migrateV44,
+  45: migrateV45,
+  46: migrateV46,
+  47: migrateV47,
+  48: migrateV48,
+  49: migrateV49,
+  50: migrateV50,
+  51: migrateV51,
+  52: migrateV52,
+  53: migrateV53,
+  54: migrateV54,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -72,9 +84,18 @@ export function runMigrations(db: DatabaseSync): void {
   for (let v = currentVersion + 1; v <= SCHEMA_VERSION; v++) {
     const migrate = migrations[v];
     if (migrate) {
-      // D3: Wrap each migration + version record in a transaction for atomicity
+      // Wrap each migration + version record in a transaction for atomicity.
+      // Re-check the target version after taking the write lock so parallel
+      // processes cannot apply the same migration based on stale pre-lock state.
       db.prepare("BEGIN IMMEDIATE").run();
       try {
+        const alreadyApplied = db.prepare(
+          "SELECT 1 FROM schema_version WHERE version = ? LIMIT 1",
+        ).get(v) as Record<string, unknown> | undefined;
+        if (alreadyApplied) {
+          db.prepare("COMMIT").run();
+          continue;
+        }
         migrate(db);
         db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)").run(v, Date.now());
         db.prepare("COMMIT").run();
@@ -281,7 +302,8 @@ function migrateV1(db: DatabaseSync): void {
       requirements TEXT NOT NULL,
       satisfied TEXT NOT NULL,
       tool_call_count INTEGER NOT NULL DEFAULT 0,
-      last_persisted_at INTEGER NOT NULL
+      last_persisted_at INTEGER NOT NULL,
+      process_id INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_tracked_sessions_project
@@ -1299,6 +1321,287 @@ function migrateV42(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_change_history_resource
       ON change_history(project_id, resource_type, resource_id, created_at DESC);
+  `);
+}
+
+// --- Migration V43: Native entities + task/goal entity linkage ---
+
+function migrateV43(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entities (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      health TEXT,
+      owner_agent_id TEXT,
+      parent_entity_id TEXT,
+      department TEXT,
+      team TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_verified_at INTEGER,
+      metadata TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_entities_project_kind
+      ON entities(project_id, kind);
+    CREATE INDEX IF NOT EXISTS idx_entities_project_state
+      ON entities(project_id, state);
+    CREATE INDEX IF NOT EXISTS idx_entities_project_health
+      ON entities(project_id, health);
+    CREATE INDEX IF NOT EXISTS idx_entities_owner
+      ON entities(project_id, owner_agent_id);
+    CREATE INDEX IF NOT EXISTS idx_entities_parent
+      ON entities(project_id, parent_entity_id);
+
+    CREATE TABLE IF NOT EXISTS entity_transitions (
+      id TEXT PRIMARY KEY,
+      entity_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      from_state TEXT,
+      to_state TEXT,
+      from_health TEXT,
+      to_health TEXT,
+      actor TEXT NOT NULL,
+      reason TEXT,
+      metadata TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_entity_transitions_entity
+      ON entity_transitions(entity_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_entity_transitions_project
+      ON entity_transitions(project_id, created_at);
+  `);
+
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN entity_type TEXT`);
+  safeAlterTable(db, `ALTER TABLE tasks ADD COLUMN entity_id TEXT`);
+  safeAlterTable(db, `ALTER TABLE goals ADD COLUMN entity_type TEXT`);
+  safeAlterTable(db, `ALTER TABLE goals ADD COLUMN entity_id TEXT`);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_entity
+      ON tasks(project_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_goals_entity
+      ON goals(project_id, entity_type, entity_id);
+  `);
+}
+
+// --- Migration V44: Entity issues + entity-linked proposals ---
+
+function migrateV44(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entity_issues (
+      id TEXT PRIMARY KEY,
+      issue_key TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      entity_kind TEXT NOT NULL,
+      check_id TEXT,
+      issue_type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      title TEXT NOT NULL,
+      description TEXT,
+      field_name TEXT,
+      evidence TEXT,
+      recommended_action TEXT,
+      playbook TEXT,
+      owner_agent_id TEXT,
+      blocking INTEGER NOT NULL DEFAULT 0,
+      approval_required INTEGER NOT NULL DEFAULT 0,
+      proposal_id TEXT,
+      first_seen_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_issues_unique_key
+      ON entity_issues(project_id, entity_id, issue_key);
+    CREATE INDEX IF NOT EXISTS idx_entity_issues_entity_status
+      ON entity_issues(project_id, entity_id, status, severity);
+    CREATE INDEX IF NOT EXISTS idx_entity_issues_kind
+      ON entity_issues(project_id, entity_kind, status);
+    CREATE INDEX IF NOT EXISTS idx_entity_issues_proposal
+      ON entity_issues(project_id, proposal_id);
+  `);
+
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN entity_type TEXT`);
+  safeAlterTable(db, `ALTER TABLE proposals ADD COLUMN entity_id TEXT`);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_proposals_entity
+      ON proposals(project_id, entity_type, entity_id, status);
+  `);
+}
+
+// --- Migration V45: Entity check runs ---
+
+function migrateV45(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entity_check_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      entity_kind TEXT NOT NULL,
+      check_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      command TEXT NOT NULL,
+      parser_type TEXT,
+      exit_code INTEGER NOT NULL,
+      issue_count INTEGER NOT NULL DEFAULT 0,
+      stdout TEXT,
+      stderr TEXT,
+      duration_ms INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_entity_check_runs_entity
+      ON entity_check_runs(project_id, entity_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_entity_check_runs_check
+      ON entity_check_runs(project_id, check_id, created_at DESC);
+  `);
+}
+
+// --- Migration V46: Durable simulated actions for dry-run execution ---
+
+function migrateV46(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS simulated_actions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      domain_id TEXT NOT NULL,
+      agent_id TEXT,
+      session_key TEXT,
+      task_id TEXT,
+      entity_type TEXT,
+      entity_id TEXT,
+      proposal_id TEXT,
+      source_type TEXT NOT NULL,
+      source_id TEXT,
+      action_type TEXT NOT NULL,
+      target_type TEXT,
+      target_id TEXT,
+      summary TEXT NOT NULL,
+      payload TEXT,
+      policy_decision TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_simulated_actions_project_created
+      ON simulated_actions(project_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_simulated_actions_project_status
+      ON simulated_actions(project_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_simulated_actions_entity
+      ON simulated_actions(project_id, entity_type, entity_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_simulated_actions_task
+      ON simulated_actions(project_id, task_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_simulated_actions_proposal
+      ON simulated_actions(project_id, proposal_id, created_at DESC);
+  `);
+}
+
+// --- Migration V47: Proposal linkage for simulated actions ---
+
+function migrateV47(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE simulated_actions ADD COLUMN proposal_id TEXT;");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_simulated_actions_proposal
+      ON simulated_actions(project_id, proposal_id, created_at DESC);
+  `);
+}
+
+// --- Migration V48: Provenance for entity check runs ---
+
+function migrateV48(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE entity_check_runs ADD COLUMN actor TEXT;");
+  safeAlterTable(db, "ALTER TABLE entity_check_runs ADD COLUMN trigger TEXT;");
+  safeAlterTable(db, "ALTER TABLE entity_check_runs ADD COLUMN source_type TEXT;");
+  safeAlterTable(db, "ALTER TABLE entity_check_runs ADD COLUMN source_id TEXT;");
+}
+
+// --- Migration V49: Cross-process controller leases ---
+
+function migrateV49(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS controller_leases (
+      project_id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      owner_label TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      acquired_at INTEGER NOT NULL,
+      heartbeat_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      metadata TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_controller_leases_expires
+      ON controller_leases(expires_at);
+  `);
+}
+
+// --- Migration V50: Structured review reason codes ---
+
+function migrateV50(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE manager_reviews ADD COLUMN reason_code TEXT;");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reviews_reason_code
+      ON manager_reviews(project_id, reason_code, created_at DESC);
+  `);
+}
+
+// --- Migration V51: Controller generation handoff state ---
+
+function migrateV51(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE controller_leases ADD COLUMN generation TEXT;");
+  safeAlterTable(db, "ALTER TABLE controller_leases ADD COLUMN required_generation TEXT;");
+  safeAlterTable(db, "ALTER TABLE controller_leases ADD COLUMN generation_requested_at INTEGER;");
+  safeAlterTable(db, "ALTER TABLE controller_leases ADD COLUMN generation_request_reason TEXT;");
+  db.exec(`
+    UPDATE controller_leases
+    SET generation = COALESCE(generation, 'legacy');
+
+    CREATE INDEX IF NOT EXISTS idx_controller_leases_required_generation
+      ON controller_leases(required_generation);
+  `);
+}
+
+// --- Migration V52: Proposal execution tracking ---
+
+function migrateV52(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE proposals ADD COLUMN execution_status TEXT;");
+  safeAlterTable(db, "ALTER TABLE proposals ADD COLUMN execution_requested_at INTEGER;");
+  safeAlterTable(db, "ALTER TABLE proposals ADD COLUMN execution_updated_at INTEGER;");
+  safeAlterTable(db, "ALTER TABLE proposals ADD COLUMN execution_error TEXT;");
+  safeAlterTable(db, "ALTER TABLE proposals ADD COLUMN execution_task_id TEXT;");
+  safeAlterTable(db, "ALTER TABLE proposals ADD COLUMN execution_required_generation TEXT;");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_proposals_execution_status
+      ON proposals(project_id, status, execution_status, resolved_at DESC);
+  `);
+}
+
+// --- Migration V53: Direct-session process ids on tracked sessions ---
+
+function migrateV53(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE tracked_sessions ADD COLUMN process_id INTEGER;");
+}
+
+// --- Migration V54: Durable controller config apply markers ---
+
+function migrateV54(db: DatabaseSync): void {
+  safeAlterTable(db, "ALTER TABLE controller_leases ADD COLUMN applied_config_version_id TEXT;");
+  safeAlterTable(db, "ALTER TABLE controller_leases ADD COLUMN applied_config_hash TEXT;");
+  safeAlterTable(db, "ALTER TABLE controller_leases ADD COLUMN applied_config_applied_at INTEGER;");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_controller_leases_applied_config
+      ON controller_leases(project_id, applied_config_applied_at DESC);
   `);
 }
 

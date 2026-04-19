@@ -1,6 +1,6 @@
 /**
  * Onboarding integration test — validates the complete config pipeline.
- * Write project.yaml → validate → load → register → verify agents are known.
+ * Write config.yaml + domains/*.yaml → validate → load → register → verify agents are known.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -30,36 +30,33 @@ describe("onboarding pipeline e2e", () => {
   });
 
   it("complete onboarding: write config → validate → load → register → verify", () => {
-    // 1. Write a minimal but realistic project.yaml
-    const projectYaml = `
-version: "1"
-project_id: my-project
-name: My Project
-description: A test project for onboarding validation
-project_dir: ${tmpDir}
-
+    // 1. Write a minimal but realistic split config
+    const globalYaml = `
 agents:
   proj-lead:
     extends: manager
     title: Project Lead
-    description: Creates tasks, reviews work, manages priorities.
 
   proj-worker:
     extends: employee
     title: Developer
-    description: Implements features and fixes bugs.
     expectations: []
-
-domain:
-  agents:
-    - proj-lead
-    - proj-worker
-  manager: proj-lead
-  worker_agents:
-    - proj-worker
 `;
 
-    fs.writeFileSync(path.join(tmpDir, "project.yaml"), projectYaml, "utf-8");
+    const domainYaml = `
+domain: my-project
+paths:
+  - ${tmpDir}
+agents:
+  - proj-lead
+  - proj-worker
+manager:
+  agentId: proj-lead
+`;
+
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), globalYaml, "utf-8");
+    fs.mkdirSync(path.join(tmpDir, "domains"), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, "domains", "my-project.yaml"), domainYaml, "utf-8");
 
     // 2. Validate — should pass with no errors
     const validationReport = validateAllConfigs(tmpDir);
@@ -68,7 +65,7 @@ domain:
     expect(errors).toHaveLength(0);
 
     // 3. Load workforce config
-    const wfConfig = loadWorkforceConfig(path.join(tmpDir, "project.yaml"));
+    const wfConfig = loadWorkforceConfig(path.join(tmpDir, "config.yaml"));
     expect(wfConfig).not.toBeNull();
     expect(wfConfig!.agents).toHaveProperty("proj-lead");
     expect(wfConfig!.agents).toHaveProperty("proj-worker");
@@ -100,16 +97,18 @@ domain:
   });
 
   it("rejects invalid config during onboarding", () => {
-    const badYaml = `
-version: "1"
-project_id: bad-project
+    const badGlobalYaml = `
 agents:
   lead:
     extends: manager
-domain:
-  agents: [lead, nonexistent]
 `;
-    fs.writeFileSync(path.join(tmpDir, "project.yaml"), badYaml, "utf-8");
+    const badDomainYaml = `
+domain: bad-project
+agents: [lead, nonexistent]
+`;
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), badGlobalYaml, "utf-8");
+    fs.mkdirSync(path.join(tmpDir, "domains"), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, "domains", "bad-project.yaml"), badDomainYaml, "utf-8");
 
     const report = validateAllConfigs(tmpDir);
     expect(report.valid).toBe(false);

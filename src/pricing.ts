@@ -5,6 +5,8 @@
  * Falls back to hardcoded defaults for offline/unknown models.
  */
 
+import { getDefaultRuntimeState } from "./runtime/default-runtime.js";
+
 export type ModelPricing = {
   inputPerM: number;    // cents per 1M input tokens
   outputPerM: number;   // cents per 1M output tokens
@@ -31,16 +33,24 @@ const BUILTIN_PRICING: Record<string, ModelPricing> = {
   "haiku":             { inputPerM: 80,   outputPerM: 400,  cacheReadPerM: 8,    cacheWritePerM: 100  },
 };
 
-const dynamicPricing = new Map<string, ModelPricing>();
+type PricingRuntimeState = {
+  dynamicPricing: Map<string, ModelPricing>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getDynamicPricingStore(): PricingRuntimeState["dynamicPricing"] {
+  return (runtime.pricing as PricingRuntimeState).dynamicPricing;
+}
 
 export function getPricing(model: string): ModelPricing {
-  return dynamicPricing.get(model)
+  return getDynamicPricingStore().get(model)
     ?? BUILTIN_PRICING[model]
     ?? DEFAULT_PRICING;
 }
 
 export function registerModelPricing(model: string, pricing: ModelPricing): void {
-  dynamicPricing.set(model, pricing);
+  getDynamicPricingStore().set(model, pricing);
 }
 
 /**
@@ -51,7 +61,7 @@ export function registerModelPricingFromConfig(
   model: string,
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number },
 ): void {
-  dynamicPricing.set(model, {
+  getDynamicPricingStore().set(model, {
     inputPerM: Math.round(cost.input * 100),
     outputPerM: Math.round(cost.output * 100),
     cacheReadPerM: Math.round(cost.cacheRead * 100),
@@ -71,5 +81,5 @@ export function registerBulkPricing(
 }
 
 export function clearPricingCache(): void {
-  dynamicPricing.clear();
+  getDynamicPricingStore().clear();
 }

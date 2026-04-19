@@ -5,9 +5,11 @@
  * Updated via after_tool_call hook, checked at agent_end.
  */
 
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type { AgentConfig, Expectation, PerformancePolicy } from "../types.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 /** Record of a single tool call for metrics. */
 export type ToolCallRecord = {
@@ -34,6 +36,9 @@ export type SessionMetrics = {
   toolCalls: ToolCallRecord[];
   firstToolCallAt: number | null;
   lastToolCallAt: number | null;
+  firstProgressAt: number | null;
+  lastProgressAt: number | null;
+  progressSignalCount: number;
   requiredCallTimings: number[];
   errorCount: number;
   /** Errors excluded from errorCount (ENOENT, file-not-found, etc.) — exploratory, not real failures. */
@@ -67,13 +72,33 @@ export type SessionCompliance = {
   jobName?: string;
   /** Dispatch context if this session was spawned via the dispatch queue. */
   dispatchContext?: { queueItemId: string; taskId: string };
+  /** Child process id for direct executors, when available. */
+  processId?: number | null;
+  /** Whether this session is expected to surface tool telemetry into ClawForce. */
+  expectsToolTelemetry?: boolean;
 };
 
 /** Persist session state every N tool calls (when compliance state hasn't changed). */
 const PERSIST_EVERY_N_CALLS = 5;
+export const SESSION_HEARTBEAT_INTERVAL_MS = 10_000;
+export const SESSION_HEARTBEAT_LIVE_MS = 25_000;
+export const SESSION_HEARTBEAT_STALE_MS = 60_000;
 
-/** In-memory store of active sessions. */
-const sessions = new Map<string, SessionCompliance>();
+export type SessionHeartbeatState = "live" | "quiet" | "stale";
+export type SessionHeartbeatStatus = {
+  state: SessionHeartbeatState;
+  ageMs: number | null;
+};
+
+type EnforcementTrackerRuntimeState = {
+  sessions: Map<string, SessionCompliance>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getTrackedSessions(): EnforcementTrackerRuntimeState["sessions"] {
+  return (runtime.enforcementTracker as EnforcementTrackerRuntimeState).sessions;
+}
 
 /**
  * Start tracking a session.
@@ -85,6 +110,9 @@ export function startTracking(
   projectId: string,
   config: AgentConfig,
   jobName?: string,
+  options?: {
+    expectsToolTelemetry?: boolean;
+  },
 ): void {
   const compliance: SessionCompliance = {
     sessionKey,
@@ -93,12 +121,16 @@ export function startTracking(
     requirements: config.expectations,
     performancePolicy: config.performance_policy,
     jobName,
+    expectsToolTelemetry: options?.expectsToolTelemetry ?? true,
     satisfied: new Map(),
     metrics: {
       startedAt: Date.now(),
       toolCalls: [],
       firstToolCallAt: null,
       lastToolCallAt: null,
+      firstProgressAt: null,
+      lastProgressAt: null,
+      progressSignalCount: 0,
       requiredCallTimings: [],
       errorCount: 0,
       exploratoryErrorCount: 0,
@@ -112,7 +144,7 @@ export function startTracking(
     compliance.satisfied.set(requirementKey(req), 0);
   }
 
-  sessions.set(sessionKey, compliance);
+  getTrackedSessions().set(sessionKey, compliance);
   persistSession(sessionKey);
 }
 
@@ -137,7 +169,7 @@ export function recordToolCall(
   success: boolean,
   errorMessage?: string,
 ): void {
-  const session = sessions.get(sessionKey);
+  const session = getTrackedSessions().get(sessionKey);
   if (!session) return;
 
   const now = Date.now();
@@ -193,7 +225,7 @@ export function recordSignificantResult(
   result: string,
   truncationLimit?: number,
 ): void {
-  const session = sessions.get(sessionKey);
+  const session = getTrackedSessions().get(sessionKey);
   if (!session) return;
   const MAX_RESULTS = 5;
   const maxChars = truncationLimit ?? 2000;
@@ -218,7 +250,7 @@ export function recordToolCallDetail(
   success: boolean,
   errorMessage?: string,
 ): void {
-  const session = sessions.get(sessionKey);
+  const session = getTrackedSessions().get(sessionKey);
   if (!session) return;
   session.metrics.toolCallBuffer.push({
     toolName, action, input, output, durationMs, success, errorMessage,
@@ -231,7 +263,7 @@ export function recordToolCallDetail(
  * Get compliance state for a session.
  */
 export function getSession(sessionKey: string): SessionCompliance | null {
-  return sessions.get(sessionKey) ?? null;
+  return getTrackedSessions().get(sessionKey) ?? null;
 }
 
 /**
@@ -239,19 +271,61 @@ export function getSession(sessionKey: string): SessionCompliance | null {
  * Called from before_prompt_build when a dispatch tag is detected.
  */
 export function setDispatchContext(sessionKey: string, context: { queueItemId: string; taskId: string }): void {
-  const session = sessions.get(sessionKey);
+  const session = getTrackedSessions().get(sessionKey);
   if (!session) return;
   session.dispatchContext = context;
   persistSession(sessionKey);
 }
 
 /**
+ * Persist the direct executor child process id for cross-process recovery.
+ */
+export function setSessionProcessId(sessionKey: string, processId: number | null): void {
+  const session = getTrackedSessions().get(sessionKey);
+  if (!session) return;
+  session.processId = processId;
+  persistSession(sessionKey);
+}
+
+/**
+ * Refresh the persisted heartbeat timestamp for an active session.
+ * Used by long-running direct executors to prove liveness even when no tool
+ * calls have been observed yet.
+ */
+export function heartbeatSession(sessionKey: string): void {
+  persistSession(sessionKey);
+}
+
+/**
+ * Record non-tool transcript progress for sessions where the executor is
+ * clearly doing work but ClawForce has not observed structured tool telemetry.
+ */
+export function recordSessionProgress(sessionKey: string): void {
+  const session = getTrackedSessions().get(sessionKey);
+  if (!session) return;
+
+  const now = Date.now();
+  session.metrics.progressSignalCount += 1;
+  session.metrics.lastProgressAt = now;
+  if (!session.metrics.firstProgressAt) {
+    session.metrics.firstProgressAt = now;
+  }
+
+  if (
+    session.metrics.progressSignalCount === 1
+    || session.metrics.progressSignalCount % PERSIST_EVERY_N_CALLS === 0
+  ) {
+    persistSession(sessionKey);
+  }
+}
+
+/**
  * Remove session tracking (after enforcement check).
  */
 export function endSession(sessionKey: string): SessionCompliance | null {
-  const session = sessions.get(sessionKey);
+  const session = getTrackedSessions().get(sessionKey);
   if (session) {
-    sessions.delete(sessionKey);
+    getTrackedSessions().delete(sessionKey);
     unpersistSession(sessionKey, session.projectId);
   }
   return session ?? null;
@@ -261,14 +335,14 @@ export function endSession(sessionKey: string): SessionCompliance | null {
  * Get all active sessions (for sweep).
  */
 export function getActiveSessions(): SessionCompliance[] {
-  return [...sessions.values()];
+  return [...getTrackedSessions().values()];
 }
 
 /**
  * Clear all sessions (for testing).
  */
 export function resetTrackerForTest(): void {
-  sessions.clear();
+  getTrackedSessions().clear();
 }
 
 // --- Session persistence (crash recovery) ---
@@ -277,14 +351,14 @@ export function resetTrackerForTest(): void {
  * Persist session state to SQLite for crash recovery.
  */
 export function persistSession(sessionKey: string): void {
-  const session = sessions.get(sessionKey);
+  const session = getTrackedSessions().get(sessionKey);
   if (!session) return;
 
   try {
     const db = getDb(session.projectId);
     db.prepare(`
-      INSERT OR REPLACE INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at, dispatch_context)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at, dispatch_context, process_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.sessionKey,
       session.agentId,
@@ -295,10 +369,32 @@ export function persistSession(sessionKey: string): void {
       session.metrics.toolCalls.length,
       Date.now(),
       session.dispatchContext ? JSON.stringify(session.dispatchContext) : null,
+      session.processId ?? null,
     );
   } catch (err) {
     safeLog("tracker.persist", err);
   }
+}
+
+/**
+ * Classify a persisted session heartbeat for operator surfaces.
+ */
+export function getSessionHeartbeatStatus(
+  lastPersistedAt: number | null | undefined,
+  now = Date.now(),
+): SessionHeartbeatStatus {
+  if (!lastPersistedAt || !Number.isFinite(lastPersistedAt)) {
+    return { state: "stale", ageMs: null };
+  }
+
+  const ageMs = Math.max(0, now - lastPersistedAt);
+  if (ageMs <= SESSION_HEARTBEAT_LIVE_MS) {
+    return { state: "live", ageMs };
+  }
+  if (ageMs <= SESSION_HEARTBEAT_STALE_MS) {
+    return { state: "quiet", ageMs };
+  }
+  return { state: "stale", ageMs };
 }
 
 /**
@@ -320,6 +416,17 @@ export type OrphanedSession = {
   startedAt: number;
   toolCallCount: number;
   dispatchContext?: { queueItemId: string; taskId: string };
+};
+
+export type PersistedTrackedSession = {
+  sessionKey: string;
+  agentId: string;
+  projectId: string;
+  startedAt: number;
+  toolCallCount: number;
+  lastPersistedAt: number | null;
+  dispatchContext?: { queueItemId: string; taskId: string };
+  processId?: number | null;
 };
 
 /**
@@ -357,6 +464,71 @@ export function recoverOrphanedSessions(projectId: string): OrphanedSession[] {
   } catch (err) {
     safeLog("tracker.recoverOrphans", err);
     return [];
+  }
+}
+
+export function listPersistedTrackedSessions(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): PersistedTrackedSession[] {
+  try {
+    const db = dbOverride ?? getDb(projectId);
+    const rows = db.prepare(
+      "SELECT session_key, agent_id, project_id, started_at, tool_call_count, last_persisted_at, dispatch_context, process_id FROM tracked_sessions WHERE project_id = ?"
+    ).all(projectId) as Record<string, unknown>[];
+
+    return rows.map((row) => {
+      let dispatchContext: { queueItemId: string; taskId: string } | undefined;
+      if (row.dispatch_context) {
+        try {
+          dispatchContext = JSON.parse(row.dispatch_context as string);
+        } catch {
+          dispatchContext = undefined;
+        }
+      }
+      return {
+        sessionKey: row.session_key as string,
+        agentId: row.agent_id as string,
+        projectId: row.project_id as string,
+        startedAt: row.started_at as number,
+        toolCallCount: row.tool_call_count as number,
+        lastPersistedAt: (row.last_persisted_at as number | null | undefined) ?? null,
+        dispatchContext,
+        processId: (row.process_id as number | null | undefined) ?? null,
+      };
+    });
+  } catch (err) {
+    safeLog("tracker.listPersisted", err);
+    return [];
+  }
+}
+
+export function killPersistedSessionProcess(
+  projectId: string,
+  sessionKey: string,
+  reason: string,
+  dbOverride?: DatabaseSync,
+): boolean {
+  try {
+    const session = listPersistedTrackedSessions(projectId, dbOverride).find((candidate) => candidate.sessionKey === sessionKey);
+    if (!session?.processId || !Number.isFinite(session.processId)) {
+      return false;
+    }
+
+    const pid = session.processId;
+    process.kill(pid, "SIGTERM");
+    setTimeout(() => {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // best effort
+      }
+    }, 5_000).unref?.();
+    return true;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    safeLog("tracker.killPersisted", `Failed to kill persisted session (${reason}): ${detail}`);
+    return false;
   }
 }
 

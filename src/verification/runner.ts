@@ -6,7 +6,8 @@
  */
 
 import { execSync } from "node:child_process";
-import type { VerificationGate } from "../types.js";
+import { evaluateCommandExecution } from "../execution/intercept.js";
+import type { DomainExecutionEffect, VerificationGate } from "../types.js";
 
 export type GateResult = {
   name: string;
@@ -17,6 +18,9 @@ export type GateResult = {
   stderr: string;
   durationMs: number;
   timedOut: boolean;
+  executionEffect?: DomainExecutionEffect;
+  simulatedActionId?: string;
+  simulated?: boolean;
 };
 
 export type VerificationRunResult = {
@@ -33,7 +37,14 @@ export type VerificationRunResult = {
 export function runVerificationGates(
   gates: VerificationGate[],
   workingDir: string,
-  options?: { totalTimeoutMs?: number; defaultGateTimeoutSeconds?: number },
+  options?: {
+    totalTimeoutMs?: number;
+    defaultGateTimeoutSeconds?: number;
+    projectId?: string;
+    actor?: string;
+    sessionKey?: string;
+    taskId?: string;
+  },
 ): VerificationRunResult {
   const startTime = Date.now();
   const totalTimeout = options?.totalTimeoutMs ?? 300_000;
@@ -50,6 +61,46 @@ export function runVerificationGates(
     let stderr = "";
     let exitCode = 1;
     let timedOut = false;
+    let executionEffect: DomainExecutionEffect | undefined;
+    let simulatedActionId: string | undefined;
+    let simulated = false;
+
+    if (options?.projectId) {
+      const decision = evaluateCommandExecution(
+        {
+          projectId: options.projectId,
+          actor: options.actor,
+          sessionKey: options.sessionKey,
+          taskId: options.taskId,
+          sourceType: "verification_gate",
+          sourceId: gate.name,
+          summary: `Would run verification gate ${gate.name}`,
+        },
+        gate.command,
+        { gateName: gate.name, workingDir },
+      );
+      if (decision.effect !== "allow") {
+        executionEffect = decision.effect;
+        simulatedActionId = decision.simulatedAction.id;
+        simulated = true;
+        stderr = decision.reason;
+        exitCode = decision.effect === "block" ? 1 : 0;
+        results.push({
+          name: gate.name,
+          passed: false,
+          required,
+          exitCode,
+          stdout: "",
+          stderr,
+          durationMs: Date.now() - gateStart,
+          timedOut: false,
+          executionEffect,
+          simulatedActionId,
+          simulated,
+        });
+        continue;
+      }
+    }
 
     try {
       const result = execSync(gate.command, {
@@ -82,6 +133,9 @@ export function runVerificationGates(
         : stderr.slice(-2000),
       durationMs,
       timedOut,
+      executionEffect,
+      simulatedActionId,
+      simulated,
     });
   }
 
@@ -118,14 +172,18 @@ export function getTransitionFailureReason(result: VerificationRunResult): strin
 export function formatGateResults(result: VerificationRunResult): string {
   const lines = ["## Verification Gates\n"];
   for (const r of result.results) {
-    const status = r.timedOut ? "TIMEOUT" : r.passed ? "PASS" : "FAIL";
+    const status = r.simulated
+      ? (r.executionEffect === "block" ? "BLOCKED" : "SIMULATED")
+      : r.timedOut
+        ? "TIMEOUT"
+        : r.passed ? "PASS" : "FAIL";
     const req = r.required ? "required" : "optional";
     const time = (r.durationMs / 1000).toFixed(1);
     lines.push(`### ${r.name} (${status}) [${req}] - ${time}s`);
-    if (!r.passed && r.stderr) {
+    if ((!r.passed || r.simulated) && r.stderr) {
       lines.push("```\n" + r.stderr.slice(-1000) + "\n```");
     }
-    if (!r.passed && r.stdout && !r.stderr) {
+    if ((!r.passed || r.simulated) && r.stdout && !r.stderr) {
       lines.push("```\n" + r.stdout.slice(-1000) + "\n```");
     }
   }

@@ -5,7 +5,7 @@
  * returns which ones should be dispatched based on shouldRunNow logic.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { parseFrequency, shouldRunNow } from "./frequency.js";
 import { getRegisteredAgentIds, getAgentConfig, getExtendedProjectConfig } from "../project.js";
 import { getDb } from "../db.js";
@@ -33,9 +33,9 @@ export function checkFrequencyJobs(
   const db = dbOverride ?? getDb(projectId);
   const toDispatch: FrequencyDispatch[] = [];
 
-  for (const agentId of getRegisteredAgentIds()) {
-    const entry = getAgentConfig(agentId);
-    if (!entry || entry.projectId !== projectId) continue;
+  for (const agentId of getRegisteredAgentIds(projectId)) {
+    const entry = getAgentConfig(agentId, projectId);
+    if (!entry) continue;
     if (!entry.config.jobs) continue;
 
     for (const [jobName, jobDef] of Object.entries(entry.config.jobs)) {

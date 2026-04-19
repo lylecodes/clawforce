@@ -21,11 +21,8 @@ vi.mock("../../src/lifecycle.js", () => ({
   isClawforceInitialized: vi.fn(() => false),
 }));
 vi.mock("../../src/project.js", () => ({
-  loadProject: vi.fn(),
-  loadEnforcementConfig: vi.fn(() => null),
-  initProject: vi.fn(),
   resolveProjectDir: vi.fn((dir: string) => dir),
-  registerEnforcementConfig: vi.fn(),
+  getExtendedProjectConfig: vi.fn(() => null),
   getAgentConfig: vi.fn(() => null),
   getApprovalPolicy: vi.fn(() => null),
   getRegisteredAgentIds: vi.fn(() => []),
@@ -33,9 +30,6 @@ vi.mock("../../src/project.js", () => ({
 }));
 vi.mock("../../src/context/assembler.js", () => ({
   assembleContext: vi.fn(() => null),
-}));
-vi.mock("../../src/context/orchestrator-bootstrap.js", () => ({
-  getAutoDetectContext: vi.fn(() => null),
 }));
 vi.mock("../../src/config-validator.js", () => ({
   validateWorkforceConfig: vi.fn(() => []),
@@ -131,6 +125,9 @@ vi.mock("../../src/tools/workflow-tool.js", () => ({
 vi.mock("../../src/tools/message-tool.js", () => ({
   createClawforceMessageTool: vi.fn(() => ({ name: "clawforce_message" })),
 }));
+vi.mock("../../src/tools/entity-tool.js", () => ({
+  createClawforceEntityTool: vi.fn(() => ({ name: "clawforce_entity" })),
+}));
 vi.mock("../../src/messaging/notify.js", () => ({
   setMessageNotifier: vi.fn(),
   formatMessageNotification: vi.fn(() => ""),
@@ -176,6 +173,14 @@ describe("clawforce plugin", () => {
     expect(clawforcePlugin.version).toBe("0.2.0");
   });
 
+  it("declares a plugin config schema that allows managed agent persistence", () => {
+    const schema = clawforcePlugin.configSchema?.jsonSchema as
+      | { properties?: Record<string, unknown>; additionalProperties?: boolean }
+      | undefined;
+    expect(schema?.additionalProperties).toBe(false);
+    expect(schema?.properties).toHaveProperty("managedAgentIds");
+  });
+
   describe("register()", () => {
     let api: ReturnType<typeof createMockApi>;
 
@@ -201,9 +206,9 @@ describe("clawforce plugin", () => {
       expect(registeredEvents).toContain("gateway_start");
     });
 
-    it("registers 12 tools", () => {
-      expect(api.registerTool).toHaveBeenCalledTimes(12);
-      expect(api._tools).toHaveLength(12);
+    it("registers 13 tools", () => {
+      expect(api.registerTool).toHaveBeenCalledTimes(13);
+      expect(api._tools).toHaveLength(13);
     });
 
     it("registers 4 commands", () => {
@@ -227,11 +232,16 @@ describe("clawforce plugin", () => {
       expect(serviceIds).toContain("clawforce-sweep");
     });
 
-    it("registers 6 gateway methods", () => {
-      expect(api.registerGatewayMethod).toHaveBeenCalledTimes(6);
+    it("registers 11 gateway methods", () => {
+      expect(api.registerGatewayMethod).toHaveBeenCalledTimes(11);
       expect(api._gatewayMethods.has("clawforce.init")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.bootstrap")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.roots")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.bind_root")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.unbind_root")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.dispatch")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.dispatch_queue_item")).toBe(true);
+      expect(api._gatewayMethods.has("clawforce.sweep")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.approval_callback")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.inject_channel_message")).toBe(true);
       expect(api._gatewayMethods.has("clawforce.kill")).toBe(true);
@@ -313,15 +323,15 @@ describe("clawforce plugin", () => {
       expect(nonNull.length).toBe(1);
     });
 
-    it("scheduled agent gets null for hidden tools", async () => {
+    it("assistant agent gets null for hidden tools", async () => {
       const { getAgentConfig } = await import("../../src/project.js");
       const mockGetAgentConfig = getAgentConfig as ReturnType<typeof vi.fn>;
 
-      // Mock a scheduled agent
+      // Mock an assistant agent
       mockGetAgentConfig.mockReturnValue({
         projectId: "p1",
         projectDir: "/tmp/test",
-        config: { extends: "scheduled" },
+        config: { extends: "assistant" },
       });
 
       const api2 = createMockApi();
@@ -332,7 +342,7 @@ describe("clawforce plugin", () => {
       const taskFactory = registerCalls.find((c: any[]) => c[1]?.name === "clawforce_task")?.[0];
       expect(taskFactory).toBeDefined();
 
-      const result = taskFactory({ agentId: "sched-1", sessionKey: "s1" });
+      const result = taskFactory({ agentId: "assistant-1", sessionKey: "s1" });
       expect(result).toBeNull();
 
       // Cleanup
@@ -363,6 +373,41 @@ describe("clawforce plugin", () => {
       expect(tool).toBeNull();
 
       // Cleanup
+      mockGetAgentConfig.mockReturnValue(null);
+    });
+  });
+
+  describe("before_tool_call runtime scoping", () => {
+    it("blocks external tools not listed in allowedTools", async () => {
+      const { getAgentConfig } = await import("../../src/project.js");
+      const mockGetAgentConfig = getAgentConfig as ReturnType<typeof vi.fn>;
+
+      mockGetAgentConfig.mockReturnValue({
+        projectId: "p1",
+        projectDir: "/tmp/test",
+        config: {
+          extends: "employee",
+          runtime: {
+            allowedTools: ["Read"],
+          },
+        },
+      });
+
+      const api2 = createMockApi();
+      clawforcePlugin.register(api2 as any);
+      const hook = api2._hooks.get("before_tool_call");
+      expect(hook).toBeTypeOf("function");
+
+      const result = await hook?.(
+        { toolName: "Bash", params: {} },
+        { agentId: "worker-1", sessionKey: "s1" },
+      );
+
+      expect(result).toEqual({
+        block: true,
+        blockReason: 'Clawforce runtime scope: tool "Bash" is not in allowedTools for worker-1',
+      });
+
       mockGetAgentConfig.mockReturnValue(null);
     });
   });

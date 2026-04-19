@@ -27,7 +27,7 @@ describe("global config loader", () => {
         "  my-agent:",
         "    extends: employee",
         "defaults:",
-        "  model: anthropic/claude-opus-4-6",
+        "  model: gpt-5.4",
       ].join("\n"),
     );
     fs.writeFileSync(

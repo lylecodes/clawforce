@@ -6,45 +6,28 @@
  */
 
 import type { DomainConfig } from "./config/schema.js";
+import { getAgentAllowedTools } from "./agent-runtime-config.js";
 import { validatePolicyConfigs } from "./policy/normalizer.js";
 import { isKnownCategory } from "./risk/categories.js";
-import type { AgentConfig, CompactionConfig, ContextSource, RiskGateAction, RiskTier, WorkforceConfig } from "./types.js";
+import { CONTEXT_SOURCE_NAMES } from "./context/catalog.js";
+import { validateEntityKindsInConfig } from "./entities/config.js";
+import { normalizeExecutionConfig, validateNormalizedExecutionConfig } from "./execution/config.js";
+import { KNOWN_TOOL_NAMES } from "./tools/catalog.js";
+import type { AgentConfig, CompactionConfig, RiskGateAction, RiskTier, WorkforceConfig } from "./types.js";
 import { EVENT_ACTION_TYPES, OPERATIONAL_PROFILES } from "./types.js";
 
 const VALID_RISK_TIERS: RiskTier[] = ["low", "medium", "high", "critical"];
 const VALID_GATE_ACTIONS: RiskGateAction[] = ["none", "delay", "confirm", "approval", "human_approval"];
 
 /**
- * All valid briefing source names — derived from the ContextSource union type
- * and the assembler switch statement. Keep in sync when new sources are added.
+ * All valid briefing source names — shared with the runtime source catalog.
  */
-export const VALID_BRIEFING_SOURCES: ReadonlySet<string> = new Set([
-  "instructions", "custom", "project_md", "task_board", "assigned_task",
-  "knowledge", "file", "skill", "memory", "memory_instructions",
-  "memory_review_context", "escalations", "workflows", "activity",
-  "sweep_status", "proposals", "agent_status", "cost_summary",
-  "policy_status", "health_status", "team_status", "team_performance",
-  "soul", "tools_reference", "pending_messages", "goal_hierarchy",
-  "channel_messages", "planning_delta", "velocity", "preferences",
-  "trust_scores", "resources", "initiative_status", "cost_forecast",
-  "available_capacity", "knowledge_candidates", "budget_guidance",
-  "onboarding_welcome", "weekly_digest", "intervention_suggestions",
-  "custom_stream", "observed_events", "direction", "policies",
-  "standards", "architecture", "task_creation_standards",
-  "execution_standards", "review_standards", "rejection_standards",
-  "worker_findings", "recent_decisions", "clawforce_health_report",
-]);
+export const VALID_BRIEFING_SOURCES: ReadonlySet<string> = new Set(CONTEXT_SOURCE_NAMES);
 
 /**
- * All known ClawForce tools — derived from DEFAULT_ACTION_SCOPES in profiles.ts.
+ * All known tools that may appear in expectations and policy scopes.
  */
-export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
-  "clawforce_task", "clawforce_verify", "clawforce_message",
-  "clawforce_context", "clawforce_ops",
-  "clawforce_memory", "clawforce_skill", "clawforce_knowledge",
-  "clawforce_scale", "clawforce_workflow", "clawforce_channel",
-  "clawforce_goal", "clawforce_log",
-]);
+export const KNOWN_TOOLS: ReadonlySet<string> = new Set(KNOWN_TOOL_NAMES);
 
 const VALID_PERFORMANCE_ACTIONS = new Set([
   "retry", "alert", "terminate_and_alert", "disable", "escalate",
@@ -74,6 +57,14 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
 
   for (const [agentId, agentConfig] of Object.entries(config.agents)) {
     warnings.push(...validateAgentConfig(agentId, agentConfig));
+  }
+
+  for (const error of validateEntityKindsInConfig(config)) {
+    warnings.push({ level: "error", message: error });
+  }
+
+  for (const error of validateNormalizedExecutionConfig(config.execution)) {
+    warnings.push({ level: "error", message: error });
   }
 
   // Check reports_to targets exist in the project
@@ -125,7 +116,7 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
 
   // Validate policy configs if present
   if (config.policies && config.policies.length > 0) {
-    const validTools = ["clawforce_task", "clawforce_log", "clawforce_verify", "clawforce_workflow", "clawforce_setup", "clawforce_compact", "clawforce_ops", "clawforce_context", "memory_search", "memory_get"];
+    const validTools = [...KNOWN_TOOL_NAMES];
     const policyErrors = validatePolicyConfigs(config.policies, validTools);
     for (const err of policyErrors) {
       warnings.push({
@@ -448,8 +439,9 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
 
   // Semantic validation: expectations reference tools in the agent's allowed tools
   for (const [agentId, agentConfig] of Object.entries(config.agents)) {
-    if (agentConfig.allowedTools && agentConfig.allowedTools.length > 0) {
-      const allowedSet = new Set(agentConfig.allowedTools);
+    const allowedTools = getAgentAllowedTools(agentConfig);
+    if (allowedTools && allowedTools.length > 0) {
+      const allowedSet = new Set(allowedTools);
       for (const exp of agentConfig.expectations) {
         // ClawForce tools (clawforce_*) are always available — not gated by allowedTools
         if (exp.tool.startsWith("clawforce_") || exp.tool.startsWith("memory_")) continue;
@@ -460,6 +452,14 @@ export function validateWorkforceConfig(config: WorkforceConfig): ConfigWarning[
             message: `Expectation references tool "${exp.tool}" which is not in allowedTools — expectation may never be satisfied.`,
           });
         }
+      }
+
+      if ((config.adapter ?? "codex") === "codex" && !allowedSet.has("Bash")) {
+        warnings.push({
+          level: "warn",
+          agentId,
+          message: 'allowedTools excludes "Bash", but the direct Codex executor cannot fully hard-disable shell access yet — ClawForce will still enforce workspace roots, read-only mode for non-writers, and approval policy.',
+        });
       }
     }
 
@@ -552,10 +552,14 @@ export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
     });
   }
 
-  if (!domain.orchestrator) {
+  const managerAgentId = typeof (domain.manager as Record<string, unknown> | undefined)?.agentId === "string"
+    ? ((domain.manager as Record<string, unknown>).agentId as string).trim()
+    : "";
+
+  if (!managerAgentId) {
     results.push({
       level: "suggest",
-      message: `Domain "${domain.domain}" has no orchestrator — consider assigning one for coordination.`,
+      message: `Domain "${domain.domain}" has no manager.agentId — consider assigning one for coordination.`,
     });
   }
 
@@ -583,9 +587,27 @@ export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
     }
   }
 
+  if (domain.execution !== undefined) {
+    try {
+      validateNormalizedExecutionConfig(
+        normalizeExecutionConfig(domain.execution),
+      ).forEach((message) => {
+        results.push({
+          level: "error",
+          message: `Domain "${domain.domain}": ${message}`,
+        });
+      });
+    } catch (err) {
+      results.push({
+        level: "error",
+        message: `Domain "${domain.domain}": ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
   // Validate role_defaults reference known preset names
   if (domain.role_defaults) {
-    const KNOWN_ROLES = new Set(["manager", "employee", "assistant", "verifier", "dashboard-assistant", "onboarding", "scheduled"]);
+    const KNOWN_ROLES = new Set(["manager", "employee", "assistant", "verifier", "dashboard-assistant", "onboarding"]);
     for (const roleName of Object.keys(domain.role_defaults)) {
       if (!KNOWN_ROLES.has(roleName)) {
         results.push({
@@ -609,7 +631,7 @@ export function validateDomainQuality(domain: DomainConfig): ConfigWarning[] {
       if (template && typeof template === "object" && (template as Record<string, unknown>).model !== undefined) {
         results.push({
           level: "error",
-          message: `Domain "${domain.domain}": team_template "${teamName}" contains "model" — model is a runtime setting, configure it in OpenClaw's agent config.`,
+          message: `Domain "${domain.domain}": team_template "${teamName}" contains "model" — model is a runtime setting, configure it in your executor runtime config (for example \`codex.model\`), not in ClawForce agent definitions.`,
         });
       }
     }
@@ -627,14 +649,14 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
     warnings.push({
       level: "error",
       agentId,
-      message: `"model" is a runtime setting — configure it in OpenClaw's agent config (~/.openclaw/ agents section), not Clawforce.`,
+      message: `"model" is a runtime setting — configure it in your executor runtime config (for example \`codex.model\`), not in ClawForce agent definitions.`,
     });
   }
   if (raw.provider !== undefined) {
     warnings.push({
       level: "error",
       agentId,
-      message: `"provider" is a runtime setting — configure it in OpenClaw's agent config, not Clawforce.`,
+      message: `"provider" is a runtime setting — configure it in your executor runtime config, not in ClawForce agent definitions.`,
     });
   }
 
@@ -766,21 +788,8 @@ function validateAgentConfig(agentId: string, config: AgentConfig): ConfigWarnin
       }
     }
 
-    const VALID_SOURCES: ContextSource["source"][] = [
-      "instructions", "custom", "project_md", "task_board",
-      "assigned_task", "knowledge", "file", "skill", "memory",
-      "memory_instructions", "memory_review_context",
-      "escalations", "workflows", "activity", "sweep_status",
-      "proposals", "agent_status", "cost_summary", "policy_status", "health_status",
-      "team_status", "team_performance", "soul", "tools_reference",
-      "pending_messages", "goal_hierarchy", "channel_messages", "planning_delta",
-      "velocity", "preferences", "trust_scores", "resources",
-      "initiative_status", "cost_forecast", "available_capacity", "knowledge_candidates",
-      "budget_guidance", "onboarding_welcome", "weekly_digest", "intervention_suggestions",
-      "custom_stream",
-    ];
     for (const excluded of config.exclude_briefing) {
-      if (!VALID_SOURCES.includes(excluded as ContextSource["source"])) {
+      if (!VALID_BRIEFING_SOURCES.has(excluded)) {
         warnings.push({
           level: "warn",
           agentId,

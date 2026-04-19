@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { getMemoryDb, closeAllDbs } from "../../src/db.js";
 import { createTask, transitionTask, attachEvidence } from "../../src/tasks/ops.js";
 import { createWorkflow, addTaskToPhase } from "../../src/workflow.js";

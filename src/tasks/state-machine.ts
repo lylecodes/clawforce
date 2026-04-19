@@ -35,6 +35,7 @@ const VALID_TRANSITIONS: TransitionRule[] = [
   { from: "OPEN", to: "BLOCKED" },
   { from: "ASSIGNED", to: "BLOCKED" },
   { from: "IN_PROGRESS", to: "BLOCKED" },
+  { from: "REVIEW", to: "BLOCKED" },
   { from: "BLOCKED", to: "OPEN" },
   { from: "BLOCKED", to: "ASSIGNED" },
 

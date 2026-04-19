@@ -9,7 +9,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb, getProjectsDir } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import type { PromotionCandidate, PromotionTarget } from "../types.js";

@@ -2,7 +2,7 @@
   "mcpServers": {
     "clawforce": {
       "command": "node",
-      "args": ["/Users/lylejens/workplace/clawforce/dist/adapters/claude-code/mcp-server.js"]
+      "args": ["/Users/lylejens/workplace/clawforce/dist/adapters/mcp-server.js"]
     }
   }
 }

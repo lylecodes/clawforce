@@ -11,7 +11,7 @@
  * 7. Verify budget_plan briefing source returns valid markdown
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({

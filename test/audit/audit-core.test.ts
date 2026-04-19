@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({

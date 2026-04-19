@@ -10,7 +10,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { getExtendedProjectConfig } from "../project.js";
@@ -20,7 +20,10 @@ import { applyRiskGate } from "../risk/gate.js";
 import { getConstraintsForTool } from "../profiles.js";
 import { getAgentConfig } from "../project.js";
 import { resolveEffectiveScope } from "../scope.js";
+import { evaluateToolExecution } from "../execution/intercept.js";
+import { checkPreApproval, consumePreApproval } from "../approval/pre-approved.js";
 import { checkPolicies, type PolicyContext } from "./engine.js";
+import { jsonResult } from "../tools/common.js";
 
 export type ToolExecuteFunction = (...args: unknown[]) => Promise<{
   content: Array<{ type: string; text: string }>;
@@ -32,6 +35,7 @@ export type PolicyMiddlewareContext = {
   agentId: string;
   sessionKey?: string;
   toolName: string;
+  taskId?: string;
 };
 
 export type ToolPolicyResult =
@@ -169,18 +173,33 @@ export function withPolicyCheck(
     const result = enforceToolPolicy(context, params);
 
     if (!result.allowed) {
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            ok: false,
-            reason: result.reason,
-            ...(result.policyId ? { policyId: result.policyId } : {}),
-            ...(result.riskTier ? { riskTier: result.riskTier } : {}),
-          }),
-        }],
-        details: null,
-      };
+      return jsonResult({
+        ok: false,
+        reason: result.reason,
+        ...(result.policyId ? { policyId: result.policyId } : {}),
+        ...(result.riskTier ? { riskTier: result.riskTier } : {}),
+      });
+    }
+
+    const taskId = context.taskId
+      ?? params.task_id as string | undefined
+      ?? params.taskId as string | undefined;
+    if (taskId && checkPreApproval({ projectId: context.projectId, taskId, toolName: context.toolName })) {
+      consumePreApproval({ projectId: context.projectId, taskId, toolName: context.toolName });
+      return execute(...args);
+    }
+
+    const executionDecision = evaluateToolExecution(context, params);
+    if (executionDecision.effect !== "allow") {
+      return jsonResult({
+        ok: false,
+        simulated: executionDecision.effect === "simulate",
+        approvalRequired: executionDecision.effect === "require_approval",
+        reason: executionDecision.reason,
+        policyDecision: executionDecision.effect,
+        simulatedActionId: executionDecision.simulatedAction.id,
+        proposalId: executionDecision.proposal?.id,
+      });
     }
 
     return execute(...args);
@@ -256,7 +275,7 @@ function checkConstraints(
           "SELECT department FROM tasks WHERE id = ? AND project_id = ?",
         ).get(taskId, context.projectId) as Record<string, unknown> | undefined;
         if (taskRow && taskRow.department) {
-          const agentCfg = getAgentConfig(context.agentId);
+          const agentCfg = getAgentConfig(context.agentId, context.projectId);
           const agentDept = agentCfg?.config?.department;
           if (agentDept && taskRow.department !== agentDept) {
             return `department_only: task ${taskId} belongs to department "${taskRow.department}", agent is in "${agentDept}"`;

@@ -7,15 +7,22 @@
  */
 
 import type { NotificationDeliveryAdapter } from "./delivery.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
-const adapters: Map<string, NotificationDeliveryAdapter> = new Map();
+type AdapterRegistryState = Map<string, NotificationDeliveryAdapter>;
+
+const runtime = getDefaultRuntimeState();
+
+function getAdapterRegistry(): AdapterRegistryState {
+  return runtime.notifications.adapterRegistry as AdapterRegistryState;
+}
 
 /**
  * Register a delivery adapter under a given name.
  * Replaces any existing adapter with the same name.
  */
 export function registerDeliveryAdapter(name: string, adapter: NotificationDeliveryAdapter): void {
-  adapters.set(name, adapter);
+  getAdapterRegistry().set(name, adapter);
 }
 
 /**
@@ -23,7 +30,7 @@ export function registerDeliveryAdapter(name: string, adapter: NotificationDeliv
  * Returns null if no adapter handles that channel.
  */
 export function getDeliveryAdapterForChannel(channel: string): NotificationDeliveryAdapter | null {
-  for (const adapter of adapters.values()) {
+  for (const adapter of getAdapterRegistry().values()) {
     if (adapter.supportedChannels().includes(channel)) {
       return adapter;
     }
@@ -37,7 +44,7 @@ export function getDeliveryAdapterForChannel(channel: string): NotificationDeliv
  */
 export function listAvailableChannels(): string[] {
   const seen = new Set<string>();
-  for (const adapter of adapters.values()) {
+  for (const adapter of getAdapterRegistry().values()) {
     for (const channel of adapter.supportedChannels()) {
       seen.add(channel);
     }
@@ -49,5 +56,5 @@ export function listAvailableChannels(): string[] {
  * Remove all registered adapters. Used in tests to reset state between runs.
  */
 export function clearDeliveryAdapters(): void {
-  adapters.clear();
+  getAdapterRegistry().clear();
 }

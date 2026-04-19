@@ -7,14 +7,28 @@
  * Re-exports core types where possible to avoid duplication.
  */
 
-import type { Task, ClawforceEvent } from "../types.js";
+import type {
+  Entity,
+  EntityIssue,
+  EntityIssueSummary,
+  EntityKindConfig,
+  Task,
+  ClawforceEvent,
+  DomainExecutionEffect,
+  DomainExecutionMode,
+} from "../types.js";
 import type { DomainConfig, GlobalAgentDef } from "../config/schema.js";
 import type { Proposal } from "../approval/resolve.js";
 import type { DashboardExtensionContribution } from "../dashboard/extensions.js";
+import type { SetupExplanation, SetupReport } from "../setup/report.js";
+import type { SetupPreflight } from "../setup/preflight.js";
+import type { AttentionSummary } from "../attention/types.js";
 
 // Re-export referenced types for consumer convenience
 export type { Task, ClawforceEvent, DomainConfig, Proposal };
 export type { DashboardExtensionContribution };
+export type { SetupReport, SetupExplanation };
+export type { SetupPreflight };
 
 // --- Config contract types ---
 
@@ -39,6 +53,16 @@ export type AgentExpectation =
   | string
   | { tool: string; action?: string | string[]; min_calls?: number; [key: string]: unknown };
 
+export type ConfigAgentRuntime = {
+  bootstrapConfig?: {
+    maxChars?: number;
+    totalMaxChars?: number;
+  };
+  bootstrapExcludeFiles?: string[];
+  allowedTools?: string[];
+  workspacePaths?: string[];
+};
+
 /**
  * An agent entry in the queryConfig() response.
  * Rich fields (briefing, expectations) are preserved as structured objects.
@@ -52,6 +76,10 @@ export type ConfigAgent = {
   department?: string;
   team?: string;
   channel?: string;
+  runtimeRef?: string;
+  runtime?: ConfigAgentRuntime;
+  allowedTools?: string[];
+  workspacePaths?: string[];
   briefing: BriefingSource[];
   expectations: AgentExpectation[];
   performance_policy?: GlobalAgentDef["performance_policy"] | Record<string, unknown>;
@@ -121,6 +149,8 @@ export type ConfigQueryResult = {
   workflows: string[];
   knowledge: Record<string, unknown>;
   memory: Record<string, unknown>;
+  entities: Record<string, EntityKindConfig>;
+  execution: Record<string, unknown>;
 };
 
 /** Response for config validate action — includes field-level errors and warnings. */
@@ -138,6 +168,57 @@ export type ConfigPreviewResponse = {
   consequence: string;
   risk: "LOW" | "MEDIUM" | "HIGH";
   riskExplanation: string;
+};
+
+export type RuntimeReloadStatus = {
+  domainId: string;
+  status: "loaded" | "warning" | "error" | "disabled" | "missing";
+  runtimeLoaded: boolean;
+  configApplied: boolean;
+  source: "initialize" | "reload";
+  ownerBaseDir?: string;
+  lastAttemptedAt: number;
+  lastAppliedAt: number | null;
+  errors: string[];
+  warnings: string[];
+};
+
+export type SimulatedActionStats = {
+  total: number;
+  pending: number;
+  simulated: number;
+  blocked: number;
+  approvedForLive: number;
+  discarded: number;
+  latestCreatedAt: number | null;
+};
+
+export type SetupOperatorActionOperation =
+  | {
+    type: "request_controller_handoff";
+  }
+  | {
+    type: "recover_recurring_run";
+    taskId: string;
+  };
+
+export type SetupOperatorAction = {
+  id: string;
+  label: string;
+  description?: string;
+  operation: SetupOperatorActionOperation;
+  tone?: "primary" | "secondary";
+};
+
+export type SetupOperatorActionResponse = {
+  ok: true;
+  message: string;
+  actionId: string;
+  mode?: "handoff_requested" | "released" | "retried" | "replayed";
+  requestedGeneration?: string;
+  taskId?: string;
+  queueItemId?: string;
+  recoveredTaskId?: string;
 };
 
 // --- Agent types ---
@@ -191,6 +272,21 @@ export type TaskListResponse = {
   hasMore: boolean;
 };
 
+export type EntityListResponse = {
+  entities: Entity[];
+  count: number;
+  hasMore?: boolean;
+};
+
+export type EntityDetailResponse = {
+  entity: Entity;
+  children: Entity[];
+  transitions: import("../types.js").EntityTransitionRecord[];
+  issues: EntityIssue[];
+  issueSummary: EntityIssueSummary;
+  checkRuns: import("../types.js").EntityCheckRun[];
+};
+
 export type ApprovalListResponse = {
   proposals: Proposal[];
   count: number;
@@ -217,6 +313,87 @@ export type DomainConfigResponse = {
   config: DomainConfig;
 };
 
+export type SetupTopologyAgent = {
+  id: string;
+  extends?: string;
+  title?: string;
+  department?: string;
+  team?: string;
+  reports_to?: string | null;
+  jobCount: number;
+  activeSessionCount: number;
+  activeTaskCount: number;
+  executor: "openclaw" | "codex" | "claude-code";
+  enforcementGrade: "hard-scoped" | "partially-scoped" | "policy-only";
+  executorSuitability: "preferred" | "acceptable" | "avoid";
+  runtime?: ConfigAgentRuntime;
+  allowedTools?: string[];
+  workspacePaths?: string[];
+  role: "manager" | "owner" | "specialist";
+};
+
+export type SetupContextRoute = {
+  path: string;
+  params?: Record<string, string>;
+};
+
+export type SetupContextReference = {
+  id: string;
+  label: string;
+  kind: "config" | "agent" | "job" | "workflow" | "runtime";
+  domainId?: string;
+  filePath?: string;
+  configSection?: string;
+  configPath?: string;
+  agentId?: string;
+  jobId?: string;
+  route?: SetupContextRoute;
+};
+
+export type SetupExperienceResponse = {
+  domainId: string;
+  report: SetupReport;
+  explanation: SetupExplanation;
+  preflight: SetupPreflight;
+  topology: {
+    managerAgentId: string | null;
+    workflows: string[];
+    entityKinds: string[];
+    manager: SetupTopologyAgent | null;
+    owners: SetupTopologyAgent[];
+    sharedSpecialists: SetupTopologyAgent[];
+  };
+  context: {
+    immediateActions: Record<string, SetupContextReference[]>;
+    checks: Record<string, SetupContextReference[]>;
+    preflight: Record<string, SetupContextReference[]>;
+    agents: Record<string, SetupContextReference[]>;
+    jobs: Record<string, SetupContextReference[]>;
+  };
+  actions: {
+    immediateActions: Record<string, SetupOperatorAction[]>;
+    jobs: Record<string, SetupOperatorAction[]>;
+  };
+  config: ConfigQueryResult;
+  feed: AttentionSummary;
+  decisionInbox: AttentionSummary;
+  runtime: {
+    dashboard: unknown;
+    queue: unknown;
+    trackedSessions: unknown;
+    execution: {
+      mode: DomainExecutionMode;
+      defaultMutationPolicy?: DomainExecutionEffect;
+      environments?: {
+        primary?: string;
+        verification?: string;
+      };
+      simulatedActions: SimulatedActionStats;
+      lastReload: RuntimeReloadStatus | null;
+    };
+  };
+};
+
 // --- Action surfaces ---
 
 export type ApproveResponse = {
@@ -241,6 +418,10 @@ export type ConfigSaveResponse = {
   error?: string;
   /** Non-fatal warnings emitted during save (e.g. unknown agent references). */
   warnings?: string[];
+  /** Reload errors captured while trying to apply the saved config to the runtime. */
+  reloadErrors?: string[];
+  /** Latest known runtime apply status for the active domain after the save. */
+  runtimeReload?: RuntimeReloadStatus | null;
 };
 
 export type EnableDisableResponse = {
@@ -274,6 +455,12 @@ export type CapabilityResponse = {
     memory: boolean;
     comms: boolean;
   };
+  messaging?: {
+    operatorChat: boolean;
+    directAgentMessaging: boolean;
+    channels: boolean;
+    assistantRouting: boolean;
+  };
   endpoints: string[];
   /** Extension summary — reflects dashboard extensions currently registered. */
   extensions?: {
@@ -295,6 +482,51 @@ export type DashboardRuntimeResponse = {
   standaloneCompatibilityServer?: boolean;
   standaloneUrl?: string;
   notes: string[];
+};
+
+export type DashboardAssistantStatusResponse = {
+  enabled: boolean;
+  configuredAgentId?: string;
+  resolvedAgentId?: string;
+  resolvedTitle?: string;
+  resolutionSource?: "configured" | "lead";
+  deliveryPolicy: "live-if-session-available-else-store" | "unavailable";
+  directMentionsSupported: boolean;
+  note: string;
+};
+
+export type MessageContextRefs = {
+  proposalId?: string;
+  taskId?: string;
+  entityId?: string;
+  issueId?: string;
+};
+
+export type OperatorCommsThread = {
+  id: string;
+  agentId: string;
+  agentTitle?: string;
+  messageCount: number;
+  unreadCount: number;
+  queuedForAgentCount: number;
+  lastMessageAt: number;
+  lastDirection: "outbound" | "inbound";
+  lastMessage?: string;
+  proposalIds: string[];
+  taskIds: string[];
+  entityIds: string[];
+  issueIds: string[];
+};
+
+export type OperatorCommsResponse = {
+  assistant: DashboardAssistantStatusResponse;
+  feed: AttentionSummary;
+  directThreads: OperatorCommsThread[];
+  inboxCount: number;
+  unreadCount: number;
+  queuedForAgentsCount: number;
+  decisionInbox: AttentionSummary;
+  channelsConfigured: boolean;
 };
 
 // --- Attention ---

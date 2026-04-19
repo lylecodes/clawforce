@@ -14,23 +14,28 @@ import { getActiveProjectIds, isClawforceInitialized } from "../lifecycle.js";
 import {
   getAgentConfig,
   getRegisteredAgentIds,
-  initProject,
   loadWorkforceConfig,
-  loadProject,
-  registerWorkforceConfig,
+  parseWorkforceConfigContent,
   resolveProjectDir,
 } from "../project.js";
 import { safeLog } from "../diagnostics.js";
 import { validateWorkforceConfig } from "../config-validator.js";
 import { recoverOrphanedSessions } from "../enforcement/tracker.js";
-import { generateDefaultScopePolicies } from "../profiles.js";
-import { registerPolicies } from "../policy/registry.js";
 import { buildExplainContent } from "../context/onboarding.js";
 import { resolveSkillSource } from "../skills/registry.js";
 import { resolveEffectiveScope } from "../scope.js";
 import { generateScoped } from "../skills/topics/tools.js";
-import { ensureAgentDocs } from "../context/sources/auto-generate.js";
 import { generateSoulTemplate, isSoulTemplateUnmodified } from "../context/sources/auto-generate.js";
+import { reloadDomain } from "../config/init.js";
+import { validateDomainConfig } from "../config/schema.js";
+import { runCreateStarterDomainCommand } from "../app/commands/domain-setup.js";
+import {
+  buildSetupReport,
+  buildSetupExplanation,
+  renderSetupExplain,
+  resolveSetupRoot,
+} from "../setup/report.js";
+import { STARTER_WORKFLOW_TYPES } from "../setup/workflows.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readStringParam, safeExecute } from "./common.js";
@@ -39,10 +44,17 @@ const SETUP_ACTIONS = ["explain", "status", "validate", "activate", "scaffold"] 
 
 const ClawforceSetupSchema = Type.Object({
   action: stringEnum(SETUP_ACTIONS, { description: "Action to perform. Use 'explain' to get the full reference docs." }),
-  yaml_content: Type.Optional(Type.String({ description: "Raw YAML content to validate (for validate action)." })),
-  config_path: Type.Optional(Type.String({ description: "Path to a project.yaml file to validate (for validate action)." })),
-  project_id: Type.Optional(Type.String({ description: "Project ID — the subdirectory name under projectsDir (for activate/scaffold action)." })),
-  agent_id: Type.Optional(Type.String({ description: "Agent ID to target (for scaffold action). Omit to scaffold all agents in the project." })),
+  yaml_content: Type.Optional(Type.String({ description: "Raw config YAML content to validate (for validate action)." })),
+  config_path: Type.Optional(Type.String({ description: "Path to a config directory, config.yaml, or domains/*.yaml file to validate (for validate action)." })),
+  project_id: Type.Optional(Type.String({ description: "Domain ID (for activate/scaffold action)." })),
+  agent_id: Type.Optional(Type.String({ description: "Agent ID to target for SOUL scaffolding. Omit to scaffold all agents in the active domain." })),
+  mode: Type.Optional(stringEnum(["new", "governance"] as const, { description: "Starter-domain scaffold mode. Pass with scaffold to create a real starter domain." })),
+  workflow: Type.Optional(stringEnum(STARTER_WORKFLOW_TYPES, { description: "Starter workflow capability to scaffold and validate as part of setup." })),
+  mission: Type.Optional(Type.String({ description: "Mission prompt for new-mode starter scaffolds." })),
+  paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Project paths for starter-domain scaffolds." })),
+  operational_profile: Type.Optional(Type.String({ description: "Operational profile for starter-domain scaffolds (low, medium, high, ultra)." })),
+  existing_agents: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Existing agent IDs to attach in governance-mode starter scaffolds." })),
+  lead_agent_id: Type.Optional(Type.String({ description: "Lead agent ID for governance-mode starter scaffolds." })),
   topic: Type.Optional(Type.String({ description: "Skill topic ID to query (e.g. 'roles', 'tasks', 'memory'). Omit for full reference." })),
 });
 
@@ -55,11 +67,11 @@ export function createClawforceSetupTool(options: {
     name: "clawforce_setup",
     description:
       "Set up and configure AI workforce projects. " +
-      "explain: Full reference docs — project.yaml format, roles, accountability, examples. " +
+      "explain: Full reference docs — domain config format, roles, accountability, examples. " +
       "status: What projects and employees are currently configured. " +
-      "validate: Check a project.yaml config (pass yaml_content or config_path). " +
-      "activate: Register or reload a project from disk (pass project_id). " +
-      "scaffold: Create SOUL.md templates for agent customization (pass project_id, optionally agent_id).",
+      "validate: Check split config files or a YAML config document (pass yaml_content or config_path). " +
+      "activate: Load or reload a configured domain from disk (pass project_id). " +
+      "scaffold: Create a starter domain when mode=new|governance is passed, otherwise scaffold SOUL.md templates for agent customization.",
     parameters: ClawforceSetupSchema,
     execute: async (_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> => {
       return safeExecute(async () => {
@@ -79,7 +91,7 @@ export function createClawforceSetupTool(options: {
             return handleActivate(params, options.projectsDir);
 
           case "scaffold":
-            return handleScaffold(options.projectsDir, readStringParam(params, "project_id"), readStringParam(params, "agent_id"));
+            return handleScaffold(options.projectsDir, params);
 
           default:
             return jsonResult({ ok: false, reason: `Unknown action: ${action}` });
@@ -109,9 +121,12 @@ function handleExplain(projectsDir: string, agentId?: string, topic?: string | n
     }
     return jsonResult({ ok: true, topic, reference: content });
   }
+  const report = buildSetupReport(resolveProjectDir(projectsDir));
   return jsonResult({
     ok: true,
-    reference: buildExplainContent(projectsDir),
+    explanation: buildSetupExplanation(report),
+    setup: report,
+    reference: `${buildExplainContent(projectsDir)}\n\n${renderSetupExplain(report)}`,
   });
 }
 
@@ -119,7 +134,6 @@ function handleStatus(projectsDir: string): ToolResult {
   const resolvedDir = resolveProjectDir(projectsDir);
   const initialized = isClawforceInitialized();
   const projectIds = getActiveProjectIds();
-  const agentIds = getRegisteredAgentIds();
 
   const projects: Array<{
     id: string;
@@ -128,32 +142,30 @@ function handleStatus(projectsDir: string): ToolResult {
 
   for (const pid of projectIds) {
     const agents: Array<{ id: string; extends: string | undefined }> = [];
-    for (const aid of agentIds) {
-      const entry = getAgentConfig(aid);
-      if (entry && entry.projectId === pid) {
+    for (const aid of getRegisteredAgentIds(pid)) {
+      const entry = getAgentConfig(aid, pid);
+      if (entry) {
         agents.push({ id: aid, extends: entry.config.extends });
       }
     }
     projects.push({ id: pid, agents });
   }
 
-  // Scan projectsDir for project directories that exist on disk but may not be active
   const onDiskProjects: string[] = [];
   try {
-    if (fs.existsSync(resolvedDir)) {
-      const entries = fs.readdirSync(resolvedDir, { withFileTypes: true });
+    const domainsDir = path.join(resolvedDir, "domains");
+    if (fs.existsSync(domainsDir)) {
+      const entries = fs.readdirSync(domainsDir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isDirectory()) {
-          const configPath = path.join(resolvedDir, entry.name, "project.yaml");
-          if (fs.existsSync(configPath)) {
-            onDiskProjects.push(entry.name);
-          }
+        if (entry.isFile() && entry.name.endsWith(".yaml")) {
+          onDiskProjects.push(entry.name.replace(/\.yaml$/, ""));
         }
       }
     }
   } catch (err) { safeLog("setup.status.scanProjects", err); }
 
   const inactiveProjects = onDiskProjects.filter((id) => !projectIds.includes(id));
+  const report = buildSetupReport(resolvedDir);
 
   return jsonResult({
     ok: true,
@@ -163,10 +175,11 @@ function handleStatus(projectsDir: string): ToolResult {
     project_count: projectIds.length,
     projects,
     inactive_projects_on_disk: inactiveProjects,
+    setup: report,
     hint: projectIds.length === 0
-      ? "No projects configured. Use 'explain' to get the full setup reference, then create a project.yaml and 'activate' it."
+      ? "No domains configured. Use 'explain' to get the full setup reference, then create config.yaml + domains/*.yaml and 'activate' one."
       : undefined,
-    agent_id_help: "Agent IDs in project.yaml must match the agent IDs configured in OpenClaw. Ask the user to check their OpenClaw agent configuration if they're unsure what IDs to use.",
+    agent_id_help: "Agent IDs in your domain config must match the agent IDs available in your chosen execution environment. If you're unsure, check the runtime or adapter configuration you plan to dispatch through.",
   });
 }
 
@@ -181,19 +194,51 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
     });
   }
 
-  let content: string;
-  if (yamlContent) {
-    content = yamlContent;
-  } else {
+  if (configPath) {
     // Validate that config_path resolves within the projects directory or temp dir
-    const resolved = path.resolve(configPath!);
+    const resolved = path.resolve(configPath);
     const allowedRoot = path.resolve(projectsDir);
-    if (!resolved.startsWith(allowedRoot + path.sep) && !resolved.startsWith(os.tmpdir())) {
+    const tempRoot = path.resolve(os.tmpdir());
+    const withinProjectsDir = resolved === allowedRoot || resolved.startsWith(allowedRoot + path.sep);
+    const withinTempDir = resolved === tempRoot || resolved.startsWith(tempRoot + path.sep);
+    if (!withinProjectsDir && !withinTempDir) {
       return jsonResult({
         ok: false,
         reason: `config_path must be within the projects directory. Got: ${configPath}`,
       });
     }
+
+    if (!fs.existsSync(resolved)) {
+      return jsonResult({
+        ok: false,
+        reason: `Cannot read file: ENOENT: no such file or directory, open '${configPath}'`,
+      });
+    }
+
+    const configRoot = resolveSetupRoot(resolved);
+    if (configRoot) {
+      const report = buildSetupReport(configRoot);
+      return jsonResult({
+        ok: report.valid,
+        valid: report.valid,
+        issues: report.issues.map((issue) => ({
+          level: issue.severity,
+          file: issue.file,
+          path: issue.path,
+          agentId: issue.agentId,
+          code: issue.code,
+          message: issue.message,
+        })),
+        checks: report.checks,
+        next_steps: report.nextSteps,
+      });
+    }
+  }
+
+  let content: string;
+  if (yamlContent) {
+    content = yamlContent;
+  } else {
     try {
       content = fs.readFileSync(configPath!, "utf-8");
     } catch (err) {
@@ -218,21 +263,25 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
     });
   }
 
-  // Check basic structure
   const issues: Array<{ level: string; message: string }> = [];
 
-  if (!raw.id) {
-    issues.push({ level: "error", message: "Missing 'id' field — every project needs a unique identifier." });
-  }
-  if (!raw.name) {
-    issues.push({ level: "warn", message: "Missing 'name' field — recommended for readability." });
-  }
-  if (!raw.dir) {
-    issues.push({ level: "warn", message: "Missing 'dir' field — the project's working directory path. Will default to '.'." });
+  if (typeof raw.domain === "string") {
+    const result = validateDomainConfig(raw);
+    for (const error of result.errors) {
+      issues.push({ level: "error", message: `${error.field}: ${error.message}` });
+    }
+    const hasErrors = issues.some((i) => i.level === "error");
+    return jsonResult({
+      ok: !hasErrors,
+      valid: !hasErrors,
+      issues,
+      domain_preview: {
+        domain: raw.domain,
+        agents: Array.isArray(raw.agents) ? raw.agents : [],
+      },
+    });
   }
 
-  // Write to a temp file so loadWorkforceConfig can parse it
-  // (it expects a file path, so we use a temp approach for yaml_content)
   let wfConfig;
   if (configPath) {
     try {
@@ -244,19 +293,13 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
       });
     }
   } else {
-    // For raw YAML content, write to temp file then load
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawforce-validate-"));
-    const tmpPath = path.join(tmpDir, "project.yaml");
     try {
-      fs.writeFileSync(tmpPath, content, "utf-8");
-      wfConfig = loadWorkforceConfig(tmpPath);
+      wfConfig = parseWorkforceConfigContent(content);
     } catch (err) {
       issues.push({
         level: "error",
         message: `Failed to load workforce config: ${err instanceof Error ? err.message : String(err)}`,
       });
-    } finally {
-      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
     }
   }
 
@@ -274,11 +317,6 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
       extends: config.extends,
       expectations: config.expectations.length,
     }));
-  } else if (issues.length === 0) {
-    issues.push({
-      level: "warn",
-      message: "No workforce agents found. Use 'extends' to inherit from a preset (manager, employee).",
-    });
   }
 
   const hasErrors = issues.some((i) => i.level === "error");
@@ -291,125 +329,94 @@ function handleValidate(params: Record<string, unknown>, projectsDir: string): T
   });
 }
 
-// NOTE: activate currently uses loadWorkforceConfig + registerWorkforceConfig
-// to preserve backward compatibility with existing project.yaml workflows.
-// A future domain-based initializeAllDomains path is intentionally deferred
-// until project.yaml onboarding is fully migrated.
 async function handleActivate(params: Record<string, unknown>, projectsDir: string): Promise<ToolResult> {
   const projectId = readStringParam(params, "project_id", { required: true })!;
   const resolvedDir = resolveProjectDir(projectsDir);
-  const projectDir = path.join(resolvedDir, projectId);
-  const configPath = path.join(projectDir, "project.yaml");
+  const domainPath = path.join(resolvedDir, "domains", `${projectId}.yaml`);
 
-  if (!fs.existsSync(configPath)) {
+  if (!fs.existsSync(domainPath)) {
     return jsonResult({
       ok: false,
-      reason: `No project.yaml found at ${configPath}. Create the file first, then activate.`,
+      reason: `No domain config found at ${domainPath}. Create the file first, then activate.`,
     });
   }
 
   const activeIds = getActiveProjectIds();
   const isReload = activeIds.includes(projectId);
-
-  // Load and validate workforce config
-  const wfConfig = loadWorkforceConfig(configPath);
-  const registeredAgents: Array<{ id: string; extends: string | undefined }> = [];
-
-  if (wfConfig) {
-    const warnings = validateWorkforceConfig(wfConfig);
-    const errors = warnings.filter((w) => w.level === "error");
-
-    if (errors.length > 0 && Object.keys(wfConfig.agents).length === 0) {
-      return jsonResult({
-        ok: false,
-        reason: "Config has errors and no valid agents.",
-        errors: errors.map((e) => e.message),
-      });
-    }
-
-    // registerWorkforceConfig overwrites existing entries in the in-memory registry,
-    // so this works for both first activation and reload.
-    registerWorkforceConfig(projectId, wfConfig, projectDir);
-
-    // Build combined policy list: explicit + auto-generated scope defaults
-    const allPolicies: Array<{ name: string; type: string; target?: string; config: Record<string, unknown> }> = [];
-    if (wfConfig.policies && wfConfig.policies.length > 0) {
-      allPolicies.push(...wfConfig.policies);
-    }
-    try {
-      const agentEntries = Object.fromEntries(
-        Object.entries(wfConfig.agents).map(([id, cfg]) => [id, { extends: cfg.extends }]),
-      );
-      const scopePolicies = generateDefaultScopePolicies(agentEntries, wfConfig.policies);
-      allPolicies.push(...scopePolicies);
-    } catch (err) { safeLog("setup.activate.scopePolicies", err); }
-    if (allPolicies.length > 0) {
-      try { registerPolicies(projectId, allPolicies); }
-      catch (err) { safeLog("setup.activate.registerPolicies", err); }
-    }
-
-    // Bootstrap per-agent docs (SOUL.md templates)
-    for (const [agentId, config] of Object.entries(wfConfig.agents)) {
-      registeredAgents.push({ id: agentId, extends: config.extends });
-      try {
-        ensureAgentDocs(projectDir, agentId, config);
-      } catch (err) { safeLog("setup.activate.ensureAgentDocs", err); }
-    }
+  const result = reloadDomain(resolvedDir, projectId);
+  if (!result.domains.includes(projectId)) {
+    const matchingErrors = result.errors.filter((err) => err.includes(`"${projectId}"`));
+    const reason = matchingErrors[0] ?? `Domain "${projectId}" was not loaded.`;
+    return jsonResult({
+      ok: false,
+      reason,
+      errors: matchingErrors.length > 0 ? matchingErrors : result.errors,
+      warnings: result.warnings,
+    });
   }
 
-  // Initialize DB + sweep registration (idempotent — safe to call again)
-  if (!isReload) {
-    try {
-      const projectConfig = loadProject(configPath);
-      initProject(projectConfig);
-    } catch (err) {
-      return jsonResult({
-        ok: false,
-        reason: `Failed to initialize project: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-  }
-
-  // Create goals from config
-  if (wfConfig?.goals) {
-    try {
-      const { createGoal, listGoals } = await import("../goals/ops.js");
-      for (const [goalTitle, goalDef] of Object.entries(wfConfig.goals)) {
-        // Idempotent: check if goal with this title already exists
-        const existing = listGoals(projectId, { status: "active" })
-          .find((g: { title: string }) => g.title === goalTitle);
-        if (!existing) {
-          createGoal({
-            projectId,
-            title: goalTitle,
-            description: goalDef.description,
-            acceptanceCriteria: goalDef.acceptance_criteria,
-            department: goalDef.department,
-            team: goalDef.team,
-            ownerAgentId: goalDef.owner_agent_id,
-            createdBy: "system:activate",
-            allocation: goalDef.allocation,
-          });
-        }
-      }
-    } catch (err) { safeLog("setup.activate.createGoals", err); }
-  }
-
-  // Recover orphaned sessions
   const orphans = recoverOrphanedSessions(projectId);
+  const agents = getRegisteredAgentIds(projectId).map((agentId) => {
+    const entry = getAgentConfig(agentId, projectId);
+    return { id: agentId, extends: entry?.config.extends };
+  });
 
   const verb = isReload ? "reloaded" : "activated";
   return jsonResult({
     ok: true,
     project_id: projectId,
     reloaded: isReload,
-    agents: registeredAgents,
+    agents,
     orphaned_sessions_recovered: orphans.length,
-    message: `Project "${projectId}" ${verb} with ${registeredAgents.length} agent(s) registered.`,
+    warnings: result.warnings,
+    message: `Project "${projectId}" ${verb} with ${agents.length} agent(s) registered.`,
   });
 }
 
-function handleScaffold(projectsDir: string, projectId?: string | null, agentId?: string | null): ToolResult {
+function handleScaffold(projectsDir: string, params: Record<string, unknown>): ToolResult {
+  const resolvedDir = resolveProjectDir(projectsDir);
+  const projectId = readStringParam(params, "project_id");
+  const agentId = readStringParam(params, "agent_id");
+  const mode = readStringParam(params, "mode");
+
+  if (mode) {
+    if (!projectId) {
+      return jsonResult({ ok: false, reason: "project_id is required when scaffold mode is set." });
+    }
+
+    const rawPaths = Array.isArray(params.paths)
+      ? params.paths.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+    const existingAgents = Array.isArray(params.existing_agents)
+      ? params.existing_agents.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+    const result = runCreateStarterDomainCommand({
+      domainId: projectId,
+      mode,
+      workflow: readStringParam(params, "workflow") ?? undefined,
+      mission: readStringParam(params, "mission") ?? undefined,
+      paths: rawPaths,
+      operational_profile: readStringParam(params, "operational_profile") ?? undefined,
+      existingAgents,
+      leadAgentId: readStringParam(params, "lead_agent_id") ?? undefined,
+    }, "clawforce_setup", { baseDir: resolvedDir });
+
+    if (!result.ok) {
+      return jsonResult({ ok: false, reason: result.error });
+    }
+
+    return jsonResult({
+      ok: true,
+      project_id: result.domainId,
+      mode: result.mode,
+      created_agent_ids: result.createdAgentIds,
+      reused_agent_ids: result.reusedAgentIds,
+      reload_errors: result.reloadErrors,
+      setup: buildSetupReport(resolvedDir, result.domainId),
+      message: `${result.message} Review setup.status or setup.validate before starting the controller.`,
+    });
+  }
+
   // Auto-resolve project if not specified
   let resolvedProjectId = projectId;
   if (!resolvedProjectId) {
@@ -423,7 +430,6 @@ function handleScaffold(projectsDir: string, projectId?: string | null, agentId?
     resolvedProjectId = activeIds[0]!;
   }
 
-  const resolvedDir = resolveProjectDir(projectsDir);
   const projectDir = path.join(resolvedDir, resolvedProjectId);
 
   if (!fs.existsSync(projectDir)) {
@@ -440,10 +446,10 @@ function handleScaffold(projectsDir: string, projectId?: string | null, agentId?
     else skipped.push(agentId);
   } else {
     // Scaffold all agents in the project
-    const allAgentIds = getRegisteredAgentIds();
+    const allAgentIds = getRegisteredAgentIds(resolvedProjectId);
     for (const aid of allAgentIds) {
-      const entry = getAgentConfig(aid);
-      if (entry && entry.projectId === resolvedProjectId) {
+      const entry = getAgentConfig(aid, resolvedProjectId);
+      if (entry) {
         const result = scaffoldAgent(projectDir, aid);
         if (result === "scaffolded") scaffolded.push(aid);
         else skipped.push(aid);

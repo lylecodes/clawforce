@@ -58,8 +58,17 @@ describe("ESM package exports", () => {
     expect(typeof tasks.transition).toBe("function");
   });
 
+  it("advanced entry (./advanced) exports curated extension and config contracts", async () => {
+    const mod = await import("../../src/advanced.js");
+
+    expect(typeof mod.planGlobalConfigPatch).toBe("function");
+    expect(typeof mod.createMergeConfigPatch).toBe("function");
+    expect(typeof mod.registerDashboardExtension).toBe("function");
+    expect(typeof mod.parseAgentSessionKey).toBe("function");
+  });
+
   it("internal entry (./internal) exports lifecycle and config functions", async () => {
-    const mod = await import("../../src/index.js");
+    const mod = await import("../../src/internal.js");
 
     // Lifecycle
     expect(typeof mod.initClawforce).toBe("function");
@@ -77,7 +86,7 @@ describe("ESM package exports", () => {
   });
 
   it("internal entry exports task and dispatch helpers", async () => {
-    const mod = await import("../../src/index.js");
+    const mod = await import("../../src/internal.js");
 
     // Dispatch
     expect(typeof mod.shouldDispatch).toBe("function");
@@ -92,7 +101,7 @@ describe("ESM package exports", () => {
   });
 
   it("internal entry exports types", async () => {
-    const mod = await import("../../src/index.js");
+    const mod = await import("../../src/internal.js");
 
     // Type re-exports show up as undefined at runtime but should not cause
     // import errors. Spot-check a runtime export that sits near type exports.

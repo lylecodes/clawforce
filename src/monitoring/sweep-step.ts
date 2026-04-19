@@ -5,7 +5,7 @@
  * as part of the sweep cycle. Called via dynamic import to avoid circular deps.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { recordMetric } from "../metrics.js";

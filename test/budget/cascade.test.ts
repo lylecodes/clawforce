@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 
 describe("cascading budget allocation v2", () => {
   let db: DatabaseSync;

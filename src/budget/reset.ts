@@ -16,7 +16,7 @@
  * - Windows where `*_reset_at` is NULL are skipped (no limit configured for that window).
  */
 
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "../sqlite-driver.js";
 
 export function getNextHourBoundary(now: number): number {
   const d = new Date(now);

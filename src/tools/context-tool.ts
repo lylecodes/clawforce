@@ -55,7 +55,7 @@ export function createClawforceContextTool(options?: {
         const projectId = resolved.projectId!;
         const actor = options?.agentSessionKey ?? "unknown";
         const agentIdResolved = options?.agentId ?? actor;
-        const agentEntry = getAgentConfig(agentIdResolved);
+        const agentEntry = getAgentConfig(agentIdResolved, projectId);
         const role = agentEntry?.config.extends ?? "employee";
         const projectDir = options?.projectDir ?? agentEntry?.projectDir;
 

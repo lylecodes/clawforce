@@ -5,7 +5,7 @@
  * Each executor is isolated — one failing does not block others.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type {
   ClawforceEvent,
   CreateTaskAction,
@@ -248,10 +248,10 @@ export function findAgentByRole(projectId: string, role: string): string | undef
     // Resolve the role through aliases (e.g. "lead" → "manager", "supervisor" → "manager")
     const resolvedRole = roleAliases[role] ?? role;
 
-    const agentIds = getRegisteredAgentIds();
+    const agentIds = getRegisteredAgentIds(projectId);
     for (const agentId of agentIds) {
-      const entry = getAgentConfig(agentId);
-      if (entry?.projectId !== projectId) continue;
+      const entry = getAgentConfig(agentId, projectId);
+      if (!entry) continue;
 
       // Match by extends preset (e.g., "lead" maps to "manager", "worker" maps to "employee")
       const preset = entry.config.extends;
@@ -260,8 +260,6 @@ export function findAgentByRole(projectId: string, role: string): string | undef
       // Also match original role name against coordination-enabled agents
       if (resolvedRole === "manager" && entry.config.coordination?.enabled) return agentId;
 
-      // Match by explicit role field if present
-      if ((entry.config as Record<string, unknown>).role === resolvedRole) return agentId;
     }
   } catch { /* project module not available */ }
   return undefined;
@@ -270,10 +268,10 @@ export function findAgentByRole(projectId: string, role: string): string | undef
 /** Find the first manager agent for a project. */
 export function findManagerAgent(projectId: string): string | undefined {
   try {
-    const agentIds = getRegisteredAgentIds();
+    const agentIds = getRegisteredAgentIds(projectId);
     for (const agentId of agentIds) {
-      const entry = getAgentConfig(agentId);
-      if (entry?.projectId === projectId && (entry.config.extends === "manager" || entry.config.coordination?.enabled)) {
+      const entry = getAgentConfig(agentId, projectId);
+      if (entry && (entry.config.extends === "manager" || entry.config.coordination?.enabled)) {
         return agentId;
       }
     }

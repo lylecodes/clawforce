@@ -42,20 +42,18 @@ describe("empty/null config handling", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
 
-  it("returns null for empty agents object (agents: {})", async () => {
+  it("throws for empty agents object (agents: {})", async () => {
     const { loadWorkforceConfig } = await import("../../src/project.js");
     const configPath = writeYaml(`
 name: test
 agents: {}
 `);
-    const config = loadWorkforceConfig(configPath);
-    // No workforce-style agents found (none with extends/role)
-    expect(config).toBeNull();
+    expect(() => loadWorkforceConfig(configPath)).toThrow("Config must define at least one agent.");
   });
 
   it("loads agent with only extends field (minimal agent)", async () => {
@@ -171,20 +169,18 @@ agents:
     expect(Object.keys(config!.agents)).toHaveLength(1);
   });
 
-  it("returns null when YAML parses to null", async () => {
+  it("throws when YAML parses to null", async () => {
     const { loadWorkforceConfig } = await import("../../src/project.js");
     const configPath = writeYaml("");
-    const config = loadWorkforceConfig(configPath);
-    expect(config).toBeNull();
+    expect(() => loadWorkforceConfig(configPath)).toThrow("Config is empty or not an object.");
   });
 
-  it("returns null when agents section is missing entirely", async () => {
+  it("throws when agents section is missing entirely", async () => {
     const { loadWorkforceConfig } = await import("../../src/project.js");
     const configPath = writeYaml(`
 name: no-agents
 `);
-    const config = loadWorkforceConfig(configPath);
-    expect(config).toBeNull();
+    expect(() => loadWorkforceConfig(configPath)).toThrow("Config must define an agents object.");
   });
 });
 
@@ -205,7 +201,7 @@ describe("type edge cases", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
@@ -376,7 +372,7 @@ describe("large config scenarios", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
@@ -568,7 +564,7 @@ describe("circular/self-reference", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
@@ -659,7 +655,7 @@ describe("unicode/special characters", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
@@ -931,7 +927,7 @@ describe("job edge cases", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
@@ -1309,19 +1305,20 @@ describe("validation edge cases", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function writeYaml(content: string) {
-    fs.writeFileSync(path.join(tmpDir, "project.yaml"), content, "utf-8");
+  function writeGlobalYaml(content: string) {
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), content, "utf-8");
+  }
+
+  function writeDomainYaml(content: string) {
+    const domainsDir = path.join(tmpDir, "domains");
+    fs.mkdirSync(domainsDir, { recursive: true });
+    fs.writeFileSync(path.join(domainsDir, "test.yaml"), content, "utf-8");
   }
 
   it("validates empty agents object without crashing", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
-agents: {}
-domain:
-  agents: []
-`);
+    writeGlobalYaml("agents: {}\n");
+    writeDomainYaml("domain: test\nagents: []\n");
     const report = validateAllConfigs(tmpDir);
     // Should not crash; no agent-level issues since there are no agents
     expect(report).toBeDefined();
@@ -1330,16 +1327,13 @@ domain:
 
   it("validates agents section with non-object entries", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   valid:
     extends: employee
   invalid: "a string"
-domain:
-  agents: [valid]
 `);
+    writeDomainYaml("domain: test\nagents: [valid]\n");
     const report = validateAllConfigs(tmpDir);
     // Should not crash on non-object agent entries
     expect(report).toBeDefined();
@@ -1378,16 +1372,13 @@ domain:
 
   it("reports unknown agent config key", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   worker:
     extends: employee
     completely_made_up_field: true
-domain:
-  agents: [worker]
 `);
+    writeDomainYaml("domain: test\nagents: [worker]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i =>
       i.code === "YAML_UNKNOWN_KEY" && i.message.includes("completely_made_up_field"),
@@ -1480,59 +1471,35 @@ describe("preset resolution edge cases", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
 
-  it("legacy role alias: worker -> employee", async () => {
+  it("throws when extends is omitted", async () => {
     const { loadWorkforceConfig } = await import("../../src/project.js");
     const configPath = writeYaml(`
 name: test
 agents:
   old_style:
-    role: worker
+    title: Worker
 `);
-    const config = loadWorkforceConfig(configPath);
-    expect(config).not.toBeNull();
-    const agent = config!.agents.old_style!;
-    expect(agent.extends).toBe("employee");
+    expect(() => loadWorkforceConfig(configPath)).toThrow('Agent "old_style" is missing required field "extends".');
   });
 
-  it("legacy role alias: orchestrator -> manager", async () => {
+  it("throws for removed orchestrator role alias", async () => {
     const { loadWorkforceConfig } = await import("../../src/project.js");
     const configPath = writeYaml(`
 name: test
 agents:
   old_mgr:
-    role: orchestrator
+    title: Lead
 `);
-    const config = loadWorkforceConfig(configPath);
-    expect(config).not.toBeNull();
-    const agent = config!.agents.old_mgr!;
-    expect(agent.extends).toBe("manager");
+    expect(() => loadWorkforceConfig(configPath)).toThrow('Agent "old_mgr" is missing required field "extends".');
   });
 
-  it("extends takes precedence over role when both present", async () => {
+  it("loads when extends is specified explicitly", async () => {
     const { loadWorkforceConfig } = await import("../../src/project.js");
-    const configPath = writeYaml(`
-name: test
-agents:
-  dual:
-    extends: manager
-    role: employee
-`);
-    const config = loadWorkforceConfig(configPath);
-    expect(config).not.toBeNull();
-    const agent = config!.agents.dual!;
-    expect(agent.extends).toBe("manager");
-  });
-
-  it("defaults to employee when neither extends nor role specified", async () => {
-    const { loadWorkforceConfig } = await import("../../src/project.js");
-    // Need at least one marker that makes it look like workforce config
-    // Since loadWorkforceConfig checks for extends or role, we need one of them
-    // Testing via domain init instead
     const configPath = writeYaml(`
 name: test
 agents:

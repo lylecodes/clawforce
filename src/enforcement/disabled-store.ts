@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { getAgentConfig } from "../project.js";
 
@@ -142,7 +142,7 @@ export function isAgentEffectivelyDisabled(
   let team = opts?.team;
   let department = opts?.department;
   if (team === undefined || department === undefined) {
-    const entry = getAgentConfig(agentId);
+    const entry = getAgentConfig(agentId, projectId);
     if (entry) {
       if (team === undefined) team = entry.config.team;
       if (department === undefined) department = entry.config.department;

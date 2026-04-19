@@ -4,6 +4,7 @@ const { getMemoryDb } = await import("../../src/db.js");
 const { runMigrations } = await import("../../src/migrations.js");
 const {
   archiveSession,
+  extractSessionArchiveDiagnostics,
   getSessionArchive,
   listSessionArchives,
 } = await import("../../src/telemetry/session-archive.js");
@@ -164,5 +165,84 @@ describe("listSessionArchives", () => {
     const compliant = listSessionArchives(PROJECT, { outcome: "compliant" }, db);
     expect(compliant).toHaveLength(1);
     expect(compliant[0]!.outcome).toBe("compliant");
+  });
+
+  it("filters by task id", () => {
+    archiveSession({
+      sessionKey: "sess-task-a",
+      agentId: "agent-1",
+      projectId: PROJECT,
+      taskId: "task-a",
+      outcome: "compliant",
+      startedAt: Date.now(),
+    }, db);
+    archiveSession({
+      sessionKey: "sess-task-b",
+      agentId: "agent-1",
+      projectId: PROJECT,
+      taskId: "task-b",
+      outcome: "compliant",
+      startedAt: Date.now(),
+    }, db);
+
+    const filtered = listSessionArchives(PROJECT, { taskId: "task-a" }, db);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]!.taskId).toBe("task-a");
+  });
+});
+
+describe("extractSessionArchiveDiagnostics", () => {
+  it("parses compact execution diagnostics from compliance detail", () => {
+    const diagnostics = extractSessionArchiveDiagnostics({
+      complianceDetail: JSON.stringify({
+      complianceObserved: false,
+      compliant: false,
+      exitCode: 0,
+        signal: null,
+        terminatedReason: "controller_shutdown",
+        timeoutMs: 120000,
+        logicalCompletion: true,
+        summarySynthetic: true,
+      observedWork: false,
+      resultSource: "synthetic",
+        outputFilePresent: false,
+        outputChars: 0,
+        stdoutChars: 0,
+        stderrChars: 68,
+        promptChars: 1024,
+      finalPromptChars: 2048,
+      mcpBridgeDisabled: true,
+      configOverrideCount: 3,
+      binary: "codex",
+      cwd: "/tmp/project",
+      stderrLooksLikeLaunchTranscript: true,
+      stderr: "Reading additional input from stdin...\nOpenAI Codex v0.118.0",
+    }),
+    });
+
+    expect(diagnostics).toMatchObject({
+      complianceObserved: false,
+      exitCode: 0,
+      signal: null,
+      terminatedReason: "controller_shutdown",
+      timeoutMs: 120000,
+      logicalCompletion: true,
+      summarySynthetic: true,
+      observedWork: false,
+      resultSource: "synthetic",
+      stderrChars: 68,
+      promptChars: 1024,
+      finalPromptChars: 2048,
+      mcpBridgeDisabled: true,
+      configOverrideCount: 3,
+      binary: "codex",
+      cwd: "/tmp/project",
+      stderrLooksLikeLaunchTranscript: true,
+    });
+    expect(diagnostics?.stderrPreview).toContain("Reading additional input from stdin");
+  });
+
+  it("returns null for malformed compliance detail", () => {
+    expect(extractSessionArchiveDiagnostics({ complianceDetail: "{not-json" })).toBeNull();
   });
 });

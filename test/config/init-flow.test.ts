@@ -69,13 +69,13 @@ describe("init flow", () => {
       const answers: InitAnswers = {
         domain_name: "custom",
         mission: "Custom models",
-        agents: [{ name: "agent", title: "Agent", model: "anthropic/claude-haiku-4-5" }],
+        agents: [{ name: "agent", title: "Agent", model: "gpt-5.4-mini" }],
         reporting: {},
         budget_cents: 500,
       };
 
       const result = buildConfigFromAnswers(answers);
-      expect(result.global.agents!.agent.model).toBe("anthropic/claude-haiku-4-5");
+      expect((result.global.agents!.agent as { codex?: { model?: string } }).codex?.model).toBe("gpt-5.4-mini");
     });
   });
 });

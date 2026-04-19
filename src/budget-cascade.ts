@@ -6,7 +6,7 @@
  * Child limits are bounded by the parent's remaining allocatable budget.
  */
 
-import { type DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { type DatabaseSync, type SQLInputValue } from "./sqlite-driver.js";
 import { getDb } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import type { BudgetConfigV2, BudgetWindowConfig } from "./types.js";

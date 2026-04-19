@@ -7,6 +7,10 @@
  */
 
 import { safeLog } from "../diagnostics.js";
+import {
+  getChannelNotifierPort,
+  setChannelNotifierPort,
+} from "../runtime/integrations.js";
 import { deliverMessage } from "./deliver.js";
 import type { Channel, Message } from "../types.js";
 
@@ -17,10 +21,8 @@ export type ChannelNotifier = {
   }): Promise<{ sent: boolean; error?: string }>;
 };
 
-let notifier: ChannelNotifier | null = null;
-
 export function setChannelNotifier(n: ChannelNotifier | null): void {
-  notifier = n;
+  setChannelNotifierPort(n);
 }
 
 /**
@@ -65,7 +67,7 @@ export async function notifyChannelMessage(channel: Channel, message: Message): 
   const telegramGroupId = channel.metadata?.telegramGroupId as string | undefined;
   if (!telegramGroupId) return;
 
-  const n = notifier;
+  const n = getChannelNotifierPort();
   if (n) {
     try {
       await n.sendChannelNotification({ channel, message });

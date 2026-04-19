@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, it, expect } from "vitest";
 
 const { getMemoryDb } = await import("../../src/db.js");

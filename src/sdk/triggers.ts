@@ -5,7 +5,7 @@
  * Provides fire(), list(), and test() methods for external trigger management.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type {
   TriggerDefinition,
   TriggerSource,

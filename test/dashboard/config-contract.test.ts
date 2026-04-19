@@ -25,6 +25,11 @@ vi.mock("../../src/project.js", () => {
         extends: "manager",
         title: "Rich Agent",
         department: "eng",
+        runtimeRef: "existing-openclaw-rich",
+        runtime: {
+          allowedTools: ["Read", "Write"],
+          workspacePaths: ["/repo/core"],
+        },
         briefing: [
           { source: "file", path: "context/DIRECTION.md" },
           { source: "direction" },
@@ -127,6 +132,7 @@ vi.mock("../../src/enforcement/disabled-store.js", () => ({
 }));
 
 vi.mock("../../src/enforcement/tracker.js", () => ({
+  getSessionHeartbeatStatus: vi.fn(() => ({ state: "live", ageMs: 10 })),
   getActiveSessions: vi.fn(() => []),
 }));
 
@@ -208,12 +214,28 @@ vi.mock("../../src/telemetry/session-archive.js", () => ({
   countSessionArchives: vi.fn(() => 0),
 }));
 
-vi.mock("../../src/config/api-service.js", () => ({
+vi.mock("../../src/config/api-service.js", () => {
+  const saveDomainConfigSection = vi.fn(() => ({ ok: true }));
+  const previewDomainConfigSectionChange = vi.fn((_projectId: string, section: string) => ({
+    ok: true,
+    preview: {
+      before: {},
+      after: {},
+      valid: true,
+      changedPaths: [section],
+      changedKeys: [section],
+    },
+  }));
+  return ({
   readDomainConfig: vi.fn((projectId: string) => {
     if (projectId === "proj1") {
       return {
         domain: "proj1",
         agents: ["agent-rich", "agent-plain"],
+        execution: {
+          mode: "dry_run",
+          default_mutation_policy: "simulate",
+        },
         defaults: {
           briefing: [{ source: "standards" }],
           performance_policy: { action: "alert" },
@@ -238,12 +260,16 @@ vi.mock("../../src/config/api-service.js", () => ({
       "agent-plain": {},
     },
   })),
-  updateDomainConfig: vi.fn(() => ({ ok: true })),
+  saveDomainConfigSection,
+  previewDomainConfigSectionChange,
+  updateDomainConfig: saveDomainConfigSection,
+  reloadDomainRuntime: vi.fn(() => ({ domains: [] })),
+  reloadDomainRuntimes: vi.fn(() => ({ domains: [] })),
   updateGlobalAgentConfig: vi.fn(() => ({ ok: true })),
   upsertGlobalAgents: vi.fn(() => ({ ok: true })),
   writeDomainConfig: vi.fn(() => ({ ok: true })),
   reloadAllDomains: vi.fn(() => ({ domains: [] })),
-}));
+})});
 
 vi.mock("../../src/diagnostics.js", () => ({
   safeLog: vi.fn(),
@@ -336,6 +362,20 @@ describe("queryConfig — performance_policy preserved", () => {
   });
 });
 
+describe("queryConfig — runtime envelope preserved", () => {
+  it("preserves runtimeRef and nested runtime config for round-trip editing", () => {
+    const result = queryConfig("proj1");
+    const rich = result.agents.find((a) => a.id === "agent-rich");
+    expect(rich?.runtimeRef).toBe("existing-openclaw-rich");
+    expect(rich?.runtime).toEqual({
+      allowedTools: ["Read", "Write"],
+      workspacePaths: ["/repo/core"],
+    });
+    expect(rich?.allowedTools).toEqual(["Read", "Write"]);
+    expect(rich?.workspacePaths).toEqual(["/repo/core"]);
+  });
+});
+
 describe("queryConfig — tool_gates structure", () => {
   it("returns tool_gates as array with tool, category, risk_tier", () => {
     const result = queryConfig("proj1");
@@ -377,6 +417,16 @@ describe("queryConfig — defaults section", () => {
       briefing: [{ source: "standards" }],
       performance_policy: { action: "alert" },
       expectations: [{ tool: "Read", min_calls: 1 }],
+    });
+  });
+});
+
+describe("queryConfig — execution section", () => {
+  it("preserves domain execution config for round-trip editing", () => {
+    const result = queryConfig("proj1");
+    expect(result.execution).toEqual({
+      mode: "dry_run",
+      default_mutation_policy: "simulate",
     });
   });
 });
@@ -491,6 +541,17 @@ describe("config preview action — contract shape", () => {
     });
     const body = result.body as Record<string, unknown>;
     expect(body.risk).toBe("MEDIUM");
+  });
+
+  it("uses section-aware preview planning when section is provided", () => {
+    const result = handleAction("proj1", "config/preview", {
+      section: "profile",
+      proposed: { operational_profile: "high" },
+    });
+    expect(result.status).toBe(200);
+    const body = result.body as Record<string, unknown>;
+    expect(body.consequence).toBe("Modified fields: operational_profile. Changes will take effect after save.");
+    expect(body.risk).toBe("LOW");
   });
 });
 

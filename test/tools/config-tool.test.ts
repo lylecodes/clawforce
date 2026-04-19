@@ -13,10 +13,21 @@ vi.mock("../../src/diagnostics.js", () => ({
 // Mock initializeAllDomains since it requires DB and full lifecycle
 vi.mock("../../src/config/init.js", () => ({
   initializeAllDomains: vi.fn(() => ({ domains: ["test"], errors: [], warnings: [] })),
+  reloadDomain: vi.fn((_baseDir: string, projectId: string) => ({
+    domains: [projectId],
+    errors: [],
+    warnings: [],
+  })),
+  reloadDomains: vi.fn((_baseDir: string, projectIds: Iterable<string>) => ({
+    domains: [...projectIds],
+    errors: [],
+    warnings: [],
+  })),
 }));
 
 const { createClawforceConfigTool } = await import("../../src/tools/config-tool.js");
 const { emitDiagnosticEvent } = await import("../../src/diagnostics.js");
+const { reloadDomain } = await import("../../src/config/init.js");
 
 describe("clawforce_config tool", () => {
   let tmpDir: string;
@@ -90,7 +101,7 @@ describe("clawforce_config tool", () => {
         action: "create_domain",
         domain: "my-project",
         agents: ["bot-a", "bot-b"],
-        orchestrator: "bot-a",
+        manager_agent_id: "bot-a",
         paths: ["~/workplace/my-project"],
       });
 
@@ -102,7 +113,8 @@ describe("clawforce_config tool", () => {
       const domainConfig = readDomain("my-project");
       expect(domainConfig.domain).toBe("my-project");
       expect(domainConfig.agents).toEqual(["bot-a", "bot-b"]);
-      expect(domainConfig.orchestrator).toBe("bot-a");
+      expect(domainConfig.manager).toEqual({ enabled: true, agentId: "bot-a" });
+      expect(reloadDomain).toHaveBeenCalledWith(tmpDir, "my-project");
     });
 
     it("fails without agents", async () => {
@@ -154,16 +166,16 @@ describe("clawforce_config tool", () => {
         action: "update_domain",
         domain: "proj",
         paths: ["~/new"],
-        orchestrator: "a",
+        manager_agent_id: "a",
       });
 
       expect(result.ok).toBe(true);
       expect(result.updated_fields).toContain("paths");
-      expect(result.updated_fields).toContain("orchestrator");
+      expect(result.updated_fields).toContain("manager");
 
       const config = readDomain("proj");
       expect(config.paths).toEqual(["~/new"]);
-      expect(config.orchestrator).toBe("a");
+      expect(config.manager).toEqual({ enabled: true, agentId: "a" });
       expect(config.agents).toEqual(["a"]); // preserved
     });
 
@@ -190,7 +202,7 @@ describe("clawforce_config tool", () => {
       const result = await execute({
         action: "update_domain",
         domain: "ghost",
-        orchestrator: "x",
+        manager_agent_id: "x",
       });
       expect(result.ok).toBe(false);
       expect(result.reason).toContain("does not exist");
@@ -217,6 +229,7 @@ describe("clawforce_config tool", () => {
       const result = await execute({ action: "delete_domain", domain: "doomed" });
       expect(result.ok).toBe(true);
       expect(fs.existsSync(path.join(tmpDir, "domains", "doomed.yaml"))).toBe(false);
+      expect(reloadDomain).toHaveBeenCalledWith(tmpDir, "doomed");
     });
 
     it("fails for non-existent domain", async () => {
@@ -286,6 +299,7 @@ describe("clawforce_config tool", () => {
 
       const domain = readDomain("proj");
       expect((domain.agents as string[]).includes("new-bot")).toBe(true);
+      expect(reloadDomain).toHaveBeenCalledWith(tmpDir, "proj");
     });
 
     it("defaults extends to employee", async () => {
@@ -328,6 +342,30 @@ describe("clawforce_config tool", () => {
       const agents = global.agents as Record<string, Record<string, unknown>>;
       expect(agents["rich-bot"]!.skillCap).toBe(5);
     });
+
+    it("accepts nested runtime config and runtime_ref", async () => {
+      scaffoldBase();
+
+      const result = await execute({
+        action: "add_agent",
+        agent_id: "runtime-bot",
+        extends: "employee",
+        runtime_ref: "existing-openclaw-runtime-bot",
+        runtime: {
+          allowedTools: ["Read", "Edit"],
+          workspacePaths: ["packages/core"],
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      const global = readGlobal();
+      const agents = global.agents as Record<string, Record<string, unknown>>;
+      expect(agents["runtime-bot"]!.runtime_ref).toBe("existing-openclaw-runtime-bot");
+      expect(agents["runtime-bot"]!.runtime).toEqual({
+        allowedTools: ["Read", "Edit"],
+        workspacePaths: ["packages/core"],
+      });
+    });
   });
 
   describe("remove_agent", () => {
@@ -345,6 +383,7 @@ describe("clawforce_config tool", () => {
       const domain = readDomain("proj");
       expect((domain.agents as string[]).includes("doomed")).toBe(false);
       expect((domain.agents as string[]).includes("keeper")).toBe(true);
+      expect(reloadDomain).toHaveBeenCalledWith(tmpDir, "proj");
     });
 
     it("fails for non-existent agent", async () => {
@@ -395,6 +434,38 @@ describe("clawforce_config tool", () => {
       const result = await execute({ action: "update_agent", agent_id: "bot" });
       expect(result.ok).toBe(false);
       expect(result.reason).toContain("No updates");
+    });
+
+    it("updates nested runtime config", async () => {
+      scaffoldBase();
+      writeGlobalAgents({
+        bot: {
+          extends: "employee",
+          runtime_ref: "old-runtime",
+          runtime: {
+            allowedTools: ["Read"],
+          },
+        },
+      });
+
+      const result = await execute({
+        action: "update_agent",
+        agent_id: "bot",
+        runtime_ref: "new-runtime",
+        runtime: {
+          allowedTools: ["Read", "Write"],
+          workspacePaths: ["packages/api"],
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      const global = readGlobal();
+      const agent = (global.agents as Record<string, Record<string, unknown>>).bot!;
+      expect(agent.runtime_ref).toBe("new-runtime");
+      expect(agent.runtime).toEqual({
+        allowedTools: ["Read", "Write"],
+        workspacePaths: ["packages/api"],
+      });
     });
   });
 
@@ -778,11 +849,8 @@ describe("clawforce_config tool", () => {
 
     it("runs full validation", async () => {
       scaffoldBase();
-      // Full validation requires project.yaml which we don't have,
-      // so it will report issues
       const result = await execute({ action: "validate", target: "full" });
       expect(result.ok).toBe(true);
-      // The report will have issues since there's no project.yaml
       expect(result.issues).toBeDefined();
     });
   });
@@ -864,7 +932,7 @@ describe("clawforce_config tool", () => {
       await execute({
         action: "update_domain",
         domain: "proj",
-        orchestrator: "a",
+        manager_agent_id: "a",
         actor: "user:manager-bot",
       });
 
@@ -884,7 +952,7 @@ describe("clawforce_config tool", () => {
       await execute({
         action: "update_domain",
         domain: "proj",
-        orchestrator: "a",
+        manager_agent_id: "a",
       });
 
       expect(emitDiagnosticEvent).toHaveBeenCalledWith(

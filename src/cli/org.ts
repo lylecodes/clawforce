@@ -10,7 +10,7 @@
  * DB is optional — skips runtime enrichment when unavailable.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import path from "node:path";
 import fs from "node:fs";
 import YAML from "yaml";
@@ -196,7 +196,7 @@ export function cmdOrg(
       // Active sessions
       const sessions = db.prepare(
         `SELECT agent_id FROM tracked_sessions
-         WHERE project_id = ? AND ended_at IS NULL`,
+         WHERE project_id = ?`,
       ).all(projectId) as Array<{ agent_id: string }>;
       for (const s of sessions) {
         activeAgents.add(s.agent_id);

@@ -22,6 +22,7 @@ import { generate as generateTools } from "./topics/tools.js";
 import { generate as generateMemory } from "./topics/memory.js";
 import { generate as generateGoals } from "./topics/goals.js";
 import { generate as generateChannels } from "./topics/channels.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 export type SkillTopic = {
   id: string;
@@ -43,18 +44,27 @@ export type CustomSkillTopic = {
   presets: string[];
 };
 
-/** Per-project store of custom skill topics. */
-const customTopicsStore = new Map<string, CustomSkillTopic[]>();
+type SkillsRegistryRuntimeState = {
+  customTopicsStore: Map<string, CustomSkillTopic[]>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getCustomTopicsStore(): SkillsRegistryRuntimeState["customTopicsStore"] {
+  return (runtime.skills as SkillsRegistryRuntimeState).customTopicsStore;
+}
 
 /**
  * Register custom skill topics from a project's config.
- * Called during project initialization when project.yaml has a `skills` section.
+ * Called during workforce activation when shared config includes a `skills` section.
  */
 export function registerCustomSkills(
   projectId: string,
   skills: Record<string, { title: string; description: string; path: string; presets?: string[] }>,
   projectDir: string,
 ): void {
+  getCustomTopicsStore().delete(projectId);
+
   const topics: CustomSkillTopic[] = [];
 
   for (const [id, skill] of Object.entries(skills)) {
@@ -73,18 +83,22 @@ export function registerCustomSkills(
   }
 
   if (topics.length > 0) {
-    customTopicsStore.set(projectId, topics);
+    getCustomTopicsStore().set(projectId, topics);
   }
+}
+
+export function unregisterCustomSkills(projectId: string): void {
+  getCustomTopicsStore().delete(projectId);
 }
 
 /** Get custom topics for a project. */
 export function getCustomTopics(projectId: string): CustomSkillTopic[] {
-  return customTopicsStore.get(projectId) ?? [];
+  return getCustomTopicsStore().get(projectId) ?? [];
 }
 
 /** Clear custom topics (for testing). */
 export function resetCustomTopicsForTest(): void {
-  customTopicsStore.clear();
+  getCustomTopicsStore().clear();
 }
 
 /**
@@ -179,7 +193,7 @@ export const SKILL_TOPICS: SkillTopic[] = [
   {
     id: "config",
     title: "Configuration Reference",
-    description: "Full project.yaml format and all options",
+    description: "Full config.yaml plus domains/*.yaml format and all options",
     presets: ["manager"],
     generate: generateConfig,
   },

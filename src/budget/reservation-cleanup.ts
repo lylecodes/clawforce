@@ -6,7 +6,7 @@
  * Prevents budget being held indefinitely by crashed/abandoned sessions.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { safeLog } from "../diagnostics.js";
 import { recordMetric } from "../metrics.js";
 import { writeAuditEntry } from "../audit.js";
@@ -25,6 +25,7 @@ export function releaseStaleReservations(
   db: DatabaseSync,
   projectId: string,
   staleMs: number = STALE_RESERVATION_MS,
+  options?: { withinTransaction?: boolean },
 ): number {
   const cutoff = Date.now() - staleMs;
   const now = Date.now();
@@ -76,6 +77,7 @@ export function releaseStaleReservations(
           leasedAt: item.leased_at,
           staleDurationMs: now - item.leased_at,
         }),
+        withinTransaction: options?.withinTransaction,
       }, db);
     } catch (err) { safeLog("reservation-cleanup.audit", err); }
   }

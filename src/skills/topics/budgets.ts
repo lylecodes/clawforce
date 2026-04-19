@@ -40,7 +40,7 @@ export function generate(): string {
   sections.push("Both levels are checked independently. If either budget is exceeded, the action is blocked.");
   sections.push("");
 
-  sections.push("## Defining Budgets in project.yaml");
+  sections.push("## Defining Budgets in Domain Config");
   sections.push("");
   sections.push("```yaml");
   sections.push("budgets:");

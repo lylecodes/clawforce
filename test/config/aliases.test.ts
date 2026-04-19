@@ -12,11 +12,6 @@ describe("normalizeAgentConfig (aliases)", () => {
     expect(result.team).toBe("frontend");
   });
 
-  it("maps role to extends", () => {
-    const result = normalizeAgentConfig({ role: "manager", title: "Lead" });
-    expect(result.extends).toBe("manager");
-  });
-
   it("canonical department takes precedence over group alias", () => {
     const result = normalizeAgentConfig({ group: "sales", department: "engineering" });
     expect(result.department).toBe("engineering");
@@ -25,11 +20,6 @@ describe("normalizeAgentConfig (aliases)", () => {
   it("canonical team takes precedence over subgroup alias", () => {
     const result = normalizeAgentConfig({ subgroup: "backend", team: "frontend" });
     expect(result.team).toBe("frontend");
-  });
-
-  it("canonical extends takes precedence over role alias", () => {
-    const result = normalizeAgentConfig({ role: "employee", extends: "manager" });
-    expect(result.extends).toBe("manager");
   });
 
   it("handles missing alias fields gracefully", () => {
@@ -51,8 +41,8 @@ describe("normalizeAgentConfig (aliases)", () => {
     expect(result.persona).toBe("Efficient");
   });
 
-  it("handles all three aliases together", () => {
-    const result = normalizeAgentConfig({ group: "sales", subgroup: "lead-gen", role: "employee" });
+  it("handles both supported aliases together", () => {
+    const result = normalizeAgentConfig({ group: "sales", subgroup: "lead-gen", extends: "employee" });
     expect(result.department).toBe("sales");
     expect(result.team).toBe("lead-gen");
     expect(result.extends).toBe("employee");
@@ -64,7 +54,6 @@ describe("normalizeAgentConfig (aliases)", () => {
       department: "engineering",
       subgroup: "backend",
       team: "frontend",
-      role: "employee",
       extends: "manager",
     });
     expect(result.department).toBe("engineering");

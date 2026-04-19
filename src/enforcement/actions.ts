@@ -1,7 +1,7 @@
 /**
  * Clawforce — Failure actions
  *
- * Executes on_failure actions when agents don't comply.
+ * Executes performance-policy actions when agents don't comply.
  * Actions: retry, alert, terminate_and_alert.
  *
  * Retry counting is durable (SQLite-backed) so the counter

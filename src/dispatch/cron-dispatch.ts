@@ -10,6 +10,8 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { safeLog } from "../diagnostics.js";
 import { getCronService, toCronJobCreate, type ManagerCronJob } from "../manager-cron.js";
+import { formatDispatchCronJobName } from "./cron-job-name.js";
+import { getProjectStorageDir } from "../db.js";
 
 const execFile = promisify(execFileCb);
 
@@ -17,6 +19,8 @@ export type CronDispatchResult = {
   ok: boolean;
   cronJobName?: string;
   error?: string;
+  handledRemotely?: boolean;
+  deferred?: boolean;
 };
 
 /**
@@ -36,7 +40,7 @@ async function tryBootstrapCron(): Promise<boolean> {
   if (getCronService() !== null) return true;
 
   try {
-    await execFile("openclaw", ["gateway", "call", "clawforce.bootstrap"], { timeout: 10_000 });
+    await execFile("openclaw", ["gateway", "call", "clawforce.bootstrap", "--json", "--params", "{}"], { timeout: 10_000 });
     // Brief wait for the gateway handler to execute setCronService()
     await new Promise(resolve => setTimeout(resolve, 500));
   } catch (err) {
@@ -44,6 +48,47 @@ async function tryBootstrapCron(): Promise<boolean> {
   }
 
   return getCronService() !== null;
+}
+
+function parseGatewayJson(stdout: string): Record<string, unknown> {
+  const start = stdout.indexOf("{");
+  if (start === -1) {
+    throw new Error(`Gateway response did not contain JSON: ${stdout.trim() || "<empty>"}`);
+  }
+  return JSON.parse(stdout.slice(start));
+}
+
+async function dispatchViaGateway(params: {
+  projectId: string;
+  queueItemId: string;
+  cronJobName: string;
+}): Promise<CronDispatchResult> {
+  try {
+    const storageDir = getProjectStorageDir(params.projectId) ?? undefined;
+    const gatewayParams = JSON.stringify({
+      projectId: params.projectId,
+      queueItemId: params.queueItemId,
+      storageDir,
+    });
+    const output = await execFile(
+      "openclaw",
+      ["gateway", "call", "clawforce.dispatch_queue_item", "--json", "--params", gatewayParams],
+      { timeout: 10_000 },
+    );
+    const stdout = typeof output === "string" ? output : output.stdout;
+    const parsed = parseGatewayJson(stdout);
+    const ok = parsed.ok === true;
+    return {
+      ok,
+      cronJobName: typeof parsed.jobName === "string" ? parsed.jobName : params.cronJobName,
+      error: typeof parsed.error === "string" ? parsed.error : undefined,
+      handledRemotely: true,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    safeLog("cron-dispatch.dispatchViaGateway", err);
+    return { ok: false, error: msg };
+  }
 }
 
 /**
@@ -60,6 +105,7 @@ export async function dispatchViaCron(options: {
   model?: string;
   timeoutSeconds?: number;
 }): Promise<CronDispatchResult> {
+  const cronJobName = formatDispatchCronJobName(options.projectId, options.queueItemId);
   let cronService = getCronService();
 
   // If cron service isn't available, try progressive recovery:
@@ -76,10 +122,12 @@ export async function dispatchViaCron(options: {
     }
   }
   if (!cronService) {
-    return { ok: false, error: "Cron service not available (bootstrap may still be in progress)" };
+    return dispatchViaGateway({
+      projectId: options.projectId,
+      queueItemId: options.queueItemId,
+      cronJobName,
+    });
   }
-
-  const cronJobName = `dispatch:${options.queueItemId}`;
 
   const job: ManagerCronJob = {
     name: cronJobName,

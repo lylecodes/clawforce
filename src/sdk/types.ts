@@ -38,6 +38,8 @@ export interface TaskParams {
   /** Nested grouping within a group (e.g. team, squad, sub-lab) */
   subgroup?: string;
   goalId?: string;
+  entityId?: string;
+  entityType?: string;
   tags?: string[];
   /** Unix timestamp (ms) */
   deadline?: number;
@@ -54,6 +56,8 @@ export interface Task {
   group?: string;
   subgroup?: string;
   goalId?: string;
+  entityId?: string;
+  entityType?: string;
   tags: string[];
   /** Unix timestamp (ms) */
   createdAt: number;
@@ -205,6 +209,8 @@ export interface GoalParams {
   /** Unix timestamp (ms) */
   deadline?: number;
   parentGoalId?: string;
+  entityId?: string;
+  entityType?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -216,11 +222,161 @@ export interface Goal {
   group?: string;
   owner?: string;
   priority: string;
+  entityId?: string;
+  entityType?: string;
   /** Unix timestamp (ms) */
   deadline?: number;
   /** Unix timestamp (ms) */
   createdAt: number;
 }
+
+// ---------------------------------------------------------------------------
+// Entity types
+// ---------------------------------------------------------------------------
+
+export interface EntityKind {
+  kind: string;
+  title?: string;
+  description?: string;
+  states: string[];
+  healthValues?: string[];
+}
+
+export type EntityIssueSeverity = "low" | "medium" | "high" | "critical";
+
+export type EntityIssueStatus = "open" | "resolved" | "dismissed";
+
+export interface EntityParams {
+  kind: string;
+  title: string;
+  state?: string;
+  health?: string;
+  owner?: string;
+  parentEntityId?: string;
+  group?: string;
+  subgroup?: string;
+  metadata?: Record<string, unknown>;
+  /** Unix timestamp (ms) */
+  lastVerifiedAt?: number;
+}
+
+export interface Entity {
+  id: string;
+  kind: string;
+  title: string;
+  state: string;
+  health?: string;
+  owner?: string;
+  parentEntityId?: string;
+  group?: string;
+  subgroup?: string;
+  metadata?: Record<string, unknown>;
+  /** Unix timestamp (ms) */
+  createdAt: number;
+  /** Unix timestamp (ms) */
+  updatedAt: number;
+  /** Unix timestamp (ms) */
+  lastVerifiedAt?: number;
+}
+
+export interface EntityIssue {
+  id: string;
+  issueKey: string;
+  entityId: string;
+  entityKind: string;
+  checkId?: string;
+  issueType: string;
+  source: string;
+  severity: EntityIssueSeverity;
+  status: EntityIssueStatus;
+  title: string;
+  description?: string;
+  fieldName?: string;
+  evidence?: Record<string, unknown>;
+  recommendedAction?: string;
+  playbook?: string;
+  owner?: string;
+  blocking: boolean;
+  approvalRequired: boolean;
+  proposalId?: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  resolvedAt?: number;
+}
+
+export interface EntityIssueSummary {
+  openCount: number;
+  blockingOpenCount: number;
+  approvalRequiredCount: number;
+  pendingProposalCount: number;
+  highestSeverity?: EntityIssueSeverity;
+  suggestedHealth?: string;
+  openIssueTypes: string[];
+  openBySeverity: Partial<Record<EntityIssueSeverity, number>>;
+}
+
+export type EntityCheckRunStatus = "passed" | "issues" | "failed" | "simulated" | "blocked";
+
+export interface EntityCheckRun {
+  id: string;
+  entityId: string;
+  entityKind: string;
+  checkId: string;
+  status: EntityCheckRunStatus;
+  command: string;
+  parserType?: string;
+  actor?: string;
+  trigger?: string;
+  sourceType?: string;
+  sourceId?: string;
+  exitCode: number;
+  issueCount: number;
+  stdout?: string;
+  stderr?: string;
+  durationMs: number;
+  createdAt: number;
+}
+
+export interface EntityCheckResult extends EntityCheckRun {
+  issues: EntityIssue[];
+}
+
+export interface EntityTransition {
+  id: string;
+  entityId: string;
+  fromState?: string;
+  toState?: string;
+  fromHealth?: string;
+  toHealth?: string;
+  actor: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface EntityDetail {
+  entity: Entity;
+  children: Entity[];
+  transitions: EntityTransition[];
+  issues: EntityIssue[];
+  issueSummary: EntityIssueSummary;
+  checkRuns: EntityCheckRun[];
+}
+
+export type EntityTransitionRequest =
+  | { ok: true; entity: Entity }
+  | {
+      ok: false;
+      approvalRequired: true;
+      reason: string;
+      proposal: {
+        id: string;
+        title: string;
+        description?: string | null;
+        status: string;
+      };
+      blockingIssues: EntityIssue[];
+    };
 
 // ---------------------------------------------------------------------------
 // Message types
@@ -274,8 +430,8 @@ export interface HealthStatus {
 export interface ClawforceOptions {
   /** Domain identifier for the Clawforce instance */
   domain: string;
-  /** Path to the SQLite database file (defaults to ~/.openclaw/<domain>/db.sqlite) */
+  /** Path to the SQLite database file (defaults to ~/.clawforce/data/<domain>.db) */
   dbPath?: string;
-  /** Path to the config directory (defaults to ~/.openclaw/<domain>/) */
+  /** Path to the config directory (defaults to ~/.clawforce/) */
   configPath?: string;
 }

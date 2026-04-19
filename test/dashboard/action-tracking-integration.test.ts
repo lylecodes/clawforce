@@ -49,6 +49,8 @@ vi.mock("../../src/project.js", () => ({
 
 vi.mock("../../src/config/api-service.js", () => ({
   updateDomainConfig: vi.fn(() => ({ ok: true })),
+  reloadDomainRuntime: vi.fn(() => ({ domains: [], errors: [] })),
+  reloadDomainRuntimes: vi.fn(() => ({ domains: [], errors: [] })),
   updateGlobalAgentConfig: vi.fn(() => ({ ok: true })),
   upsertGlobalAgents: vi.fn(() => ({ ok: true })),
   writeDomainConfig: vi.fn(() => ({ ok: true })),

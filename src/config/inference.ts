@@ -8,9 +8,18 @@
  */
 
 import type { GlobalAgentDef } from "./schema.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 /** Track which agents had their preset inferred (not injected into config). */
-const inferredAgents = new Map<string, boolean>();
+type ConfigInferenceRuntimeState = {
+  inferredAgents: Map<string, boolean>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getInferredAgents(): ConfigInferenceRuntimeState["inferredAgents"] {
+  return (runtime.configInference as ConfigInferenceRuntimeState).inferredAgents;
+}
 
 export function inferPreset(
   agentId: string,
@@ -28,6 +37,5 @@ export function inferPreset(
 }
 
 export function markInferred(agentId: string): void {
-  inferredAgents.set(agentId, true);
+  getInferredAgents().set(agentId, true);
 }
-

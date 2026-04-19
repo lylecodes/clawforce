@@ -5,7 +5,7 @@
  * Results formatted as table, JSON, or summary for briefing/webhook use.
  */
 
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "../sqlite-driver.js";
 
 export type CustomStreamDef = {
   name: string;

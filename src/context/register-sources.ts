@@ -38,8 +38,10 @@ import { renderPreferences } from "../trust/preferences.js";
 import { renderTrustSummary } from "../trust/tracker.js";
 import { getDirectReports } from "../org.js";
 import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
+import { listEntities, listEntityKinds } from "../entities/ops.js";
 import { getStream } from "../streams/catalog.js";
 import { resolveBudgetGuidanceSource } from "./sources/budget-guidance.js";
+import { resolveBudgetPlanSource } from "./sources/budget-plan.js";
 import { resolveWelcomeSource, resolveWeeklyDigestSource, resolveInterventionSource } from "./sources/onboarding-sources.js";
 import { resolveMemoryInstructions } from "./sources/memory-instructions.js";
 import { buildReviewContext } from "../memory/review-context.js";
@@ -49,7 +51,7 @@ import { getTaskCreationStandards, getExecutionStandards, getReviewStandards, ge
 
 import fs from "node:fs";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type { AssemblerContext } from "./assembler.js";
 import { registerContextSource } from "./registry.js";
 
@@ -104,7 +106,9 @@ registerContextSource("task_board", (ctx) => {
 
 // --- assigned_task ---
 registerContextSource("assigned_task", (ctx) => {
-  const assignment = getWorkerAssignment(ctx.agentId);
+  const assignment = ctx.projectId && ctx.taskId
+    ? { projectId: ctx.projectId, taskId: ctx.taskId }
+    : getWorkerAssignment(ctx.agentId);
   if (!assignment) return null;
 
   let db: DatabaseSync;
@@ -343,7 +347,7 @@ registerContextSource("team_status", (ctx) => {
 
   for (const reportId of reports) {
     const session = allSessions.find((s) => s.agentId === reportId && s.projectId === ctx.projectId);
-    const reportEntry = getAgentConfig(reportId);
+    const reportEntry = getAgentConfig(reportId, ctx.projectId);
     const title = reportEntry?.config.title ?? reportId;
 
     if (session) {
@@ -381,7 +385,7 @@ registerContextSource("team_performance", (ctx) => {
     if (rows.length === 0) continue;
     hasData = true;
 
-    const reportEntry = getAgentConfig(reportId);
+    const reportEntry = getAgentConfig(reportId, ctx.projectId);
     const title = reportEntry?.config.title ?? reportId;
     const stats = rows.map((r) => `${r.status}: ${r.cnt}`).join(", ");
     lines.push(`- **${title}** (\`${reportId}\`) — last 24h: ${stats}`);
@@ -732,6 +736,45 @@ registerContextSource("resources", (ctx) => {
   try { return buildResourcesContext(ctx.projectId, ctx.agentId); } catch { return null; }
 });
 
+// --- entity_registry ---
+registerContextSource("entity_registry", (ctx) => {
+  if (!ctx.projectId) return null;
+
+  try {
+    const kinds = listEntityKinds(ctx.projectId);
+    const entities = listEntities(ctx.projectId, { limit: 100 });
+    if (kinds.length === 0 && entities.length === 0) return null;
+
+    const lines = ["## Entity Registry", ""];
+
+    if (kinds.length > 0) {
+      lines.push("### Kinds");
+      for (const { kind, config } of kinds) {
+        const states = Object.keys(config.states).join(", ");
+        const health = config.health?.values?.join(", ");
+        lines.push(`- \`${kind}\`${config.title ? ` — ${config.title}` : ""}`);
+        lines.push(`  states: ${states}`);
+        if (health) lines.push(`  health: ${health}`);
+      }
+      lines.push("");
+    }
+
+    if (entities.length > 0) {
+      lines.push("### Instances");
+      for (const entity of entities) {
+        const owner = entity.ownerAgentId ? ` owner=${entity.ownerAgentId}` : "";
+        const parent = entity.parentEntityId ? ` parent=${entity.parentEntityId}` : "";
+        const health = entity.health ? ` health=${entity.health}` : "";
+        lines.push(`- [${entity.kind}] ${entity.title} (\`${entity.id}\`) state=${entity.state}${health}${owner}${parent}`);
+      }
+    }
+
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+});
+
 // --- initiative_status ---
 registerContextSource("initiative_status", (ctx) => {
   return resolveInitiativeStatusSourceImpl(ctx.projectId ?? "", undefined);
@@ -757,12 +800,18 @@ registerContextSource("budget_guidance", (ctx, source) => {
   return resolveBudgetGuidanceSource(ctx.projectId ?? "", source.params);
 });
 
+// --- budget_plan ---
+registerContextSource("budget_plan", (ctx) => {
+  if (!ctx.projectId) return null;
+  return resolveBudgetPlanSource(ctx.projectId);
+});
+
 // --- onboarding_welcome ---
 registerContextSource("onboarding_welcome", (ctx) => {
   if (!ctx.projectId) return null;
   try {
     const db = getDb(ctx.projectId);
-    const agents = getRegisteredAgentIds();
+    const agents = getRegisteredAgentIds(ctx.projectId);
     return resolveWelcomeSource(ctx.projectId, db, {
       agentCount: agents.length,
       domainName: ctx.projectId,
@@ -784,9 +833,83 @@ registerContextSource("intervention_suggestions", (ctx) => {
   if (!ctx.projectId) return null;
   try {
     const db = getDb(ctx.projectId);
-    const agents = getRegisteredAgentIds();
+    const agents = getRegisteredAgentIds(ctx.projectId);
     return resolveInterventionSource(ctx.projectId, db, agents);
   } catch { return null; }
+});
+
+// --- worker_findings ---
+registerContextSource("worker_findings", (ctx) => {
+  if (!ctx.projectId) return null;
+
+  const reports = getDirectReports(ctx.projectId, ctx.agentId);
+  if (reports.length === 0) return null;
+
+  let db: DatabaseSync;
+  try { db = getDb(ctx.projectId); } catch { return null; }
+
+  const placeholders = reports.map(() => "?").join(", ");
+  const rows = db.prepare(
+    `SELECT title, category, content, source_agent, created_at
+     FROM knowledge
+     WHERE project_id = ? AND source_agent IN (${placeholders})
+     ORDER BY created_at DESC
+     LIMIT 10`,
+  ).all(ctx.projectId, ...reports) as Array<{
+    title: string;
+    category: string;
+    content: string;
+    source_agent: string | null;
+    created_at: number;
+  }>;
+
+  if (rows.length === 0) return null;
+
+  const lines = ["## Worker Findings", ""];
+  for (const row of rows) {
+    const sourceAgent = row.source_agent ?? "unknown";
+    const age = formatTimeAgo(Date.now() - row.created_at);
+    lines.push(`### ${row.title} (${sourceAgent}, ${age})`);
+    lines.push(`Category: ${row.category}`);
+    lines.push(row.content.slice(0, 400));
+    lines.push("");
+  }
+
+  return lines.join("\n");
+});
+
+// --- recent_decisions ---
+registerContextSource("recent_decisions", (ctx) => {
+  if (!ctx.projectId) return null;
+
+  let db: DatabaseSync;
+  try { db = getDb(ctx.projectId); } catch { return null; }
+
+  const rows = db.prepare(
+    `SELECT title, category, content, created_at
+     FROM knowledge
+     WHERE project_id = ? AND source_agent = ?
+     ORDER BY created_at DESC
+     LIMIT 10`,
+  ).all(ctx.projectId, ctx.agentId) as Array<{
+    title: string;
+    category: string;
+    content: string;
+    created_at: number;
+  }>;
+
+  if (rows.length === 0) return null;
+
+  const lines = ["## Recent Decisions", ""];
+  for (const row of rows) {
+    const age = formatTimeAgo(Date.now() - row.created_at);
+    lines.push(`### ${row.title} (${age})`);
+    lines.push(`Category: ${row.category}`);
+    lines.push(row.content.slice(0, 400));
+    lines.push("");
+  }
+
+  return lines.join("\n");
 });
 
 // --- custom_stream ---
@@ -986,7 +1109,7 @@ export function resolveAvailableCapacitySourceImpl(
   } catch { /* ignore */ }
 
   if (!modelConfigs || Object.keys(modelConfigs).length === 0) {
-    return "## Available Capacity\n\nNo resource/model configuration found. Configure `resources.models` in project.yaml to enable capacity planning.";
+    return "## Available Capacity\n\nNo resource/model configuration found. Configure `resources.models` in your Clawforce config to enable capacity planning.";
   }
 
   const activeRows = db.prepare(`

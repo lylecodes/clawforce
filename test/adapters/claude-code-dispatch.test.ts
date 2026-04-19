@@ -88,6 +88,20 @@ function createMockSpawn(config: {
   };
 }
 
+function createMockSpawnSequence(configs: Array<{
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  error?: Error | null;
+}>) {
+  let index = 0;
+  return (cmd: string, args: string[], opts: Record<string, unknown>) => {
+    const config = configs[Math.min(index, configs.length - 1)] ?? {};
+    index += 1;
+    return createMockSpawn(config)(cmd, args, opts);
+  };
+}
+
 // --- Tests ---
 
 describe("buildCliArgs", () => {
@@ -122,6 +136,12 @@ describe("buildCliArgs", () => {
 
   it("includes max budget", () => {
     const args = buildCliArgs("test", defaultConfig);
+    expect(args).toContain("--max-budget-usd");
+    expect(args).toContain("1");
+  });
+
+  it("can target the legacy budget flag explicitly", () => {
+    const args = buildCliArgs("test", defaultConfig, undefined, { budgetFlag: "--max-turns-cost" });
     expect(args).toContain("--max-turns-cost");
     expect(args).toContain("1");
   });
@@ -271,6 +291,32 @@ describe("dispatchViaClaude", () => {
     expect(result.error).toBe("Error: rate limited");
   });
 
+  it("retries with the legacy budget flag when the modern flag is unsupported", async () => {
+    _setSpawnForTest(createMockSpawnSequence([
+      {
+        stdout: "",
+        stderr: "error: unknown option '--max-budget-usd'",
+        exitCode: 1,
+      },
+      {
+        stdout: JSON.stringify({ result: "Recovered" }),
+        exitCode: 0,
+      },
+    ]));
+
+    const result = await dispatchViaClaude({
+      agentId: "agent-1",
+      projectId: "proj-1",
+      prompt: "test",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.result).toBe("Recovered");
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls[0]!.args).toContain("--max-budget-usd");
+    expect(spawnCalls[1]!.args).toContain("--max-turns-cost");
+  });
+
   it("handles is_error in JSON output", async () => {
     _setSpawnForTest(createMockSpawn({
       stdout: JSON.stringify({ is_error: true, error: "Tool call failed" }),
@@ -284,6 +330,22 @@ describe("dispatchViaClaude", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toBe("Tool call failed");
+  });
+
+  it("falls back to the JSON result message when is_error has no explicit error field", async () => {
+    _setSpawnForTest(createMockSpawn({
+      stdout: JSON.stringify({ is_error: true, result: "Not logged in · Please run /login" }),
+      exitCode: 1,
+    }));
+
+    const result = await dispatchViaClaude({
+      agentId: "agent-1",
+      projectId: "proj-1",
+      prompt: "test",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("Not logged in · Please run /login");
   });
 
   it("records cost when usage data is present", async () => {

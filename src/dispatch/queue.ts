@@ -6,15 +6,41 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { ingestEvent } from "../events/store.js";
 import { recordMetric } from "../metrics.js";
 import { writeAuditEntry } from "../audit.js";
-import { getExtendedProjectConfig } from "../project.js";
+import { getAgentConfig, getExtendedProjectConfig } from "../project.js";
 import { checkQueueDepth } from "../safety.js";
 import type { DispatchQueueItem, DispatchQueueStatus } from "../types.js";
+import { replayRecurringJobTask } from "../scheduling/recurring-jobs.js";
+import { resolveEffectiveConfig } from "../jobs.js";
+
+type QueueTaskRow = {
+  state?: unknown;
+  priority?: unknown;
+  origin?: unknown;
+  origin_id?: unknown;
+  metadata?: unknown;
+  assigned_to?: unknown;
+};
+
+function normalizeDispatchPayload(
+  payload: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!payload) return payload;
+  const normalized = { ...payload };
+  const rawModel = normalized.model;
+  if (typeof rawModel === "object" && rawModel !== null && !Array.isArray(rawModel)) {
+    const primary = (rawModel as Record<string, unknown>).primary;
+    if (typeof primary === "string" && primary.trim()) {
+      normalized.model = primary.trim();
+    }
+  }
+  return normalized;
+}
 
 function rowToQueueItem(row: Record<string, unknown>): DispatchQueueItem {
   return {
@@ -36,6 +62,336 @@ function rowToQueueItem(row: Record<string, unknown>): DispatchQueueItem {
   };
 }
 
+function parseTaskMetadata(raw: unknown): Record<string, unknown> | null {
+  if (!raw) return null;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  return null;
+}
+
+function taskPriorityToQueuePriority(priority: unknown): number {
+  switch (priority) {
+    case "P0": return 0;
+    case "P1": return 1;
+    case "P3": return 3;
+    case "P2":
+    default:
+      return 2;
+  }
+}
+
+function deriveQueuePriorityFromTask(taskRow: QueueTaskRow | undefined): number {
+  const base = taskPriorityToQueuePriority(taskRow?.priority);
+  const metadata = parseTaskMetadata(taskRow?.metadata);
+  const isRecurring = !!(
+    metadata
+    && typeof metadata.recurringJob === "object"
+    && metadata.recurringJob !== null
+    && !Array.isArray(metadata.recurringJob)
+  );
+  if (isRecurring) {
+    return Math.min(3, base + 1);
+  }
+
+  const origin = typeof taskRow?.origin === "string" ? taskRow.origin : null;
+  const originId = typeof taskRow?.origin_id === "string" ? taskRow.origin_id : null;
+  if (origin === "reactive" && originId) {
+    return Math.max(0, base - 1);
+  }
+
+  return base;
+}
+
+function buildRetryPayload(
+  projectId: string,
+  taskRow: Pick<QueueTaskRow, "assigned_to" | "metadata"> | undefined,
+  previousPayload: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const payload = previousPayload ? { ...previousPayload } : {};
+  const metadata = parseTaskMetadata(taskRow?.metadata);
+  const recurringJob = metadata?.recurringJob;
+  const jobName = recurringJob
+    && typeof recurringJob === "object"
+    && !Array.isArray(recurringJob)
+    && typeof (recurringJob as Record<string, unknown>).jobName === "string"
+    ? ((recurringJob as Record<string, unknown>).jobName as string).trim()
+    : "";
+  const assignedTo = typeof taskRow?.assigned_to === "string" ? taskRow.assigned_to.trim() : "";
+
+  if (jobName) {
+    payload.jobName = jobName;
+  }
+
+  if (assignedTo) {
+    const agentEntry = getAgentConfig(assignedTo, projectId);
+    const effectiveConfig = jobName && agentEntry?.config
+      ? resolveEffectiveConfig(agentEntry.config, jobName) ?? agentEntry.config
+      : agentEntry?.config;
+    if (typeof effectiveConfig?.model === "string" && effectiveConfig.model.trim()) {
+      payload.model = effectiveConfig.model.trim();
+    }
+  }
+
+  return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+export function getQueueItem(
+  projectId: string,
+  id: string,
+  dbOverride?: DatabaseSync,
+): DispatchQueueItem | null {
+  const db = dbOverride ?? getDb(projectId);
+  const row = db.prepare(
+    "SELECT * FROM dispatch_queue WHERE project_id = ? AND id = ? LIMIT 1",
+  ).get(projectId, id) as Record<string, unknown> | undefined;
+  return row ? rowToQueueItem(row) : null;
+}
+
+export function retryFailedItem(
+  projectId: string,
+  params: {
+    taskId?: string;
+    queueItemId?: string;
+    actor?: string;
+  },
+  dbOverride?: DatabaseSync,
+): { ok: true; previousItem: DispatchQueueItem; queueItem: DispatchQueueItem } | { ok: false; reason: string; queueItem?: DispatchQueueItem } {
+  const db = dbOverride ?? getDb(projectId);
+  const actor = params.actor ?? "operator:cli";
+
+  const failedRow = params.queueItemId
+    ? db.prepare(
+      `SELECT * FROM dispatch_queue
+       WHERE project_id = ? AND id = ? AND status = 'failed'
+       LIMIT 1`,
+    ).get(projectId, params.queueItemId) as Record<string, unknown> | undefined
+    : db.prepare(
+      `SELECT * FROM dispatch_queue
+       WHERE project_id = ? AND task_id = ? AND status = 'failed'
+       ORDER BY completed_at DESC, created_at DESC
+       LIMIT 1`,
+    ).get(projectId, params.taskId ?? null) as Record<string, unknown> | undefined;
+
+  if (!failedRow) {
+    return { ok: false, reason: "No failed dispatch item found for retry" };
+  }
+
+  const previousItem = rowToQueueItem(failedRow);
+
+  const taskRow = db.prepare(
+    "SELECT state, assigned_to, metadata FROM tasks WHERE project_id = ? AND id = ? LIMIT 1",
+  ).get(projectId, previousItem.taskId) as Record<string, unknown> | undefined;
+
+  if (!taskRow) {
+    return { ok: false, reason: `Task not found for failed queue item ${previousItem.id}` };
+  }
+
+  const refreshedPayload = buildRetryPayload(projectId, taskRow as QueueTaskRow | undefined, previousItem.payload);
+
+  const taskState = String(taskRow.state ?? "");
+  if (taskState !== "ASSIGNED" && taskState !== "IN_PROGRESS") {
+    const replay = replayRecurringJobTask(projectId, previousItem.taskId, actor, db);
+    if (replay.ok) {
+      const replayPayload = buildRetryPayload(projectId, {
+        assigned_to: replay.task.assignedTo,
+        metadata: replay.task.metadata,
+      }, previousItem.payload);
+      const queueItem = enqueue(
+        projectId,
+        replay.task.id,
+        replayPayload,
+        previousItem.priority,
+        db,
+        undefined,
+        false,
+        true,
+      );
+      if (!queueItem) {
+        return { ok: false, reason: `Failed to requeue replayed recurring task ${replay.task.id}` };
+      }
+
+      try {
+        writeAuditEntry({
+          projectId,
+          actor,
+          action: "queue.retry.recurring_replay",
+          targetType: "dispatch_queue",
+          targetId: queueItem.id,
+          detail: JSON.stringify({
+            previousTaskId: previousItem.taskId,
+            replayTaskId: replay.task.id,
+            previousQueueItemId: previousItem.id,
+          }),
+        }, db);
+      } catch (err) {
+        safeLog("queue.retry.recurring.audit", err);
+      }
+
+      return {
+        ok: true,
+        previousItem,
+        queueItem,
+      };
+    }
+
+    return {
+      ok: false,
+      reason: replay.reason,
+    };
+  }
+
+  const existingRow = db.prepare(
+    `SELECT * FROM dispatch_queue
+     WHERE project_id = ? AND task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+     LIMIT 1`,
+  ).get(projectId, previousItem.taskId) as Record<string, unknown> | undefined;
+
+  if (existingRow) {
+    return {
+      ok: false,
+      reason: `Task ${previousItem.taskId} already has active queue item ${String(existingRow.id)} (${String(existingRow.status)})`,
+      queueItem: rowToQueueItem(existingRow),
+    };
+  }
+
+  const queueItem = enqueue(
+    projectId,
+    previousItem.taskId,
+    refreshedPayload,
+    previousItem.priority,
+    db,
+    undefined,
+    false,
+    true,
+  );
+
+  if (!queueItem) {
+    return { ok: false, reason: `Failed to requeue task ${previousItem.taskId}` };
+  }
+
+  try {
+    writeAuditEntry({
+      projectId,
+      actor,
+      action: "queue.retry",
+      targetType: "dispatch_queue",
+      targetId: queueItem.id,
+      detail: JSON.stringify({
+        taskId: previousItem.taskId,
+        previousQueueItemId: previousItem.id,
+      }),
+    }, db);
+  } catch (err) {
+    safeLog("queue.retry.audit", err);
+  }
+
+  return {
+    ok: true,
+    previousItem,
+    queueItem,
+  };
+}
+
+export function releaseActiveItem(
+  projectId: string,
+  params: {
+    taskId?: string;
+    queueItemId?: string;
+    actor?: string;
+    reason?: string;
+  },
+  dbOverride?: DatabaseSync,
+): {
+  ok: true;
+  previousItem: DispatchQueueItem;
+  queueItem: DispatchQueueItem;
+} | {
+  ok: false;
+  reason: string;
+  queueItem?: DispatchQueueItem;
+} {
+  const db = dbOverride ?? getDb(projectId);
+  const actor = params.actor ?? "operator:cli";
+
+  const activeRow = params.queueItemId
+    ? db.prepare(
+      `SELECT * FROM dispatch_queue
+       WHERE project_id = ? AND id = ? AND status IN ('leased', 'dispatched')
+       LIMIT 1`,
+    ).get(projectId, params.queueItemId) as Record<string, unknown> | undefined
+    : db.prepare(
+      `SELECT * FROM dispatch_queue
+       WHERE project_id = ? AND task_id = ? AND status IN ('leased', 'dispatched')
+       ORDER BY leased_at DESC, dispatched_at DESC, created_at DESC
+       LIMIT 1`,
+    ).get(projectId, params.taskId ?? null) as Record<string, unknown> | undefined;
+
+  if (!activeRow) {
+    return { ok: false, reason: "No active leased/dispatched queue item found for release" };
+  }
+
+  const previousItem = rowToQueueItem(activeRow);
+  const taskRow = db.prepare(
+    "SELECT state FROM tasks WHERE project_id = ? AND id = ? LIMIT 1",
+  ).get(projectId, previousItem.taskId) as Record<string, unknown> | undefined;
+
+  if (!taskRow) {
+    return { ok: false, reason: `Task not found for active queue item ${previousItem.id}` };
+  }
+
+  const taskState = String(taskRow.state ?? "");
+  if (taskState !== "ASSIGNED" && taskState !== "IN_PROGRESS") {
+    return {
+      ok: false,
+      reason: `Task ${previousItem.taskId} is in ${taskState}, not releasable through queue release`,
+      queueItem: previousItem,
+    };
+  }
+
+  const reason = params.reason
+    ?? `Operator released active queue item ${previousItem.id} back to queued`;
+  releaseToQueued(previousItem.id, reason, db, projectId, { undoDispatchAttempt: false });
+  const queueItem = getQueueItem(projectId, previousItem.id, db);
+  if (!queueItem) {
+    return { ok: false, reason: `Failed to reload queue item ${previousItem.id} after release` };
+  }
+
+  try {
+    writeAuditEntry({
+      projectId,
+      actor,
+      action: "queue.release",
+      targetType: "dispatch_queue",
+      targetId: queueItem.id,
+      detail: JSON.stringify({
+        taskId: previousItem.taskId,
+        previousStatus: previousItem.status,
+        reason,
+      }),
+    }, db);
+  } catch (err) {
+    safeLog("queue.release.audit", err);
+  }
+
+  return {
+    ok: true,
+    previousItem,
+    queueItem,
+  };
+}
+
 const TERMINAL_STATUSES = ["completed", "failed", "cancelled"];
 
 /**
@@ -53,6 +409,8 @@ export function enqueue(
   skipStateCheck?: boolean,
   /** Skip the recent-failure dedup check (e.g. when re-enqueueing from sweep recovery). */
   skipFailedDedup?: boolean,
+  /** Skip nested audit transactions when caller already holds a transaction. */
+  withinTransaction?: boolean,
 ): DispatchQueueItem | null {
   const db = dbOverride ?? getDb(projectId);
 
@@ -63,14 +421,19 @@ export function enqueue(
   }
 
   // Skip tasks in non-dispatchable states — unless caller explicitly opts out
+  let taskRow: QueueTaskRow | undefined;
   if (!skipStateCheck) {
-    const taskRow = db.prepare(
-      "SELECT state FROM tasks WHERE id = ? AND project_id = ?",
+    taskRow = db.prepare(
+      "SELECT state, priority, origin, origin_id, metadata FROM tasks WHERE id = ? AND project_id = ?",
     ).get(taskId, projectId) as Record<string, unknown> | undefined;
 
     if (taskRow && ["DONE", "CANCELLED", "FAILED", "REVIEW", "BLOCKED"].includes(taskRow.state as string)) {
       return null;
     }
+  } else {
+    taskRow = db.prepare(
+      "SELECT state, priority, origin, origin_id, metadata FROM tasks WHERE id = ? AND project_id = ?",
+    ).get(taskId, projectId) as Record<string, unknown> | undefined;
   }
 
   // Dedup: check for existing non-terminal item
@@ -107,7 +470,7 @@ export function enqueue(
     }
   }
 
-  const prio = priority ?? 2;
+  const prio = priority ?? deriveQueuePriorityFromTask(taskRow);
 
   // Read max dispatch attempts from config, fall back to default 3
   let effectiveMaxDispatchAttempts = 3;
@@ -118,17 +481,27 @@ export function enqueue(
     }
   } catch { /* project module may not be available during bootstrap */ }
 
+  const normalizedPayload = normalizeDispatchPayload(payload);
+
   db.prepare(`
     INSERT INTO dispatch_queue (id, project_id, task_id, priority, payload, status, dispatch_attempts, max_dispatch_attempts, risk_tier, created_at)
     VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
-  `).run(id, projectId, taskId, prio, payload ? JSON.stringify(payload) : null, effectiveMaxDispatchAttempts, riskTier ?? null, now);
+  `).run(id, projectId, taskId, prio, normalizedPayload ? JSON.stringify(normalizedPayload) : null, effectiveMaxDispatchAttempts, riskTier ?? null, now);
 
   try {
     recordMetric({ projectId, type: "dispatch", subject: taskId, key: "queue_enqueue", value: 1, tags: { priority: prio, queueItemId: id } }, db);
   } catch (err) { safeLog("queue.enqueue.metric", err); }
 
   try {
-    writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.enqueue", targetType: "dispatch_queue", targetId: id, detail: JSON.stringify({ taskId, priority: prio }) }, db);
+    writeAuditEntry({
+      projectId,
+      actor: "system:dispatch",
+      action: "queue.enqueue",
+      targetType: "dispatch_queue",
+      targetId: id,
+      detail: JSON.stringify({ taskId, priority: prio }),
+      withinTransaction,
+    }, db);
   } catch (err) { safeLog("queue.enqueue.audit", err); }
 
   try {
@@ -214,6 +587,7 @@ export function claimNext(
 export function reclaimExpiredLeases(
   projectId: string,
   dbOverride?: DatabaseSync,
+  options?: { withinTransaction?: boolean },
 ): number {
   const db = dbOverride ?? getDb(projectId);
   const now = Date.now();
@@ -264,7 +638,15 @@ export function reclaimExpiredLeases(
     } catch (err) { safeLog("queue.leaseExpired.metric", err); }
 
     try {
-      writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.lease_expired", targetType: "dispatch_queue", targetId: itemId, detail: JSON.stringify({ taskId, attempts, maxAttempts, outcome: exhausted ? "dead_letter" : "requeued" }) }, db);
+      writeAuditEntry({
+        projectId,
+        actor: "system:dispatch",
+        action: "queue.lease_expired",
+        targetType: "dispatch_queue",
+        targetId: itemId,
+        detail: JSON.stringify({ taskId, attempts, maxAttempts, outcome: exhausted ? "dead_letter" : "requeued" }),
+        withinTransaction: options?.withinTransaction,
+      }, db);
     } catch (err) { safeLog("queue.leaseExpired.audit", err); }
 
     reclaimed++;
@@ -331,6 +713,7 @@ export function completeItem(
   id: string,
   dbOverride?: DatabaseSync,
   projectId?: string,
+  options?: { withinTransaction?: boolean },
 ): void {
   const db = dbOverride ?? getDb(projectId ?? "");
   db.prepare(
@@ -339,7 +722,14 @@ export function completeItem(
 
   if (projectId) {
     try {
-      writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.complete", targetType: "dispatch_queue", targetId: id }, db);
+      writeAuditEntry({
+        projectId,
+        actor: "system:dispatch",
+        action: "queue.complete",
+        targetType: "dispatch_queue",
+        targetId: id,
+        withinTransaction: options?.withinTransaction,
+      }, db);
     } catch (err) { safeLog("queue.complete.audit", err); }
   }
 }
@@ -350,6 +740,7 @@ export function failItem(
   error: string,
   dbOverride?: DatabaseSync,
   projectId?: string,
+  options?: { withinTransaction?: boolean },
 ): void {
   const db = dbOverride ?? getDb(projectId ?? "");
   db.prepare(
@@ -358,7 +749,15 @@ export function failItem(
 
   if (projectId) {
     try {
-      writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.fail", targetType: "dispatch_queue", targetId: id, detail: error.slice(0, 500) }, db);
+      writeAuditEntry({
+        projectId,
+        actor: "system:dispatch",
+        action: "queue.fail",
+        targetType: "dispatch_queue",
+        targetId: id,
+        detail: error.slice(0, 500),
+        withinTransaction: options?.withinTransaction,
+      }, db);
     } catch (err) { safeLog("queue.fail.audit", err); }
   }
 }
@@ -376,18 +775,40 @@ export function releaseToQueued(
   reason: string,
   dbOverride?: DatabaseSync,
   projectId?: string,
+  options?: {
+    withinTransaction?: boolean;
+    undoDispatchAttempt?: boolean;
+  },
 ): void {
   const db = dbOverride ?? getDb(projectId ?? "");
-  db.prepare(
-    `UPDATE dispatch_queue
-     SET status = 'queued', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL,
-         last_error = ?, dispatch_attempts = MAX(0, dispatch_attempts - 1)
-     WHERE id = ?`,
-  ).run(reason, id);
+  const undoDispatchAttempt = options?.undoDispatchAttempt ?? true;
+  if (undoDispatchAttempt) {
+    db.prepare(
+      `UPDATE dispatch_queue
+       SET status = 'queued', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL,
+           last_error = ?, dispatch_attempts = MAX(0, dispatch_attempts - 1)
+       WHERE id = ?`,
+    ).run(reason, id);
+  } else {
+    db.prepare(
+      `UPDATE dispatch_queue
+       SET status = 'queued', leased_by = NULL, leased_at = NULL, lease_expires_at = NULL,
+           last_error = ?
+       WHERE id = ?`,
+    ).run(reason, id);
+  }
 
   if (projectId) {
     try {
-      writeAuditEntry({ projectId, actor: "system:dispatch", action: "queue.release_to_queued", targetType: "dispatch_queue", targetId: id, detail: reason.slice(0, 500) }, db);
+      writeAuditEntry({
+        projectId,
+        actor: "system:dispatch",
+        action: "queue.release_to_queued",
+        targetType: "dispatch_queue",
+        targetId: id,
+        detail: reason.slice(0, 500),
+        withinTransaction: options?.withinTransaction,
+      }, db);
     } catch (err) { safeLog("queue.releaseToQueued.audit", err); }
   }
 }

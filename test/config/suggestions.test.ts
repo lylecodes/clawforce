@@ -24,7 +24,7 @@ describe("config quality suggestions", () => {
     expect(suggestions.some(s => s.message.toLowerCase().includes("budget"))).toBe(true);
   });
 
-  it("suggests orchestrator when domain has no orchestrator", async () => {
+  it("suggests manager when domain has no manager assignment", async () => {
     const { validateDomainQuality } = await import("../../src/config-validator.js");
 
     const result = validateDomainQuality({
@@ -32,7 +32,7 @@ describe("config quality suggestions", () => {
       agents: ["a", "b"],
     } as any);
     const suggestions = result.filter(r => r.level === "suggest");
-    expect(suggestions.some(s => s.message.toLowerCase().includes("orchestrator"))).toBe(true);
+    expect(suggestions.some(s => s.message.includes("manager.agentId"))).toBe(true);
   });
 
   it("suggests expectations when agents have none", async () => {

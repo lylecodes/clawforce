@@ -31,6 +31,8 @@ export type DispatchOptions = {
   sessionKey?: string;
   /** Agent config for compliance tracking (optional). */
   agentConfig?: import("../../src/types.js").AgentConfig;
+  /** Extra environment variables needed by the execution substrate. */
+  extraEnv?: Record<string, string>;
 };
 
 export type DispatchResult = {
@@ -91,6 +93,16 @@ type SpawnFn = (
   options: Record<string, unknown>,
 ) => ChildProcess;
 
+type BudgetFlag = "--max-budget-usd" | "--max-turns-cost";
+
+type DispatchAttempt = {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+};
+
+const DEFAULT_BUDGET_FLAG: BudgetFlag = "--max-budget-usd";
+
 /**
  * Module-level spawn function. Defaults to node:child_process spawn.
  * Can be overridden via _setSpawnForTest() for unit testing.
@@ -120,21 +132,22 @@ export async function dispatchViaClaude(options: DispatchOptions): Promise<Dispa
   }
 
   try {
-    // Build CLI arguments
-    const args = buildCliArgs(options.prompt, cfg, options.systemContext);
-
     // Build environment variables
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       CLAWFORCE_AGENT_ID: options.agentId,
       CLAWFORCE_SESSION_KEY: sessionKey,
       CLAWFORCE_PROJECT_ID: options.projectId,
+      ...(options.extraEnv ?? {}),
     };
 
-    // Spawn the claude process
-    const { stdout, stderr, exitCode } = await spawnClaude(
+    let budgetFlag: BudgetFlag = DEFAULT_BUDGET_FLAG;
+    let attempt = await runDispatchAttempt(
       cfg.binary,
-      args,
+      options.prompt,
+      cfg,
+      options.systemContext,
+      budgetFlag,
       {
         env,
         cwd: cfg.workdir,
@@ -142,7 +155,24 @@ export async function dispatchViaClaude(options: DispatchOptions): Promise<Dispa
       },
     );
 
+    if (shouldRetryWithAlternateBudgetFlag(cfg, budgetFlag, attempt)) {
+      budgetFlag = alternateBudgetFlag(budgetFlag);
+      attempt = await runDispatchAttempt(
+        cfg.binary,
+        options.prompt,
+        cfg,
+        options.systemContext,
+        budgetFlag,
+        {
+          env,
+          cwd: cfg.workdir,
+          timeoutMs,
+        },
+      );
+    }
+
     const durationMs = Date.now() - startTime;
+    const { stdout, stderr, exitCode } = attempt;
 
     // Parse JSON output
     const parsed = parseClaudeOutput(stdout);
@@ -193,7 +223,7 @@ export async function dispatchViaClaude(options: DispatchOptions): Promise<Dispa
       exitCode,
       rawJson: parsed ?? undefined,
       error: isError
-        ? (parsed?.error ?? (stderr.trim() || `claude exited with code ${exitCode}`))
+        ? (parsed?.error ?? (parsed?.is_error ? parsed.result : undefined) ?? (stderr.trim() || `claude exited with code ${exitCode}`))
         : undefined,
     };
   } catch (err) {
@@ -225,6 +255,7 @@ export function buildCliArgs(
   prompt: string,
   config: ReturnType<typeof resolveClaudeCodeConfig>,
   systemContext?: string,
+  options?: { budgetFlag?: BudgetFlag },
 ): string[] {
   const args: string[] = [
     "-p", prompt,
@@ -240,7 +271,7 @@ export function buildCliArgs(
   }
 
   if (config.maxBudgetPerDispatch !== undefined) {
-    args.push("--max-turns-cost", String(config.maxBudgetPerDispatch));
+    args.push(options?.budgetFlag ?? DEFAULT_BUDGET_FLAG, String(config.maxBudgetPerDispatch));
   }
 
   if (systemContext) {
@@ -252,6 +283,41 @@ export function buildCliArgs(
   }
 
   return args;
+}
+
+function alternateBudgetFlag(flag: BudgetFlag): BudgetFlag {
+  return flag === "--max-budget-usd" ? "--max-turns-cost" : "--max-budget-usd";
+}
+
+function shouldRetryWithAlternateBudgetFlag(
+  config: ReturnType<typeof resolveClaudeCodeConfig>,
+  budgetFlag: BudgetFlag,
+  attempt: DispatchAttempt,
+): boolean {
+  if (config.maxBudgetPerDispatch === undefined) {
+    return false;
+  }
+  if (attempt.exitCode === 0) {
+    return false;
+  }
+  return attempt.stderr.includes(`unknown option '${budgetFlag}'`)
+    || attempt.stderr.includes(`unknown option "${budgetFlag}"`);
+}
+
+function runDispatchAttempt(
+  binary: string,
+  prompt: string,
+  config: ReturnType<typeof resolveClaudeCodeConfig>,
+  systemContext: string | undefined,
+  budgetFlag: BudgetFlag,
+  options: {
+    env?: Record<string, string>;
+    cwd?: string;
+    timeoutMs: number;
+  },
+): Promise<DispatchAttempt> {
+  const args = buildCliArgs(prompt, config, systemContext, { budgetFlag });
+  return spawnClaude(binary, args, options);
 }
 
 /**

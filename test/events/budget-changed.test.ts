@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -65,10 +65,10 @@ describe("budget_changed event", () => {
     const events = listEvents(PROJECT, { type: "budget_changed" }, db);
     expect(events.length).toBe(2);
 
-    // Second event should have old = 10000, new = 20000
-    const secondPayload = events[1].payload as Record<string, unknown>;
-    expect(secondPayload.oldLimit).toBe(10000);
-    expect(secondPayload.newLimit).toBe(20000);
+    // listEvents returns most recent first, so the updated budget event is index 0.
+    const latestPayload = events[0].payload as Record<string, unknown>;
+    expect(latestPayload.oldLimit).toBe(10000);
+    expect(latestPayload.newLimit).toBe(20000);
   });
 
   it("does not emit budget_changed for per-agent budgets", () => {

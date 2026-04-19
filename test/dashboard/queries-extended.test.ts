@@ -13,12 +13,72 @@ vi.mock("../../src/project.js", () => {
         extends: "manager",
         title: "Manager",
         department: "eng",
+        runtime: {
+          allowedTools: ["Read", "Write"],
+          workspacePaths: ["/repo/core", "/repo/shared"],
+        },
         briefing: [{ source: "file", path: "context/manager.md" }, { source: "direction" }],
       },
     }],
-    ["agent-dev", { projectId: "proj1", config: { extends: "employee", title: "Developer", department: "eng", briefing: [] } }],
+    ["agent-dev", {
+      projectId: "proj1",
+      config: {
+        extends: "employee",
+        title: "Developer",
+        department: "eng",
+        briefing: [],
+      },
+    }],
   ]);
   return {
+    parseWorkforceConfigContent: vi.fn((content: string) => {
+      const raw = JSON.parse(content) as Record<string, any>;
+      const agents = Object.fromEntries(
+        Object.entries(raw.agents ?? {}).map(([agentId, agentDef]) => {
+          const config = agentDef as Record<string, any>;
+          const runtime = config.runtime && typeof config.runtime === "object"
+            ? config.runtime as Record<string, any>
+            : {};
+          const extendsFrom = typeof config.extends === "string" ? config.extends : "employee";
+          const defaultAllowedTools = extendsFrom === "employee"
+            ? ["Bash", "Read", "Edit", "Write", "WebSearch"]
+            : extendsFrom === "verifier"
+              ? ["Bash", "Read", "WebSearch"]
+              : undefined;
+          return [agentId, {
+            extends: extendsFrom,
+            title: typeof config.title === "string" ? config.title : undefined,
+            department: typeof config.department === "string" ? config.department : undefined,
+            briefing: [],
+            expectations: [],
+            performance_policy: undefined,
+            runtime: Object.keys(runtime).length > 0 ? runtime : undefined,
+            allowedTools: Array.isArray(runtime.allowedTools)
+              ? runtime.allowedTools
+              : Array.isArray(runtime.allowed_tools)
+                ? runtime.allowed_tools
+                : Array.isArray(config.allowedTools)
+              ? config.allowedTools
+              : Array.isArray(config.allowed_tools)
+                ? config.allowed_tools
+                : defaultAllowedTools,
+            workspacePaths: Array.isArray(runtime.workspacePaths)
+              ? runtime.workspacePaths
+              : Array.isArray(runtime.workspace_paths)
+                ? runtime.workspace_paths
+                : Array.isArray(config.workspacePaths)
+              ? config.workspacePaths
+              : Array.isArray(config.workspace_paths)
+                ? config.workspace_paths
+                : undefined,
+          }];
+        }),
+      );
+      return {
+        name: typeof raw.name === "string" ? raw.name : "mock-project",
+        agents,
+      };
+    }),
     getAgentConfig: vi.fn((id: string) => configs.get(id) ?? null),
     getRegisteredAgentIds: vi.fn(() => [...configs.keys()]),
     getExtendedProjectConfig: vi.fn((pid: string) => {
@@ -104,6 +164,7 @@ vi.mock("../../src/enforcement/disabled-store.js", () => ({
 }));
 
 vi.mock("../../src/enforcement/tracker.js", () => ({
+  getSessionHeartbeatStatus: vi.fn(() => ({ state: "live", ageMs: 10 })),
   getActiveSessions: vi.fn(() => [
     { agentId: "agent-dev", projectId: "proj1", sessionKey: "sk1", metrics: { startedAt: 0, toolCalls: [] } },
   ]),
@@ -238,6 +299,7 @@ vi.mock("../../src/config/api-service.js", () => ({
   readGlobalConfig: vi.fn(() => ({
     agents: {
       "agent-mgr": {
+        extends: "manager",
         jobs: {
           standup: {
             cron: "0 9 * * *",
@@ -247,6 +309,8 @@ vi.mock("../../src/config/api-service.js", () => ({
         },
       },
       "agent-dev": {
+        extends: "employee",
+        workspace_paths: ["/repo/dashboard"],
         jobs: {
           cleanup: {
             cron: "0 18 * * *",
@@ -258,6 +322,115 @@ vi.mock("../../src/config/api-service.js", () => ({
   })),
 }));
 
+vi.mock("../../src/setup/report.js", () => ({
+  buildSetupReport: vi.fn((_root: string, targetDomainId?: string | null) => ({
+    root: "/tmp/.clawforce",
+    targetDomainId: targetDomainId ?? null,
+    valid: true,
+    hasGlobalConfig: true,
+    domainFileIds: ["proj1"],
+    domains: [{
+      id: "proj1",
+      file: "domains/proj1.yaml",
+      exists: true,
+      loaded: true,
+      enabled: true,
+      workflows: ["data-source-onboarding"],
+      agentCount: 2,
+      jobCount: 2,
+      jobs: [
+        {
+          agentId: "agent-mgr",
+          jobId: "standup",
+          cron: "0 9 * * *",
+          frequency: null,
+          lastScheduledAt: null,
+          lastFinishedAt: null,
+          lastStatus: null,
+          activeTaskId: null,
+          activeTaskState: null,
+          activeTaskTitle: null,
+          activeTaskBlockedReason: null,
+          activeQueueStatus: null,
+          activeSessionState: "none",
+          nextRunAt: null,
+        },
+        {
+          agentId: "agent-dev",
+          jobId: "cleanup",
+          cron: "0 18 * * *",
+          frequency: null,
+          lastScheduledAt: null,
+          lastFinishedAt: null,
+          lastStatus: null,
+          activeTaskId: "task-cleanup-1",
+          activeTaskState: "IN_PROGRESS",
+          activeTaskTitle: "Run recurring workflow agent-dev.cleanup",
+          activeTaskBlockedReason: null,
+          activeQueueStatus: null,
+          activeSessionState: "none",
+          nextRunAt: null,
+        },
+      ],
+      controller: {
+        state: "live",
+        ownerLabel: "controller:proj1",
+        heartbeatAgeMs: 1000,
+        activeSessionCount: 1,
+        activeDispatchCount: 1,
+      },
+      managerAgentId: "agent-mgr",
+      pathCount: 1,
+      issueCounts: { errors: 0, warnings: 0, suggestions: 0 },
+    }],
+    issueCounts: { errors: 0, warnings: 0, suggestions: 0 },
+    checks: [{
+      id: "domain:proj1:controller-config",
+      status: "warn",
+      summary: 'Live controller for "proj1" is running an older config revision than the config currently on disk.',
+      detail: "Caller-side reload feedback is not enough to prove the live controller picked up the newer config.",
+      fix: "Reload this domain through the live controller.",
+      domainId: "proj1",
+    }],
+    issues: [],
+    nextSteps: [],
+  })),
+  buildSetupExplanation: vi.fn(() => ({
+    summary: "Setup is clean and ready.",
+    targetDomainId: "proj1",
+    immediateActions: [{
+      id: "domain:proj1:controller-config",
+      status: "warn",
+      summary: 'Live controller for "proj1" is running an older config revision than the config currently on disk.',
+      why: "Caller-side reload feedback is not enough to prove the live controller picked up the newer config.",
+      fix: "Reload this domain through the live controller.",
+      domainId: "proj1",
+    }],
+    domains: [{
+      id: "proj1",
+      diagnosis: "healthy",
+      controllerState: "live",
+      managerAgentId: "agent-mgr",
+      counts: {
+        running: 1,
+        dispatching: 0,
+        queued: 0,
+        blocked: 0,
+        stalled: 0,
+        orphaned: 0,
+        completed: 1,
+        failed: 0,
+        never: 0,
+      },
+      highlights: ["declared workflows: data-source-onboarding"],
+    }],
+  })),
+}));
+
+vi.mock("../../src/paths.js", () => ({
+  getClawforceHome: vi.fn(() => "/tmp/.clawforce"),
+}));
+
 const {
   queryDashboardSummary,
   queryApprovals,
@@ -265,6 +438,7 @@ const {
   queryBudgetForecast,
   queryTrustScores,
   queryConfig,
+  querySetupExperience,
   queryMeetings,
   queryMeetingDetail,
 } = await import("../../src/dashboard/queries.js");
@@ -344,6 +518,8 @@ describe("queryConfig", () => {
     expect(result.agents).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "agent-mgr",
+        allowedTools: ["Read", "Write"],
+        workspacePaths: ["/repo/core", "/repo/shared"],
         briefing: [{ source: "file", path: "context/manager.md" }, { source: "direction" }],
       }),
     ]));
@@ -421,6 +597,94 @@ describe("queryConfig", () => {
     expect(result.team_templates).toEqual({});
     expect(result.profile).toEqual({});
     expect(result.initiatives).toEqual({});
+  });
+});
+
+describe("querySetupExperience", () => {
+  it("returns a setup-focused control-plane payload", () => {
+    const result = querySetupExperience("proj1");
+    expect(result.domainId).toBe("proj1");
+    expect(result.report.targetDomainId).toBe("proj1");
+    expect(result.explanation.summary).toContain("Setup");
+    expect(result.topology.manager?.id).toBe("agent-mgr");
+    expect(result.topology.manager?.executor).toBe("openclaw");
+    expect(result.topology.manager?.enforcementGrade).toBe("hard-scoped");
+    expect(result.topology.manager?.runtime).toEqual({
+      allowedTools: ["Read", "Write"],
+      workspacePaths: ["/repo/core", "/repo/shared"],
+    });
+    expect(result.topology.manager?.allowedTools).toEqual(["Read", "Write"]);
+    expect(result.topology.manager?.workspacePaths).toEqual(["/repo/core", "/repo/shared"]);
+    expect(result.topology.owners).toEqual([]);
+    expect(result.topology.sharedSpecialists).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "agent-dev",
+        role: "specialist",
+        jobCount: 1,
+        activeSessionCount: 1,
+        executor: "openclaw",
+        enforcementGrade: "hard-scoped",
+        runtime: {
+          allowedTools: ["Bash", "Read", "Edit", "Write", "WebSearch"],
+          workspacePaths: ["/repo/dashboard"],
+        },
+        allowedTools: ["Bash", "Read", "Edit", "Write", "WebSearch"],
+        workspacePaths: ["/repo/dashboard"],
+      }),
+    ]));
+    expect(result.topology.workflows).toEqual(["data-source-onboarding"]);
+    expect(result.preflight.summary).toContain("modeled behavior");
+    expect(result.preflight.scenarios.some((scenario) => scenario.category === "execution")).toBe(true);
+    expect(result.feed).toHaveProperty("counts");
+    expect(result.decisionInbox).toHaveProperty("counts");
+    expect(result.runtime).toHaveProperty("queue");
+    expect(result.runtime).toHaveProperty("trackedSessions");
+    expect(result.runtime.execution).toMatchObject({
+      mode: "live",
+      simulatedActions: {
+        total: 0,
+        pending: 0,
+        simulated: 0,
+        blocked: 0,
+        approvedForLive: 0,
+        discarded: 0,
+        latestCreatedAt: null,
+      },
+      lastReload: null,
+    });
+    expect(result.context.agents["agent-mgr"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          configPath: "agents[agent-mgr]",
+          domainId: "proj1",
+          route: expect.objectContaining({
+            path: "/config",
+            params: expect.objectContaining({ section: "agents", agentId: "agent-mgr" }),
+          }),
+        }),
+      ]),
+    );
+    expect(result.context.preflight["execution:default-mutation-policy"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          configPath: "execution",
+        }),
+      ]),
+    );
+    expect(result.actions.immediateActions["domain:proj1:controller-config"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: { type: "request_controller_handoff" },
+        }),
+      ]),
+    );
+    expect(result.actions.jobs["agent-dev:cleanup"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: { type: "recover_recurring_run", taskId: "task-cleanup-1" },
+        }),
+      ]),
+    );
   });
 });
 

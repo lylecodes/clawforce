@@ -8,7 +8,7 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../sqlite-driver.js";
 import { getDb } from "../../db.js";
 
 /**
@@ -200,6 +200,7 @@ export function buildClawforceHealthReport(
         const diff = execSync("git log --oneline -5", {
           cwd: projectDir,
           encoding: "utf-8",
+          stdio: "pipe",
           timeout: 5000,
         }).trim();
         if (diff) {

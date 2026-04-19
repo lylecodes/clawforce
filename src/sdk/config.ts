@@ -28,8 +28,8 @@ import type { AgentConfig as PublicAgentConfig } from "./types.js";
  *   department → group
  *   team       → subgroup
  */
-function toPublicAgentConfig(agentId: string): PublicAgentConfig | undefined {
-  const entry = getAgentConfig(agentId);
+function toPublicAgentConfig(agentId: string, projectId?: string): PublicAgentConfig | undefined {
+  const entry = getAgentConfig(agentId, projectId);
   if (!entry) return undefined;
   const { config } = entry;
 
@@ -75,7 +75,7 @@ export class ConfigNamespace {
    */
   get(agentId?: string): any {
     if (agentId !== undefined) {
-      return toPublicAgentConfig(agentId);
+      return toPublicAgentConfig(agentId, this.domain);
     }
     // No agentId — return the extended domain config
     return getExtendedProjectConfig(this.domain);
@@ -95,11 +95,7 @@ export class ConfigNamespace {
    * List the agent IDs registered under this domain.
    */
   agents(): string[] {
-    const allIds = getRegisteredAgentIds();
-    return allIds.filter((agentId) => {
-      const entry = getAgentConfig(agentId);
-      return entry?.projectId === this.domain;
-    });
+    return getRegisteredAgentIds(this.domain);
   }
 
   /**

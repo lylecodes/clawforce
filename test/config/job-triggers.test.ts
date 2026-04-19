@@ -174,15 +174,19 @@ describe("job trigger validation", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function writeYaml(content: string) {
-    fs.writeFileSync(path.join(tmpDir, "project.yaml"), content, "utf-8");
+  function writeGlobalYaml(content: string) {
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), content, "utf-8");
+  }
+
+  function writeDomainYaml(content: string) {
+    const domainsDir = path.join(tmpDir, "domains");
+    fs.mkdirSync(domainsDir, { recursive: true });
+    fs.writeFileSync(path.join(domainsDir, "test.yaml"), content, "utf-8");
   }
 
   it("reports error for non-array triggers", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   mgr:
     extends: manager
@@ -190,18 +194,15 @@ agents:
       coordination:
         cron: "*/30 * * * *"
         triggers: "not-an-array"
-domain:
-  agents: [mgr]
 `);
+    writeDomainYaml("domain: test\nagents: [mgr]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i => i.code === "INVALID_TRIGGERS")).toBe(true);
   });
 
   it("reports error for trigger missing on field", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   mgr:
     extends: manager
@@ -210,18 +211,15 @@ agents:
         cron: "*/30 * * * *"
         triggers:
           - conditions: { severity: critical }
-domain:
-  agents: [mgr]
 `);
+    writeDomainYaml("domain: test\nagents: [mgr]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i => i.code === "MISSING_TRIGGER_EVENT")).toBe(true);
   });
 
   it("warns for unknown trigger event type", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   mgr:
     extends: manager
@@ -230,18 +228,15 @@ agents:
         cron: "*/30 * * * *"
         triggers:
           - on: made_up_event
-domain:
-  agents: [mgr]
 `);
+    writeDomainYaml("domain: test\nagents: [mgr]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i => i.code === "UNKNOWN_TRIGGER_EVENT" && i.message.includes("made_up_event"))).toBe(true);
   });
 
   it("passes for valid trigger event types", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   mgr:
     extends: manager
@@ -251,18 +246,15 @@ agents:
         triggers:
           - on: task_failed
           - on: dispatch_failed
-domain:
-  agents: [mgr]
 `);
+    writeDomainYaml("domain: test\nagents: [mgr]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.filter(i => i.code === "INVALID_TRIGGERS" || i.code === "MISSING_TRIGGER_EVENT" || i.code === "UNKNOWN_TRIGGER_EVENT")).toHaveLength(0);
   });
 
   it("validates trigger with non-object entry", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   mgr:
     extends: manager
@@ -271,9 +263,8 @@ agents:
         cron: "*/30 * * * *"
         triggers:
           - "just a string"
-domain:
-  agents: [mgr]
 `);
+    writeDomainYaml("domain: test\nagents: [mgr]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i => i.code === "INVALID_TRIGGER")).toBe(true);
   });

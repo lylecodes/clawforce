@@ -15,11 +15,11 @@ Clawforce evolves from a human-configured accountability layer into an autonomou
 
 ## Key Architectural Shifts
 
-### 1. Collapse scheduled role
+### 1. Simplify Roles Around Manager + Employee
 Cron is a trigger mechanism, not a role. Two roles only: **manager** and **employee**.
 - Cron-triggered employee work auto-creates a task and flows through the normal employee lifecycle (evidence, verification, compliance)
 - Cron-triggered manager work is a coordination cycle ("wake up and check on things")
-- The `scheduled` role config becomes syntactic sugar for "employee with a cron trigger"
+- Cron-triggered work is configured through `jobs:` on the owning agent
 
 ### 2. Initiatives as first-class concept
 Named strategic priorities with allocation weights. Replaces arbitrary cron frequency configuration.
@@ -57,18 +57,18 @@ Managers get dedicated thinking time — not reacting to events, but proactively
 
 ## Phase 6: Role Simplification
 
-### 6.1 Collapse scheduled → employee + cron trigger
+### 6.1 Collapse Cron-Only Roles Into Jobs
 
-Remove `scheduled` as a distinct role. Cron becomes a property of any agent.
+Remove cron-only role variants. Cron becomes a property of any agent.
 
 - Cron-triggered employee sessions auto-create a task before dispatch
   - Task title derived from job config (e.g. "Lead generation run — Mar 8")
   - Full employee lifecycle: evidence, verification, compliance check
 - Cron-triggered manager sessions remain coordination cycles (no task creation)
-- Migrate existing `role: scheduled` configs to `role: employee` with `jobs:` section
-- Update profiles.ts: remove scheduled defaults, employee defaults apply
-- Update context assembly: no special-casing for scheduled role
-- Update skill topics: remove scheduled-specific documentation
+- Migrate any cron-only configs to `role: employee` with a `jobs:` section
+- Update profiles.ts: employee defaults apply uniformly
+- Update context assembly: no special-casing for cron-only roles
+- Update skill topics: remove cron-only role documentation
 
 ### 6.2 Simplify role profiles
 
@@ -257,7 +257,7 @@ Improve manager's ability to predict session costs.
 ## Phase Summary
 
 ### Phase 6: Role Simplification ✅
-- [x] 6.1: Collapse scheduled → employee + cron trigger (scheduled is now a deprecated preset alias for employee)
+- [x] 6.1: Collapse cron-only roles into employee + jobs
 - [x] 6.2: Simplify role profiles → config inheritance with `extends:` presets, merge operators (+/-), user-defined presets
 - [x] 6.3: Default manager reflection job → builtin `reflect` job preset (weekly strategic thinking)
 
@@ -304,7 +304,7 @@ Config is overwhelming. A new user shouldn't need to know 28 context sources and
 No guided onboarding exists. First experience is reading docs or a raw `explain` dump.
 
 - `clawforce init` — interactive CLI flow: "What's your project? How many agents? Budget?"
-- Generates `project.yaml` from answers
+- Generates `config.yaml` plus `domains/<domain>.yaml` from answers
 - Shows budget guidance: "Based on your team size, $20/day gives ~8-12 employee sessions"
 - Optional: `clawforce init --from-description "I need a sales team with a manager and 3 reps"`
 
@@ -333,7 +333,7 @@ User sets `dailyLimitCents: 2000` with no idea if that's enough.
 
 Config changes require re-activation. No diff preview.
 
-- Watch `project.yaml` for changes (or explicit `clawforce reload`)
+- Watch `config.yaml` and `domains/*.yaml` for changes (or explicit `clawforce reload`)
 - Show diff: "Adding agent 'designer', changing manager cron from 30m to 15m"
 - Apply without restart — re-register agents, update cron jobs, sync policies
 - Rollback on failure: "Config invalid, keeping previous config"

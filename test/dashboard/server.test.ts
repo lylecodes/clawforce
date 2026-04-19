@@ -1,5 +1,8 @@
 import { describe, expect, it, vi, afterAll, beforeEach } from "vitest";
-import { createDashboardServer } from "../../src/dashboard/server.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createDashboardServer, resolveDefaultDashboardDir } from "../../src/dashboard/server.js";
 import { resetRateLimits } from "../../src/dashboard/auth.js";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -185,5 +188,16 @@ describe("createDashboardServer", () => {
     const { port } = await startServer({ port: 0 });
     const res = await fetch(`http://127.0.0.1:${port}/api/health`, { method: "OPTIONS" });
     expect(res.headers.get("x-clawforce-runtime")).toBe("standalone");
+  });
+
+  it("resolves the sibling dashboard dist when running from a built dist path", () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawforce-dashboard-dir-"));
+    const builtBaseDir = path.join(tmpRoot, "clawforce", "dist", "src", "dashboard");
+    const siblingDistDir = path.join(tmpRoot, "clawforce-dashboard", "dist");
+
+    fs.mkdirSync(builtBaseDir, { recursive: true });
+    fs.mkdirSync(siblingDistDir, { recursive: true });
+
+    expect(resolveDefaultDashboardDir(builtBaseDir)).toBe(siblingDistDir);
   });
 });

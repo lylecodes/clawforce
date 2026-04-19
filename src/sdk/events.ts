@@ -10,7 +10,7 @@
  * prevent other handlers from running.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import {
   ingestEvent,
   listEvents,

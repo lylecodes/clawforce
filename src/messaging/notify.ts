@@ -8,16 +8,18 @@
 
 import { safeLog } from "../diagnostics.js";
 import { deliverMessage } from "../channels/deliver.js";
+import {
+  getMessageNotifierPort,
+  setMessageNotifierPort,
+} from "../runtime/integrations.js";
 import type { Message } from "../types.js";
 
 export type MessageNotifier = {
   sendMessageNotification(message: Message): Promise<{ sent: boolean; error?: string }>;
 };
 
-let notifier: MessageNotifier | null = null;
-
 export function setMessageNotifier(n: MessageNotifier | null): void {
-  notifier = n;
+  setMessageNotifierPort(n);
 }
 
 /**
@@ -50,7 +52,7 @@ export function formatMessageNotification(message: Message): string {
  * Falls back to unified delivery adapter when no explicit notifier is set.
  */
 export async function notifyMessage(message: Message): Promise<void> {
-  const n = notifier;
+  const n = getMessageNotifierPort();
   if (n) {
     try {
       await n.sendMessageNotification(message);

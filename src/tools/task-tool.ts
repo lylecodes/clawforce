@@ -16,6 +16,8 @@ import {
   getTaskDependents,
   getUnresolvedBlockers,
 } from "../tasks/deps.js";
+import { getSession } from "../enforcement/tracker.js";
+import { getWorkerAssignment } from "../worker-registry.js";
 import { markWorkerCompliant } from "../tasks/compliance.js";
 import { getDb } from "../db.js";
 import { getApprovalPolicy } from "../project.js";
@@ -31,9 +33,18 @@ import { mergeTaskBranch, deleteTaskBranch } from "../verification/git.js";
 import { stringEnum } from "../schema-helpers.js";
 import type { ToolResult } from "./common.js";
 import { jsonResult, readNumberParam, readStringArrayParam, readStringParam, resolveProjectId, safeExecute } from "./common.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 // --- Per-session task creation counter for maxTasksPerSession ---
-const sessionTaskCreationCounts = new Map<string, number>();
+type TaskToolRuntimeState = {
+  sessionTaskCreationCounts: Map<string, number>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getSessionTaskCreationCounts(): TaskToolRuntimeState["sessionTaskCreationCounts"] {
+  return (runtime.taskTool as TaskToolRuntimeState).sessionTaskCreationCounts;
+}
 
 /** Increment and check task creation count for a session. Returns null if OK, or error message. */
 function checkSessionTaskLimit(sessionKey: string | undefined, projectId: string): string | null {
@@ -41,7 +52,7 @@ function checkSessionTaskLimit(sessionKey: string | undefined, projectId: string
   try {
     const config = getSafetyConfig(projectId);
     const maxTasks = config.maxTasksPerSession;
-    const current = sessionTaskCreationCounts.get(sessionKey) ?? 0;
+    const current = getSessionTaskCreationCounts().get(sessionKey) ?? 0;
     if (current >= maxTasks) {
       return `Session task creation limit reached (${current}/${maxTasks}). Cannot create more tasks in this session.`;
     }
@@ -54,7 +65,7 @@ function checkSessionTaskLimit(sessionKey: string | undefined, projectId: string
 /** Record a task creation in a session. */
 function recordSessionTaskCreation(sessionKey: string | undefined): void {
   if (!sessionKey) return;
-  sessionTaskCreationCounts.set(sessionKey, (sessionTaskCreationCounts.get(sessionKey) ?? 0) + 1);
+  getSessionTaskCreationCounts().set(sessionKey, (getSessionTaskCreationCounts().get(sessionKey) ?? 0) + 1);
 }
 
 const TASK_ACTIONS = [
@@ -81,8 +92,11 @@ const ClawforceTaskSchema = Type.Object({
   max_retries: Type.Optional(Type.Number({ description: "Max retries (for create, default 3)." })),
   deadline: Type.Optional(Type.Number({ description: "Deadline as Unix timestamp ms (for create)." })),
   workflow_id: Type.Optional(Type.String({ description: "Workflow ID (for create/list)." })),
+  parent_task_id: Type.Optional(Type.String({ description: "Parent task ID (for create). Child tasks stay blocked until the parent is DONE." })),
   state: Type.Optional(Type.Array(Type.String(), { description: "Filter by state(s): OPEN, ASSIGNED, IN_PROGRESS, REVIEW, DONE, FAILED, BLOCKED." })),
   goal_id: Type.Optional(Type.String({ description: "Goal ID to link task to (for create)." })),
+  entity_id: Type.Optional(Type.String({ description: "Entity ID to link task to (for create/list)." })),
+  entity_type: Type.Optional(Type.String({ description: "Entity kind to enforce when linking or filtering." })),
   kind: Type.Optional(Type.String({ description: "Task kind: exercise, bug, feature, infra, research. Used for categorization and filtering." })),
   department: Type.Optional(Type.String({ description: "Filter by department (for list)." })),
   team: Type.Optional(Type.String({ description: "Filter by team (for list)." })),
@@ -106,7 +120,10 @@ const ClawforceTaskSchema = Type.Object({
       deadline: Type.Optional(Type.Number()),
       workflow_id: Type.Optional(Type.String()),
       goal_id: Type.Optional(Type.String()),
+      entity_id: Type.Optional(Type.String()),
+      entity_type: Type.Optional(Type.String()),
       kind: Type.Optional(Type.String()),
+      parent_task_id: Type.Optional(Type.String()),
     }),
     { description: "Array of task definitions (for bulk_create)." },
   )),
@@ -124,6 +141,21 @@ export function createClawforceTaskTool(options?: {
   agentSessionKey?: string;
   projectId?: string;
 }) {
+  function resolveParentTaskIdForCreate(projectId: string, entityId: string | null | undefined, explicitParentTaskId?: string): string | undefined {
+    if (explicitParentTaskId?.trim()) return explicitParentTaskId.trim();
+    if (!entityId || !options?.agentSessionKey) return undefined;
+
+    const session = getSession(options.agentSessionKey);
+    const currentTaskId = session?.dispatchContext?.taskId
+      ?? getWorkerAssignment(session?.agentId ?? options.agentSessionKey)?.taskId;
+    if (!currentTaskId) return undefined;
+
+    const currentTask = getTask(projectId, currentTaskId);
+    if (!currentTask?.entityId || currentTask.entityId !== entityId) return undefined;
+
+    return currentTask.id;
+  }
+
   return {
     label: "Work Management",
     name: "clawforce_task",
@@ -163,13 +195,17 @@ export function createClawforceTaskTool(options?: {
           const deadline = readNumberParam(params, "deadline", { integer: true });
           const tags = readStringArrayParam(params, "tags");
           const workflowId = readStringParam(params, "workflow_id");
+          const parentTaskId = readStringParam(params, "parent_task_id");
           const goalId = readStringParam(params, "goal_id");
+          const entityId = readStringParam(params, "entity_id");
+          const entityType = readStringParam(params, "entity_type");
           const kindRaw = readStringParam(params, "kind");
           if (kindRaw && !TASK_KINDS.includes(kindRaw as TaskKind)) {
             return jsonResult({ ok: false, reason: `Invalid kind: ${kindRaw}. Must be one of: ${TASK_KINDS.join(", ")}` });
           }
           const kind = kindRaw as TaskKind | undefined;
 
+          const resolvedParentTaskId = resolveParentTaskIdForCreate(projectId, entityId, parentTaskId ?? undefined);
           const task = createTask({
             projectId,
             title,
@@ -181,13 +217,19 @@ export function createClawforceTaskTool(options?: {
             deadline: deadline ?? undefined,
             tags: tags ?? undefined,
             workflowId: workflowId ?? undefined,
+            parentTaskId: resolvedParentTaskId,
             goalId: goalId ?? undefined,
+            entityId: entityId ?? undefined,
+            entityType: entityType ?? undefined,
             kind: kind ?? undefined,
           });
           recordSessionTaskCreation(options?.agentSessionKey);
           const dupWarning = (task as Record<string, unknown>).duplicateWarning as string | undefined;
           const result: Record<string, unknown> = { ok: true, task };
           if (dupWarning) result.warning = dupWarning;
+          if (!parentTaskId && resolvedParentTaskId) {
+            result.autoLinkedParentTaskId = resolvedParentTaskId;
+          }
           return jsonResult(result);
         }
 
@@ -231,7 +273,7 @@ export function createClawforceTaskTool(options?: {
               if (branchName) {
                 const verConfig = getEffectiveVerificationConfig(projectId);
                 if (verConfig.git?.auto_merge) {
-                  const cfEntry = getAgentConfig(actor);
+                  const cfEntry = getAgentConfig(actor, projectId);
                   const projectDir = cfEntry?.projectDir;
                   if (projectDir) {
                     const mergeResult = mergeTaskBranch(projectDir, branchName, verConfig.git.base_branch);
@@ -291,12 +333,14 @@ export function createClawforceTaskTool(options?: {
           const priority = priorityRaw2 as TaskPriority | undefined;
           const tags = readStringArrayParam(params, "tags");
           const workflowId = readStringParam(params, "workflow_id");
+          const entityId = readStringParam(params, "entity_id");
+          const entityType = readStringParam(params, "entity_type");
           const limit = readNumberParam(params, "limit", { integer: true });
           let department = readStringParam(params, "department") ?? undefined;
           let team = readStringParam(params, "team") ?? undefined;
 
           // Auto-inject department filter for non-managers
-          const callerEntry = options?.agentSessionKey ? getAgentConfig(actor) : null;
+          const callerEntry = options?.agentSessionKey ? getAgentConfig(actor, projectId) : null;
           if (callerEntry && callerEntry.config.extends !== "manager") {
             if (!department && callerEntry.config.department) {
               department = callerEntry.config.department;
@@ -318,6 +362,8 @@ export function createClawforceTaskTool(options?: {
             priority: priority ?? undefined,
             tags: tags ?? undefined,
             workflowId: workflowId ?? undefined,
+            entityId: entityId ?? undefined,
+            entityType: entityType ?? undefined,
             department,
             team,
             kind: kindFilter as TaskKind | undefined,
@@ -479,6 +525,9 @@ export function createClawforceTaskTool(options?: {
               results.push({ ok: false, reason: `Invalid kind: ${bulkKind}` });
               continue;
             }
+            const entityId = (t.entity_id as string) ?? undefined;
+            const parentTaskId = typeof t.parent_task_id === "string" ? t.parent_task_id : undefined;
+            const resolvedParentTaskId = resolveParentTaskIdForCreate(projectId, entityId, parentTaskId);
             const task = createTask({
               projectId,
               title,
@@ -490,11 +539,18 @@ export function createClawforceTaskTool(options?: {
               deadline: typeof t.deadline === "number" ? t.deadline : undefined,
               tags: Array.isArray(t.tags) ? t.tags.map(String) : undefined,
               workflowId: (t.workflow_id as string) ?? undefined,
+              parentTaskId: resolvedParentTaskId,
               goalId: (t.goal_id as string) ?? undefined,
+              entityId,
+              entityType: (t.entity_type as string) ?? undefined,
               kind: bulkKind as TaskKind | undefined,
             });
             recordSessionTaskCreation(options?.agentSessionKey);
-            results.push({ ok: true, task });
+            const entry: { ok: boolean; task?: unknown; reason?: string; autoLinkedParentTaskId?: string } = { ok: true, task };
+            if (!parentTaskId && resolvedParentTaskId) {
+              entry.autoLinkedParentTaskId = resolvedParentTaskId;
+            }
+            results.push(entry);
           }
           const successCount = results.filter((r) => r.ok).length;
           return jsonResult({ ok: true, created: successCount, total: tasksRaw.length, results });

@@ -23,11 +23,13 @@ describe("recordReview", () => {
       taskId: "task-1",
       reviewerAgentId: "manager-1",
       verdict: "approved",
+      reasonCode: "evidence_insufficient",
       reasoning: "Code looks good",
     }, db);
 
     expect(review.id).toBeDefined();
     expect(review.verdict).toBe("approved");
+    expect(review.reasonCode).toBe("evidence_insufficient");
     expect(review.reasoning).toBe("Code looks good");
     expect(review.createdAt).toBeGreaterThan(0);
   });
@@ -44,6 +46,20 @@ describe("recordReview", () => {
     const reviews = getReviewsForTask(PROJECT, "task-2", db);
     expect(reviews).toHaveLength(1);
     expect(reviews[0]!.criteriaChecked).toEqual(["tests_pass", "code_reviewed", "docs_updated"]);
+  });
+
+  it("persists structured reason codes", () => {
+    recordReview({
+      projectId: PROJECT,
+      taskId: "task-reason",
+      reviewerAgentId: "manager-1",
+      verdict: "rejected",
+      reasonCode: "verification_environment_blocked",
+      reasoning: "Sandbox blocked the decisive rerun",
+    }, db);
+
+    const reviews = getReviewsForTask(PROJECT, "task-reason", db);
+    expect(reviews[0]!.reasonCode).toBe("verification_environment_blocked");
   });
 
   it("records revision_needed verdict with notes", () => {

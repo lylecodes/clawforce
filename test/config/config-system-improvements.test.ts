@@ -629,6 +629,32 @@ describe("enhanced semantic config validation", () => {
       );
       expect(toolWarnings).toHaveLength(0);
     });
+
+    it("warns when codex agents exclude Bash from allowedTools", async () => {
+      const { validateWorkforceConfig } = await importValidator();
+
+      const config: WorkforceConfig = {
+        name: "test",
+        adapter: "codex",
+        agents: {
+          worker: {
+            extends: "employee",
+            allowedTools: ["Read", "Edit", "Write"],
+            briefing: [{ source: "soul" }],
+            expectations: [],
+            performance_policy: { action: "alert" },
+          },
+        },
+      };
+
+      const warnings = validateWorkforceConfig(config);
+      expect(warnings.some((warning) =>
+        warning.level === "warn"
+        && warning.agentId === "worker"
+        && warning.message.includes('excludes "Bash"')
+        && warning.message.includes("direct Codex executor"),
+      )).toBe(true);
+    });
   });
 
   describe("role_defaults domain quality validation", () => {

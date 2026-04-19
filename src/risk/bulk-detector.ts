@@ -10,6 +10,7 @@
  */
 
 import type { RiskTier } from "../types.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 // --- Types ---
 
@@ -37,8 +38,15 @@ export type BulkCheckResult = {
 
 // --- In-memory sliding windows ---
 
-// Key: "projectId:agentId:category" → timestamps[]
-const actionTimestamps = new Map<string, number[]>();
+type BulkDetectorRuntimeState = {
+  bulkActionTimestamps: Map<string, number[]>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getBulkActionTimestamps(): BulkDetectorRuntimeState["bulkActionTimestamps"] {
+  return (runtime.risk as BulkDetectorRuntimeState).bulkActionTimestamps;
+}
 
 function makeKey(
   projectId: string,
@@ -58,9 +66,9 @@ export function recordToolGateHit(
   category: string,
 ): void {
   const key = makeKey(projectId, agentId, category);
-  const timestamps = actionTimestamps.get(key) ?? [];
+  const timestamps = getBulkActionTimestamps().get(key) ?? [];
   timestamps.push(Date.now());
-  actionTimestamps.set(key, timestamps);
+  getBulkActionTimestamps().set(key, timestamps);
 }
 
 /**
@@ -83,14 +91,14 @@ export function checkBulkThreshold(
   const cutoff = now - threshold.windowMs;
 
   // Prune old timestamps
-  const timestamps = actionTimestamps.get(key) ?? [];
+  const timestamps = getBulkActionTimestamps().get(key) ?? [];
   const recent = timestamps.filter((t) => t > cutoff);
 
   // Update stored timestamps (pruned)
   if (recent.length === 0) {
-    actionTimestamps.delete(key);
+    getBulkActionTimestamps().delete(key);
   } else {
-    actionTimestamps.set(key, recent);
+    getBulkActionTimestamps().set(key, recent);
   }
 
   if (recent.length >= threshold.maxCount) {
@@ -141,7 +149,7 @@ export function getEffectiveTier(
 
 /** Reset all tracking state (for tests). */
 export function resetBulkDetector(): void {
-  actionTimestamps.clear();
+  getBulkActionTimestamps().clear();
 }
 
 /** Get current count for a key (for tests/visibility). */
@@ -154,7 +162,7 @@ export function getActionCount(
   const key = makeKey(projectId, agentId, category);
   const now = Date.now();
   const cutoff = now - windowMs;
-  const timestamps = actionTimestamps.get(key) ?? [];
+  const timestamps = getBulkActionTimestamps().get(key) ?? [];
   return timestamps.filter((t) => t > cutoff).length;
 }
 

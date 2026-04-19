@@ -6,15 +6,19 @@
  * when diagnostics are unavailable.
  */
 
+import {
+  getDiagnosticEmitterPort,
+  setDiagnosticEmitterPort,
+} from "./runtime/integrations.js";
+
 type DiagnosticPayload = Record<string, unknown>;
 
-let emitter: ((payload: DiagnosticPayload) => void) | null = null;
-
 export function setDiagnosticEmitter(fn: (payload: DiagnosticPayload) => void): void {
-  emitter = fn;
+  setDiagnosticEmitterPort(fn);
 }
 
 export function emitDiagnosticEvent(payload: DiagnosticPayload): void {
+  const emitter = getDiagnosticEmitterPort();
   emitter?.(payload);
 }
 

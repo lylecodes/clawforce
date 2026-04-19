@@ -7,9 +7,10 @@
 
 import crypto from "node:crypto";
 import { deflateSync, inflateSync } from "node:zlib";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
+import type { DomainConfig, GlobalConfig } from "../config/schema.js";
 
 // --- Types ---
 
@@ -24,6 +25,72 @@ export type ConfigVersion = {
   previousVersionId?: string;
   changeSummary?: string;
 };
+
+function stableSerialize(value: unknown): string {
+  if (value === undefined) {
+    return "null";
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerialize(entry)).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableSerialize(entry)}`);
+  return `{${entries.join(",")}}`;
+}
+
+function selectRelevantGlobalAgents(globalConfig: GlobalConfig, domainConfig: DomainConfig): Record<string, unknown> {
+  const agentIds = new Set<string>(domainConfig.agents);
+  const managerAgentId = typeof domainConfig.manager?.agentId === "string"
+    ? domainConfig.manager.agentId.trim()
+    : "";
+  if (managerAgentId) {
+    agentIds.add(managerAgentId);
+  }
+
+  const relevant: Record<string, unknown> = {};
+  for (const agentId of [...agentIds].sort()) {
+    if (globalConfig.agents[agentId]) {
+      relevant[agentId] = globalConfig.agents[agentId];
+    }
+  }
+  return relevant;
+}
+
+export function hashTrackedConfigContent(content: string): string {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+export function buildDomainConfigVersionContent(
+  globalConfig: GlobalConfig,
+  domainConfig: DomainConfig,
+): string {
+  const { agents: _agents, ...globalRest } = globalConfig;
+  return stableSerialize({
+    global: {
+      ...globalRest,
+      agents: selectRelevantGlobalAgents(globalConfig, domainConfig),
+    },
+    domain: domainConfig,
+  });
+}
+
+export function computeDomainConfigFingerprint(
+  globalConfig: GlobalConfig,
+  domainConfig: DomainConfig,
+): {
+  content: string;
+  contentHash: string;
+} {
+  const content = buildDomainConfigVersionContent(globalConfig, domainConfig);
+  return {
+    content,
+    contentHash: hashTrackedConfigContent(content),
+  };
+}
 
 // --- Compression helpers ---
 
@@ -49,7 +116,7 @@ export function detectConfigChange(
   dbOverride?: DatabaseSync,
 ): string {
   const db = dbOverride ?? getDb(projectId);
-  const contentHash = crypto.createHash("sha256").update(contextContent).digest("hex");
+  const contentHash = hashTrackedConfigContent(contextContent);
 
   // Check if this hash already exists for this project
   const existing = db.prepare(`
@@ -104,6 +171,23 @@ export function detectConfigChange(
   }
 
   return id;
+}
+
+export function detectDomainConfigChange(
+  projectId: string,
+  globalConfig: GlobalConfig,
+  domainConfig: DomainConfig,
+  detectedBy?: string,
+  dbOverride?: DatabaseSync,
+): {
+  versionId: string;
+  contentHash: string;
+} {
+  const fingerprint = computeDomainConfigFingerprint(globalConfig, domainConfig);
+  return {
+    versionId: detectConfigChange(projectId, fingerprint.content, detectedBy, dbOverride),
+    contentHash: fingerprint.contentHash,
+  };
 }
 
 /**

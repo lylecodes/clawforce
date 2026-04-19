@@ -28,12 +28,12 @@ export type BudgetEstimate = {
 
 /** Default cost per session in cents, keyed by model identifier. */
 export const MODEL_COSTS: Record<string, number> = {
-  "anthropic/claude-opus-4-6": 150,
-  "anthropic/claude-sonnet-4-6": 30,
-  "anthropic/claude-haiku-4-5": 8,
-  "claude-opus-4-6": 150,
-  "claude-sonnet-4-6": 30,
-  "claude-haiku-4-5": 8,
+  "gpt-5.4": 80,
+  "gpt-5.4-mini": 12,
+  "gpt-5.4-nano": 3,
+  "gpt-5": 80,
+  "gpt-5-mini": 12,
+  "gpt-5-nano": 3,
 };
 
 const DEFAULT_SESSIONS: Record<string, number> = {
@@ -41,7 +41,7 @@ const DEFAULT_SESSIONS: Record<string, number> = {
   employee: 4,
 };
 
-const FALLBACK_COST = MODEL_COSTS["anthropic/claude-sonnet-4-6"];
+const FALLBACK_COST = MODEL_COSTS["gpt-5.4-mini"];
 
 export function estimateBudget(
   agents: AgentBudgetInput[],

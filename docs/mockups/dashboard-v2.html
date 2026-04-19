@@ -1,0 +1,1884 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ClawForce — workspace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..700&family=Geist:wght@300..700&family=Geist+Mono:wght@300..600&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* Surface ladder */
+  --bg:        #0A0B0D;
+  --bg-1:      #0F1115;
+  --bg-2:      #14171C;
+  --bg-3:      #1A1E24;
+  --bg-4:      #21262E;
+
+  /* Borders */
+  --line:      #1B1F25;
+  --line-2:    #262C34;
+  --line-3:    #353C46;
+
+  /* Type */
+  --t1:        #E7E3DA;
+  --t2:        #A6A199;
+  --t3:        #6F6B64;
+  --t4:        #4A463F;
+
+  /* Signal */
+  --amber:     #D6A674;
+  --amber-2:   #E0B789;
+  --amber-soft: rgba(214,166,116,.12);
+  --amber-line: rgba(214,166,116,.42);
+
+  /* States — railway semaphore, muted */
+  --s-running: #D6A674;
+  --s-done:    #94B89E;
+  --s-blocked: #C18888;
+  --s-idle:    #5C615E;
+  --s-draft:   #7A8290;
+
+  /* Type ramp */
+  --display: 'Bricolage Grotesque', ui-serif, Georgia, serif;
+  --sans:    'Geist', system-ui, sans-serif;
+  --mono:    'Geist Mono', ui-monospace, monospace;
+
+  --rail-l: 268px;
+  --rail-r: 360px;
+  --bar-h:  52px;
+}
+
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--t1);font-family:var(--sans);font-size:13px;line-height:1.45;-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision;}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0;resize:none}
+ul{list-style:none;padding:0;margin:0}
+a{color:inherit;text-decoration:none}
+
+/* ─────────────────────────── shell ─────────────────────────── */
+.app{
+  display:grid;
+  grid-template-columns: var(--rail-l) 1fr var(--rail-r);
+  grid-template-rows: var(--bar-h) 1fr;
+  grid-template-areas:
+    "bar bar bar"
+    "left center right";
+  height:100vh;width:100vw;
+}
+
+/* ─────────────────────────── state machine ───────────────────────────
+   Default = project. Each rail-pane / canvas-pane is hidden unless
+   the current data-state explicitly shows it. */
+.rail-pane,.canvas-pane{display:none;flex:1;min-height:0;flex-direction:column}
+
+.app[data-state="project"]   .left .project-pane,
+.app[data-state="project"]   .center .project-canvas,
+.app[data-state="project"]   .right .feed-pane{display:flex}
+
+.app[data-state="focus"]     .left .focus-pane,
+.app[data-state="focus"]     .center .focus-canvas,
+.app[data-state="focus"]     .right .feed-pane{display:flex}
+
+.app[data-state="inspector"] .left .focus-pane,
+.app[data-state="inspector"] .center .focus-canvas,
+.app[data-state="inspector"] .right .inspector-pane{display:flex}
+
+.app[data-state="setup"]     .left .helper-pane,
+.app[data-state="setup"]     .center .helper-canvas,
+.app[data-state="setup"]     .right .rhelper-pane{display:flex}
+
+.app[data-state="review"]    .left .focus-pane,
+.app[data-state="review"]    .center .focus-canvas,
+.app[data-state="review"]    .right .review-pane{display:flex}
+
+/* ─────────────────────── top bar ─────────────────────── */
+.bar{
+  grid-area:bar;
+  display:flex;align-items:center;
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(to bottom, var(--bg-1) 0%, var(--bg) 100%);
+  padding:0 18px 0 22px;gap:22px;position:relative;
+}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{
+  width:18px;height:18px;border:1px solid var(--line-3);border-radius:3px;
+  display:grid;place-items:center;
+  background:radial-gradient(circle at 30% 30%, var(--amber-soft), transparent 70%);
+  position:relative;
+}
+.brand-mark::after{
+  content:"";width:6px;height:6px;background:var(--amber);border-radius:50%;
+  box-shadow:0 0 10px var(--amber-soft);
+}
+.brand-name{
+  font-family:var(--display);font-weight:500;letter-spacing:.18em;
+  font-size:11.5px;text-transform:uppercase;color:var(--t1);
+}
+.scope{
+  display:flex;align-items:center;gap:8px;
+  color:var(--t2);font-size:12px;
+  font-family:var(--mono);font-weight:300;
+}
+.scope .crumb{color:var(--t3)}
+.scope .sep{color:var(--t4);font-weight:300}
+.scope .here{color:var(--t1)}
+.scope .switcher{
+  display:inline-flex;align-items:center;gap:5px;
+  color:var(--t1);padding:2px 6px;margin:-2px -6px;
+  border-radius:4px;cursor:pointer;
+  transition:background .15s, color .15s;
+}
+.scope .switcher:hover{background:var(--bg-2);color:var(--amber-2)}
+.scope .switcher .chev{
+  font-size:8px;color:var(--t3);transform:translateY(.5px);
+}
+.scope .switcher:hover .chev{color:var(--amber-2)}
+.bar-spacer{flex:1}
+.bar-tools{display:flex;align-items:center;gap:14px;color:var(--t2);font-size:12px}
+.search{
+  display:flex;align-items:center;gap:8px;
+  border:1px solid var(--line-2);border-radius:6px;
+  padding:6px 10px 6px 8px;color:var(--t3);
+  background:var(--bg-1);
+  font-family:var(--mono);font-size:11px;letter-spacing:.02em;
+  min-width:180px;
+}
+.search .glyph{opacity:.7}
+.search .kbd{
+  margin-left:auto;border:1px solid var(--line-2);border-radius:3px;
+  padding:1px 4px;font-size:10px;color:var(--t3);
+}
+.health{
+  display:inline-flex;align-items:center;gap:7px;
+  font-family:var(--mono);font-size:11px;color:var(--t2);
+  border:1px solid var(--line);border-radius:99px;padding:4px 10px;
+}
+.health .pulse{
+  width:7px;height:7px;border-radius:50%;background:var(--s-done);position:relative;
+}
+.health .pulse::after{
+  content:"";position:absolute;inset:-3px;border-radius:50%;
+  border:1px solid var(--s-done);opacity:.45;
+  animation:ring 2.4s ease-out infinite;
+}
+@keyframes ring{
+  0%{transform:scale(.7);opacity:.55}
+  80%{transform:scale(2.2);opacity:0}
+  100%{transform:scale(2.2);opacity:0}
+}
+.bar .user{
+  width:26px;height:26px;border-radius:50%;
+  border:1px solid var(--line-2);
+  display:grid;place-items:center;color:var(--t1);
+  font-family:var(--mono);font-size:11px;font-weight:500;
+  background:var(--bg-2);
+}
+
+/* ─────────────────────── left rail ─────────────────────── */
+.left{
+  grid-area:left;
+  border-right:1px solid var(--line);
+  background:var(--bg-1);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.rail-section{padding:18px 18px 14px}
+.rail-section + .rail-section{border-top:1px solid var(--line)}
+.rail-label{
+  font-family:var(--mono);font-size:10px;font-weight:400;
+  letter-spacing:.18em;text-transform:uppercase;
+  color:var(--t3);margin:0 0 12px;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.rail-label .count{color:var(--t4);font-size:10px}
+
+/* operator summary — a quiet line, not a stat block */
+.op-line{
+  margin:0;
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.02em;
+  color:var(--t3);
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px;line-height:1.5;
+}
+.op-line strong{color:var(--t1);font-weight:500;font-variant-numeric:tabular-nums}
+
+.rail-search{
+  display:flex;align-items:center;gap:8px;
+  border:1px solid var(--line-2);border-radius:6px;
+  background:var(--bg);padding:7px 10px;color:var(--t3);
+  margin-bottom:14px;
+}
+.rail-search input{flex:1;font-family:var(--mono);font-size:11px}
+.rail-search input::placeholder{color:var(--t4)}
+
+.wf-list li{
+  display:flex;align-items:center;gap:10px;
+  padding:7px 10px;margin:0 -10px;border-radius:5px;
+  color:var(--t2);cursor:pointer;font-size:12.5px;position:relative;
+}
+.wf-list li:hover{background:var(--bg-2);color:var(--t1)}
+.wf-list li.active{background:var(--bg-3);color:var(--t1)}
+.wf-list li.active::before{
+  content:"";position:absolute;left:-18px;top:0;bottom:0;width:2px;background:var(--amber);
+}
+.wf-list .name{flex:1;letter-spacing:-.005em}
+.wf-list .meta{font-family:var(--mono);font-size:10px;color:var(--t4)}
+
+.dot{width:7px;height:7px;border-radius:50%;background:var(--s-idle);flex-shrink:0}
+.dot.running{background:var(--s-running);box-shadow:0 0 0 3px rgba(214,166,116,.10)}
+.dot.done   {background:var(--s-done)}
+.dot.blocked{background:var(--s-blocked);box-shadow:0 0 0 3px rgba(193,136,136,.12)}
+.dot.idle   {background:var(--s-idle)}
+.dot.draft  {background:transparent;border:1px dashed var(--s-draft)}
+
+/* drafts in left rail */
+.drafts-toggle{
+  width:100%;display:flex;align-items:center;justify-content:space-between;
+  padding:0;color:var(--t3);
+  font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+}
+.drafts-toggle .chev{font-size:10px;color:var(--t4)}
+.draft-list{margin-top:12px}
+.draft-list li{
+  display:flex;align-items:center;gap:10px;
+  padding:9px 10px;margin:0 -10px;
+  font-size:12px;color:var(--t2);
+  border-radius:5px;cursor:pointer;
+  border:1px dashed transparent;
+  position:relative;
+}
+.draft-list li:hover{background:var(--bg-2);color:var(--t1);border-color:var(--line-2)}
+.draft-list li.active{background:var(--bg-3);color:var(--t1);border-color:var(--amber-line);border-style:solid}
+.draft-list li.active::before{
+  content:"";position:absolute;left:-18px;top:0;bottom:0;width:2px;background:var(--amber);
+}
+.draft-list .draft-name{flex:1;letter-spacing:-.005em}
+.draft-list .draft-meta{
+  font-family:var(--mono);font-size:9.5px;color:var(--t4);
+  letter-spacing:.04em;
+}
+.draft-list .draft-toggle{
+  font-family:var(--mono);font-size:9.5px;
+  color:var(--t4);border:1px solid var(--line-2);
+  padding:2px 6px;border-radius:3px;letter-spacing:.06em;text-transform:uppercase;
+}
+.draft-list .draft-toggle.on{color:var(--amber);border-color:var(--amber-line)}
+
+.rail-cta{
+  margin:auto 18px 18px;padding:11px 12px;
+  border:1px solid var(--line-2);border-radius:6px;
+  color:var(--t1);background:var(--bg);
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  font-family:var(--mono);font-size:11px;letter-spacing:.06em;
+  text-transform:uppercase;
+  transition:border-color .15s, color .15s;
+}
+.rail-cta:hover{border-color:var(--amber-line);color:var(--amber-2)}
+.rail-cta .plus{font-family:var(--display);font-size:14px;line-height:1;color:var(--amber)}
+
+/* focus-mode left rail */
+.wf-back{
+  display:inline-flex;align-items:center;gap:8px;
+  color:var(--t3);font-family:var(--mono);font-size:11px;
+  letter-spacing:.04em;padding:0;margin-bottom:14px;
+}
+.wf-back:hover{color:var(--amber-2)}
+.wf-h2{
+  font-family:var(--display);font-weight:400;
+  font-size:22px;line-height:1.15;letter-spacing:-.018em;
+  margin:2px 0 4px;color:var(--t1);
+}
+.wf-sub{font-family:var(--mono);font-size:11px;color:var(--t3);letter-spacing:.02em}
+.wf-meta-grid{
+  margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:14px 18px;
+}
+.wf-meta-grid .k{
+  display:block;font-family:var(--mono);font-size:9.5px;
+  color:var(--t4);letter-spacing:.16em;text-transform:uppercase;
+}
+.wf-meta-grid .v{
+  display:block;color:var(--t1);font-size:12.5px;margin-top:3px;
+  font-variant-numeric:tabular-nums;
+}
+.wf-meta-grid .v.amber{color:var(--amber-2)}
+.wf-meta-grid .v.draft{color:var(--s-draft)}
+
+.stage-jump{margin-top:6px}
+.stage-jump li{
+  display:flex;align-items:center;gap:10px;
+  padding:7px 10px;margin:0 -10px;border-radius:5px;
+  color:var(--t2);font-size:12px;cursor:pointer;font-family:var(--mono);
+}
+.stage-jump li:hover{background:var(--bg-2);color:var(--t1)}
+.stage-jump li.selected{background:var(--bg-3);color:var(--t1)}
+.stage-jump .num{color:var(--t4);font-size:10px;width:18px}
+.stage-jump .name{flex:1;letter-spacing:-.01em}
+.stage-jump .change-flag{
+  font-size:9px;color:var(--amber);letter-spacing:.06em;text-transform:uppercase;
+  margin-left:auto;padding-right:8px;
+}
+.stage-jump .change-flag.add{color:var(--s-draft)}
+
+/* helper-mode left rail */
+.helper-eyebrow{
+  font-family:var(--mono);font-size:10px;letter-spacing:.18em;
+  color:var(--t3);text-transform:uppercase;margin-bottom:8px;
+}
+.helper-eyebrow .live{
+  display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--amber);margin-right:6px;
+  box-shadow:0 0 0 3px rgba(214,166,116,.16);
+}
+
+/* ─────────────────────── center canvas ─────────────────────── */
+.center{
+  grid-area:center;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(214,166,116,.025), transparent 70%),
+    var(--bg);
+  position:relative;overflow:hidden;
+  display:flex;flex-direction:column;
+}
+
+/* ─────────── PROJECT VIEW: grid of mini workflows ─────────── */
+.project-canvas{padding:30px 32px 40px;overflow:auto}
+.wf-grid{
+  display:grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap:18px;
+}
+.mini{
+  border:1px solid var(--line);border-radius:8px;
+  background:linear-gradient(180deg, var(--bg-2) 0%, var(--bg-1) 100%);
+  padding:16px 18px 14px;cursor:pointer;
+  transition:border-color .18s, transform .18s, background .18s;
+  position:relative;overflow:hidden;
+}
+.mini:hover{border-color:var(--line-3);transform:translateY(-1px)}
+.mini-head{
+  display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;
+}
+.mini h3{
+  margin:0;font-family:var(--display);font-weight:400;
+  font-size:15.5px;letter-spacing:-.012em;color:var(--t1);line-height:1.1;
+}
+.mini .badge{
+  display:inline-flex;align-items:center;gap:6px;
+  font-family:var(--mono);font-size:10px;color:var(--t2);
+  letter-spacing:.02em;text-transform:lowercase;
+}
+.mini-track{height:64px;width:100%;position:relative;margin:4px 0 12px}
+.mini-track svg{width:100%;height:100%;display:block;overflow:visible}
+.mini-foot{
+  display:flex;align-items:center;justify-content:space-between;
+  padding-top:10px;border-top:1px solid var(--line);
+  font-family:var(--mono);font-size:10.5px;color:var(--t3);letter-spacing:.01em;
+}
+.mini-foot .agents{display:inline-flex;align-items:center;gap:6px}
+.mini-foot .agents .ai{
+  display:inline-block;width:14px;height:14px;border-radius:50%;
+  background:var(--bg-3);border:1px solid var(--line-2);margin-left:-5px;
+  font-size:8px;color:var(--t2);text-align:center;line-height:13px;
+}
+.mini-foot .agents .ai:first-child{margin-left:0}
+.mini.draft{
+  background:repeating-linear-gradient(135deg, var(--bg-1) 0 8px, var(--bg-2) 8px 9px);
+  border-style:dashed;border-color:var(--line-2);
+}
+/* draft session indicator on mini cards — sits in the footer, not the header */
+.mini .draft-flag{
+  font-family:var(--mono);font-size:10px;letter-spacing:.04em;
+  color:var(--amber-2);
+  display:inline-flex;align-items:center;gap:5px;
+  margin-right:10px;
+}
+.mini .draft-flag::before{
+  content:"";width:5px;height:5px;border:1px dashed var(--amber-line);border-radius:50%;
+}
+/* subtle top-left accent stripe for workflows with an active draft session */
+.mini.has-draft::before{
+  content:"";position:absolute;top:0;left:0;width:2px;height:36px;
+  background:var(--amber-line);
+}
+
+/* ─────────── FOCUS / INSPECTOR / REVIEW: full topology ─────────── */
+.focus-canvas{flex:1;position:relative;overflow:hidden}
+.focus-head{
+  padding:22px 32px 18px;
+  display:flex;align-items:flex-end;justify-content:space-between;gap:18px;
+  border-bottom:1px solid var(--line);
+}
+.focus-head .eyebrow{
+  font-family:var(--mono);font-size:10px;letter-spacing:.18em;
+  color:var(--t3);text-transform:uppercase;margin-bottom:6px;
+  display:inline-flex;align-items:center;gap:8px;
+}
+.focus-head .eyebrow .live{
+  width:6px;height:6px;border-radius:50%;background:var(--s-running);
+  box-shadow:0 0 0 3px rgba(214,166,116,.12);
+}
+.focus-head .eyebrow .draft-pulse{
+  width:6px;height:6px;border-radius:50%;background:transparent;
+  border:1px dashed var(--s-draft);
+}
+.focus-head h1{
+  font-family:var(--display);font-weight:400;font-size:30px;
+  letter-spacing:-.022em;line-height:1;margin:0;color:var(--t1);
+}
+.focus-head .session-tag{
+  font-family:var(--mono);font-size:10.5px;color:var(--amber-2);
+  letter-spacing:.04em;
+  border:1px solid var(--amber-line);border-radius:99px;padding:4px 10px;
+  display:inline-flex;align-items:center;gap:7px;
+}
+.focus-head .session-tag::before{
+  content:"";width:6px;height:6px;border:1px dashed var(--amber-line);border-radius:50%;
+}
+
+/* topology surface */
+.topology{
+  position:relative;flex:1;overflow:hidden;
+  background-image:
+    radial-gradient(1px 1px at 24px 24px, var(--line-2) 1px, transparent 1px);
+  background-size: 48px 48px;
+  background-position: 0 0;
+}
+.topology::before{
+  content:"";position:absolute;inset:0;
+  background:
+    radial-gradient(ellipse 100% 60% at 50% 0%, rgba(214,166,116,.03), transparent 60%),
+    radial-gradient(ellipse 80% 40% at 50% 100%, rgba(0,0,0,.4), transparent 70%);
+  pointer-events:none;
+}
+.topo-viewport{
+  position:absolute;inset:0;overflow:auto;
+  display:flex;align-items:center;justify-content:flex-start;
+  padding:18px 24px 50px;
+}
+.topo-canvas{
+  position:relative;width:1200px;height:520px;
+  transform:scale(.88);transform-origin:left center;flex-shrink:0;
+}
+.edges{position:absolute;inset:0;pointer-events:none;width:100%;height:100%}
+
+/* stage box */
+.stage{
+  position:absolute;width:208px;
+  border:1px solid var(--line-2);border-radius:7px;
+  background:linear-gradient(180deg, var(--bg-2) 0%, var(--bg-1) 100%);
+  padding:14px 14px 12px;cursor:pointer;
+  transition:border-color .18s, transform .18s, background .18s;
+  z-index:2;
+}
+.stage:hover{border-color:var(--line-3);transform:translateY(-1px)}
+.stage.selected{
+  border-color:var(--amber-line);
+  background:linear-gradient(180deg, var(--bg-3) 0%, var(--bg-2) 100%);
+}
+.stage.selected::after{
+  content:"";position:absolute;inset:-1px;border-radius:8px;
+  border:1px solid var(--amber-line);pointer-events:none;
+}
+
+/* terminals (start / end) */
+.terminal{
+  position:absolute;width:64px;height:64px;display:grid;place-items:center;
+  font-family:var(--mono);font-size:9.5px;color:var(--t3);
+  letter-spacing:.18em;text-transform:uppercase;z-index:2;
+}
+.terminal .ring{position:absolute;inset:14px;border:1px solid var(--line-3);border-radius:50%}
+.terminal .core{
+  position:absolute;width:10px;height:10px;border-radius:50%;
+  background:var(--amber);box-shadow:0 0 0 3px rgba(214,166,116,.12);
+}
+.terminal .lbl{position:absolute;top:100%;margin-top:8px;white-space:nowrap;color:var(--t3)}
+.terminal.end .core{background:var(--s-done);box-shadow:0 0 0 3px rgba(148,184,158,.12)}
+.terminal.end .ring{border-style:dashed}
+.terminal.draft .core{background:transparent;border:1px dashed var(--s-draft);box-shadow:none}
+.terminal.draft .ring{border-color:var(--line-2);border-style:dashed}
+
+.stage-head{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px;
+}
+.stage-name{
+  font-family:var(--display);font-weight:400;font-size:14.5px;
+  letter-spacing:-.012em;color:var(--t1);line-height:1.2;
+}
+.state-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
+  color:var(--t2);text-transform:lowercase;white-space:nowrap;padding-top:2px;
+}
+.state-badge .d{width:6px;height:6px;border-radius:50%;background:var(--s-idle)}
+.state-badge.running .d{background:var(--s-running);box-shadow:0 0 0 2px rgba(214,166,116,.16)}
+.state-badge.done .d{background:var(--s-done)}
+.state-badge.blocked .d{background:var(--s-blocked)}
+.state-badge.idle .d{background:var(--s-idle)}
+.state-badge.draft .d{background:transparent;border:1px dashed var(--s-draft)}
+.state-badge.proposed .d{background:transparent;border:1px dashed var(--amber-line)}
+.state-badge.proposed{color:var(--amber-2)}
+
+.stage-agent{
+  font-family:var(--mono);font-size:11px;color:var(--t3);
+  letter-spacing:0;line-height:1.3;margin-bottom:10px;
+  display:flex;align-items:center;gap:7px;
+}
+.stage-agent .av{
+  width:14px;height:14px;border-radius:3px;
+  background:var(--bg-3);border:1px solid var(--line-2);
+  display:grid;place-items:center;font-size:8.5px;color:var(--t2);
+}
+.stage-tags{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;
+  color:var(--t4);text-transform:lowercase;line-height:1;
+}
+.stage-tags .tag-sep{opacity:.5;color:var(--t4)}
+.tag{
+  font-family:inherit;font-size:inherit;letter-spacing:inherit;
+  color:var(--t4);background:none;border:0;padding:0;text-transform:lowercase;
+}
+.tag.accent{color:var(--amber-2);opacity:.85}
+
+/* draft variants */
+.stage.draft{
+  background:repeating-linear-gradient(135deg, var(--bg-1) 0 6px, var(--bg-2) 6px 7px);
+  border-style:dashed;border-color:var(--line-3);
+}
+.stage.draft .stage-name{color:var(--t2)}
+.stage.proposed{
+  background:repeating-linear-gradient(135deg, rgba(214,166,116,.04) 0 6px, transparent 6px 7px), var(--bg-1);
+  border-style:dashed;border-color:var(--amber-line);
+}
+.stage.proposed .stage-name{color:var(--t2)}
+
+/* review-state stage decorations */
+.stage.review-modified{border-color:var(--amber-line)}
+.stage.review-modified::before{
+  content:"modified";position:absolute;top:-9px;left:12px;
+  font-family:var(--mono);font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--amber-2);background:var(--bg);padding:0 6px;
+}
+.stage.review-added::before{
+  content:"added";position:absolute;top:-9px;left:12px;
+  font-family:var(--mono);font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--s-draft);background:var(--bg);padding:0 6px;
+}
+.stage.review-removed{
+  opacity:.42;background:var(--bg-1);border-style:dashed;
+}
+.stage.review-removed .stage-name{text-decoration:line-through;text-decoration-color:var(--t4);text-decoration-thickness:1px}
+.stage.review-removed::before{
+  content:"removed";position:absolute;top:-9px;left:12px;
+  font-family:var(--mono);font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--s-blocked);background:var(--bg);padding:0 6px;
+}
+
+/* canvas overlay — quiet text affordances bottom-right */
+.canvas-overlay{
+  position:absolute;right:24px;bottom:18px;
+  display:inline-flex;align-items:center;gap:14px;z-index:5;
+  font-family:var(--mono);font-size:11px;color:var(--t4);letter-spacing:.04em;
+}
+.canvas-overlay button{color:var(--t3);padding:0;font:inherit;letter-spacing:inherit}
+.canvas-overlay button:hover{color:var(--t1)}
+.canvas-overlay .sep{opacity:.45}
+
+/* legend bottom-left */
+.legend{
+  position:absolute;left:24px;bottom:18px;
+  display:flex;gap:14px;align-items:center;z-index:5;
+  font-family:var(--mono);font-size:10.5px;color:var(--t3);
+  background:var(--bg-1);border:1px solid var(--line);border-radius:6px;
+  padding:7px 12px;
+}
+.legend .item{display:inline-flex;align-items:center;gap:6px}
+
+/* ─────────── HELPER CANVAS — draft workflow being proposed ─────────── */
+.helper-canvas{flex:1;position:relative;overflow:hidden}
+.helper-canvas .focus-head .session-tag{color:var(--s-draft);border-color:var(--line-3)}
+.helper-canvas .focus-head .session-tag::before{border-color:var(--s-draft)}
+
+.helper-prompt-strip{
+  position:absolute;left:50%;transform:translateX(-50%);bottom:74px;
+  display:inline-flex;align-items:center;gap:10px;z-index:4;
+  font-family:var(--mono);font-size:10.5px;color:var(--amber-2);letter-spacing:.04em;
+  background:var(--bg-1);border:1px dashed var(--amber-line);border-radius:99px;
+  padding:7px 14px;
+}
+.helper-prompt-strip .pulse{
+  width:7px;height:7px;border-radius:50%;background:var(--amber);
+  box-shadow:0 0 0 3px rgba(214,166,116,.18);
+  animation:pulseDot 1.6s ease-in-out infinite;
+}
+@keyframes pulseDot{
+  0%,100%{opacity:1}
+  50%{opacity:.4}
+}
+
+/* ─────────────────────── right rail ─────────────────────── */
+.right{
+  grid-area:right;
+  border-left:1px solid var(--line);
+  background:var(--bg-1);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.r-head{
+  display:flex;align-items:flex-start;justify-content:space-between;
+  padding:18px 20px 14px;gap:10px;
+}
+.r-context{display:flex;flex-direction:column;gap:4px;line-height:1;min-width:0}
+.r-eyebrow{
+  font-family:var(--mono);font-size:10px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--t3);
+  display:inline-flex;align-items:center;gap:8px;
+}
+.r-eyebrow .crumb-sep{color:var(--t4);opacity:.5}
+.r-eyebrow .live-d{
+  width:6px;height:6px;border-radius:50%;background:var(--s-running);
+  box-shadow:0 0 0 3px rgba(214,166,116,.12);
+}
+.r-eyebrow .draft-d{
+  width:6px;height:6px;border-radius:50%;background:transparent;border:1px dashed var(--amber-line);
+}
+.r-scope{
+  font-family:var(--mono);font-size:11px;color:var(--t4);letter-spacing:.02em;
+}
+.r-h{
+  font-family:var(--display);font-weight:400;font-size:22px;
+  letter-spacing:-.018em;line-height:1.1;color:var(--t1);margin:8px 0 0;
+}
+.r-close{
+  color:var(--t4);font-size:14px;cursor:pointer;flex-shrink:0;
+  line-height:1;padding:2px 4px;
+}
+.r-close:hover{color:var(--t1)}
+.r-collapse{color:var(--t4);font-family:var(--mono);font-size:11px;letter-spacing:.04em;flex-shrink:0}
+.r-collapse:hover{color:var(--t1)}
+
+/* quiet text filters — operator-style scope */
+.r-filters{
+  display:flex;flex-wrap:wrap;align-items:center;gap:7px;
+  padding:0 20px 14px;border-bottom:1px solid var(--line);
+}
+.filter{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;
+  color:var(--t3);padding:0;background:none;border:0;cursor:pointer;
+}
+.filter:hover{color:var(--t1)}
+.filter.active{color:var(--t1)}
+.filter .n{color:var(--t4);margin-left:4px;font-size:9.5px}
+.dot-sep{color:var(--t4);opacity:.5;font-family:var(--mono);font-size:10px}
+
+/* feed body */
+.r-body{flex:1;overflow:auto;min-height:0}
+
+.feed-day{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;
+  color:var(--t4);text-transform:uppercase;padding:14px 20px 6px;
+}
+.feed-item{
+  padding:10px 20px;border-top:1px solid var(--line);
+  cursor:pointer;display:grid;grid-template-columns:38px 1fr;gap:10px;
+  position:relative;
+}
+.feed-item:hover{background:var(--bg-2)}
+.feed-item.related{background:var(--amber-soft)}
+.feed-item.related::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--amber)}
+.feed-item .ts{
+  font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.02em;padding-top:2px;
+}
+.feed-item .text{color:var(--t1);font-size:12.5px;line-height:1.4;letter-spacing:-.005em}
+.feed-item .text strong{font-weight:500;color:var(--t1)}
+.feed-item .meta{
+  margin-top:5px;font-family:var(--mono);font-size:10.5px;
+  color:var(--t3);letter-spacing:.01em;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+.feed-item .meta .arrow{color:var(--t4)}
+.feed-item .meta .wf{color:var(--t2)}
+.feed-item .meta .pill{
+  font-family:var(--mono);font-size:9.5px;color:var(--t3);
+  border:1px solid var(--line);padding:1px 6px;border-radius:3px;
+  letter-spacing:.04em;text-transform:lowercase;
+}
+.feed-item .meta .pill.amber{color:var(--amber-2);border-color:var(--amber-line)}
+.feed-item .meta .pill.draft{color:var(--s-draft);border-color:var(--line-3);border-style:dashed}
+
+/* INSPECTOR */
+.insp-head{padding:18px 20px 16px;border-bottom:1px solid var(--line)}
+.insp-row{
+  display:flex;align-items:center;gap:10px;margin-top:10px;
+  font-family:var(--mono);font-size:11px;color:var(--t3);
+}
+.insp-section{padding:16px 20px;border-bottom:1px solid var(--line)}
+.insp-section h4{
+  margin:0 0 10px;
+  font-family:var(--mono);font-size:9.5px;font-weight:400;
+  letter-spacing:.18em;text-transform:uppercase;color:var(--t3);
+}
+.kv{display:grid;grid-template-columns:90px 1fr;gap:6px 14px;font-size:12px}
+.kv dt{font-family:var(--mono);font-size:10.5px;color:var(--t3);letter-spacing:.02em}
+.kv dd{margin:0;color:var(--t1);font-variant-numeric:tabular-nums}
+.kv dd.amber{color:var(--amber-2)}
+
+.io-row{
+  display:flex;align-items:center;gap:10px;
+  padding:8px 0;border-bottom:1px solid var(--line);
+}
+.io-row:last-child{border-bottom:0}
+.io-row .io-mark{
+  width:18px;height:18px;border-radius:3px;border:1px solid var(--line-2);
+  display:grid;place-items:center;font-family:var(--mono);font-size:10px;color:var(--t3);
+}
+.io-row .io-name{flex:1;font-size:12px;color:var(--t1)}
+.io-row .io-type{font-family:var(--mono);font-size:10.5px;color:var(--t3)}
+
+.event-row{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.event-row:last-child{border-bottom:0}
+.event-row .ts{font-family:var(--mono);font-size:10px;color:var(--t4);width:54px;flex-shrink:0;padding-top:1px}
+.event-row .ev{font-size:12px;color:var(--t1);line-height:1.35}
+.event-row .ev .em{color:var(--amber-2)}
+
+.r-actions{
+  margin-top:auto;padding:14px 20px;
+  border-top:1px solid var(--line);background:var(--bg);
+  display:flex;gap:8px;flex-shrink:0;
+}
+.btn{
+  font-family:var(--mono);font-size:11px;letter-spacing:.04em;
+  border:1px solid var(--line-2);padding:7px 12px;border-radius:5px;
+  color:var(--t1);background:var(--bg-1);cursor:pointer;
+  text-transform:lowercase;
+}
+.btn:hover{border-color:var(--line-3)}
+.btn.primary{border-color:var(--amber-line);color:var(--amber-2);background:var(--amber-soft)}
+.btn.danger{color:var(--s-blocked);border-color:rgba(193,136,136,.35)}
+.btn.ghost{color:var(--t3);border-color:var(--line)}
+
+/* HELPER PANE — conversational right rail */
+.rhelper-pane .helper-conv{
+  flex:1;overflow:auto;padding:14px 20px;display:flex;flex-direction:column;gap:14px;
+}
+.helper-turn{display:block;width:100%}
+.helper-turn .who{
+  display:block;margin-bottom:5px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;
+  color:var(--t4);text-transform:uppercase;
+}
+.helper-turn .who.helper{color:var(--amber-2)}
+.helper-turn .msg{
+  color:var(--t1);font-size:12.5px;line-height:1.45;letter-spacing:-.005em;
+}
+.helper-turn.user .msg{color:var(--t2)}
+.helper-turn.helper .msg{
+  color:var(--t1);
+  border-left:2px solid var(--amber-line);padding-left:10px;margin-left:-2px;
+}
+.helper-turn.current .msg{
+  font-family:var(--display);font-size:18px;font-weight:400;
+  letter-spacing:-.012em;line-height:1.3;color:var(--t1);
+  border-left:2px solid var(--amber);padding-left:10px;margin-left:-2px;
+}
+.helper-input-strip{
+  border-top:1px solid var(--line);padding:14px 20px;background:var(--bg);
+  display:flex;flex-direction:column;gap:10px;flex-shrink:0;
+}
+.helper-input-strip textarea{
+  width:100%;background:var(--bg-1);border:1px solid var(--line-2);border-radius:5px;
+  padding:10px 12px;color:var(--t1);font-size:13px;
+  letter-spacing:-.005em;line-height:1.4;min-height:48px;
+}
+.helper-input-strip textarea::placeholder{color:var(--t4)}
+.helper-input-meta{
+  display:flex;align-items:center;justify-content:space-between;
+  font-family:var(--mono);font-size:10px;color:var(--t4);letter-spacing:.04em;
+}
+.helper-input-meta .proposing{color:var(--amber-2)}
+.helper-input-meta .proposing::before{
+  content:"→ ";opacity:.7;
+}
+
+/* REVIEW PANE */
+.review-meta{
+  padding:0 20px 14px;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:11px;color:var(--t3);letter-spacing:.02em;
+}
+.review-meta .row{display:flex;align-items:center;gap:8px;margin-top:8px}
+.review-meta .row .k{color:var(--t4)}
+.review-meta .summary{
+  margin-top:10px;font-family:var(--sans);font-size:12.5px;color:var(--t2);
+  letter-spacing:-.005em;line-height:1.4;
+  border-left:2px solid var(--line-2);padding-left:10px;
+}
+.changes h4{
+  margin:0;
+  font-family:var(--mono);font-size:9.5px;font-weight:400;
+  letter-spacing:.18em;text-transform:uppercase;color:var(--t3);
+  padding:14px 20px 6px;
+}
+.change-row{
+  display:grid;grid-template-columns:24px 1fr;gap:10px;
+  padding:11px 20px;border-top:1px solid var(--line);
+  cursor:pointer;
+}
+.change-row:hover{background:var(--bg-2)}
+.change-row .mark{
+  font-family:var(--mono);font-size:13px;line-height:1.2;font-weight:400;
+  color:var(--s-draft);
+}
+.change-row.add .mark{color:var(--s-draft)}
+.change-row.mod .mark{color:var(--amber-2)}
+.change-row.rem .mark{color:var(--s-blocked)}
+.change-row .name{
+  font-family:var(--display);font-size:14px;font-weight:400;
+  letter-spacing:-.012em;color:var(--t1);line-height:1.2;
+}
+.change-row .what{
+  font-family:var(--mono);font-size:10.5px;color:var(--t3);
+  margin-top:5px;letter-spacing:.01em;line-height:1.4;
+  display:block;
+}
+.change-row .what .delta{color:var(--t1)}
+.change-row .what .delta-arrow{color:var(--t4);margin:0 4px}
+
+.review-notes{
+  padding:14px 20px;border-top:1px solid var(--line);
+  font-family:var(--mono);font-size:11px;color:var(--t3);letter-spacing:.02em;
+}
+.review-notes .quote{
+  font-family:var(--sans);font-size:12.5px;color:var(--t2);
+  letter-spacing:-.005em;line-height:1.45;margin-top:6px;
+}
+
+
+/* scrollbars */
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px;border:3px solid var(--bg)}
+*::-webkit-scrollbar-thumb:hover{background:var(--line-3)}
+
+/* light entry animation when entering focus-style canvas */
+@keyframes lift{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.app[data-state="focus"] .stage,
+.app[data-state="inspector"] .stage,
+.app[data-state="review"] .stage,
+.app[data-state="setup"] .stage,
+.app[data-state="focus"] .terminal,
+.app[data-state="inspector"] .terminal,
+.app[data-state="review"] .terminal,
+.app[data-state="setup"] .terminal{
+  animation:lift .35s cubic-bezier(.2,.7,.2,1) both;
+}
+</style>
+</head>
+<body>
+<div class="app" id="app" data-state="project">
+
+  <!-- ─────────── top bar ─────────── -->
+  <header class="bar">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div class="brand-name">Clawforce</div>
+    </div>
+    <div class="scope">
+      <span class="crumb">workspace</span>
+      <span class="sep">/</span>
+      <button class="switcher" title="switch project">
+        <span>quantscape</span>
+        <span class="chev">▾</span>
+      </button>
+      <span class="sep">/</span>
+      <span class="here" id="scope-here">all workflows</span>
+    </div>
+    <div class="bar-spacer"></div>
+    <div class="bar-tools">
+      <div class="search">
+        <span class="glyph">⌕</span>
+        <span>jump to anything</span>
+        <span class="kbd">⌘K</span>
+      </div>
+      <div class="health">
+        <span class="pulse"></span>
+        <span>nominal · 12 agents</span>
+      </div>
+      <div class="user">LJ</div>
+    </div>
+  </header>
+
+  <!-- ─────────── left scope rail ─────────── -->
+  <aside class="left">
+
+    <!-- PROJECT MODE -->
+    <div class="rail-pane project-pane">
+      <section class="rail-section">
+        <h3 class="rail-label">workspace</h3>
+        <p class="op-line">
+          <span><strong>7</strong> live</span>
+          <span class="dot-sep">·</span>
+          <span><strong>12</strong> agents</span>
+          <span class="dot-sep">·</span>
+          <span><strong>2</strong> drafts</span>
+        </p>
+      </section>
+
+      <section class="rail-section">
+        <div class="rail-search">
+          <span style="color:var(--t4)">⌕</span>
+          <input placeholder="filter workflows" />
+        </div>
+        <h3 class="rail-label">workflows <span class="count">7</span></h3>
+        <ul class="wf-list">
+          <li class="active" onclick="setState('focus')">
+            <span class="dot running"></span><span class="name">Market Signal Pipeline</span><span class="meta">2m</span>
+          </li>
+          <li onclick="setState('focus')">
+            <span class="dot running"></span><span class="name">Trade Approval Flow</span><span class="meta">11m</span>
+          </li>
+          <li onclick="setState('focus')">
+            <span class="dot done"></span><span class="name">Research Synthesis</span><span class="meta">38m</span>
+          </li>
+          <li onclick="setState('focus')">
+            <span class="dot idle"></span><span class="name">Daily Brief Generation</span><span class="meta">3h</span>
+          </li>
+          <li onclick="setState('focus')">
+            <span class="dot blocked"></span><span class="name">Risk Audit Loop</span><span class="meta">26m</span>
+          </li>
+          <li onclick="setState('focus')">
+            <span class="dot done"></span><span class="name">Compliance Check</span><span class="meta">1h</span>
+          </li>
+          <li onclick="setState('focus')">
+            <span class="dot idle"></span><span class="name">Operator Onboarding</span><span class="meta">—</span>
+          </li>
+        </ul>
+      </section>
+
+      <section class="rail-section">
+        <button class="drafts-toggle">draft sessions <span class="chev">— 2</span></button>
+        <ul class="draft-list">
+          <li onclick="setState('review')">
+            <div style="flex:1;min-width:0">
+              <div class="draft-name">Intake Refactor</div>
+              <div class="draft-meta">market signal · 2 changes · qs-lead</div>
+            </div>
+            <span class="draft-toggle on">on</span>
+          </li>
+          <li>
+            <div style="flex:1;min-width:0">
+              <div class="draft-name">New Approval Branch</div>
+              <div class="draft-meta">trade approval · 1 change · ops</div>
+            </div>
+            <span class="draft-toggle">off</span>
+          </li>
+        </ul>
+      </section>
+
+      <button class="rail-cta" onclick="setState('setup')">
+        <span class="plus">+</span> new workflow
+      </button>
+    </div>
+
+    <!-- FOCUS MODE (also used for inspector and review states) -->
+    <div class="rail-pane focus-pane">
+      <section class="rail-section">
+        <button class="wf-back" onclick="setState('project')">← back to workflows</button>
+        <h2 class="wf-h2">Market Signal<br/>Pipeline</h2>
+        <div class="wf-sub">qs / pipelines / signals</div>
+
+        <div class="wf-meta-grid">
+          <div><span class="k">state</span><span class="v amber">running</span></div>
+          <div><span class="k">owner</span><span class="v">qs-lead</span></div>
+          <div><span class="k">last run</span><span class="v">2m ago</span></div>
+          <div><span class="k">cadence</span><span class="v">15m</span></div>
+          <div><span class="k">stages</span><span class="v">6</span></div>
+          <div><span class="k">agents</span><span class="v">4</span></div>
+        </div>
+      </section>
+
+      <section class="rail-section">
+        <h3 class="rail-label">stages <span class="count">6</span></h3>
+        <ul class="stage-jump">
+          <li><span class="num">01</span><span class="name">market scan</span><span class="dot done"></span></li>
+          <li><span class="num">02</span><span class="name">signal gen</span><span class="dot done"></span></li>
+          <li class="selected" onclick="setState('inspector')">
+            <span class="num">03</span>
+            <span class="name">risk check</span>
+            <span class="change-flag" id="rail-rc-flag" hidden>mod</span>
+            <span class="dot running"></span>
+          </li>
+          <li><span class="num">04</span><span class="name">approval gate</span><span class="dot idle"></span></li>
+          <li id="rail-pre-trade" hidden><span class="num">04b</span><span class="name">pre-trade audit</span><span class="change-flag add">add</span><span class="dot draft"></span></li>
+          <li><span class="num">05</span><span class="name">execute</span><span class="dot idle"></span></li>
+          <li><span class="num">06</span><span class="name">log &amp; archive</span><span class="dot idle"></span></li>
+        </ul>
+      </section>
+
+      <section class="rail-section">
+        <button class="drafts-toggle">draft sessions <span class="chev">— 1</span></button>
+        <ul class="draft-list">
+          <li id="rail-draft-intake" class="active" onclick="setState('review')">
+            <div style="flex:1;min-width:0">
+              <div class="draft-name">Intake Refactor</div>
+              <div class="draft-meta">2 changes · proposed 14m ago</div>
+            </div>
+            <span class="draft-toggle on">on</span>
+          </li>
+        </ul>
+      </section>
+
+      <button class="rail-cta" onclick="setState('setup')">
+        <span class="plus">+</span> new workflow
+      </button>
+    </div>
+
+    <!-- HELPER MODE -->
+    <div class="rail-pane helper-pane">
+      <section class="rail-section">
+        <button class="wf-back" onclick="setState('project')">← back to workflows</button>
+        <div class="helper-eyebrow"><span class="live"></span>setup · helper-led</div>
+        <h2 class="wf-h2">Daily Briefing<br/>Drafter</h2>
+        <div class="wf-sub">unsaved · qs / pipelines</div>
+
+        <div class="wf-meta-grid">
+          <div><span class="k">state</span><span class="v draft">drafting</span></div>
+          <div><span class="k">owner</span><span class="v">qs-lead</span></div>
+          <div><span class="k">trigger</span><span class="v">cron · 06:00 ET</span></div>
+          <div><span class="k">stages</span><span class="v">3 proposed</span></div>
+        </div>
+      </section>
+
+      <section class="rail-section">
+        <h3 class="rail-label">proposed stages <span class="count">3</span></h3>
+        <ul class="stage-jump">
+          <li><span class="num">01</span><span class="name">intake — pull market data</span><span class="dot draft"></span></li>
+          <li><span class="num">02</span><span class="name">analyze — synthesize</span><span class="dot draft"></span></li>
+          <li><span class="num">03</span><span class="name">publish — slack #trading-team</span><span class="dot draft"></span></li>
+        </ul>
+      </section>
+
+      <section class="rail-section">
+        <h3 class="rail-label">helper notes</h3>
+        <p class="op-line" style="color:var(--t4);font-size:11px;line-height:1.5">
+          asked: <strong>4</strong> · answered: <strong>3</strong>
+          <span class="dot-sep">·</span>
+          1 question pending
+        </p>
+      </section>
+    </div>
+  </aside>
+
+  <!-- ─────────── center canvas ─────────── -->
+  <main class="center">
+
+    <!-- PROJECT VIEW -->
+    <div class="canvas-pane project-canvas">
+      <div class="wf-grid">
+
+        <article class="mini has-draft" onclick="setState('focus')">
+          <div class="mini-head">
+            <h3>Market Signal Pipeline</h3>
+            <div class="badge"><span class="dot running"></span>running</div>
+          </div>
+          <div class="mini-track">
+            <svg viewBox="0 0 360 64" preserveAspectRatio="none">
+              <line x1="22" y1="32" x2="338" y2="32" stroke="#262C34" stroke-width="1.25"/>
+              <line x1="200" y1="32" x2="252" y2="14" stroke="#262C34" stroke-width="1.25"/>
+              <line x1="200" y1="32" x2="252" y2="50" stroke="#262C34" stroke-width="1.25"/>
+              <circle cx="22" cy="32" r="5" fill="#D6A674"/>
+              <rect x="64"  y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="118" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="194" y="24" width="14" height="16" rx="3" fill="#D6A674"/>
+              <rect x="252" y="6"  width="14" height="16" rx="3" fill="#5C615E"/>
+              <rect x="252" y="42" width="14" height="16" rx="3" fill="none" stroke="#7A8290" stroke-dasharray="2 2"/>
+              <rect x="316" y="22" width="22" height="20" rx="4" fill="none" stroke="#5C615E" stroke-dasharray="2 2"/>
+            </svg>
+          </div>
+          <div class="mini-foot">
+            <span class="draft-flag">draft session</span>
+            <span style="flex:1">6 stages · 4 agents</span>
+            <div class="agents"><span class="ai">M</span><span class="ai">S</span><span class="ai">R</span><span class="ai">+</span></div>
+          </div>
+        </article>
+
+        <article class="mini has-draft" onclick="setState('focus')">
+          <div class="mini-head">
+            <h3>Trade Approval Flow</h3>
+            <div class="badge"><span class="dot running"></span>awaiting human</div>
+          </div>
+          <div class="mini-track">
+            <svg viewBox="0 0 360 64" preserveAspectRatio="none">
+              <line x1="22" y1="32" x2="338" y2="32" stroke="#262C34" stroke-width="1.25"/>
+              <circle cx="22" cy="32" r="5" fill="#D6A674"/>
+              <rect x="64"  y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="124" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="184" y="24" width="14" height="16" rx="3" fill="#D6A674"/>
+              <rect x="244" y="24" width="14" height="16" rx="3" fill="#5C615E"/>
+              <circle cx="184" cy="32" r="11" fill="none" stroke="#D6A674" stroke-opacity=".4" stroke-dasharray="2 3"/>
+              <rect x="316" y="22" width="22" height="20" rx="4" fill="none" stroke="#5C615E" stroke-dasharray="2 2"/>
+            </svg>
+          </div>
+          <div class="mini-foot">
+            <span class="draft-flag">draft session</span>
+            <span style="flex:1">5 stages · 3 agents</span>
+            <div class="agents"><span class="ai">A</span><span class="ai">R</span><span class="ai">L</span></div>
+          </div>
+        </article>
+
+        <article class="mini" onclick="setState('focus')">
+          <div class="mini-head">
+            <h3>Research Synthesis</h3>
+            <div class="badge"><span class="dot done"></span>done</div>
+          </div>
+          <div class="mini-track">
+            <svg viewBox="0 0 360 64" preserveAspectRatio="none">
+              <line x1="22" y1="20" x2="338" y2="20" stroke="#262C34" stroke-width="1.25"/>
+              <line x1="22" y1="44" x2="338" y2="44" stroke="#262C34" stroke-width="1.25"/>
+              <line x1="22" y1="20" x2="22" y2="44" stroke="#262C34" stroke-width="1.25"/>
+              <line x1="160" y1="20" x2="160" y2="44" stroke="#262C34" stroke-width="1.25"/>
+              <line x1="240" y1="20" x2="240" y2="44" stroke="#262C34" stroke-width="1.25"/>
+              <circle cx="22" cy="32" r="5" fill="#94B89E"/>
+              <rect x="76"  y="12" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="76"  y="36" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="154" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="234" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="316" y="22" width="22" height="20" rx="4" fill="none" stroke="#94B89E" stroke-dasharray="2 2"/>
+            </svg>
+          </div>
+          <div class="mini-foot">
+            <span>5 stages · 3 agents</span>
+            <div class="agents"><span class="ai">R</span><span class="ai">S</span><span class="ai">E</span></div>
+          </div>
+        </article>
+
+        <article class="mini" onclick="setState('focus')">
+          <div class="mini-head">
+            <h3>Daily Brief Generation</h3>
+            <div class="badge"><span class="dot idle"></span>idle · next 06:00</div>
+          </div>
+          <div class="mini-track">
+            <svg viewBox="0 0 360 64" preserveAspectRatio="none">
+              <line x1="22" y1="32" x2="338" y2="32" stroke="#262C34" stroke-width="1.25"/>
+              <circle cx="22" cy="32" r="5" fill="#5C615E"/>
+              <rect x="86" y="24" width="14" height="16" rx="3" fill="#5C615E"/>
+              <rect x="170" y="24" width="14" height="16" rx="3" fill="#5C615E"/>
+              <rect x="254" y="24" width="14" height="16" rx="3" fill="#5C615E"/>
+              <rect x="316" y="22" width="22" height="20" rx="4" fill="none" stroke="#5C615E" stroke-dasharray="2 2"/>
+            </svg>
+          </div>
+          <div class="mini-foot">
+            <span>4 stages · 2 agents</span>
+            <div class="agents"><span class="ai">B</span><span class="ai">D</span></div>
+          </div>
+        </article>
+
+        <article class="mini" onclick="setState('focus')">
+          <div class="mini-head">
+            <h3>Risk Audit Loop</h3>
+            <div class="badge"><span class="dot blocked"></span>blocked · approval</div>
+          </div>
+          <div class="mini-track">
+            <svg viewBox="0 0 360 64" preserveAspectRatio="none">
+              <line x1="22" y1="32" x2="338" y2="32" stroke="#262C34" stroke-width="1.25"/>
+              <path d="M260 32 C 280 60, 80 60, 100 32" stroke="#262C34" stroke-width="1.25" fill="none" stroke-dasharray="3 3"/>
+              <circle cx="22" cy="32" r="5" fill="#94B89E"/>
+              <rect x="80"  y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="160" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="248" y="24" width="14" height="16" rx="3" fill="#C18888"/>
+              <rect x="316" y="22" width="22" height="20" rx="4" fill="none" stroke="#5C615E" stroke-dasharray="2 2"/>
+            </svg>
+          </div>
+          <div class="mini-foot">
+            <span>4 stages · 2 agents · cyclic</span>
+            <div class="agents"><span class="ai">A</span><span class="ai">L</span></div>
+          </div>
+        </article>
+
+        <article class="mini" onclick="setState('focus')">
+          <div class="mini-head">
+            <h3>Compliance Check</h3>
+            <div class="badge"><span class="dot done"></span>done · 1h ago</div>
+          </div>
+          <div class="mini-track">
+            <svg viewBox="0 0 360 64" preserveAspectRatio="none">
+              <line x1="22" y1="32" x2="338" y2="32" stroke="#262C34" stroke-width="1.25"/>
+              <circle cx="22" cy="32" r="5" fill="#94B89E"/>
+              <rect x="86" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="180" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="274" y="24" width="14" height="16" rx="3" fill="#94B89E"/>
+              <rect x="316" y="22" width="22" height="20" rx="4" fill="none" stroke="#94B89E" stroke-dasharray="2 2"/>
+            </svg>
+          </div>
+          <div class="mini-foot">
+            <span>4 stages · 2 agents</span>
+            <div class="agents"><span class="ai">C</span><span class="ai">A</span></div>
+          </div>
+        </article>
+
+        <article class="mini draft" onclick="setState('focus')">
+          <div class="mini-head">
+            <h3>Operator Onboarding</h3>
+            <div class="badge"><span class="dot draft"></span>draft</div>
+          </div>
+          <div class="mini-track">
+            <svg viewBox="0 0 360 64" preserveAspectRatio="none">
+              <line x1="22" y1="32" x2="338" y2="32" stroke="#262C34" stroke-width="1.25" stroke-dasharray="3 3"/>
+              <circle cx="22" cy="32" r="5" fill="none" stroke="#7A8290" stroke-width="1.4"/>
+              <rect x="86"  y="24" width="14" height="16" rx="3" fill="none" stroke="#7A8290" stroke-dasharray="2 2"/>
+              <rect x="170" y="24" width="14" height="16" rx="3" fill="none" stroke="#7A8290" stroke-dasharray="2 2"/>
+              <rect x="254" y="24" width="14" height="16" rx="3" fill="none" stroke="#7A8290" stroke-dasharray="2 2"/>
+              <rect x="316" y="22" width="22" height="20" rx="4" fill="none" stroke="#7A8290" stroke-dasharray="2 2"/>
+            </svg>
+          </div>
+          <div class="mini-foot">
+            <span>4 stages drafted · unassigned</span>
+            <div class="agents"><span class="ai">+</span></div>
+          </div>
+        </article>
+      </div>
+    </div>
+
+    <!-- FOCUS / INSPECTOR / REVIEW canvas -->
+    <div class="canvas-pane focus-canvas">
+      <div class="focus-head">
+        <div>
+          <div class="eyebrow" id="focus-eyebrow">
+            <span class="live"></span>
+            <span>live · run #4127 · 2m elapsed</span>
+          </div>
+          <h1>Market Signal Pipeline</h1>
+        </div>
+        <div id="focus-session" hidden>
+          <div class="session-tag">draft session · intake refactor</div>
+        </div>
+      </div>
+      <div class="topology">
+        <div class="topo-viewport">
+          <div class="topo-canvas">
+
+            <svg class="edges" viewBox="0 0 1200 560" preserveAspectRatio="none">
+              <defs>
+                <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                  <path d="M0 0 L6 4 L0 8" fill="none" stroke="#3A4049" stroke-width="1.4"/>
+                </marker>
+                <marker id="arr-amber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                  <path d="M0 0 L6 4 L0 8" fill="none" stroke="#D6A674" stroke-width="1.4"/>
+                </marker>
+                <marker id="arr-draft" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                  <path d="M0 0 L6 4 L0 8" fill="none" stroke="#7A8290" stroke-width="1.4"/>
+                </marker>
+              </defs>
+
+              <line x1="92"   y1="280" x2="156"  y2="280" stroke="#3A4049" stroke-width="1.5" marker-end="url(#arr)"/>
+              <line x1="364"  y1="280" x2="396"  y2="280" stroke="#3A4049" stroke-width="1.5" marker-end="url(#arr)"/>
+              <line x1="604"  y1="280" x2="636"  y2="280" stroke="#D6A674" stroke-width="1.6" marker-end="url(#arr-amber)" stroke-dasharray="6 4">
+                <animate attributeName="stroke-dashoffset" from="0" to="-20" dur="1.6s" repeatCount="indefinite"/>
+              </line>
+              <path d="M844 280 C 860 280, 860 160, 876 160" fill="none" stroke="#3A4049" stroke-width="1.5" marker-end="url(#arr)"/>
+              <path d="M844 280 C 860 280, 860 400, 876 400" fill="none" stroke="#7A8290" stroke-width="1.4" stroke-dasharray="3 4" marker-end="url(#arr-draft)"/>
+              <path d="M1084 160 C 1100 160, 1100 280, 1116 280" fill="none" stroke="#3A4049" stroke-width="1.5" marker-end="url(#arr)"/>
+              <path d="M1084 400 C 1100 400, 1100 280, 1116 280" fill="none" stroke="#7A8290" stroke-width="1.4" stroke-dasharray="3 4" marker-end="url(#arr-draft)"/>
+
+              <text x="846" y="220" font-family="Geist Mono" font-size="10" fill="#6F6B64" letter-spacing=".06em">if conf ≥ 0.78</text>
+              <text x="846" y="364" font-family="Geist Mono" font-size="10" fill="#7A8290" letter-spacing=".06em">otherwise · draft</text>
+            </svg>
+
+            <div class="terminal" style="left:28px;top:248px">
+              <div class="ring"></div>
+              <div class="core"></div>
+              <div class="lbl">start</div>
+            </div>
+
+            <div class="stage" style="left:156px;top:236px" onclick="setState('inspector')">
+              <div class="stage-head">
+                <div class="stage-name">Market Scan</div>
+                <div class="state-badge done"><span class="d"></span>done</div>
+              </div>
+              <div class="stage-agent"><span class="av">M</span> qs-market-scout · haiku</div>
+              <div class="stage-tags">
+                <span class="tag">ingest</span><span class="tag-sep">·</span>
+                <span class="tag">ext-data</span>
+              </div>
+            </div>
+
+            <div class="stage" style="left:396px;top:236px" onclick="setState('inspector')">
+              <div class="stage-head">
+                <div class="stage-name">Signal Generation</div>
+                <div class="state-badge done"><span class="d"></span>done</div>
+              </div>
+              <div class="stage-agent"><span class="av">S</span> qs-signal-gen · sonnet</div>
+              <div class="stage-tags">
+                <span class="tag">analyze</span><span class="tag-sep">·</span>
+                <span class="tag">model</span><span class="tag-sep">·</span>
+                <span class="tag">scoring</span>
+              </div>
+            </div>
+
+            <div class="stage selected" id="stage-rc" style="left:636px;top:236px" onclick="setState('inspector')">
+              <div class="stage-head">
+                <div class="stage-name">Risk Check</div>
+                <div class="state-badge running"><span class="d"></span>running</div>
+              </div>
+              <div class="stage-agent"><span class="av">R</span> qs-risk-analyst · opus</div>
+              <div class="stage-tags">
+                <span class="tag">verify</span><span class="tag-sep">·</span>
+                <span class="tag accent">branching</span>
+              </div>
+            </div>
+
+            <div class="stage" style="left:876px;top:116px">
+              <div class="stage-head">
+                <div class="stage-name">Approval Gate</div>
+                <div class="state-badge idle"><span class="d"></span>queued</div>
+              </div>
+              <div class="stage-agent"><span class="av">A</span> qs-approver · human</div>
+              <div class="stage-tags">
+                <span class="tag">gate</span><span class="tag-sep">·</span>
+                <span class="tag">human</span>
+              </div>
+            </div>
+
+            <div class="stage draft" id="stage-pre-trade" style="left:876px;top:356px">
+              <div class="stage-head">
+                <div class="stage-name">Pre-Trade Audit</div>
+                <div class="state-badge draft"><span class="d"></span>draft</div>
+              </div>
+              <div class="stage-agent"><span class="av">+</span> unassigned</div>
+              <div class="stage-tags">
+                <span class="tag">audit</span><span class="tag-sep">·</span>
+                <span class="tag">draft</span>
+              </div>
+            </div>
+
+            <div class="terminal end" style="left:1116px;top:248px">
+              <div class="ring"></div>
+              <div class="core"></div>
+              <div class="lbl">end</div>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="legend">
+          <span class="item"><span class="dot done"></span>done</span>
+          <span class="item"><span class="dot running"></span>running</span>
+          <span class="item"><span class="dot idle"></span>queued</span>
+          <span class="item"><span class="dot blocked"></span>blocked</span>
+          <span class="item"><span class="dot draft"></span>draft</span>
+        </div>
+
+        <div class="canvas-overlay">
+          <button title="zoom out">−</button>
+          <span>100%</span>
+          <button title="zoom in">+</button>
+          <span class="sep">·</span>
+          <button title="fit">fit</button>
+          <button title="recenter">center</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- HELPER CANVAS — emerging proposed workflow -->
+    <div class="canvas-pane helper-canvas">
+      <div class="focus-head">
+        <div>
+          <div class="eyebrow"><span class="draft-pulse"></span><span>drafting · proposed by helper · 3 of ~4 stages</span></div>
+          <h1>Daily Briefing Drafter</h1>
+        </div>
+        <div>
+          <div class="session-tag">unsaved · 4m of conversation</div>
+        </div>
+      </div>
+      <div class="topology">
+        <div class="topo-viewport">
+          <div class="topo-canvas" style="height:340px">
+
+            <svg class="edges" viewBox="0 0 1200 360" preserveAspectRatio="none">
+              <line x1="92"   y1="180" x2="156"  y2="180" stroke="#7A8290" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arr-draft-h)"/>
+              <line x1="364"  y1="180" x2="396"  y2="180" stroke="#7A8290" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arr-draft-h)"/>
+              <line x1="604"  y1="180" x2="636"  y2="180" stroke="#7A8290" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arr-draft-h)"/>
+              <line x1="844"  y1="180" x2="912"  y2="180" stroke="#7A8290" stroke-width="1.4" stroke-dasharray="4 4" opacity=".5"/>
+              <defs>
+                <marker id="arr-draft-h" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                  <path d="M0 0 L6 4 L0 8" fill="none" stroke="#7A8290" stroke-width="1.4"/>
+                </marker>
+              </defs>
+            </svg>
+
+            <div class="terminal" style="left:28px;top:148px">
+              <div class="ring"></div>
+              <div class="core"></div>
+              <div class="lbl">start</div>
+            </div>
+
+            <div class="stage proposed" style="left:156px;top:136px">
+              <div class="stage-head">
+                <div class="stage-name">Intake</div>
+                <div class="state-badge proposed"><span class="d"></span>proposed</div>
+              </div>
+              <div class="stage-agent"><span class="av">?</span> pull market data · cron</div>
+              <div class="stage-tags">
+                <span class="tag">ingest</span><span class="tag-sep">·</span>
+                <span class="tag">scheduled</span>
+              </div>
+            </div>
+
+            <div class="stage proposed" style="left:396px;top:136px">
+              <div class="stage-head">
+                <div class="stage-name">Analyze</div>
+                <div class="state-badge proposed"><span class="d"></span>proposed</div>
+              </div>
+              <div class="stage-agent"><span class="av">?</span> synthesize key moves</div>
+              <div class="stage-tags">
+                <span class="tag">analyze</span><span class="tag-sep">·</span>
+                <span class="tag">synth</span>
+              </div>
+            </div>
+
+            <div class="stage proposed" style="left:636px;top:136px">
+              <div class="stage-head">
+                <div class="stage-name">Publish</div>
+                <div class="state-badge proposed"><span class="d"></span>proposed</div>
+              </div>
+              <div class="stage-agent"><span class="av">?</span> slack · #trading-team</div>
+              <div class="stage-tags">
+                <span class="tag">deliver</span><span class="tag-sep">·</span>
+                <span class="tag accent">slack</span>
+              </div>
+            </div>
+
+            <!-- ghost slot where helper is about to propose next -->
+            <div class="terminal draft" style="left:912px;top:148px">
+              <div class="ring"></div>
+              <div class="core"></div>
+              <div class="lbl">format?</div>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="helper-prompt-strip">
+          <span class="pulse"></span>
+          <span>helper is asking · what format should the brief use?</span>
+        </div>
+
+        <div class="legend">
+          <span class="item"><span class="dot draft"></span>proposed</span>
+          <span class="item"><span class="dot idle"></span>unassigned</span>
+        </div>
+
+        <div class="canvas-overlay">
+          <button title="zoom out">−</button>
+          <span>100%</span>
+          <button title="zoom in">+</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ─────────── right context rail ─────────── -->
+  <aside class="right">
+
+    <!-- FEED PANE (project / focus) -->
+    <div class="rail-pane feed-pane">
+      <div class="r-head">
+        <div class="r-context">
+          <div class="r-eyebrow" id="feed-eyebrow">
+            <span>events</span>
+          </div>
+          <div class="r-scope" id="feed-scope">scoped to all workflows</div>
+        </div>
+        <button class="r-collapse" title="hide rail">⌘.</button>
+      </div>
+
+      <div class="r-filters">
+        <button class="filter active">all<span class="n">42</span></button>
+        <span class="dot-sep">·</span>
+        <button class="filter">runs</button>
+        <span class="dot-sep">·</span>
+        <button class="filter">approvals<span class="n">3</span></button>
+        <span class="dot-sep">·</span>
+        <button class="filter">alerts<span class="n">1</span></button>
+      </div>
+
+      <div class="r-body" id="feed-body">
+
+        <div class="feed-day">today · apr 19</div>
+
+        <div class="feed-item related" onclick="setState('inspector')">
+          <div class="ts">14:32</div>
+          <div>
+            <div class="text"><strong>Risk Check</strong> began evaluation of 4 candidate signals</div>
+            <div class="meta">
+              <span class="wf">market signal</span><span class="arrow">→</span><span>qs-risk-analyst</span>
+              <span class="pill amber">running</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-item">
+          <div class="ts">14:30</div>
+          <div>
+            <div class="text"><strong>Signal Generation</strong> produced 4 signals (avg conf 0.81)</div>
+            <div class="meta">
+              <span class="wf">market signal</span><span class="arrow">→</span><span>qs-signal-gen</span>
+              <span class="pill">done</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-item">
+          <div class="ts">14:21</div>
+          <div>
+            <div class="text"><strong>Trade Approval</strong> awaiting decision on USD/JPY long</div>
+            <div class="meta">
+              <span class="wf">trade approval</span><span class="arrow">→</span><span>operator</span>
+              <span class="pill amber">pending</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-item" onclick="setState('review')">
+          <div class="ts">14:18</div>
+          <div>
+            <div class="text">Draft session <strong>Intake Refactor</strong> ready for review</div>
+            <div class="meta">
+              <span class="wf">market signal</span><span class="arrow">→</span><span>qs-lead</span>
+              <span class="pill draft">review</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-item">
+          <div class="ts">13:42</div>
+          <div>
+            <div class="text"><strong>Risk Audit Loop</strong> blocked — needs policy approval</div>
+            <div class="meta">
+              <span class="wf">risk audit</span><span class="arrow">→</span><span>qs-lead</span>
+              <span class="pill">blocked</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-day">earlier · apr 19</div>
+
+        <div class="feed-item">
+          <div class="ts">11:14</div>
+          <div>
+            <div class="text">Compliance Check completed — no findings</div>
+            <div class="meta">
+              <span class="wf">compliance</span><span class="arrow">→</span><span>cf-compliance</span>
+              <span class="pill">done</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-item">
+          <div class="ts">10:02</div>
+          <div>
+            <div class="text">Research Synthesis archived 3 reports</div>
+            <div class="meta">
+              <span class="wf">research synthesis</span><span class="arrow">→</span><span>qs-researcher</span>
+              <span class="pill">done</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feed-item">
+          <div class="ts">06:00</div>
+          <div>
+            <div class="text">Daily Brief Generation scheduled — next 06:00 tmrw</div>
+            <div class="meta">
+              <span class="wf">daily brief</span><span class="arrow">→</span><span>qs-briefer</span>
+              <span class="pill">idle</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- INSPECTOR PANE -->
+    <div class="rail-pane inspector-pane">
+      <div class="r-head">
+        <div class="r-context">
+          <div class="r-eyebrow"><span>stage 03</span><span class="crumb-sep">·</span><span>market signal</span></div>
+          <h2 class="r-h">Risk Check</h2>
+        </div>
+        <span class="r-close" onclick="setState('focus')">✕</span>
+      </div>
+      <div class="insp-head" style="border-top:0;padding-top:0">
+        <div class="insp-row" style="margin-top:0">
+          <span class="dot running"></span> running · 47s elapsed · branching
+        </div>
+      </div>
+
+      <div class="r-body">
+        <div class="insp-section">
+          <h4>assignment</h4>
+          <dl class="kv">
+            <dt>agent</dt><dd>qs-risk-analyst</dd>
+            <dt>model</dt><dd>opus 4.6</dd>
+            <dt>budget</dt><dd class="amber">$0.18 / $0.50</dd>
+            <dt>timeout</dt><dd>4m 00s</dd>
+            <dt>retries</dt><dd>0 / 2</dd>
+          </dl>
+        </div>
+
+        <div class="insp-section">
+          <h4>inputs</h4>
+          <div class="io-row">
+            <div class="io-mark">in</div>
+            <div class="io-name">candidate signals</div>
+            <div class="io-type">signal[]</div>
+          </div>
+          <div class="io-row">
+            <div class="io-mark">in</div>
+            <div class="io-name">portfolio state</div>
+            <div class="io-type">snapshot</div>
+          </div>
+        </div>
+
+        <div class="insp-section">
+          <h4>outputs · branching</h4>
+          <div class="io-row">
+            <div class="io-mark" style="color:var(--amber-2);border-color:var(--amber-line)">→</div>
+            <div class="io-name">passes risk · approval gate</div>
+            <div class="io-type">≥ 0.78</div>
+          </div>
+          <div class="io-row">
+            <div class="io-mark" style="color:var(--s-draft);border-style:dashed">→</div>
+            <div class="io-name">otherwise · pre-trade audit</div>
+            <div class="io-type">draft</div>
+          </div>
+        </div>
+
+        <div class="insp-section">
+          <h4>recent events</h4>
+          <div class="event-row">
+            <div class="ts">14:32</div>
+            <div class="ev"><span class="em">started</span> · 4 signals submitted</div>
+          </div>
+          <div class="event-row">
+            <div class="ts">14:32</div>
+            <div class="ev">portfolio snapshot loaded · 142 positions</div>
+          </div>
+          <div class="event-row">
+            <div class="ts">14:30</div>
+            <div class="ev">previous run completed · 2 passed, 1 deferred</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="r-actions">
+        <button class="btn primary">edit as draft</button>
+        <button class="btn">jump to stage</button>
+        <button class="btn ghost">history</button>
+      </div>
+    </div>
+
+    <!-- SETUP PANE — conversational context (helper-led workflow creation) -->
+    <div class="rail-pane rhelper-pane">
+      <div class="r-head">
+        <div class="r-context">
+          <div class="r-eyebrow"><span class="draft-d"></span><span>setup</span><span class="crumb-sep">·</span><span>new workflow</span></div>
+          <h2 class="r-h">Helper</h2>
+        </div>
+        <span class="r-close" onclick="setState('project')">✕</span>
+      </div>
+
+      <div class="helper-conv">
+        <div class="helper-turn user">
+          <div class="who">you</div>
+          <div class="msg">Daily morning brief for the trading team.</div>
+        </div>
+        <div class="helper-turn helper">
+          <div class="who helper">helper</div>
+          <div class="msg">Got it. What triggers it — schedule, event, or manual?</div>
+        </div>
+        <div class="helper-turn user">
+          <div class="who">you</div>
+          <div class="msg">Scheduled, weekdays at 6am ET.</div>
+        </div>
+        <div class="helper-turn helper">
+          <div class="who helper">helper</div>
+          <div class="msg">I’ll propose <em>intake → analyze → publish</em>. Where does it land?</div>
+        </div>
+        <div class="helper-turn user">
+          <div class="who">you</div>
+          <div class="msg">Slack, channel <code style="color:var(--amber-2)">#trading-team</code>.</div>
+        </div>
+        <div class="helper-turn helper">
+          <div class="who helper">helper</div>
+          <div class="msg">Done. Three stages drafted on the canvas.</div>
+        </div>
+        <div class="helper-turn current">
+          <div class="who helper">helper · asking</div>
+          <div class="msg">What format should the brief use — bullet summary, narrative, or chart-with-commentary?</div>
+        </div>
+      </div>
+
+      <div class="helper-input-strip">
+        <textarea placeholder="your answer…"></textarea>
+        <div class="helper-input-meta">
+          <span class="proposing">proposing 3 stages on canvas</span>
+          <span><span class="kbd" style="border:1px solid var(--line-2);padding:1px 5px;border-radius:3px">⏎</span> send</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- REVIEW PANE — grouped draft session review -->
+    <div class="rail-pane review-pane">
+      <div class="r-head">
+        <div class="r-context">
+          <div class="r-eyebrow"><span class="draft-d"></span><span>draft session</span><span class="crumb-sep">·</span><span>market signal</span></div>
+          <h2 class="r-h">Intake Refactor</h2>
+        </div>
+        <span class="r-close" onclick="setState('focus')">✕</span>
+      </div>
+
+      <div class="review-meta">
+        <div class="row"><span class="k">proposed by</span><span style="color:var(--t1)">qs-lead</span><span class="dot-sep">·</span><span>14m ago</span></div>
+        <div class="row"><span class="k">scope</span><span style="color:var(--t1)">market signal pipeline</span></div>
+        <div class="row"><span class="k">changes</span><span style="color:var(--t1)">2 pending review</span></div>
+        <div class="summary">Adds an audit step for low-confidence signals and gives risk check more headroom.</div>
+      </div>
+
+      <div class="r-body">
+        <div class="changes">
+          <h4>changes</h4>
+
+          <div class="change-row add" onclick="setState('review')">
+            <div class="mark">+</div>
+            <div>
+              <div class="name">Pre-Trade Audit</div>
+              <span class="what">
+                new stage · branches off <span class="delta">Risk Check (otherwise)</span><br>
+                tags: audit · draft  ·  agent: unassigned
+              </span>
+            </div>
+          </div>
+
+          <div class="change-row mod" onclick="setState('review')">
+            <div class="mark">~</div>
+            <div>
+              <div class="name">Risk Check</div>
+              <span class="what">
+                timeout <span class="delta">4m</span><span class="delta-arrow">→</span><span class="delta">6m</span><br>
+                threshold <span class="delta">0.78</span><span class="delta-arrow">→</span><span class="delta">0.82</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="review-notes">
+          notes from <span style="color:var(--t1)">qs-lead</span>
+          <div class="quote">“Saw three deferrals last week from low-confidence signals slipping through. Audit step gives us a paper trail and the timeout gives risk check breathing room on the new model.”</div>
+        </div>
+      </div>
+
+      <div class="r-actions">
+        <button class="btn primary" onclick="setState('focus')">approve all</button>
+        <button class="btn">approve with notes</button>
+        <button class="btn danger">reject</button>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+
+<script>
+  const app = document.getElementById('app');
+  const scopeHere = document.getElementById('scope-here');
+  const feedEyebrow = document.getElementById('feed-eyebrow');
+  const feedScope = document.getElementById('feed-scope');
+  const focusEyebrow = document.getElementById('focus-eyebrow');
+  const focusSession = document.getElementById('focus-session');
+  const stageRC = document.getElementById('stage-rc');
+  const stagePT = document.getElementById('stage-pre-trade');
+  const railPT = document.getElementById('rail-pre-trade');
+  const railRCFlag = document.getElementById('rail-rc-flag');
+  const railDraftIntake = document.getElementById('rail-draft-intake');
+
+  const stateMap = {
+    '1': 'project',
+    '2': 'focus',
+    '3': 'inspector',
+    '4': 'setup',
+    '5': 'review',
+  };
+
+  function setState(state){
+    app.setAttribute('data-state', state);
+
+    // breadcrumb in top bar
+    if (state === 'project'){
+      scopeHere.textContent = 'all workflows';
+    } else if (state === 'focus'){
+      scopeHere.textContent = 'market signal pipeline';
+    } else if (state === 'inspector'){
+      scopeHere.textContent = 'market signal pipeline · risk check';
+    } else if (state === 'setup'){
+      scopeHere.textContent = 'new workflow · setup';
+    } else if (state === 'review'){
+      scopeHere.textContent = 'market signal pipeline · intake refactor';
+    }
+
+    // adaptive right-rail eyebrow + scope (feed pane only)
+    if (state === 'project'){
+      feedEyebrow.innerHTML = '<span>project events</span>';
+      feedScope.textContent = 'quantscape · 7 workflows · live';
+    } else if (state === 'focus'){
+      feedEyebrow.innerHTML = '<span class="live-d"></span><span>workflow events</span>';
+      feedScope.textContent = 'market signal pipeline · run #4127';
+    }
+
+    // review-state canvas overlay: mark stages with diff treatment + reveal session tag
+    const isReview = state === 'review';
+    focusSession.hidden = !isReview;
+    focusEyebrow.style.display = isReview ? 'none' : '';
+    if (isReview){
+      stageRC.classList.add('review-modified');
+      stagePT.classList.add('review-added');
+      stagePT.classList.remove('draft');
+      railPT.hidden = false;
+      railRCFlag.hidden = false;
+    } else {
+      stageRC.classList.remove('review-modified');
+      stagePT.classList.remove('review-added');
+      stagePT.classList.add('draft');
+      railPT.hidden = true;
+      railRCFlag.hidden = true;
+    }
+
+    // selected stage only meaningful in inspector
+    if (state === 'inspector') stageRC.classList.add('selected');
+    else if (state !== 'review') stageRC.classList.add('selected');
+
+    // url hash mirror
+    const h = '#' + state;
+    if (location.hash !== h) history.replaceState(null, '', h);
+  }
+
+  // keyboard 1-5 navigate states
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    const s = stateMap[e.key];
+    if (s) setState(s);
+  });
+
+  function applyHash(){
+    const s = (location.hash || '').slice(1);
+    if (Object.values(stateMap).includes(s)) setState(s);
+    else setState('project');
+  }
+  window.addEventListener('hashchange', applyHash);
+  applyHash();
+</script>
+
+</body>
+</html>

@@ -1,24 +1,40 @@
 /**
  * Clawforce — Project configuration
  *
- * Reads project.yaml files, initializes per-project databases and directories.
+ * Loads workforce configuration, initializes per-project databases and directories,
+ * and manages runtime registration for active domains.
  */
 
 import fs from "node:fs";
 import path from "node:path";
+import type { DatabaseSync } from "./sqlite-driver.js";
 import YAML from "yaml";
 import { setBudget } from "./budget.js";
-import { getDb, getProjectsDir } from "./db.js";
+import { clearProjectStorageDir, getDb, setProjectStorageDir } from "./db.js";
 import { emitDiagnosticEvent, safeLog } from "./diagnostics.js";
-import { registerProject } from "./lifecycle.js";
-import type { ManagerSettings } from "./manager-config.js";
-import { registerManagerProject } from "./manager-config.js";
+import { registerProject, unregisterProject } from "./lifecycle.js";
+import { registerManagerProject, unregisterManagerProjectByProject } from "./manager-config.js";
 import { resolveEscalationChain } from "./org.js";
-import { applyProfile } from "./profiles.js";
+import { applyProfile, generateDefaultScopePolicies } from "./profiles.js";
+import { clearProjectPolicies, registerPolicies } from "./policy/registry.js";
 import { BUILTIN_AGENT_PRESETS } from "./presets.js";
 import { normalizeAgentConfig as resolveAliases } from "./config/aliases.js";
-import { registerCustomSkills } from "./skills/registry.js";
-import { toNamespacedAgentId, parseNamespacedAgentId } from "./agent-sync.js";
+import { isKnownContextSource } from "./context/catalog.js";
+import { ensureAgentDocs } from "./context/sources/auto-generate.js";
+import { recoverOrphanedSessions } from "./enforcement/tracker.js";
+import { normalizeEntityKindsConfig } from "./entities/config.js";
+import { normalizeExecutionConfig } from "./execution/config.js";
+import { createGoal, listGoals } from "./goals/ops.js";
+import { registerCustomSkills, unregisterCustomSkills } from "./skills/registry.js";
+import {
+  getAgentRuntimeConfig,
+  mergeAgentRuntimeConfig,
+  normalizeBootstrapConfig,
+  normalizeConfiguredAgentRuntime,
+} from "./agent-runtime-config.js";
+import { toNamespacedAgentId } from "./agent-sync.js";
+import { getDefaultRuntimeState } from "./runtime/default-runtime.js";
+import { REVIEW_REASON_CODES } from "./types.js";
 import type {
   AgentConfig,
   AlertRuleDefinition,
@@ -26,7 +42,6 @@ import type {
   ApprovalPolicy,
   AssignmentConfig,
   AssignmentStrategy,
-  BootstrapConfig,
   BudgetConfig,
   BudgetPacingConfig,
   ChannelConfig,
@@ -74,64 +89,27 @@ import type {
 } from "./types.js";
 import { EVENT_ACTION_TYPES, TRIGGER_SOURCES } from "./types.js";
 
-export type ProjectConfig = {
-  id: string;
-  name: string;
-  dir: string;
-  agents: {
-    project: string;
-    workers: WorkerConfig[];
-  };
-  verification: {
-    required: boolean;
-  };
-  defaults: {
-    maxRetries: number;
-    priority: "P0" | "P1" | "P2" | "P3";
-  };
-  manager?: ManagerSettings;
-  /** @deprecated Use manager instead. */
-  orchestrator?: ManagerSettings;
-};
-
-export type WorkerConfig = {
-  type: "claude-code" | "openclaw-agent";
-  profile?: string;
-  model?: string;
-  timeoutMs?: number;
-};
-
 /**
- * Load a project config from a YAML file.
- * @deprecated Use domain-based config via initializeAllDomains instead.
- * Retained for backward compatibility with setup-tool activate and tests.
+ * Load a workforce config document from disk.
  */
-export function loadProject(configPath: string): ProjectConfig {
+export function loadWorkforceConfig(configPath: string): WorkforceConfig {
   const content = fs.readFileSync(configPath, "utf-8");
-  return parseProjectYaml(content);
+  return parseWorkforceConfigContent(content);
 }
 
 /**
- * Load the workforce config (agent configs + approval policy) from a project.yaml.
- * Returns null if the file has no `agents` section with workforce configs.
- * @deprecated Use domain-based config via initializeAllDomains instead.
- * Retained for backward compatibility with setup-tool activate and tests.
+ * Parse a workforce config document from raw YAML content.
  */
-export function loadWorkforceConfig(configPath: string): WorkforceConfig | null {
-  const content = fs.readFileSync(configPath, "utf-8");
+export function parseWorkforceConfigContent(content: string): WorkforceConfig {
   const raw = YAML.parse(content) as Record<string, unknown> | null;
-  if (!raw) return null;
+  if (!raw) {
+    throw new Error("Config is empty or not an object.");
+  }
 
   const rawAgents = raw.agents as Record<string, unknown> | undefined;
-  if (!rawAgents) return null;
-
-  // Check if agents section has workforce-style configs (extends/role + expectations)
-  // vs the legacy format (project + workers)
-  const hasWorkforceAgents = Object.values(rawAgents).some(
-    (v) => typeof v === "object" && v !== null &&
-      ("extends" in (v as Record<string, unknown>) || "role" in (v as Record<string, unknown>)),
-  );
-  if (!hasWorkforceAgents) return null;
+  if (!rawAgents || typeof rawAgents !== "object") {
+    throw new Error("Config must define an agents object.");
+  }
 
   // Pre-parse skill_packs so they can be applied during agent normalization
   const skillPacks = raw.skill_packs && typeof raw.skill_packs === "object"
@@ -142,12 +120,16 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   for (const [agentId, rawAgent] of Object.entries(rawAgents)) {
     if (typeof rawAgent !== "object" || rawAgent === null) continue;
     const a = rawAgent as Record<string, unknown>;
-    if (!a.role && !a.extends) continue;
+    if (!a.extends) {
+      throw new Error(`Agent "${agentId}" is missing required field "extends".`);
+    }
 
     agents[agentId] = normalizeAgentConfig(a, skillPacks);
   }
 
-  if (Object.keys(agents).length === 0) return null;
+  if (Object.keys(agents).length === 0) {
+    throw new Error("Config must define at least one agent.");
+  }
 
   const approval = normalizeApprovalPolicy(raw.approval);
 
@@ -156,6 +138,18 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
     approval: approval ?? undefined,
     agents,
   };
+
+  if (typeof raw.adapter === "string" && ["openclaw", "codex", "claude-code"].includes(raw.adapter)) {
+    result.adapter = raw.adapter as WorkforceConfig["adapter"];
+  } else {
+    result.adapter = "codex";
+  }
+  if (raw.codex && typeof raw.codex === "object") {
+    result.codex = raw.codex as Record<string, unknown>;
+  }
+  if ((raw.claude_code ?? raw.claudeCode) && typeof (raw.claude_code ?? raw.claudeCode) === "object") {
+    result.claudeCode = (raw.claude_code ?? raw.claudeCode) as Record<string, unknown>;
+  }
 
   // Parse budgets config
   if (raw.budgets && typeof raw.budgets === "object") {
@@ -244,6 +238,16 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
     result.goals = goals;
   }
 
+  // Parse entity kind config
+  if (raw.entities && typeof raw.entities === "object") {
+    result.entities = normalizeEntityKindsConfig(raw.entities);
+  }
+
+  // Parse execution config
+  if (raw.execution !== undefined) {
+    result.execution = normalizeExecutionConfig(raw.execution);
+  }
+
   // Parse knowledge config
   if (raw.knowledge && typeof raw.knowledge === "object") {
     const k = raw.knowledge as Record<string, unknown>;
@@ -312,33 +316,6 @@ export function loadWorkforceConfig(configPath: string): WorkforceConfig | null 
   return result;
 }
 
-/** @deprecated Use domain-based config via initializeAllDomains. Alias for loadWorkforceConfig. */
-export const loadEnforcementConfig = loadWorkforceConfig;
-
-/**
- * Initialize a project: create DB, register for sweeps.
- */
-export function initProject(config: ProjectConfig): void {
-  // Ensure project directory exists
-  const projectDir = path.join(getProjectsDir(), config.id);
-  fs.mkdirSync(projectDir, { recursive: true });
-
-  // Initialize the database (runs migrations)
-  getDb(config.id);
-
-  // Register for sweep service
-  registerProject(config.id);
-
-  // Register manager if configured (accept both "manager" and legacy "orchestrator" key)
-  const mgrConfig = config.manager ?? config.orchestrator;
-  if (mgrConfig?.enabled) {
-    // Set projectDir so the charter file (PROJECT.md) can be loaded at bootstrap
-    mgrConfig.projectDir = resolveProjectDir(config.dir);
-    registerManagerProject(config.id, mgrConfig);
-
-  }
-}
-
 /**
  * Resolve the project directory path, expanding ~ if needed.
  */
@@ -349,126 +326,31 @@ export function resolveProjectDir(dir: string): string {
   return path.resolve(dir);
 }
 
-/**
- * Parse project.yaml using the yaml library.
- */
-function parseProjectYaml(content: string): ProjectConfig {
-  const raw = YAML.parse(content) as Record<string, unknown>;
-  return normalizeProjectConfig(raw);
-}
-
-function normalizeProjectConfig(raw: Record<string, unknown>): ProjectConfig {
-  const agents = raw.agents as Record<string, unknown> | undefined;
-  const verification = raw.verification as Record<string, unknown> | undefined;
-  const defaults = raw.defaults as Record<string, unknown> | undefined;
-  const workers = (agents?.workers as Record<string, unknown>[]) ?? [];
-  const orch = (raw.manager ?? raw.orchestrator) as Record<string, unknown> | undefined;
-
-  const config: ProjectConfig = {
-    id: String(raw.id ?? "default"),
-    name: String(raw.name ?? raw.id ?? "Default Project"),
-    dir: String(raw.dir ?? "."),
-    agents: {
-      project: String(agents?.project ?? "default"),
-      workers: workers.map((w) => ({
-        type: (String(w.type ?? "claude-code")) as "claude-code" | "openclaw-agent",
-        profile: w.profile ? String(w.profile) : undefined,
-        model: w.model ? String(w.model) : undefined,
-        timeoutMs: typeof w.timeoutMs === "number" ? w.timeoutMs : undefined,
-      })),
-    },
-    verification: {
-      required: verification?.required !== false,
-    },
-    defaults: {
-      maxRetries: typeof defaults?.maxRetries === "number" ? defaults.maxRetries : 3,
-      priority: (String(defaults?.priority ?? "P2")) as "P0" | "P1" | "P2" | "P3",
-    },
-  };
-
-  if (orch) {
-    const dispatchDefaults = orch.dispatchDefaults as Record<string, unknown> | undefined;
-    config.manager = {
-      enabled: orch.enabled !== false,
-      agentId: String(orch.agentId ?? config.agents.project),
-      cronSchedule: orch.cronSchedule ? String(orch.cronSchedule) : undefined,
-      directives: Array.isArray(orch.directives)
-        ? (orch.directives as unknown[]).map(String)
-        : [],
-      contextBudgetChars:
-        typeof orch.contextBudgetChars === "number" ? orch.contextBudgetChars : undefined,
-      dispatchDefaults: dispatchDefaults
-        ? {
-            profile: dispatchDefaults.profile ? String(dispatchDefaults.profile) : undefined,
-            model: dispatchDefaults.model ? String(dispatchDefaults.model) : undefined,
-            timeoutMs:
-              typeof dispatchDefaults.timeoutMs === "number"
-                ? dispatchDefaults.timeoutMs
-                : undefined,
-          }
-        : undefined,
-    };
-  }
-
-  return config;
-}
 
 // --- Workforce config normalizers ---
 
-const VALID_SOURCES: ContextSource["source"][] = [
-  "instructions", "custom", "project_md", "task_board",
-  "assigned_task", "knowledge", "file", "skill", "memory",
-  "memory_instructions", "memory_review_context",
-  "escalations", "workflows", "activity", "sweep_status",
-  "proposals", "agent_status", "cost_summary", "policy_status", "health_status",
-  "team_status", "team_performance", "soul", "tools_reference",
-  "channel_messages", "pending_messages", "goal_hierarchy", "planning_delta",
-  "velocity", "preferences", "trust_scores", "resources", "initiative_status",
-  "cost_forecast", "available_capacity", "knowledge_candidates",
-  "budget_guidance", "onboarding_welcome", "weekly_digest", "intervention_suggestions",
-"custom_stream", "observed_events",
-  "direction", "policies", "standards", "architecture",
-  "task_creation_standards", "execution_standards", "review_standards", "rejection_standards",
-  "clawforce_health_report",
-];
-
 function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Record<string, SkillPack>): AgentConfig {
-  // Resolve config aliases (group→department, subgroup→team, role→extends)
-  // before any other processing so canonical names are always available.
+  // Resolve config aliases (group→department, subgroup→team) before any
+  // other processing so canonical names are always available.
   const raw = resolveAliases(rawInput);
 
-  // Handle extends field — error if old role: field used
-  if (raw.role !== undefined) {
-    const oldRole = raw.role as string;
-    emitDiagnosticEvent({
-      type: "config_error",
-      message: `"role: ${oldRole}" is deprecated. Use "extends: ${oldRole}" instead.`,
-    });
-  }
-
-  // Use `extends` if set, fall back to `role` for backward compat, default to "employee"
+  // `extends` is the only supported preset selector.
   const rawExtends = typeof raw.extends === "string" && raw.extends.trim()
     ? raw.extends.trim()
     : undefined;
-  const rawRole = typeof raw.role === "string" && raw.role.trim()
-    ? raw.role.trim()
-    : undefined;
-  // Map legacy role aliases (applies to both extends and role for backward compat)
-  // e.g. role: worker → extends: worker (via alias) → employee (via legacy map)
-  const ROLE_ALIAS: Record<string, string> = { orchestrator: "manager", worker: "employee" };
-  const mappedExtends = rawExtends ? (ROLE_ALIAS[rawExtends] ?? rawExtends) : undefined;
-  const mappedRole = rawRole ? (ROLE_ALIAS[rawRole] ?? rawRole) : undefined;
-  const extendsFrom = mappedExtends ?? mappedRole ?? "employee";
+  if (rawExtends === "scheduled") {
+    throw new Error('Preset "scheduled" has been removed. Use "employee" instead.');
+  }
+  const extendsFrom = rawExtends ?? "employee";
 
-  // Accept both old and new field names for migration
-  const briefing = normalizeContextSources(raw.briefing ?? raw.context_in);
-  const excludeBriefing = normalizeExcludeContext(raw.exclude_briefing ?? raw.exclude_context);
-  const expectations = normalizeExpectations(raw.expectations ?? raw.required_outputs);
-  const performancePolicy = normalizePerformancePolicy(raw.performance_policy ?? raw.on_failure);
+  const briefing = normalizeContextSources(raw.briefing);
+  const excludeBriefing = normalizeExcludeContext(raw.exclude_briefing);
+  const expectations = normalizeExpectations(raw.expectations);
+  const performancePolicy = normalizePerformancePolicy(raw.performance_policy);
 
   // Determine whether the user explicitly provided these fields
-  const hasExplicitExpectations = Array.isArray(raw.expectations ?? raw.required_outputs);
-  const hasExplicitPolicy = typeof (raw.performance_policy ?? raw.on_failure) === "object" && (raw.performance_policy ?? raw.on_failure) !== null;
+  const hasExplicitExpectations = Array.isArray(raw.expectations);
+  const hasExplicitPolicy = typeof raw.performance_policy === "object" && raw.performance_policy !== null;
 
   // Apply role profile defaults, merging with agent-level overrides
   const merged = applyProfile(extendsFrom, {
@@ -584,6 +466,10 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
   const maxTurnsPerSession = typeof (raw.max_turns_per_session ?? raw.maxTurnsPerSession) === "number"
     ? (raw.max_turns_per_session ?? raw.maxTurnsPerSession) as number
     : undefined;
+  const runtimeRef = typeof (raw.runtime_ref ?? raw.runtimeRef) === "string"
+    && String(raw.runtime_ref ?? raw.runtimeRef).trim()
+    ? String(raw.runtime_ref ?? raw.runtimeRef).trim()
+    : undefined;
   const agentModel = typeof raw.model === "string" && raw.model.trim() ? raw.model.trim() : undefined;
 
   let scheduling: SchedulingConfig | undefined;
@@ -596,29 +482,11 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     };
   }
 
-  // Parse bootstrap config (CO-1: bootstrap budget control)
-  const bootstrapConfig = normalizeBootstrapConfig(raw.bootstrap_config ?? raw.bootstrapConfig);
-
-  // Parse bootstrap exclude files (CO-2: skip unnecessary bootstrap files)
-  const rawExcludeFiles = raw.bootstrap_exclude_files ?? raw.bootstrapExcludeFiles;
-  const bootstrapExcludeFiles = Array.isArray(rawExcludeFiles)
-    ? (rawExcludeFiles as unknown[]).filter((f: unknown): f is string => typeof f === "string")
-    : undefined;
-
-  // Parse allowed OpenClaw tools (CO-3: per-agent tool filtering)
-  const rawAllowedTools = raw.allowed_tools ?? raw.allowedTools;
-  const allowedTools = Array.isArray(rawAllowedTools)
-    ? (rawAllowedTools as unknown[]).filter((t: unknown): t is string => typeof t === "string")
-    : undefined;
-
-  // Resolve defaults from preset for new fields
   const presetDefaults = BUILTIN_AGENT_PRESETS[extendsFrom];
-  const effectiveBootstrapConfig = bootstrapConfig
-    ?? (presetDefaults?.bootstrapConfig as AgentConfig["bootstrapConfig"] | undefined);
-  const effectiveBootstrapExcludeFiles = bootstrapExcludeFiles
-    ?? (presetDefaults?.bootstrapExcludeFiles as string[] | undefined);
-  const effectiveAllowedTools = allowedTools
-    ?? (presetDefaults?.allowedTools as string[] | undefined);
+  const effectiveRuntime = mergeAgentRuntimeConfig(
+    getAgentRuntimeConfig(presetDefaults as AgentConfig | undefined),
+    normalizeConfiguredAgentRuntime(raw),
+  );
 
   return {
     extends: extendsFrom,
@@ -643,22 +511,14 @@ function normalizeAgentConfig(rawInput: Record<string, unknown>, skillPacks?: Re
     memory,
     contextBudgetChars,
     maxTurnsPerSession,
+    runtimeRef,
+    runtime: effectiveRuntime,
     model: agentModel,
-    bootstrapConfig: effectiveBootstrapConfig,
-    bootstrapExcludeFiles: effectiveBootstrapExcludeFiles?.length ? effectiveBootstrapExcludeFiles : undefined,
-    allowedTools: effectiveAllowedTools?.length ? effectiveAllowedTools : undefined,
+    bootstrapConfig: effectiveRuntime?.bootstrapConfig,
+    bootstrapExcludeFiles: effectiveRuntime?.bootstrapExcludeFiles,
+    allowedTools: effectiveRuntime?.allowedTools,
+    workspacePaths: effectiveRuntime?.workspacePaths,
   };
-}
-
-function normalizeBootstrapConfig(raw: unknown): BootstrapConfig | undefined {
-  if (typeof raw !== "object" || raw === null) return undefined;
-  const r = raw as Record<string, unknown>;
-  const result: BootstrapConfig = {};
-  const maxChars = r.max_chars ?? r.maxChars;
-  const totalMaxChars = r.total_max_chars ?? r.totalMaxChars;
-  if (typeof maxChars === "number" && maxChars > 0) result.maxChars = Math.floor(maxChars);
-  if (typeof totalMaxChars === "number" && totalMaxChars > 0) result.totalMaxChars = Math.floor(totalMaxChars);
-  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function normalizePermissions(raw: unknown): AgentConfig["permissions"] {
@@ -678,13 +538,13 @@ function normalizeContextSources(raw: unknown): ContextSource[] {
   return raw
     .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
     .map((item): ContextSource => {
-      if (!VALID_SOURCES.includes(item.source as ContextSource["source"])) {
+      if (!isKnownContextSource(item.source as string)) {
         emitDiagnosticEvent({
           type: "config_warning",
-          message: `Unknown context source "${item.source as string}" — falling back to "custom". Valid sources: ${VALID_SOURCES.join(", ")}`,
+          message: `Unknown context source "${item.source as string}" — falling back to "custom".`,
         });
       }
-      const source = VALID_SOURCES.includes(item.source as ContextSource["source"])
+      const source = isKnownContextSource(item.source as string)
         ? (item.source as ContextSource["source"])
         : "custom";
 
@@ -814,17 +674,17 @@ function normalizeJobs(raw: unknown): Record<string, JobDefinition> | undefined 
     if (typeof j.cron === "string" && j.cron.trim()) {
       job.cron = j.cron.trim();
     }
-    if (j.briefing !== undefined || j.context_in !== undefined) {
-      job.briefing = normalizeContextSources(j.briefing ?? j.context_in);
+    if (j.briefing !== undefined) {
+      job.briefing = normalizeContextSources(j.briefing);
     }
-    if (j.exclude_briefing !== undefined || j.exclude_context !== undefined) {
-      job.exclude_briefing = normalizeExcludeContext(j.exclude_briefing ?? j.exclude_context);
+    if (j.exclude_briefing !== undefined) {
+      job.exclude_briefing = normalizeExcludeContext(j.exclude_briefing);
     }
-    if (j.expectations !== undefined || j.required_outputs !== undefined) {
-      job.expectations = normalizeExpectations(j.expectations ?? j.required_outputs);
+    if (j.expectations !== undefined) {
+      job.expectations = normalizeExpectations(j.expectations);
     }
-    if (j.performance_policy !== undefined || j.on_failure !== undefined) {
-      job.performance_policy = normalizePerformancePolicy(j.performance_policy ?? j.on_failure);
+    if (j.performance_policy !== undefined) {
+      job.performance_policy = normalizePerformancePolicy(j.performance_policy);
     }
     if (j.compaction !== undefined) {
       const c = normalizeCompactionConfig(j.compaction);
@@ -1054,6 +914,7 @@ function normalizeApprovalPolicy(raw: unknown): ApprovalPolicy | null {
 const VALID_ASSIGNMENT_STRATEGIES: AssignmentStrategy[] = ["workload_balanced", "round_robin", "skill_matched"];
 
 const VALID_DISPATCH_MODES = ["event-driven", "cron", "manual"] as const;
+const VALID_DISPATCH_EXECUTORS = ["openclaw", "codex", "claude-code"] as const;
 
 function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
   const result: DispatchConfig = {};
@@ -1061,6 +922,9 @@ function normalizeDispatchConfig(raw: Record<string, unknown>): DispatchConfig {
   // Dispatch mode
   if (typeof raw.mode === "string" && (VALID_DISPATCH_MODES as readonly string[]).includes(raw.mode)) {
     result.mode = raw.mode as DispatchConfig["mode"];
+  }
+  if (typeof raw.executor === "string" && (VALID_DISPATCH_EXECUTORS as readonly string[]).includes(raw.executor)) {
+    result.executor = raw.executor as DispatchConfig["executor"];
   }
 
   if (typeof raw.max_concurrent_dispatches === "number" && raw.max_concurrent_dispatches > 0) {
@@ -1465,6 +1329,33 @@ function normalizeReviewConfig(raw: Record<string, unknown>): ReviewConfig {
     result.selfReviewMaxPriority = raw.self_review_max_priority as TaskPriority;
   }
 
+  if (raw.workflow_steward && typeof raw.workflow_steward === "object") {
+    const steward = raw.workflow_steward as Record<string, unknown>;
+    const normalized: NonNullable<ReviewConfig["workflowSteward"]> = {};
+
+    if (typeof steward.agent_id === "string" && steward.agent_id.trim()) {
+      normalized.agentId = steward.agent_id.trim();
+    }
+    if (typeof steward.auto_proposal_threshold === "number" && steward.auto_proposal_threshold > 0) {
+      normalized.autoProposalThreshold = steward.auto_proposal_threshold;
+    }
+    if (Array.isArray(steward.auto_proposal_reason_codes)) {
+      const allowed = new Set<string>(REVIEW_REASON_CODES);
+      const reasonCodes = steward.auto_proposal_reason_codes
+        .filter((code): code is import("./types.js").ReviewReasonCode => typeof code === "string" && allowed.has(code));
+      if (reasonCodes.length > 0) {
+        normalized.autoProposalReasonCodes = reasonCodes;
+      }
+    }
+    if (typeof steward.proposal_cooldown_hours === "number" && steward.proposal_cooldown_hours > 0) {
+      normalized.proposalCooldownHours = steward.proposal_cooldown_hours;
+    }
+
+    if (Object.keys(normalized).length > 0) {
+      result.workflowSteward = normalized;
+    }
+  }
+
   return result;
 }
 
@@ -1601,30 +1492,24 @@ function normalizeMemorySystemConfig(raw: Record<string, unknown>): MemoryConfig
 }
 
 // --- Agent config registry ---
-// Maps agentId → { projectId, config } for runtime lookups by hooks
+// Stores runtime agent config under namespaced keys and keeps a legacy bare-ID
+// alias only while that bare ID is unique across all loaded domains.
 
 type AgentConfigEntry = {
+  agentId: string;
   projectId: string;
   config: AgentConfig;
   /** Absolute path to the project directory on disk. */
   projectDir?: string;
 };
 
-const agentConfigRegistry = new Map<string, AgentConfigEntry>();
-
-/**
- * Namespace alias map: namespaced ID → bare ID.
- * When OpenClaw sends a namespaced agentId (e.g. "clawforce-dev:cf-lead") via hooks,
- * this map lets getAgentConfig resolve it to the canonical bare entry.
- * Kept separate from agentConfigRegistry so getRegisteredAgentIds() only returns bare IDs.
- */
-const namespacedAliases = new Map<string, string>();
-
-/** Approval policies keyed by projectId. */
-const approvalPolicies = new Map<string, ApprovalPolicy>();
-
 /** Extended project config keyed by projectId. */
 export type ExtendedProjectConfig = {
+  projectDir?: string;
+  storageDir?: string;
+  adapter?: WorkforceConfig["adapter"];
+  codex?: WorkforceConfig["codex"];
+  claudeCode?: WorkforceConfig["claudeCode"];
   policies?: WorkforceConfig["policies"];
   monitoring?: WorkforceConfig["monitoring"];
   riskTiers?: RiskTierConfig;
@@ -1646,12 +1531,34 @@ export type ExtendedProjectConfig = {
   trust?: WorkforceConfig["trust"];
   context?: WorkforceConfig["context"];
   memory?: WorkforceConfig["memory"];
+  entities?: WorkforceConfig["entities"];
+  execution?: WorkforceConfig["execution"];
 };
-const projectExtendedConfig = new Map<string, ExtendedProjectConfig>();
+
+type ProjectConfigRuntimeState = {
+  agentConfigRegistry: Map<string, AgentConfigEntry>;
+  bareAgentAliases: Map<string, string>;
+  bareAgentQualifiedIds: Map<string, Set<string>>;
+  runtimeAgentAliases: Map<string, string>;
+  runtimeAgentQualifiedIds: Map<string, Set<string>>;
+  projectAgentIds: Map<string, Set<string>>;
+  approvalPolicies: Map<string, ApprovalPolicy>;
+  projectExtendedConfig: Map<string, ExtendedProjectConfig>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getProjectConfigState(): ProjectConfigRuntimeState {
+  return runtime.projectConfig as ProjectConfigRuntimeState;
+}
 
 /** Get extended project config. */
 export function getExtendedProjectConfig(projectId: string): ExtendedProjectConfig | null {
-  return projectExtendedConfig.get(projectId) ?? null;
+  return getProjectConfigState().projectExtendedConfig.get(projectId) ?? null;
+}
+
+export function getProjectDir(projectId: string): string | null {
+  return getProjectConfigState().projectExtendedConfig.get(projectId)?.projectDir ?? null;
 }
 
 /**
@@ -1662,19 +1569,28 @@ export function registerWorkforceConfig(
   projectId: string,
   wfConfig: WorkforceConfig,
   projectDir?: string,
+  storageDir?: string,
 ): void {
+  const state = getProjectConfigState();
+  clearProjectAgentRegistrations(projectId);
+  state.approvalPolicies.delete(projectId);
+  unregisterManagerProjectByProject(projectId);
+  unregisterCustomSkills(projectId);
+  if (storageDir) {
+    setProjectStorageDir(projectId, storageDir);
+  } else {
+    clearProjectStorageDir(projectId);
+  }
+
   for (const [agentId, config] of Object.entries(wfConfig.agents)) {
-    agentConfigRegistry.set(agentId, { projectId, config, projectDir });
-    // Register a namespace alias so OpenClaw hook callbacks (which receive
-    // the namespaced ID like "clawforce-dev:cf-lead") can resolve the agent
-    namespacedAliases.set(toNamespacedAgentId(projectId, agentId), agentId);
+    registerAgentEntry(projectId, agentId, { agentId, projectId, config, projectDir });
   }
   if (wfConfig.approval) {
-    approvalPolicies.set(projectId, wfConfig.approval);
+    state.approvalPolicies.set(projectId, wfConfig.approval);
   }
 
   // Register manager cron if configured
-  const mgrConfig = wfConfig.manager ?? wfConfig.orchestrator;
+  const mgrConfig = wfConfig.manager;
   if (mgrConfig?.enabled) {
     if (projectDir) {
       mgrConfig.projectDir = projectDir;
@@ -1686,28 +1602,18 @@ export function registerWorkforceConfig(
   }
 
   // Register custom skill topics
-  if (wfConfig.skills && projectDir) {
+  if (projectDir) {
     try {
-      registerCustomSkills(projectId, wfConfig.skills, projectDir);
+      registerCustomSkills(projectId, wfConfig.skills ?? {}, projectDir);
     } catch (err) {
       safeLog("project.customSkills", err);
     }
   }
 
-  // Register budgets
-  if (wfConfig.budgets) {
-    try {
-      if (wfConfig.budgets.project) {
-        setBudget({ projectId, config: wfConfig.budgets.project });
-      }
-      if (wfConfig.budgets.agents) {
-        for (const [agentId, budgetConfig] of Object.entries(wfConfig.budgets.agents)) {
-          setBudget({ projectId, agentId, config: budgetConfig });
-        }
-      }
-    } catch (err) {
-      safeLog("project.budgetSetup", err);
-    }
+  try {
+    syncProjectBudgets(projectId, wfConfig.budgets);
+  } catch (err) {
+    safeLog("project.budgetSetup", err);
   }
 
   // Runtime escalation chain validation — catches cycles that span
@@ -1743,9 +1649,14 @@ export function registerWorkforceConfig(
   }
 
   // Store extra config sections for runtime use
-  if (wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || effectiveEventHandlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification || wfConfig.sweep || wfConfig.trust || wfConfig.context || wfConfig.memory) {
-    projectExtendedConfig.set(projectId, {
-      policies: wfConfig.policies,
+  if (projectDir || storageDir || wfConfig.adapter || wfConfig.codex || wfConfig.claudeCode || wfConfig.policies || wfConfig.monitoring || wfConfig.riskTiers || wfConfig.dispatch || wfConfig.assignment || wfConfig.toolGates || wfConfig.bulkThresholds || effectiveEventHandlers || wfConfig.triggers || wfConfig.review || wfConfig.channels || wfConfig.safety || wfConfig.lifecycle || wfConfig.managerBehavior || wfConfig.telemetry || wfConfig.contextOwnership || wfConfig.verification || wfConfig.sweep || wfConfig.trust || wfConfig.context || wfConfig.memory || wfConfig.entities || wfConfig.execution) {
+  state.projectExtendedConfig.set(projectId, {
+    projectDir,
+    storageDir,
+    adapter: wfConfig.adapter,
+    codex: wfConfig.codex,
+    claudeCode: wfConfig.claudeCode,
+    policies: wfConfig.policies,
       monitoring: wfConfig.monitoring,
       riskTiers: wfConfig.riskTiers,
       dispatch: wfConfig.dispatch,
@@ -1766,53 +1677,313 @@ export function registerWorkforceConfig(
       trust: wfConfig.trust,
       context: wfConfig.context,
       memory: wfConfig.memory,
+      entities: wfConfig.entities,
+      execution: wfConfig.execution,
     });
+  } else {
+    state.projectExtendedConfig.delete(projectId);
   }
 }
 
-/** @deprecated Use registerWorkforceConfig instead. */
-export const registerEnforcementConfig = registerWorkforceConfig;
+export type GoalSeedMode = "literal" | "titleized";
+
+export type ActivateWorkforceProjectOptions = {
+  projectDir?: string;
+  storageDir?: string;
+  scaffoldAgentDocs?: boolean;
+  recoverOrphanedSessions?: boolean;
+  goalSeedMode?: GoalSeedMode;
+  goalCreatedBy?: string;
+  syncExistingGoalMetadata?: boolean;
+};
+
+export type ActivateWorkforceProjectResult = {
+  registeredAgents: Array<{ id: string; extends: string | undefined }>;
+  orphanedSessionsRecovered: number;
+};
+
+/**
+ * Activate a workforce project into the live runtime.
+ *
+ * This is the shared runtime path used by setup activation and domain
+ * initialization. It keeps workforce registration,
+ * policy loading, DB/bootstrap, and goal seeding on one code path.
+ */
+export function activateWorkforceProject(
+  projectId: string,
+  wfConfig: WorkforceConfig,
+  options: ActivateWorkforceProjectOptions = {},
+): ActivateWorkforceProjectResult {
+  const {
+    projectDir,
+    storageDir,
+    scaffoldAgentDocs = false,
+    recoverOrphanedSessions: shouldRecoverOrphans = false,
+    goalSeedMode = "literal",
+    goalCreatedBy = "system:config",
+    syncExistingGoalMetadata = false,
+  } = options;
+
+  registerWorkforceConfig(projectId, wfConfig, projectDir, storageDir);
+
+  try {
+    // Ensure the runtime DB exists and the project participates in sweeps.
+    getDb(projectId);
+    registerProject(projectId);
+
+    registerProjectPolicies(projectId, wfConfig);
+
+    const registeredAgents = Object.entries(wfConfig.agents).map(([agentId, config]) => {
+      if (scaffoldAgentDocs && projectDir) {
+        try {
+          ensureAgentDocs(projectDir, agentId, config);
+        } catch (err) {
+          safeLog("project.activate.ensureAgentDocs", err);
+        }
+      }
+      return { id: agentId, extends: config.extends };
+    });
+
+    if (wfConfig.goals) {
+      seedConfiguredGoals(projectId, wfConfig.goals, {
+        mode: goalSeedMode,
+        createdBy: goalCreatedBy,
+        syncExistingGoalMetadata,
+      });
+    }
+
+    const orphanedSessionsRecovered = shouldRecoverOrphans
+      ? recoverOrphanedSessions(projectId).length
+      : 0;
+
+    return { registeredAgents, orphanedSessionsRecovered };
+  } catch (error) {
+    unregisterWorkforceProject(projectId);
+    throw error;
+  }
+}
+
+export function unregisterWorkforceProject(projectId: string): void {
+  const state = getProjectConfigState();
+  clearProjectAgentRegistrations(projectId);
+  state.approvalPolicies.delete(projectId);
+  state.projectExtendedConfig.delete(projectId);
+  clearProjectStorageDir(projectId);
+  unregisterManagerProjectByProject(projectId);
+  unregisterCustomSkills(projectId);
+  clearProjectPolicies(projectId);
+  unregisterProject(projectId);
+}
 
 /**
  * Look up agent config by agent ID.
  *
  * Accepts both bare IDs ("cf-lead") and namespaced IDs ("clawforce-dev:cf-lead").
- * When a namespaced ID is provided and not found directly, resolves via the
- * namespace alias map or falls back to parsing the bare portion.
+ * Bare IDs only resolve when they are unambiguous across loaded domains.
+ * Project-local lookups always try the local bare ID first, which preserves
+ * agent IDs that already contain ":" (for example "agent:verifier").
+ * Pass projectId when the caller already knows domain context.
  */
-export function getAgentConfig(agentId: string): AgentConfigEntry | null {
-  // Direct lookup (bare ID)
-  const direct = agentConfigRegistry.get(agentId);
-  if (direct) return direct;
+export function getAgentConfig(agentId: string, projectId?: string): AgentConfigEntry | null {
+  const state = getProjectConfigState();
+  if (projectId) {
+    const scopedEntry = state.agentConfigRegistry.get(toNamespacedAgentId(projectId, agentId));
+    if (scopedEntry) return scopedEntry;
 
-  // Try namespace alias map (namespaced ID → bare ID → entry)
-  const bareId = namespacedAliases.get(agentId);
-  if (bareId) return agentConfigRegistry.get(bareId) ?? null;
+    const exactEntry = state.agentConfigRegistry.get(agentId);
+    if (exactEntry?.projectId === projectId) return exactEntry;
 
-  // Last resort: parse the namespaced ID and try the bare portion
-  const parsed = parseNamespacedAgentId(agentId);
-  if (parsed) {
-    return agentConfigRegistry.get(parsed.agentId) ?? null;
+    const runtimeQualifiedId = state.runtimeAgentAliases.get(agentId);
+    if (!runtimeQualifiedId) return null;
+    const runtimeEntry = state.agentConfigRegistry.get(runtimeQualifiedId);
+    return runtimeEntry?.projectId === projectId ? runtimeEntry : null;
   }
-  return null;
+
+  const qualifiedId = state.bareAgentAliases.get(agentId);
+  if (qualifiedId) {
+    return state.agentConfigRegistry.get(qualifiedId) ?? null;
+  }
+
+  const runtimeQualifiedId = state.runtimeAgentAliases.get(agentId);
+  if (runtimeQualifiedId) {
+    return state.agentConfigRegistry.get(runtimeQualifiedId) ?? null;
+  }
+
+  return state.agentConfigRegistry.get(agentId) ?? null;
+}
+
+/**
+ * Resolve the OpenClaw-facing agent identifier for a registered ClawForce agent.
+ * Existing runtimes can supply `runtimeRef` to keep their native agent IDs.
+ */
+export function resolveOpenClawAgentId(agentId: string, projectId?: string): string {
+  const entry = getAgentConfig(agentId, projectId);
+  if (!entry) return agentId;
+  if (entry.config.runtimeRef) return entry.config.runtimeRef;
+  return toNamespacedAgentId(entry.projectId, entry.agentId);
+}
+
+function registerProjectPolicies(projectId: string, wfConfig: WorkforceConfig): void {
+  const allPolicies: Array<{ name: string; type: string; target?: string; config: Record<string, unknown> }> = [];
+
+  if (wfConfig.policies && wfConfig.policies.length > 0) {
+    allPolicies.push(...wfConfig.policies);
+  }
+
+  try {
+    const agentEntries = Object.fromEntries(
+      Object.entries(wfConfig.agents).map(([id, cfg]) => [id, { extends: cfg.extends }]),
+    );
+    const scopePolicies = generateDefaultScopePolicies(agentEntries, wfConfig.policies);
+    allPolicies.push(...scopePolicies);
+  } catch (err) {
+    safeLog("project.activate.scopePolicies", err);
+  }
+
+  try {
+    registerPolicies(projectId, allPolicies);
+  } catch (err) {
+    safeLog("project.activate.registerPolicies", err);
+  }
+}
+
+function seedConfiguredGoals(
+  projectId: string,
+  goals: Record<string, GoalConfigEntry>,
+  options: {
+    mode: GoalSeedMode;
+    createdBy: string;
+    syncExistingGoalMetadata: boolean;
+  },
+): void {
+  try {
+    const existing = listGoals(projectId, { status: "active" });
+    const existingByTitle = new Map(existing.map((goal) => [goal.title, goal]));
+
+    for (const [goalKey, goalDef] of Object.entries(goals)) {
+      const title = options.mode === "titleized" ? titleizeGoalKey(goalKey) : goalKey;
+      const match = existingByTitle.get(title);
+      if (match) {
+        if (options.syncExistingGoalMetadata && (goalDef.department != null || goalDef.allocation != null)) {
+          try {
+            const db = getDb(projectId);
+            db.prepare(
+              "UPDATE goals SET department = COALESCE(?, department), allocation = COALESCE(?, allocation) WHERE id = ?",
+            ).run(goalDef.department ?? null, goalDef.allocation ?? null, match.id);
+          } catch {
+            // Metadata sync is best-effort only.
+          }
+        }
+        continue;
+      }
+
+      createGoal({
+        projectId,
+        title,
+        description: goalDef.description,
+        acceptanceCriteria: goalDef.acceptance_criteria,
+        ownerAgentId: goalDef.owner_agent_id,
+        department: goalDef.department,
+        team: goalDef.team,
+        allocation: goalDef.allocation,
+        createdBy: options.createdBy,
+      });
+    }
+  } catch (err) {
+    safeLog("project.activate.seedGoals", err);
+  }
+}
+
+function syncProjectBudgets(
+  projectId: string,
+  budgets?: WorkforceConfig["budgets"],
+): void {
+  const db = getDb(projectId);
+
+  syncBudgetRows(projectId, budgets, db);
+
+  if (!budgets) return;
+
+  if (budgets.project) {
+    setBudget({ projectId, config: budgets.project }, db);
+  }
+
+  if (budgets.agents) {
+    for (const [agentId, budgetConfig] of Object.entries(budgets.agents)) {
+      setBudget({ projectId, agentId, config: budgetConfig }, db);
+    }
+  }
+}
+
+function syncBudgetRows(
+  projectId: string,
+  budgets: WorkforceConfig["budgets"] | undefined,
+  db: DatabaseSync,
+): void {
+  if (!budgets?.project) {
+    db.prepare("DELETE FROM budgets WHERE project_id = ? AND agent_id IS NULL").run(projectId);
+  }
+
+  const desiredAgentBudgetIds = Object.keys(budgets?.agents ?? {});
+  if (desiredAgentBudgetIds.length === 0) {
+    db.prepare("DELETE FROM budgets WHERE project_id = ? AND agent_id IS NOT NULL").run(projectId);
+    return;
+  }
+
+  const placeholders = desiredAgentBudgetIds.map(() => "?").join(", ");
+  db.prepare(
+    `DELETE FROM budgets
+     WHERE project_id = ? AND agent_id IS NOT NULL AND agent_id NOT IN (${placeholders})`,
+  ).run(projectId, ...desiredAgentBudgetIds);
+}
+
+function titleizeGoalKey(goalKey: string): string {
+  return goalKey
+    .split("-")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 /** Get approval policy for a project. */
 export function getApprovalPolicy(projectId: string): ApprovalPolicy | null {
-  return approvalPolicies.get(projectId) ?? null;
+  return getProjectConfigState().approvalPolicies.get(projectId) ?? null;
 }
 
-/** Get all registered agent IDs. */
-export function getRegisteredAgentIds(): string[] {
-  return [...agentConfigRegistry.keys()];
+/**
+ * Get registered agent IDs.
+ *
+ * With projectId, returns bare IDs for that domain.
+ * Without projectId, returns bare IDs when unique and namespaced IDs for
+ * colliding agent names so no registrations are silently omitted.
+ */
+export function getRegisteredAgentIds(projectId?: string): string[] {
+  const state = getProjectConfigState();
+  if (projectId) {
+    return [...(state.projectAgentIds.get(projectId) ?? [])];
+  }
+
+  const ids: string[] = [];
+  for (const [agentId, qualifiedIds] of state.bareAgentQualifiedIds) {
+    if (qualifiedIds.size === 1) {
+      ids.push(agentId);
+      continue;
+    }
+    ids.push(...[...qualifiedIds].sort());
+  }
+  return ids;
 }
 
 /** Clear all registrations (for testing). */
 export function resetEnforcementConfigForTest(): void {
-  agentConfigRegistry.clear();
-  namespacedAliases.clear();
-  approvalPolicies.clear();
-  projectExtendedConfig.clear();
+  const state = getProjectConfigState();
+  state.agentConfigRegistry.clear();
+  state.bareAgentAliases.clear();
+  state.bareAgentQualifiedIds.clear();
+  state.runtimeAgentAliases.clear();
+  state.runtimeAgentQualifiedIds.clear();
+  state.projectAgentIds.clear();
+  state.approvalPolicies.clear();
+  state.projectExtendedConfig.clear();
 }
 
 /**
@@ -1828,6 +1999,106 @@ export function registerAgentInProject(
   config: AgentConfig,
   projectDir?: string,
 ): void {
-  agentConfigRegistry.set(agentId, { projectId, config, projectDir });
-  namespacedAliases.set(toNamespacedAgentId(projectId, agentId), agentId);
+  registerAgentEntry(projectId, agentId, { agentId, projectId, config, projectDir });
+}
+
+function registerAgentEntry(projectId: string, agentId: string, entry: AgentConfigEntry): void {
+  const state = getProjectConfigState();
+  const qualifiedId = toNamespacedAgentId(projectId, agentId);
+  state.agentConfigRegistry.set(qualifiedId, entry);
+
+  let projectIds = state.projectAgentIds.get(projectId);
+  if (!projectIds) {
+    projectIds = new Set<string>();
+    state.projectAgentIds.set(projectId, projectIds);
+  }
+  projectIds.add(agentId);
+
+  let qualifiedIds = state.bareAgentQualifiedIds.get(agentId);
+  if (!qualifiedIds) {
+    qualifiedIds = new Set<string>();
+    state.bareAgentQualifiedIds.set(agentId, qualifiedIds);
+  }
+  qualifiedIds.add(qualifiedId);
+  refreshBareAlias(agentId);
+
+  const runtimeRef = entry.config.runtimeRef?.trim();
+  if (runtimeRef && runtimeRef !== agentId) {
+    let runtimeQualifiedIds = state.runtimeAgentQualifiedIds.get(runtimeRef);
+    if (!runtimeQualifiedIds) {
+      runtimeQualifiedIds = new Set<string>();
+      state.runtimeAgentQualifiedIds.set(runtimeRef, runtimeQualifiedIds);
+    }
+    runtimeQualifiedIds.add(qualifiedId);
+    refreshRuntimeAlias(runtimeRef);
+  }
+}
+
+function clearProjectAgentRegistrations(projectId: string): void {
+  const state = getProjectConfigState();
+  const bareIds = state.projectAgentIds.get(projectId);
+  if (!bareIds) return;
+
+  for (const agentId of bareIds) {
+    const qualifiedId = toNamespacedAgentId(projectId, agentId);
+    const entry = state.agentConfigRegistry.get(qualifiedId);
+    state.agentConfigRegistry.delete(qualifiedId);
+
+    const qualifiedIds = state.bareAgentQualifiedIds.get(agentId);
+    if (qualifiedIds) {
+      qualifiedIds.delete(qualifiedId);
+      if (qualifiedIds.size === 0) {
+        state.bareAgentQualifiedIds.delete(agentId);
+      }
+      refreshBareAlias(agentId);
+    }
+
+    const runtimeRef = entry?.config.runtimeRef?.trim();
+    if (runtimeRef && runtimeRef !== agentId) {
+      const runtimeQualifiedIds = state.runtimeAgentQualifiedIds.get(runtimeRef);
+      if (runtimeQualifiedIds) {
+        runtimeQualifiedIds.delete(qualifiedId);
+        if (runtimeQualifiedIds.size === 0) {
+          state.runtimeAgentQualifiedIds.delete(runtimeRef);
+          state.runtimeAgentAliases.delete(runtimeRef);
+        } else {
+          refreshRuntimeAlias(runtimeRef);
+        }
+      }
+    }
+  }
+
+  state.projectAgentIds.delete(projectId);
+}
+
+function refreshBareAlias(agentId: string): void {
+  const state = getProjectConfigState();
+  const qualifiedIds = state.bareAgentQualifiedIds.get(agentId);
+  if (!qualifiedIds || qualifiedIds.size === 0) {
+    state.bareAgentAliases.delete(agentId);
+    return;
+  }
+
+  if (qualifiedIds.size === 1) {
+    state.bareAgentAliases.set(agentId, [...qualifiedIds][0]!);
+    return;
+  }
+
+  state.bareAgentAliases.delete(agentId);
+}
+
+function refreshRuntimeAlias(runtimeRef: string): void {
+  const state = getProjectConfigState();
+  const qualifiedIds = state.runtimeAgentQualifiedIds.get(runtimeRef);
+  if (!qualifiedIds || qualifiedIds.size === 0) {
+    state.runtimeAgentAliases.delete(runtimeRef);
+    return;
+  }
+
+  if (qualifiedIds.size === 1) {
+    state.runtimeAgentAliases.set(runtimeRef, [...qualifiedIds][0]!);
+    return;
+  }
+
+  state.runtimeAgentAliases.delete(runtimeRef);
 }

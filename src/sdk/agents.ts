@@ -23,8 +23,8 @@ import { getAgentCapabilities, hasCapability as capabilityCheck } from "./capabi
 import type { AgentCapability, AgentInfo } from "./types.js";
 
 /** Convert an internal agent registry entry into the public AgentInfo shape. */
-function toAgentInfo(agentId: string): AgentInfo | undefined {
-  const entry = getAgentConfig(agentId);
+function toAgentInfo(agentId: string, projectId?: string): AgentInfo | undefined {
+  const entry = getAgentConfig(agentId, projectId);
   if (!entry) return undefined;
   const { config } = entry;
   return {
@@ -50,20 +50,19 @@ export class AgentsNamespace {
    * `group` maps to the internal `department` field.
    */
   list(filters?: { group?: string }): AgentInfo[] {
-    const allIds = getRegisteredAgentIds();
+    const allIds = getRegisteredAgentIds(this.domain);
     const result: AgentInfo[] = [];
 
     for (const agentId of allIds) {
-      const entry = getAgentConfig(agentId);
+      const entry = getAgentConfig(agentId, this.domain);
       if (!entry) continue;
-      if (entry.projectId !== this.domain) continue;
 
       // Apply group filter (group → department)
       if (filters?.group !== undefined && entry.config.department !== filters.group) {
         continue;
       }
 
-      const info = toAgentInfo(agentId);
+      const info = toAgentInfo(agentId, this.domain);
       if (info) result.push(info);
     }
 
@@ -75,9 +74,9 @@ export class AgentsNamespace {
    * in this domain.
    */
   get(agentId: string): AgentInfo | undefined {
-    const entry = getAgentConfig(agentId);
-    if (!entry || entry.projectId !== this.domain) return undefined;
-    return toAgentInfo(agentId);
+    const entry = getAgentConfig(agentId, this.domain);
+    if (!entry) return undefined;
+    return toAgentInfo(agentId, this.domain);
   }
 
   /**
@@ -86,8 +85,8 @@ export class AgentsNamespace {
    * coordination.enabled.
    */
   capabilities(agentId: string): AgentCapability[] {
-    const entry = getAgentConfig(agentId);
-    if (!entry || entry.projectId !== this.domain) return [];
+    const entry = getAgentConfig(agentId, this.domain);
+    if (!entry) return [];
     const { config } = entry;
     return getAgentCapabilities({
       extends: config.extends,
@@ -100,8 +99,8 @@ export class AgentsNamespace {
    * Returns false for unknown agents.
    */
   hasCapability(agentId: string, cap: AgentCapability): boolean {
-    const entry = getAgentConfig(agentId);
-    if (!entry || entry.projectId !== this.domain) return false;
+    const entry = getAgentConfig(agentId, this.domain);
+    if (!entry) return false;
     const { config } = entry;
     return capabilityCheck(
       {
@@ -120,8 +119,8 @@ export class AgentsNamespace {
    * the sentinel value "parent").
    */
   hierarchy(agentId: string): { reportsTo?: string; directReports: string[] } {
-    const entry = getAgentConfig(agentId);
-    if (!entry || entry.projectId !== this.domain) {
+    const entry = getAgentConfig(agentId, this.domain);
+    if (!entry) {
       return { reportsTo: undefined, directReports: [] };
     }
 
@@ -141,7 +140,7 @@ export class AgentsNamespace {
     const ids = getDepartmentAgents(this.domain, groupName);
     const result: AgentInfo[] = [];
     for (const id of ids) {
-      const info = toAgentInfo(id);
+      const info = toAgentInfo(id, this.domain);
       if (info) result.push(info);
     }
     return result;

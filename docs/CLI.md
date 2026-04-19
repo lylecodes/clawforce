@@ -8,6 +8,8 @@ Usage: pnpm cf <command> [options]
 
 All commands accept `--domain=ID` (or `--project=ID`) to target a specific domain. Defaults to `clawforce-dev`.
 
+For repo development, `pnpm cf`, `pnpm build`, `pnpm test`, and `pnpm typecheck` all run through the runtime pinned in `.nvmrc`. Use `pnpm runtime:doctor` if your shell Node and the repo runtime drift apart.
+
 ## Quick Reference
 
 | Command | Purpose |
@@ -32,6 +34,7 @@ All commands accept `--domain=ID` (or `--project=ID`) to target a specific domai
 | `cf inbox` | User messages from/to agents |
 | `cf approve` | Approve a pending proposal |
 | `cf reject` | Reject a pending proposal |
+| `cf verdict` | Submit a human review verdict for a task in `REVIEW` |
 | `cf message` | Send a message to an agent |
 | `cf replay` | Replay session tool calls with full I/O |
 | `cf watch` | Curated feed -- only what changed since last check |
@@ -42,6 +45,7 @@ All commands accept `--domain=ID` (or `--project=ID`) to target a specific domai
 | `cf org` | Org tree with runtime status |
 | `cf running` | Current runtime state |
 | `cf health` | Comprehensive health check |
+| `pnpm runtime:doctor` | Diagnose shell/runtime/native-addon mismatches |
 
 ---
 
@@ -174,6 +178,15 @@ Approve or reject a pending proposal. First 8 characters of the UUID are suffici
 ```
 pnpm cf approve a3f8c2d1
 pnpm cf reject a3f8c2d1 --feedback="Too broad"
+```
+
+### `cf verdict <task-id> --pass|--fail [--reason="note"]`
+
+Submit the operator review decision for a task already in `REVIEW`. This is the customer-path lever for human review, not an internal admin shortcut. On success, ClawForce drains follow-on workflow so linked entity issues and feed state stay current.
+
+```bash
+pnpm cf verdict 0f10e6b3 --pass --reason="Evidence is sufficient"
+pnpm cf verdict 0f10e6b3 --fail --reason="Pipeline still fails locally"
 ```
 
 ### `cf message <agent> "text"`

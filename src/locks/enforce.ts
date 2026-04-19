@@ -8,7 +8,7 @@
  * a human dashboard edit will automatically create or refresh a lock.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getLock, getOverridePolicy, refreshLock, type LockEntry } from "./store.js";
 import { writeAuditEntry } from "../audit.js";
 

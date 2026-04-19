@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -30,10 +30,12 @@ vi.mock("../../src/dispatch/spawn.js", () => ({
 const { getMemoryDb } = await import("../../src/db.js");
 const { createTask, transitionTask, attachEvidence, getTask } = await import("../../src/tasks/ops.js");
 const { enqueue, getQueueStatus } = await import("../../src/dispatch/queue.js");
-const { dispatchLoop, resetDispatcherForTest, getConcurrencyInfo, buildRetryContext, hasAcceptanceCriteria } = await import("../../src/dispatch/dispatcher.js");
+const { dispatchLoop, processAndDispatch, resetDispatcherForTest, getConcurrencyInfo, buildRetryContext, hasAcceptanceCriteria } = await import("../../src/dispatch/dispatcher.js");
 const { listEvents } = await import("../../src/events/store.js");
 const { queryMetrics } = await import("../../src/metrics.js");
 const { queryAuditLog } = await import("../../src/audit.js");
+const { registerWorkforceConfig } = await import("../../src/project.js");
+const { acquireControllerLease } = await import("../../src/runtime/controller-leases.js");
 
 describe("dispatch/dispatcher", () => {
   let db: DatabaseSync;
@@ -71,6 +73,29 @@ describe("dispatch/dispatcher", () => {
     expect(dispatchedRow.cnt).toBe(1);
   });
 
+  it("namespaces registered project agents at the dispatch boundary", async () => {
+    registerWorkforceConfig(PROJECT, {
+      name: PROJECT,
+      agents: {
+        worker: {
+          extends: "employee",
+          title: "Worker",
+        },
+      },
+    });
+
+    const task = createTask({
+      projectId: PROJECT, title: "Namespaced dispatch", createdBy: "agent:pm", assignedTo: "worker",
+    }, db);
+
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
+    await dispatchLoop(PROJECT, db);
+
+    expect(mockDispatchViaInject).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: `${PROJECT}:worker`,
+    }));
+  });
+
   it("dispatches queued items when task state is lowercase assigned", async () => {
     const task = createTask({
       projectId: PROJECT, title: "Legacy assigned task", createdBy: "agent:pm", assignedTo: "agent:worker",
@@ -86,6 +111,54 @@ describe("dispatch/dispatcher", () => {
       "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND status = 'dispatched'",
     ).get(PROJECT) as Record<string, unknown>;
     expect(dispatchedRow.cnt).toBe(1);
+  });
+
+  it("normalizes stale recurring workflow task descriptions before dispatch validation", async () => {
+    registerWorkforceConfig(PROJECT, {
+      name: PROJECT,
+      agents: {
+        steward: {
+          extends: "employee",
+          title: "Steward",
+          jobs: {
+            onboarding_backlog_sweep: {
+              frequency: "1/hour",
+              nudge: "Review onboarding backlog and open governed follow-up work when needed.",
+            },
+          },
+        },
+      },
+    });
+
+    const task = createTask({
+      projectId: PROJECT,
+      title: "Run recurring workflow steward.onboarding_backlog_sweep",
+      description: "Recurring workflow run for steward.onboarding_backlog_sweep.",
+      createdBy: "system:recurring-job",
+      assignedTo: "steward",
+      metadata: {
+        recurringJob: {
+          agentId: "steward",
+          jobName: "onboarding_backlog_sweep",
+          schedule: "1/hour",
+          reason: "never run before",
+          scheduledAt: Date.now(),
+        },
+      },
+    }, db);
+
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
+    const dispatched = await dispatchLoop(PROJECT, db);
+
+    expect(dispatched).toBe(1);
+    const refreshedTask = getTask(PROJECT, task.id, db);
+    expect(refreshedTask?.description).toContain("## Acceptance Criteria");
+
+    const queueRow = db.prepare(
+      "SELECT status, last_error FROM dispatch_queue WHERE project_id = ? AND task_id = ? ORDER BY created_at DESC LIMIT 1",
+    ).get(PROJECT, task.id) as Record<string, unknown> | undefined;
+    expect(queueRow?.status).toMatch(/failed|dispatched|completed/);
+    expect(String(queueRow?.last_error ?? "")).not.toContain("acceptance criteria");
   });
 
   it("fails items for tasks in non-dispatchable states", async () => {
@@ -178,6 +251,51 @@ describe("dispatch/dispatcher", () => {
     const events = listEvents(PROJECT, { type: "dispatch_failed" }, db);
     expect(events).toHaveLength(1);
     expect(events[0]!.payload.error).toBe("Agent session spawn failed");
+  });
+
+  it("immediately dead-letters non-retryable dispatch errors", async () => {
+    mockDispatchViaInject.mockResolvedValue({
+      ok: false, error: "Not logged in · Please run /login",
+    });
+
+    const task = createTask({
+      projectId: PROJECT, title: "Auth blocked task", createdBy: "agent:pm", assignedTo: "agent:worker",
+    }, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
+
+    await dispatchLoop(PROJECT, db);
+
+    const failedEvents = listEvents(PROJECT, { type: "dispatch_failed" }, db);
+    expect(failedEvents).toHaveLength(1);
+    expect(failedEvents[0]!.payload.nonRetryable).toBe(true);
+
+    const deadLetterEvents = listEvents(PROJECT, { type: "dispatch_dead_letter" }, db);
+    expect(deadLetterEvents).toHaveLength(1);
+    expect(deadLetterEvents[0]!.payload.lastError).toBe("Not logged in · Please run /login");
+  });
+
+  it("skips processAndDispatch when a foreign controller owns the project", async () => {
+    const task = createTask({
+      projectId: PROJECT, title: "Queued task", createdBy: "agent:pm", assignedTo: "agent:worker",
+    }, db);
+    enqueue(PROJECT, task.id, { prompt: "do it" }, undefined, db);
+
+    acquireControllerLease(PROJECT, {
+      ownerId: "controller:foreign",
+      ownerLabel: "foreign-owner",
+      purpose: "sweep",
+      ttlMs: 60_000,
+    }, db);
+
+    const result = await processAndDispatch(PROJECT, db);
+
+    expect(result.eventsProcessed).toBe(0);
+    expect(result.dispatched).toBe(0);
+    expect(result.controller?.skipped).toBe(true);
+    expect(result.controller?.ownerId).toBe("controller:foreign");
+
+    const status = getQueueStatus(PROJECT, db);
+    expect(status.queued).toBe(1);
   });
 
   // --- Dead letter emission from dispatcher ---

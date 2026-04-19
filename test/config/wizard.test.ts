@@ -48,7 +48,7 @@ describe("init wizard", () => {
     initDomain(tmpDir, {
       name: "rentright",
       paths: ["~/workplace/rentright-api"],
-      orchestrator: "lyle-pa",
+      managerAgentId: "lyle-pa",
       agents: ["compliance-bot"],
     });
 
@@ -119,11 +119,11 @@ describe("init wizard", () => {
     initDomain(tmpDir, { name: "proj", agents: ["a"] });
 
     updateDomain(tmpDir, "proj", {
-      updates: { orchestrator: "a", paths: ["~/new-path"] },
+      updates: { manager: { enabled: true, agentId: "a" }, paths: ["~/new-path"] },
     });
 
     const content = fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8");
-    expect(content).toContain("orchestrator: a");
+    expect(content).toContain("agentId: a");
     expect(content).toContain("~/new-path");
     expect(content).toContain("domain: proj"); // preserved
   });
@@ -132,13 +132,13 @@ describe("init wizard", () => {
     const { scaffoldConfigDir, initDomain, updateDomain } = await import("../../src/config/wizard.js");
 
     scaffoldConfigDir(tmpDir);
-    initDomain(tmpDir, { name: "proj", agents: ["a"], orchestrator: "a" });
+    initDomain(tmpDir, { name: "proj", agents: ["a"], managerAgentId: "a" });
 
     updateDomain(tmpDir, "proj", { updates: { paths: ["~/x"] } });
 
     const YAML = (await import("yaml")).default;
     const content = YAML.parse(fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8"));
-    expect(content.orchestrator).toBe("a"); // preserved
+    expect(content.manager).toEqual({ enabled: true, agentId: "a" });
     expect(content.paths).toEqual(["~/x"]);
   });
 
@@ -208,6 +208,33 @@ describe("init wizard", () => {
     expect(config.agents.bot.extends).toBe("employee");
   });
 
+  it("addAgentToGlobal preserves unrelated comments in config.yaml", async () => {
+    const { scaffoldConfigDir, addAgentToGlobal } = await import("../../src/config/wizard.js");
+
+    scaffoldConfigDir(tmpDir);
+    fs.writeFileSync(
+      path.join(tmpDir, "config.yaml"),
+      [
+        "# top comment",
+        "agents:",
+        "  keeper:",
+        "    extends: manager",
+        "# defaults comment",
+        "defaults:",
+        "  retries: 1",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    addAgentToGlobal(tmpDir, "bot", { extends: "employee" });
+
+    const raw = fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8");
+    expect(raw).toContain("# top comment");
+    expect(raw).toContain("# defaults comment");
+    expect(raw).toContain("bot:");
+  });
+
   it("removes agent from global via removeAgentFromGlobal", async () => {
     const { scaffoldConfigDir, addAgentToGlobal, removeAgentFromGlobal } = await import("../../src/config/wizard.js");
 
@@ -237,14 +264,14 @@ describe("init wizard", () => {
     scaffoldConfigDir(tmpDir);
     addAgentToGlobal(tmpDir, "bot", { extends: "employee" });
     addAgentToGlobal(tmpDir, "keeper", { extends: "manager" });
-    initDomain(tmpDir, { name: "proj", agents: ["bot", "keeper"], orchestrator: "bot" });
+    initDomain(tmpDir, { name: "proj", agents: ["bot", "keeper"], managerAgentId: "bot" });
 
     removeAgentFromGlobal(tmpDir, "bot", true);
 
     const YAML = (await import("yaml")).default;
     const domain = YAML.parse(fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8"));
     expect(domain.agents).toEqual(["keeper"]);
-    expect(domain.orchestrator).toBeUndefined(); // cleared since orchestrator was bot
+    expect(domain.manager).toBeUndefined();
   });
 
   it("updates agent fields via updateAgentInGlobal", async () => {

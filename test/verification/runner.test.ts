@@ -1,8 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { runVerificationGates, formatGateResults } from "../../src/verification/runner.js";
 import type { VerificationGate } from "../../src/types.js";
+import { registerWorkforceConfig, resetEnforcementConfigForTest } from "../../src/project.js";
+
+const DRY_RUN_PROJECT = "verification-runner-dry-run";
 
 describe("verification/runner", () => {
+  afterEach(() => {
+    resetEnforcementConfigForTest();
+  });
+
   it("runs a passing gate", () => {
     const gates: VerificationGate[] = [
       { name: "echo-test", command: "echo hello", required: true },
@@ -91,6 +98,27 @@ describe("verification/runner", () => {
 
     expect(result.results[0]!.passed).toBe(false);
     expect(result.results[0]!.stderr).toContain("error-output");
+  });
+
+  it("marks simulated gates as not passed when dry-run execution policy intercepts them", () => {
+    registerWorkforceConfig(DRY_RUN_PROJECT, {
+      name: "dry-run",
+      agents: {},
+      execution: {
+        mode: "dry_run",
+        defaultMutationPolicy: "simulate",
+      },
+    });
+
+    const result = runVerificationGates(
+      [{ name: "simulated-gate", command: "echo ok", required: true }],
+      process.cwd(),
+      { projectId: DRY_RUN_PROJECT },
+    );
+
+    expect(result.allRequiredPassed).toBe(false);
+    expect(result.results[0]?.simulated).toBe(true);
+    expect(result.results[0]?.executionEffect).toBe("simulate");
   });
 
   describe("formatGateResults", () => {

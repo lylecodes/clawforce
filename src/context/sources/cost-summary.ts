@@ -4,7 +4,7 @@
  * Renders project/agent cost breakdown as markdown for context injection.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../sqlite-driver.js";
 import { getDb } from "../../db.js";
 import { getCostSummary } from "../../cost.js";
 

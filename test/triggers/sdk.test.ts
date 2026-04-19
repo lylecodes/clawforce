@@ -5,7 +5,7 @@
  * and registered trigger configs.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---- Module mocks ----

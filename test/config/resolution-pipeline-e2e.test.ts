@@ -62,7 +62,7 @@ describe("resolution pipeline e2e", () => {
       "  analyst:",
       "    extends: employee",
       "    title: Data Analyst",
-      "    model: anthropic/claude-sonnet-4-6",
+      "    model: gpt-5.4",
       "defaults:",
       "  performance_policy:",
       "    action: retry",
@@ -132,7 +132,7 @@ describe("resolution pipeline e2e", () => {
     // Check analyst — has explicit model
     const analystEntry = getAgentConfig("analyst");
     expect(analystEntry).not.toBeNull();
-    expect(analystEntry!.config.model).toBe("anthropic/claude-sonnet-4-6");
+    expect(analystEntry!.config.model).toBe("gpt-5.4");
   });
 
   it("agent-specific fields always win over preset and domain defaults", async () => {
@@ -469,7 +469,7 @@ describe("resolution pipeline e2e", () => {
   it("loadWorkforceConfig resolves observe as string array", async () => {
     const { loadWorkforceConfig } = await import("../../src/project.js");
 
-    const configPath = path.join(tmpDir, "project.yaml");
+    const configPath = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(configPath, [
       "name: test-observe",
       "agents:",

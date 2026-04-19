@@ -11,13 +11,12 @@ import { getAgentConfig, getRegisteredAgentIds } from "./project.js";
  * Get all agents that report to a given manager within a project.
  */
 export function getDirectReports(projectId: string, managerId: string): string[] {
-  const allIds = getRegisteredAgentIds();
+  const allIds = getRegisteredAgentIds(projectId);
   const reports: string[] = [];
 
   for (const agentId of allIds) {
-    const entry = getAgentConfig(agentId);
+    const entry = getAgentConfig(agentId, projectId);
     if (!entry) continue;
-    if (entry.projectId !== projectId) continue;
     if (entry.config.reports_to === managerId) {
       reports.push(agentId);
     }
@@ -43,8 +42,8 @@ export function resolveEscalationChain(projectId: string, startAgentId: string):
   let currentId = startAgentId;
 
   while (true) {
-    const entry = getAgentConfig(currentId);
-    if (!entry || entry.projectId !== projectId) break;
+    const entry = getAgentConfig(currentId, projectId);
+    if (!entry) break;
 
     const reportsTo = entry.config.reports_to;
     if (!reportsTo || reportsTo === "parent") break;
@@ -66,13 +65,12 @@ export function resolveEscalationChain(projectId: string, startAgentId: string):
  * Get all agents in the same department within a project.
  */
 export function getDepartmentAgents(projectId: string, department: string): string[] {
-  const allIds = getRegisteredAgentIds();
+  const allIds = getRegisteredAgentIds(projectId);
   const result: string[] = [];
 
   for (const agentId of allIds) {
-    const entry = getAgentConfig(agentId);
+    const entry = getAgentConfig(agentId, projectId);
     if (!entry) continue;
-    if (entry.projectId !== projectId) continue;
     if (entry.config.department === department) {
       result.push(agentId);
     }
@@ -85,13 +83,12 @@ export function getDepartmentAgents(projectId: string, department: string): stri
  * Get all agents in the same team within a project.
  */
 export function getTeamAgents(projectId: string, team: string): string[] {
-  const allIds = getRegisteredAgentIds();
+  const allIds = getRegisteredAgentIds(projectId);
   const result: string[] = [];
 
   for (const agentId of allIds) {
-    const entry = getAgentConfig(agentId);
+    const entry = getAgentConfig(agentId, projectId);
     if (!entry) continue;
-    if (entry.projectId !== projectId) continue;
     if (entry.config.team === team) {
       result.push(agentId);
     }

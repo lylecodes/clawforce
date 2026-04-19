@@ -10,7 +10,10 @@
  */
 
 import type { ApprovalChannel } from "./channel-router.js";
-import { deliverMessage } from "../channels/deliver.js";
+import {
+  getApprovalNotifierPort,
+  setApprovalNotifierPort,
+} from "../runtime/integrations.js";
 
 export type NotificationPayload = {
   proposalId: string;
@@ -45,13 +48,11 @@ export type ApprovalNotifier = {
   ): Promise<void>;
 };
 
-let notifier: ApprovalNotifier | null = null;
-
 /**
  * Register the approval notifier (called by adapter during setup).
  */
 export function setApprovalNotifier(n: ApprovalNotifier | null): void {
-  notifier = n;
+  setApprovalNotifierPort(n);
 }
 
 /**
@@ -59,6 +60,7 @@ export function setApprovalNotifier(n: ApprovalNotifier | null): void {
  * Falls back to the unified delivery adapter if no explicit notifier is set.
  */
 export function getApprovalNotifier(): ApprovalNotifier | null {
+  const notifier = getApprovalNotifierPort();
   if (notifier) return notifier;
 
   // Fallback: log the notification (no valid Telegram chatId available —

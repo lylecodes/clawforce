@@ -5,6 +5,10 @@
  */
 
 import type { ServerResponse } from "node:http";
+import {
+  getSSEManagerPort,
+  setSSEManagerPort,
+} from "../runtime/integrations.js";
 
 export type SSEEventType =
   | "budget:update"
@@ -88,14 +92,15 @@ export class SSEManager {
   }
 }
 
-// Singleton instance
-let _sseManager: SSEManager | null = null;
-
 export function getSSEManager(): SSEManager {
-  if (!_sseManager) _sseManager = new SSEManager();
-  return _sseManager;
+  const existing = getSSEManagerPort() as SSEManager | null;
+  if (existing) return existing;
+
+  const manager = new SSEManager();
+  setSSEManagerPort(manager);
+  return manager;
 }
 
 export function emitSSE(domain: string, event: SSEEventType, data: unknown): void {
-  _sseManager?.broadcast(domain, event, data);
+  getSSEManagerPort()?.broadcast(domain, event, data);
 }

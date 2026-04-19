@@ -65,7 +65,7 @@ const TOOLS: ToolDef[] = [
     name: "clawforce_log",
     description: "Journal and audit log — write entries, record outcomes, and search history.",
     actions: LOG_ACTIONS,
-    roleAccess: "manager, employee, scheduled",
+    roleAccess: "manager, employee",
   },
   {
     name: "clawforce_verify",

@@ -26,6 +26,7 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryTrustScores: vi.fn(() => ({ agents: [], overrides: [] })),
   queryTrustHistory: vi.fn(() => ({ history: [] })),
   queryConfig: vi.fn(() => ({ agents: {} })),
+  querySetupExperience: vi.fn(() => ({ domainId: "test-project", topology: {}, report: {}, explanation: {}, config: {}, feed: {}, decisionInbox: {}, runtime: {} })),
   queryMeetings: vi.fn(() => ({ meetings: [], count: 0 })),
   queryMeetingDetail: vi.fn(() => null),
   queryThreadMessages: vi.fn(() => ({ messages: [] })),
@@ -50,14 +51,45 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   queryPromotionCandidates: vi.fn(() => ({ candidates: [], count: 0 })),
   queryInterventions: vi.fn(() => ({ interventions: [], count: 0 })),
   queryWorkStreams: vi.fn(() => ({ workstreams: [], count: 0 })),
+  queryOperatorComms: vi.fn(() => ({
+    assistant: {
+      enabled: true,
+      resolvedAgentId: "lead-root",
+      resolvedTitle: "Root Lead",
+      resolutionSource: "lead",
+      deliveryPolicy: "live-if-session-available-else-store",
+      directMentionsSupported: true,
+      note: "Operator chat routes to the lead.",
+    },
+    feed: {
+      projectId: "test-project",
+      items: [],
+      counts: { actionNeeded: 0, watching: 0, fyi: 0 },
+      generatedAt: 123,
+    },
+    directThreads: [],
+    inboxCount: 0,
+    unreadCount: 0,
+    queuedForAgentsCount: 0,
+    decisionInbox: {
+      projectId: "test-project",
+      items: [],
+      counts: { actionNeeded: 0, watching: 0, fyi: 0 },
+      generatedAt: 123,
+    },
+    channelsConfigured: false,
+  })),
   queryUserInbox: vi.fn(() => ({ messages: [], count: 0 })),
   queryOperationalMetrics: vi.fn(() => ({ metrics: {} })),
-  readContextFile: vi.fn((_root: string, relativePath: string) => ({
+}));
+
+vi.mock("../../src/app/queries/context-files.js", () => ({
+  readDomainContextFile: vi.fn((_projectId: string, relativePath: string) => ({
     content: `content for ${relativePath}`,
     path: relativePath,
     lastModified: 123,
   })),
-  writeContextFile: vi.fn(() => ({ ok: true })),
+  writeDomainContextFile: vi.fn(() => ({ ok: true })),
   ContextFileError: class ContextFileError extends Error {
     status: number;
 
@@ -68,12 +100,70 @@ vi.mock("../../src/dashboard/queries.js", () => ({
   },
 }));
 
+vi.mock("../../src/app/queries/dashboard-meta.js", () => ({
+  queryActiveDomains: vi.fn(() => [{ id: "test-project", agentCount: 3 }]),
+  queryDashboardExtensions: vi.fn(() => ({ extensions: [], count: 0 })),
+  queryDashboardRuntimeMetadata: vi.fn((runtime?: unknown) => runtime ?? {
+    mode: "standalone",
+    authMode: "localhost-only",
+    notes: ["Runtime metadata was not explicitly provided by the caller."],
+  }),
+  queryActiveAttentionRollup: vi.fn(() => ({
+    businesses: [],
+    totals: { actionNeeded: 0, watching: 0, fyi: 0 },
+  })),
+  queryActiveDecisionInboxRollup: vi.fn(() => ({
+    businesses: [],
+    totals: { actionNeeded: 0, watching: 0, fyi: 0 },
+  })),
+  queryDomainCapabilities: vi.fn(() => ({
+    version: "0.2.0",
+    features: {
+      tasks: true,
+      approvals: false,
+      budget: false,
+      trust: false,
+      memory: false,
+      comms: false,
+    },
+    endpoints: ["dashboard"],
+    extensions: { count: 0, ids: [] },
+  })),
+}));
+
 vi.mock("../../src/dashboard/actions.js", () => ({
   handleAction: vi.fn(() => ({ status: 200, body: { ok: true } })),
   handleAgentKillAction: vi.fn(async () => ({ status: 200, body: { ok: true, killedSessions: 1 } })),
   handleDomainKillAction: vi.fn(async () => ({ status: 200, body: { ok: true, emergencyStop: true } })),
   handleDemoCreate: vi.fn(() => ({ status: 201, body: { ok: true } })),
   handleStarterDomainCreate: vi.fn(() => ({ status: 201, body: { ok: true, domainId: "starter-co" } })),
+}));
+
+vi.mock("../../src/app/commands/operator-messages.js", () => ({
+  runDeliverOperatorMessageCommand: vi.fn(async (_projectId: string, routeAgentId: string, body: Record<string, unknown>) => ({
+    ok: true,
+    status: 200,
+    delivery: "stored",
+    acknowledgement: routeAgentId === "clawforce-assistant"
+      ? `Stored your operator request for "lead-root". They will see it in their next briefing.`
+      : `Stored your message for "${routeAgentId}". They will see it in their next briefing.`,
+    message: {
+      id: "msg-1",
+      projectId: "test-project",
+      toAgent: routeAgentId === "clawforce-assistant" ? "lead-root" : routeAgentId,
+      content: typeof body.content === "string" ? body.content : "",
+    },
+  })),
+}));
+
+vi.mock("../../src/app/commands/notification-controls.js", () => ({
+  runMarkAllNotificationsReadCommand: vi.fn(() => ({ status: 200, body: { ok: true, marked: 2 } })),
+  runMarkNotificationReadCommand: vi.fn(() => ({ status: 200, body: { ok: true } })),
+  runDismissNotificationCommand: vi.fn(() => ({ status: 200, body: { ok: true } })),
+}));
+
+vi.mock("../../src/app/commands/project-controls.js", () => ({
+  runWriteProjectContextFileCommand: vi.fn(() => ({ status: 200, body: { ok: true } })),
 }));
 
 vi.mock("../../src/dashboard/sse.js", () => ({
@@ -107,25 +197,40 @@ vi.mock("../../src/config/api-service.js", () => ({
 
 const { createDashboardHandler } = await import("../../src/dashboard/gateway-routes.js");
 const {
-  registerDashboardExtension,
-  clearDashboardExtensions,
-} = await import("../../src/dashboard/extensions.js");
-const {
   queryAgents, queryDashboardSummary, querySessions, querySessionDetail,
   queryAuditLog, queryAuditRuns, queryEnforcementRetries,
   queryOnboardingState, queryTrackedSessions, queryWorkerAssignments,
   queryQueueStatus, queryKnowledge, queryKnowledgeFlags,
   queryPromotionCandidates, queryInterventions, queryWorkStreams,
+  queryOperatorComms,
   queryUserInbox, queryOperationalMetrics, queryTrustHistory, queryThreadMessages,
+  querySetupExperience,
   queryConfigVersions,
-  readContextFile, writeContextFile,
 } = await import("../../src/dashboard/queries.js");
+const {
+  readDomainContextFile,
+} = await import("../../src/app/queries/context-files.js");
+const {
+  queryActiveDomains,
+  queryDashboardExtensions,
+  queryDashboardRuntimeMetadata,
+  queryActiveAttentionRollup,
+  queryActiveDecisionInboxRollup,
+  queryDomainCapabilities,
+} = await import("../../src/app/queries/dashboard-meta.js");
 const {
   handleAction,
   handleStarterDomainCreate,
   handleAgentKillAction,
   handleDomainKillAction,
 } = await import("../../src/dashboard/actions.js");
+const { runDeliverOperatorMessageCommand } = await import("../../src/app/commands/operator-messages.js");
+const {
+  runMarkAllNotificationsReadCommand,
+  runMarkNotificationReadCommand,
+  runDismissNotificationCommand,
+} = await import("../../src/app/commands/notification-controls.js");
+const { runWriteProjectContextFileCommand } = await import("../../src/app/commands/project-controls.js");
 const { getSSEManager } = await import("../../src/dashboard/sse.js");
 const { readDomainConfig } = await import("../../src/config/api-service.js");
 
@@ -190,7 +295,6 @@ function createMockRequest(method: string, urlStr: string, body?: Record<string,
 describe("createDashboardHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    clearDashboardExtensions();
     (readDomainConfig as any).mockReturnValue(null);
   });
 
@@ -218,11 +322,16 @@ describe("createDashboardHandler", () => {
   });
 
   it("routes GET /clawforce/api/extensions to the extension registry", async () => {
-    registerDashboardExtension({
-      id: "clawforce-experiments",
-      title: "Experiments",
-      source: { kind: "openclaw-plugin", pluginId: "@clawforce/plugin-experiments" },
-      pages: [{ id: "experiments", title: "Experiments", route: "/experiments" }],
+    (queryDashboardExtensions as any).mockReturnValue({
+      count: 1,
+      extensions: [
+        {
+          id: "clawforce-experiments",
+          title: "Experiments",
+          source: { kind: "openclaw-plugin", pluginId: "@clawforce/plugin-experiments" },
+          pages: [{ id: "experiments", title: "Experiments", route: "/experiments" }],
+        },
+      ],
     });
 
     const handler = createDashboardHandler({ auth: { skipAuth: true } });
@@ -256,6 +365,51 @@ describe("createDashboardHandler", () => {
     const body = JSON.parse(res.bodyData);
     expect(body.mode).toBe("embedded");
     expect(body.authMode).toBe("openclaw-delegated");
+    expect(queryDashboardRuntimeMetadata).toHaveBeenCalled();
+  });
+
+  it("routes GET /clawforce/api/domains to the active domains query", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/domains");
+    await handler(req, res);
+    expect(queryActiveDomains).toHaveBeenCalled();
+    expect(JSON.parse(res.bodyData)).toEqual([{ id: "test-project", agentCount: 3 }]);
+  });
+
+  it("routes GET /clawforce/api/attention to the active attention rollup query", async () => {
+    (queryActiveAttentionRollup as any).mockReturnValue({
+      businesses: [{ domainId: "test-project", counts: { actionNeeded: 2, watching: 1, fyi: 0 } }],
+      totals: { actionNeeded: 2, watching: 1, fyi: 0 },
+    });
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/attention");
+    await handler(req, res);
+    expect(queryActiveAttentionRollup).toHaveBeenCalled();
+    expect(JSON.parse(res.bodyData).totals.actionNeeded).toBe(2);
+  });
+
+  it("routes GET /clawforce/api/feed to the active attention rollup query", async () => {
+    (queryActiveAttentionRollup as any).mockReturnValue({
+      businesses: [{ projectId: "test-project", counts: { actionNeeded: 3, watching: 0, fyi: 1 } }],
+      totals: { actionNeeded: 3, watching: 0, fyi: 1 },
+    });
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/feed");
+    await handler(req, res);
+    expect(queryActiveAttentionRollup).toHaveBeenCalled();
+    expect(JSON.parse(res.bodyData).totals.actionNeeded).toBe(3);
+  });
+
+  it("routes GET /clawforce/api/decisions to the active decision inbox rollup query", async () => {
+    (queryActiveDecisionInboxRollup as any).mockReturnValue({
+      businesses: [{ projectId: "test-project", counts: { actionNeeded: 1, watching: 0, fyi: 0 } }],
+      totals: { actionNeeded: 1, watching: 0, fyi: 0 },
+    });
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/decisions");
+    await handler(req, res);
+    expect(queryActiveDecisionInboxRollup).toHaveBeenCalled();
+    expect(JSON.parse(res.bodyData).totals.actionNeeded).toBe(1);
   });
 
   it("routes GET /clawforce/api/:domain/dashboard to dashboard summary", async () => {
@@ -294,6 +448,30 @@ describe("createDashboardHandler", () => {
     const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/agents/a1/kill", { reason: "panic" });
     await handler(req, res);
     expect(handleAgentKillAction).toHaveBeenCalledWith("test-project", "a1", { reason: "panic" });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes POST /clawforce/api/:domain/notifications/read-all to the notification command", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/notifications/read-all", {});
+    await handler(req, res);
+    expect(runMarkAllNotificationsReadCommand).toHaveBeenCalledWith("test-project");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes POST /clawforce/api/:domain/notifications/:id/read to the notification command", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/notifications/notif-1/read", {});
+    await handler(req, res);
+    expect(runMarkNotificationReadCommand).toHaveBeenCalledWith("test-project", "notif-1");
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes POST /clawforce/api/:domain/notifications/:id/dismiss to the notification command", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/notifications/notif-1/dismiss", {});
+    await handler(req, res);
+    expect(runDismissNotificationCommand).toHaveBeenCalledWith("test-project", "notif-1");
     expect(res.statusCode).toBe(200);
   });
 
@@ -347,6 +525,14 @@ describe("createDashboardHandler", () => {
     expect(res.statusCode).toBe(200);
   });
 
+  it("routes GET /clawforce/api/:domain/setup to querySetupExperience", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/setup");
+    await handler(req, res);
+    expect(querySetupExperience).toHaveBeenCalledWith("test-project");
+    expect(res.statusCode).toBe(200);
+  });
+
   it("routes GET /clawforce/api/:domain/config/versions to config version history", async () => {
     const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/config/versions?limit=25");
@@ -367,7 +553,7 @@ describe("createDashboardHandler", () => {
     const handler = createDashboardHandler({ auth: { skipAuth: true } });
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/context-files?path=DIRECTION.md");
     await handler(req, res);
-    expect(readContextFile).toHaveBeenCalledWith("/tmp/test-project", "DIRECTION.md");
+    expect(readDomainContextFile).toHaveBeenCalledWith("test-project", "DIRECTION.md", { includeDomainContext: true });
     expect(res.statusCode).toBe(200);
   });
 
@@ -378,8 +564,27 @@ describe("createDashboardHandler", () => {
       content: "# direction",
     });
     await handler(req, res);
-    expect(writeContextFile).toHaveBeenCalledWith("/tmp/test-project", "DIRECTION.md", "# direction");
+    expect(runWriteProjectContextFileCommand).toHaveBeenCalledWith("test-project", {
+      path: "DIRECTION.md",
+      content: "# direction",
+    }, {
+      includeDomainContext: true,
+    });
     expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/capabilities to the capability query", async () => {
+    (queryDomainCapabilities as any).mockReturnValue({
+      version: "0.2.0",
+      features: { tasks: true, approvals: true, budget: true, trust: false, memory: false, comms: true },
+      endpoints: ["dashboard", "capabilities"],
+      extensions: { count: 1, ids: ["clawforce-experiments"] },
+    });
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/capabilities");
+    await handler(req, res);
+    expect(queryDomainCapabilities).toHaveBeenCalledWith("test-project");
+    expect(JSON.parse(res.bodyData).extensions.ids).toEqual(["clawforce-experiments"]);
   });
 
   it("routes GET /clawforce/api/:domain/approvals to queryApprovals", async () => {
@@ -459,6 +664,12 @@ describe("createDashboardHandler", () => {
   });
 
   it("streams an agent message acknowledgement when live injection is configured", async () => {
+    (runDeliverOperatorMessageCommand as any).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      delivery: "live",
+      acknowledgement: 'Delivered your message to "a1".',
+    });
     const injectAgentMessage = vi.fn(async () => ({}));
     const handler = createDashboardHandler({
       auth: { skipAuth: true },
@@ -468,10 +679,7 @@ describe("createDashboardHandler", () => {
       content: "hello",
     });
     await handler(req, res);
-    expect(injectAgentMessage).toHaveBeenCalledWith({
-      sessionKey: "agent:a1:main",
-      message: "hello",
-    });
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalledWith("test-project", "a1", { content: "hello" }, injectAgentMessage);
     expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
       "Content-Type": "text/event-stream",
     }));
@@ -483,10 +691,12 @@ describe("createDashboardHandler", () => {
       content: "please review the org",
     });
     await handler(req, res);
-    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
-      to: "lead-root",
-      content: "please review the org",
-    }));
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalledWith(
+      "test-project",
+      "clawforce-assistant",
+      { content: "please review the org" },
+      undefined,
+    );
     expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
       "Content-Type": "text/event-stream",
     }));
@@ -502,17 +712,24 @@ describe("createDashboardHandler", () => {
       content: "review the roadmap",
     });
     await handler(req, res);
-    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
-      to: "lead-child",
-      content: "review the roadmap",
-    }));
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalledWith(
+      "test-project",
+      "clawforce-assistant",
+      { content: "review the roadmap" },
+      undefined,
+    );
     expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
       "Content-Type": "text/event-stream",
     }));
-    expect(res.bodyData).toContain("configured assistant target");
   });
 
   it("injects assistant messages into the configured assistant target session", async () => {
+    (runDeliverOperatorMessageCommand as any).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      delivery: "live",
+      acknowledgement: 'Delivered your operator request to "lead-child".',
+    });
     (readDomainConfig as any).mockReturnValueOnce({
       domain: "test-project",
       dashboard_assistant: { agentId: "lead-child" },
@@ -526,10 +743,7 @@ describe("createDashboardHandler", () => {
       content: "check staffing",
     });
     await handler(req, res);
-    expect(injectAgentMessage).toHaveBeenCalledWith({
-      sessionKey: "agent:lead-child:main",
-      message: "check staffing",
-    });
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalledWith("test-project", "clawforce-assistant", { content: "check staffing" }, injectAgentMessage);
     expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
       "Content-Type": "text/event-stream",
     }));
@@ -541,16 +755,24 @@ describe("createDashboardHandler", () => {
       content: "@lead-child focus on auth",
     });
     await handler(req, res);
-    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
-      to: "lead-child",
-      content: "focus on auth",
-    }));
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalledWith(
+      "test-project",
+      "clawforce-assistant",
+      { content: "@lead-child focus on auth" },
+      undefined,
+    );
     expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
       "Content-Type": "text/event-stream",
     }));
   });
 
   it("reports when the dashboard assistant is disabled for a domain", async () => {
+    (runDeliverOperatorMessageCommand as any).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      delivery: "unavailable",
+      acknowledgement: "The dashboard assistant is disabled for this domain.",
+    });
     (readDomainConfig as any).mockReturnValueOnce({
       domain: "test-project",
       dashboard_assistant: { enabled: false },
@@ -560,7 +782,7 @@ describe("createDashboardHandler", () => {
       content: "help me",
     });
     await handler(req, res);
-    expect(handleAction).not.toHaveBeenCalledWith("test-project", "messages/send", expect.anything());
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalled();
     expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
       "Content-Type": "text/event-stream",
     }));
@@ -568,6 +790,12 @@ describe("createDashboardHandler", () => {
   });
 
   it("falls back to stored delivery when live agent injection fails", async () => {
+    (runDeliverOperatorMessageCommand as any).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      delivery: "stored",
+      acknowledgement: 'Live delivery failed, but your message was stored for "worker-1". They will see it in their next briefing.',
+    });
     const injectAgentMessage = vi.fn(async () => {
       throw new Error("session offline");
     });
@@ -579,13 +807,45 @@ describe("createDashboardHandler", () => {
       content: "check task t1",
     });
     await handler(req, res);
-    expect(handleAction).toHaveBeenCalledWith("test-project", "messages/send", expect.objectContaining({
-      to: "worker-1",
-      content: "check task t1",
-    }));
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalledWith("test-project", "worker-1", { content: "check task t1" }, injectAgentMessage);
     expect(res.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({
       "Content-Type": "text/event-stream",
     }));
+  });
+
+  it("returns JSON for operator-chat POSTs through /messages/operator", async () => {
+    (runDeliverOperatorMessageCommand as any).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      delivery: "stored",
+      acknowledgement: 'Stored your operator request for "lead-root". They will see it in their next briefing.',
+      message: {
+        id: "msg-operator-1",
+        toAgent: "lead-root",
+        content: "Please review staffing",
+      },
+    });
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("POST", "/clawforce/api/test-project/messages/operator", {
+      content: "Please review staffing",
+    });
+    await handler(req, res);
+    expect(runDeliverOperatorMessageCommand).toHaveBeenCalledWith(
+      "test-project",
+      "clawforce-assistant",
+      { content: "Please review staffing" },
+      undefined,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.bodyData)).toEqual({
+      delivery: "stored",
+      acknowledgement: 'Stored your operator request for "lead-root". They will see it in their next briefing.',
+      message: {
+        id: "msg-operator-1",
+        toAgent: "lead-root",
+        content: "Please review staffing",
+      },
+    });
   });
 
   it("sets CORS method and header headers", async () => {
@@ -799,6 +1059,30 @@ describe("createDashboardHandler", () => {
     const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/inbox");
     await handler(req, res);
     expect(queryUserInbox).toHaveBeenCalledWith("test-project", expect.any(Object));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("routes GET /clawforce/api/:domain/assistant to the assistant status query", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/assistant");
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.bodyData)).toEqual(expect.objectContaining({
+      enabled: true,
+      resolvedAgentId: expect.any(String),
+      deliveryPolicy: "live-if-session-available-else-store",
+    }));
+  });
+
+  it("routes GET /clawforce/api/:domain/operator-comms to queryOperatorComms", async () => {
+    const handler = createDashboardHandler({ auth: { skipAuth: true } });
+    const { req, res } = createMockRequest("GET", "/clawforce/api/test-project/operator-comms?limit=10");
+    await handler(req, res);
+    expect(queryOperatorComms).toHaveBeenCalledWith("test-project", {
+      agentId: undefined,
+      limit: 10,
+      since: undefined,
+    });
     expect(res.statusCode).toBe(200);
   });
 

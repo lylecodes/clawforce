@@ -5,6 +5,8 @@
  * for the autonomous project management layer.
  */
 
+import type { ContextSourceName } from "./context/catalog.js";
+
 export type TaskState =
   | "OPEN"
   | "ASSIGNED"
@@ -65,6 +67,8 @@ export type Task = {
   department?: string;
   team?: string;
   goalId?: string;
+  entityType?: string;
+  entityId?: string;
   origin?: TaskOrigin;
   originId?: string;
   metadata?: Record<string, unknown>;
@@ -169,6 +173,7 @@ export type ClawforceConfig = {
   sweepIntervalMs: number;
   defaultMaxRetries: number;
   verificationRequired: boolean;
+  autoInitialize?: boolean;
 };
 
 /** Sweep timing configuration — controls stale detection and proposal expiry thresholds. */
@@ -233,10 +238,14 @@ export type WorkerDispatchConfig = {
   wake_on?: string[];
 };
 
+export type DispatchExecutorName = "openclaw" | "codex" | "claude-code";
+
 /** Per-project dispatch concurrency and rate-limiting configuration. */
 export type DispatchConfig = {
   /** Dispatch mode: event-driven (default), cron (legacy), or manual. */
   mode?: "event-driven" | "cron" | "manual";
+  /** Execution backend for worker dispatch. Defaults to the configured adapter or Codex. */
+  executor?: DispatchExecutorName;
   /** Max concurrent dispatches per project (default: 3). */
   maxConcurrentDispatches?: number;
   /** Max dispatches per hour per project. */
@@ -291,7 +300,7 @@ export type CoordinationConfig = {
 
 /** A context source to inject at session start. */
 export type ContextSource = {
-  source: "instructions" | "custom" | "project_md" | "task_board" | "assigned_task" | "knowledge" | "file" | "skill" | "memory" | "memory_instructions" | "memory_review_context" | "escalations" | "workflows" | "activity" | "sweep_status" | "proposals" | "agent_status" | "cost_summary" | "policy_status" | "health_status" | "team_status" | "team_performance" | "soul" | "tools_reference" | "pending_messages" | "user_messages" | "goal_hierarchy" | "channel_messages" | "planning_delta" | "velocity" | "preferences" | "trust_scores" | "resources" | "initiative_status" | "cost_forecast" | "available_capacity" | "knowledge_candidates" | "budget_guidance" | "onboarding_welcome" | "weekly_digest" | "intervention_suggestions" | "custom_stream" | "observed_events" | "direction" | "policies" | "standards" | "architecture" | "task_creation_standards" | "execution_standards" | "review_standards" | "rejection_standards" | "worker_findings" | "recent_decisions" | "clawforce_health_report" | "budget_plan";
+  source: ContextSourceName;
   /** Raw markdown content (for source: "custom"). */
   content?: string;
   /** File path (for source: "file"). */
@@ -316,9 +325,6 @@ export type Expectation = {
   min_calls: number;
 };
 
-/** @deprecated Use Expectation instead. */
-export type RequiredOutput = Expectation;
-
 /** What happens when an employee doesn't meet expectations. */
 export type PerformancePolicy = {
   action: "retry" | "alert" | "terminate_and_alert";
@@ -326,9 +332,6 @@ export type PerformancePolicy = {
   /** Escalation action after max_retries exhausted. */
   then?: "alert" | "terminate_and_alert";
 };
-
-/** @deprecated Use PerformancePolicy instead. */
-export type FailureAction = PerformancePolicy;
 
 /** Compaction configuration for an agent. */
 export type CompactionConfig = {
@@ -378,6 +381,20 @@ export type ObserveEntry = string | {
     team?: string;
     agent?: string;
   };
+};
+
+export type RuntimeIntegrationMode = "overlay" | "hybrid" | "clawforce-owned";
+
+/** Runtime-scoped execution envelope that ClawForce may govern across runtimes. */
+export type AgentRuntimeConfig = {
+  /** Bootstrap context budget for runtime session initialization. */
+  bootstrapConfig?: BootstrapConfig;
+  /** Bootstrap files to exclude from the session bootstrap bundle. */
+  bootstrapExcludeFiles?: string[];
+  /** Runtime tool allowlist requested by ClawForce governance. */
+  allowedTools?: string[];
+  /** Runtime workspace roots requested by ClawForce governance. */
+  workspacePaths?: string[];
 };
 
 /** Per-agent configuration. */
@@ -443,6 +460,17 @@ export type AgentConfig = {
   contextBudgetChars?: number;
   /** Max turns per session. Default: 50. */
   maxTurnsPerSession?: number;
+  /**
+   * Stable runtime-owned agent identifier for external execution systems.
+   * When set, ClawForce binds governance to this runtime agent instead of
+   * assuming the runtime agent ID is the ClawForce namespaced ID.
+   */
+  runtimeRef?: string;
+  /**
+   * Runtime-scoped execution envelope that ClawForce governs while leaving the
+   * full runtime-owned agent definition outside the core org model.
+   */
+  runtime?: AgentRuntimeConfig;
   /** Model override for this agent. */
   model?: string;
   /** Auto-recovery config — re-enable disabled agents after cooldown. */
@@ -454,6 +482,7 @@ export type AgentConfig = {
   /**
    * OpenClaw bootstrap configuration for this agent's sessions.
    * Controls how much workspace context gets injected at session start.
+   * Compatibility alias for `runtime.bootstrapConfig`.
    */
   bootstrapConfig?: BootstrapConfig;
   /**
@@ -462,6 +491,7 @@ export type AgentConfig = {
    * in each workspace. ClawForce agents that don't need them can exclude them
    * to reduce token usage.
    * Example: ["AGENTS.md", "HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"]
+   * Compatibility alias for `runtime.bootstrapExcludeFiles`.
    */
   bootstrapExcludeFiles?: string[];
   /**
@@ -469,8 +499,16 @@ export type AgentConfig = {
    * Controls the tools available in the agent's sessions, separate from
    * ClawForce action scope (which controls ClawForce tool actions).
    * When not set, all OpenClaw tools are available.
+   * Compatibility alias for `runtime.allowedTools`.
    */
   allowedTools?: string[];
+  /**
+   * Workspace roots this agent may operate within.
+   * The first path becomes the primary workspace; additional paths are treated
+   * as explicitly allowed companion roots by supported runtimes.
+   * Compatibility alias for `runtime.workspacePaths`.
+   */
+  workspacePaths?: string[];
 };
 
 /** A scoped session definition for an agent. */
@@ -590,6 +628,262 @@ export type ContextOwnershipConfig = {
   policies?: "any" | "manager" | "human";
 };
 
+// --- Entity config and lifecycle types ---
+
+export type EntityMetadataFieldType = "string" | "number" | "boolean" | "object" | "array";
+
+export type EntityMetadataFieldConfig = {
+  type: EntityMetadataFieldType;
+  required?: boolean;
+  description?: string;
+  enum?: string[];
+};
+
+export type EntityStateConfig = {
+  description?: string;
+  initial?: boolean;
+  terminal?: boolean;
+};
+
+export type EntityTransitionConfig = {
+  from: string;
+  to: string;
+  reasonRequired?: boolean;
+  approvalRequired?: boolean;
+  blockedByOpenIssues?: boolean;
+  blockedBySeverities?: EntityIssueSeverity[];
+  blockedByIssueTypes?: string[];
+};
+
+export type EntityHealthConfig = {
+  values: string[];
+  default?: string;
+  clear?: string;
+};
+
+export type EntityIssueSeverity = "low" | "medium" | "high" | "critical";
+
+export type EntityIssueStatus = "open" | "resolved" | "dismissed";
+
+export type EntityIssueTypeConfig = {
+  title?: string;
+  description?: string;
+  defaultSeverity?: EntityIssueSeverity;
+  blocking?: boolean;
+  approvalRequired?: boolean;
+  health?: string;
+  playbook?: string;
+  task?: boolean | EntityIssueTaskConfig;
+};
+
+export type EntityIssueTaskConfig = {
+  enabled?: boolean;
+  titleTemplate?: string;
+  descriptionTemplate?: string;
+  priority?: TaskPriority;
+  kind?: TaskKind;
+  tags?: string[];
+  rerunCheckIds?: string[];
+  rerunOnStates?: TaskState[];
+  closeTaskOnResolved?: boolean;
+};
+
+export type EntityIssueStateSignalOwnerPresence = "any" | "missing" | "present";
+
+export type EntityIssueStateSignalConfig = {
+  id?: string;
+  whenStates?: string[];
+  ownerPresence?: EntityIssueStateSignalOwnerPresence;
+  issueType: string;
+  issueKey?: string;
+  issueKeyTemplate?: string;
+  titleTemplate?: string;
+  descriptionTemplate?: string;
+  recommendedAction?: string;
+  playbook?: string;
+  ownerAgentId?: string;
+  severity?: EntityIssueSeverity;
+  blocking?: boolean;
+  approvalRequired?: boolean;
+};
+
+export type EntityCheckJsonRecordIssuesParserConfig = {
+  type: "json_record_issues";
+  recordsPath: string;
+  matchField: string;
+  matchValueTemplate?: string;
+  issueArrayPath: string;
+  issueTypeField?: string;
+  issueTypeMap?: Record<string, string>;
+  defaultIssueType?: string;
+  severityField?: string;
+  titleField?: string;
+  descriptionField?: string;
+  descriptionTemplate?: string;
+  fieldNameField?: string;
+  keyTemplate?: string;
+  metadataUpdates?: Record<string, string>;
+};
+
+export type EntityCheckStatusIssueRule = {
+  issueType: string;
+  severity?: EntityIssueSeverity;
+  blocking?: boolean;
+  approvalRequired?: boolean;
+  titleTemplate?: string;
+  descriptionTemplate?: string;
+};
+
+export type EntityCheckJsonRecordStatusParserConfig = {
+  type: "json_record_status";
+  recordsPath: string;
+  matchField: string;
+  matchValueTemplate?: string;
+  statusField: string;
+  ignoreStatuses?: string[];
+  keyTemplate?: string;
+  metadataUpdates?: Record<string, string>;
+  issueStates: Record<string, EntityCheckStatusIssueRule>;
+};
+
+export type EntityCheckParserConfig =
+  | string
+  | EntityCheckJsonRecordIssuesParserConfig
+  | EntityCheckJsonRecordStatusParserConfig;
+
+export type EntityCheckConfig = {
+  title?: string;
+  description?: string;
+  command: string;
+  parser?: EntityCheckParserConfig;
+  timeoutSeconds?: number;
+  required?: boolean;
+  issueTypes?: string[];
+  playbook?: string;
+};
+
+export type EntityIssuesConfig = {
+  autoSyncHealth?: boolean;
+  defaultBlockingSeverities?: EntityIssueSeverity[];
+  defaultHealthBySeverity?: Partial<Record<EntityIssueSeverity, string>>;
+  checks?: Record<string, EntityCheckConfig>;
+  types?: Record<string, EntityIssueTypeConfig>;
+  stateSignals?: EntityIssueStateSignalConfig[];
+};
+
+export type EntityRelationshipConfig = {
+  parent?: {
+    enabled?: boolean;
+    allowedKinds?: string[];
+  };
+};
+
+export type EntityReadinessRequirementsConfig = {
+  noOpenIssues?: boolean;
+  metadataTrue?: string[];
+  metadataEquals?: Record<string, string | number | boolean>;
+  metadataMin?: Record<string, number>;
+};
+
+export type EntityReadinessTaskCloseConfig = {
+  titleTemplates?: string[];
+};
+
+export type EntityReadinessTransitionConfig = {
+  toState: string;
+  reason?: string;
+  actor?: string;
+};
+
+export type EntityReadinessConfig = {
+  whenStates?: string[];
+  blockersField?: string;
+  requirements?: EntityReadinessRequirementsConfig;
+  closeTasksWhenReady?: EntityReadinessTaskCloseConfig;
+  requestTransitionWhenReady?: EntityReadinessTransitionConfig;
+};
+
+export type EntityKindConfig = {
+  title?: string;
+  description?: string;
+  runtimeCreate?: boolean;
+  states: Record<string, EntityStateConfig>;
+  transitions: EntityTransitionConfig[];
+  health?: EntityHealthConfig;
+  relationships?: EntityRelationshipConfig;
+  metadataSchema?: Record<string, EntityMetadataFieldConfig>;
+  issues?: EntityIssuesConfig;
+  readiness?: EntityReadinessConfig;
+};
+
+// --- Domain Execution types ---
+
+export type DomainExecutionMode = "dry_run" | "live";
+
+export const DOMAIN_EXECUTION_MODES: readonly DomainExecutionMode[] = ["dry_run", "live"] as const;
+
+export type DomainExecutionEffect = "allow" | "simulate" | "block" | "require_approval";
+
+export const DOMAIN_EXECUTION_EFFECTS: readonly DomainExecutionEffect[] = [
+  "allow",
+  "simulate",
+  "block",
+  "require_approval",
+] as const;
+
+export type DomainExecutionToolPolicy = {
+  default?: DomainExecutionEffect;
+  actions?: Record<string, DomainExecutionEffect>;
+};
+
+export type DomainExecutionCommandPolicy = {
+  match: string;
+  effect: DomainExecutionEffect;
+  reason?: string;
+};
+
+export type DomainExecutionConfig = {
+  mode?: DomainExecutionMode;
+  defaultMutationPolicy?: DomainExecutionEffect;
+  environments?: {
+    primary?: string;
+    verification?: string;
+  };
+  policies?: {
+    tools?: Record<string, DomainExecutionToolPolicy>;
+    commands?: DomainExecutionCommandPolicy[];
+  };
+};
+
+export type SimulatedActionStatus =
+  | "simulated"
+  | "blocked"
+  | "approved_for_live"
+  | "discarded";
+
+export type SimulatedAction = {
+  id: string;
+  projectId: string;
+  domainId: string;
+  agentId?: string;
+  sessionKey?: string;
+  taskId?: string;
+  entityType?: string;
+  entityId?: string;
+  proposalId?: string;
+  sourceType: string;
+  sourceId?: string;
+  actionType: string;
+  targetType?: string;
+  targetId?: string;
+  summary: string;
+  payload?: Record<string, unknown>;
+  policyDecision: DomainExecutionEffect;
+  status: SimulatedActionStatus;
+  createdAt: number;
+  resolvedAt?: number;
+};
+
 // --- Verification Gate types ---
 
 export type VerificationGate = {
@@ -626,6 +920,12 @@ export type WorkforceConfig = {
   id?: string;
   /** Project root directory path. */
   dir?: string;
+  /** Preferred execution adapter inherited from shared config. Defaults to `codex` when omitted. */
+  adapter?: DispatchExecutorName;
+  /** Codex executor configuration inherited from shared config. */
+  codex?: Record<string, unknown>;
+  /** Claude Code adapter configuration inherited from shared config. Legacy compatibility only. */
+  claudeCode?: Record<string, unknown>;
   approval?: ApprovalPolicy;
   agents: Record<string, AgentConfig>;
   /** Auto-lifecycle configuration. */
@@ -679,6 +979,10 @@ export type WorkforceConfig = {
   safety?: SafetyConfig;
   /** Goal definitions with optional allocation percentages. */
   goals?: Record<string, GoalConfigEntry>;
+  /** Config-defined governed object kinds with lifecycle and metadata rules. */
+  entities?: Record<string, EntityKindConfig>;
+  /** Domain execution mode and dry-run policy configuration. */
+  execution?: DomainExecutionConfig;
   /** External trigger definitions. */
   triggers?: Record<string, TriggerDefinition>;
   /** Knowledge lifecycle configuration (promotion thresholds, etc.). */
@@ -695,15 +999,8 @@ export type WorkforceConfig = {
    * inherit these defaults. Merge order: org defaults -> team template -> preset -> agent override.
    */
   team_templates?: Record<string, Partial<AgentConfig>>;
-  /** Manager/orchestrator cron configuration. */
+  /** Manager cron configuration. */
   manager?: {
-    enabled: boolean;
-    agentId: string;
-    cronSchedule?: string;
-    projectDir?: string;
-  };
-  /** Legacy alias for manager. */
-  orchestrator?: {
     enabled: boolean;
     agentId: string;
     cronSchedule?: string;
@@ -767,14 +1064,64 @@ export type SafetyConfig = {
   retryBackoffMaxMs?: number;
 };
 
-/** @deprecated Use WorkforceConfig instead. */
-export type EnforcementProjectConfig = WorkforceConfig;
-
 // --- Review config types ---
 
 /** Review gate configuration for task verification. */
+export const REVIEW_REASON_CODES = [
+  "verification_environment_blocked",
+  "evidence_insufficient",
+  "workflow_gap",
+  "app_gap",
+] as const;
+
+export type ReviewReasonCode = typeof REVIEW_REASON_CODES[number];
+
+export type ReviewWorkflowStewardConfig = {
+  /** Agent responsible for proposing workflow mutations when review loops expose setup gaps. */
+  agentId?: string;
+  /** Number of repeated matching review failures before proposing a workflow mutation. Default: 2. */
+  autoProposalThreshold?: number;
+  /** Structured reason codes that should count toward workflow-mutation proposals. */
+  autoProposalReasonCodes?: ReviewReasonCode[];
+  /** Cooldown in hours before another workflow-mutation proposal can be raised for the same reason. Default: 24. */
+  proposalCooldownHours?: number;
+};
+
+export type WorkflowMutationCategory =
+  | "verification_path"
+  | "review_policy"
+  | "workflow_routing"
+  | "app_workflow";
+
+export type WorkflowMutationTaskSpec = {
+  title: string;
+  description: string;
+  priority: TaskPriority;
+  kind: TaskKind;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type WorkflowMutationProposalSnapshot = {
+  replayType: "workflow_mutation";
+  stewardAgentId: string;
+  sourceTaskId: string;
+  sourceTaskTitle: string;
+  sourceIssueId?: string | null;
+  affectedIssueIds?: string[];
+  reasonCode: ReviewReasonCode;
+  mutationCategory: WorkflowMutationCategory;
+  failureCount: number;
+  entityType?: string | null;
+  entityId?: string | null;
+  entityTitle?: string | null;
+  latestReason?: string | null;
+  recommendedChanges: string[];
+  stewardTask: WorkflowMutationTaskSpec;
+};
+
 export type ReviewConfig = {
-  /** Explicit verifier agent ID. If omitted, falls back to regex pattern matching. */
+  /** Explicit verifier agent ID. */
   verifierAgent?: string;
   /** Hours before a REVIEW task with no verifier action triggers escalation. */
   autoEscalateAfterHours?: number;
@@ -782,6 +1129,8 @@ export type ReviewConfig = {
   selfReviewAllowed?: boolean;
   /** Maximum task priority that allows self-review. Tasks at higher priority still require cross-verification. Default: P3. */
   selfReviewMaxPriority?: TaskPriority;
+  /** Optional workflow-steward policy for repeated blocked review loops. */
+  workflowSteward?: ReviewWorkflowStewardConfig;
 };
 
 // --- Channel types ---
@@ -945,6 +1294,12 @@ export type EventType =
   | "goal_created"
   | "goal_achieved"
   | "goal_abandoned"
+  | "entity_created"
+  | "entity_updated"
+  | "entity_transitioned"
+  | "entity_issue_opened"
+  | "entity_issue_updated"
+  | "entity_issue_resolved"
   | "budget_changed"
   | "custom";
 
@@ -1237,9 +1592,103 @@ export type Goal = {
   createdBy: string;
   createdAt: number;
   achievedAt?: number;
+  entityType?: string;
+  entityId?: string;
   metadata?: Record<string, unknown>;
   allocation?: number;
   priority?: TaskPriority;
+};
+
+export type Entity = {
+  id: string;
+  projectId: string;
+  kind: string;
+  title: string;
+  state: string;
+  health?: string;
+  ownerAgentId?: string;
+  parentEntityId?: string;
+  department?: string;
+  team?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  lastVerifiedAt?: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type EntityTransitionRecord = {
+  id: string;
+  entityId: string;
+  projectId: string;
+  fromState?: string;
+  toState?: string;
+  fromHealth?: string;
+  toHealth?: string;
+  actor: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+};
+
+export type EntityIssue = {
+  id: string;
+  issueKey: string;
+  projectId: string;
+  entityId: string;
+  entityKind: string;
+  checkId?: string;
+  issueType: string;
+  source: string;
+  severity: EntityIssueSeverity;
+  status: EntityIssueStatus;
+  title: string;
+  description?: string;
+  fieldName?: string;
+  evidence?: Record<string, unknown>;
+  recommendedAction?: string;
+  playbook?: string;
+  ownerAgentId?: string;
+  blocking: boolean;
+  approvalRequired: boolean;
+  proposalId?: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  resolvedAt?: number;
+};
+
+export type EntityIssueSummary = {
+  openCount: number;
+  blockingOpenCount: number;
+  approvalRequiredCount: number;
+  pendingProposalCount: number;
+  highestSeverity?: EntityIssueSeverity;
+  suggestedHealth?: string;
+  openIssueTypes: string[];
+  openBySeverity: Partial<Record<EntityIssueSeverity, number>>;
+};
+
+export type EntityCheckRunStatus = "passed" | "issues" | "failed" | "simulated" | "blocked";
+
+export type EntityCheckRun = {
+  id: string;
+  projectId: string;
+  entityId: string;
+  entityKind: string;
+  checkId: string;
+  status: EntityCheckRunStatus;
+  command: string;
+  parserType?: string;
+  actor?: string;
+  trigger?: string;
+  sourceType?: string;
+  sourceId?: string;
+  exitCode: number;
+  issueCount: number;
+  stdout?: string;
+  stderr?: string;
+  durationMs: number;
+  createdAt: number;
 };
 
 export type PlannedItem = {
@@ -1604,4 +2053,3 @@ export type TriggerDefinition = {
   /** Tags to attach to created tasks. */
   tags?: string[];
 };
-

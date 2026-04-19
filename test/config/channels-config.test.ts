@@ -23,7 +23,7 @@ describe("channels config", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }

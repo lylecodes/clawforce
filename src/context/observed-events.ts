@@ -6,7 +6,7 @@
  * filter events by team or agent membership.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type { ClawforceEvent, ObserveEntry } from "../types.js";
 import { listEvents } from "../events/store.js";
 import { getTeamAgents } from "../org.js";

@@ -161,6 +161,8 @@ First-class behavior:
 
 - direct user-to-lead communication
 - operator requests routed into the agent team
+- shared comms state between Codex/chat surfaces and the dashboard UI
+- decision inbox kept separate from normal operator chat
 
 ## UI and Editing Model
 

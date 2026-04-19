@@ -5,9 +5,10 @@
  * Each check returns { ok, reason? } and is called at the relevant enforcement point.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "./sqlite-driver.js";
 import { getDb } from "./db.js";
 import { getExtendedProjectConfig } from "./project.js";
+import { getDefaultRuntimeState } from "./runtime/default-runtime.js";
 import type {
   LifecycleConfig,
   SafetyConfig,
@@ -35,6 +36,16 @@ const DEFAULTS: Required<SafetyConfig> = {
 };
 
 export type SafetyCheckResult = { ok: true } | { ok: false; reason: string };
+
+type SafetyRuntimeState = {
+  channelMessageTimestamps: Map<string, number[]>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getSafetyRuntimeState(): SafetyRuntimeState {
+  return runtime.safety as SafetyRuntimeState;
+}
 
 /**
  * Get the effective safety config for a project, merging with defaults.
@@ -251,8 +262,6 @@ export function checkMeetingConcurrency(
 // --- Message rate limiting ---
 
 // In-memory sliding window: channelId → timestamps[]
-const channelMessageTimestamps = new Map<string, number[]>();
-
 /**
  * Check if a channel is within its message rate limit.
  * Also records the message timestamp for future checks.
@@ -267,11 +276,11 @@ export function checkMessageRate(
   const oneMinuteAgo = now - 60_000;
 
   // Prune and count
-  const timestamps = channelMessageTimestamps.get(key) ?? [];
+  const timestamps = getSafetyRuntimeState().channelMessageTimestamps.get(key) ?? [];
   const recent = timestamps.filter((t) => t > oneMinuteAgo);
 
   if (recent.length >= config.maxMessageRate) {
-    channelMessageTimestamps.set(key, recent);
+    getSafetyRuntimeState().channelMessageTimestamps.set(key, recent);
     return {
       ok: false,
       reason: `Message rate limit: ${recent.length} messages in last minute, max is ${config.maxMessageRate}/min`,
@@ -280,14 +289,14 @@ export function checkMessageRate(
 
   // Record this message
   recent.push(now);
-  channelMessageTimestamps.set(key, recent);
+  getSafetyRuntimeState().channelMessageTimestamps.set(key, recent);
 
   return { ok: true };
 }
 
 /** Reset message rate tracking (for tests). */
 export function resetMessageRateTracking(): void {
-  channelMessageTimestamps.clear();
+  getSafetyRuntimeState().channelMessageTimestamps.clear();
 }
 
 // --- Emergency stop ---
@@ -481,4 +490,3 @@ export function getEffectiveLifecycleConfig(projectId: string): Required<Lifecyc
     workerNonComplianceAction: lc.workerNonComplianceAction ?? LIFECYCLE_DEFAULTS.workerNonComplianceAction,
   };
 }
-

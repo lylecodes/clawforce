@@ -7,7 +7,7 @@
  * Stale reservations from crashed plans are cleaned up via TTL.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 
 /**
  * Reserve budget for an executing plan.

@@ -7,7 +7,7 @@
  * in-memory DB to keep tests deterministic and isolated.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---- Module mocks (must come before dynamic imports) ----

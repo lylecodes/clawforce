@@ -1,11 +1,12 @@
 /**
  * Clawforce — Agent sync to OpenClaw
  *
- * One-way projection of clawforce agent configs (project.yaml) into OpenClaw's
+ * One-way projection of clawforce agent configs (`config.yaml` plus domain membership)
+ * into OpenClaw's
  * config (agents.list[]) so they appear in `oc agents list`, channel routing,
  * and the OpenClaw dashboard.
  *
- * project.yaml remains source of truth. User customizations in OpenClaw config
+ * Clawforce config remains source of truth. User customizations in OpenClaw config
  * are preserved via a "user-wins" merge strategy.
  *
  * Agent IDs are namespaced with the domain (projectId) to prevent collisions
@@ -16,6 +17,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import {
+  getAgentAllowedTools,
+  getAgentBootstrapExcludeFiles,
+  getAgentWorkspacePaths,
+} from "./agent-runtime-config.js";
 import type { AgentConfig as ClawforceAgentConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +66,7 @@ export type OpenClawAgentEntry = {
   id: string;
   name?: string;
   workspace?: string;
+  tools?: string[];
   model?: string | { primary?: string; fallbacks?: string[] };
   identity?: { name?: string; theme?: string; emoji?: string; avatar?: string };
   subagents?: { allowAgents?: string[]; model?: string | { primary?: string; fallbacks?: string[] } };
@@ -71,6 +78,9 @@ export type OpenClawConfigSubset = {
   agents?: {
     defaults?: Record<string, unknown>;
     list?: OpenClawAgentEntry[];
+  };
+  plugins?: {
+    entries?: Record<string, { enabled?: boolean; config?: Record<string, unknown> }>;
   };
   [key: string]: unknown;
 };
@@ -91,12 +101,56 @@ export type SyncResult = {
   collisions: string[];
 };
 
+function resolveManagedOpenClawAgentId(
+  agentId: string,
+  config: ClawforceAgentConfig,
+  domain?: string,
+): string {
+  if (config.runtimeRef && config.runtimeRef.trim().length > 0) {
+    return config.runtimeRef.trim();
+  }
+  return domain ? toNamespacedAgentId(domain, agentId) : agentId;
+}
+
 type SyncParams = {
   agents: SyncAgentInput[];
   loadConfig: () => OpenClawConfigSubset;
   writeConfigFile: (cfg: OpenClawConfigSubset) => Promise<void>;
   logger?: { info(msg: string): void; warn(msg: string): void };
 };
+
+const CLAWFORCE_PLUGIN_ID = "clawforce";
+const MANAGED_AGENT_IDS_KEY = "managedAgentIds";
+
+function getManagedAgentIds(config: OpenClawConfigSubset): Set<string> {
+  const raw =
+    config.plugins?.entries?.[CLAWFORCE_PLUGIN_ID]?.config?.[MANAGED_AGENT_IDS_KEY];
+  if (!Array.isArray(raw)) return new Set();
+  return new Set(
+    raw.filter((value): value is string => typeof value === "string" && value.trim().length > 0),
+  );
+}
+
+function setManagedAgentIds(config: OpenClawConfigSubset, ids: Iterable<string>): void {
+  if (!config.plugins) config.plugins = {};
+  if (!config.plugins.entries) config.plugins.entries = {};
+  const existing = config.plugins.entries[CLAWFORCE_PLUGIN_ID] ?? {};
+  config.plugins.entries[CLAWFORCE_PLUGIN_ID] = {
+    ...existing,
+    config: {
+      ...(existing.config ?? {}),
+      [MANAGED_AGENT_IDS_KEY]: [...ids].sort(),
+    },
+  };
+}
+
+function sameIdSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
+}
 
 /**
  * Map a clawforce agent config to an OpenClaw agent entry.
@@ -106,7 +160,6 @@ type SyncParams = {
  *
  * When `domain` is provided the agent ID is namespaced as `{domain}:{agentId}`
  * to prevent collisions with personal agents or agents from other domains.
- * A `clawforce_domain` metadata field is added so ownership is traceable.
  */
 export function buildOpenClawAgentEntry(
   agentId: string,
@@ -114,8 +167,7 @@ export function buildOpenClawAgentEntry(
   projectDir?: string,
   domain?: string,
 ): OpenClawAgentEntry {
-  // Namespace the ID when domain context is available
-  const effectiveId = domain ? toNamespacedAgentId(domain, agentId) : agentId;
+  const effectiveId = resolveManagedOpenClawAgentId(agentId, config, domain);
   const entry: OpenClawAgentEntry = { id: effectiveId };
 
   if (config.title) {
@@ -123,44 +175,26 @@ export function buildOpenClawAgentEntry(
     entry.identity = { name: config.title };
   }
 
-  if (projectDir) {
-    entry.workspace = projectDir;
+  const workspaceRoots = resolveWorkspaceRoots(getAgentWorkspacePaths(config), projectDir);
+  if (workspaceRoots.length > 0) {
+    entry.workspace = workspaceRoots[0];
+  }
+
+  const allowedTools = getAgentAllowedTools(config);
+  if (allowedTools && allowedTools.length > 0) {
+    entry.tools = [...allowedTools];
   }
 
   if (config.extends === "manager" || config.coordination?.enabled) {
     entry.subagents = { allowAgents: ["*"] };
   }
 
-  if (config.model) {
-    entry.model = { primary: config.model };
-  }
-
-  // CO-1: Propagate bootstrap config to OpenClaw agent entry
-  if (config.bootstrapConfig) {
-    if (config.bootstrapConfig.maxChars !== undefined) {
-      entry.bootstrapMaxChars = config.bootstrapConfig.maxChars;
-    }
-    if (config.bootstrapConfig.totalMaxChars !== undefined) {
-      entry.bootstrapTotalMaxChars = config.bootstrapConfig.totalMaxChars;
-    }
-  }
-
-  // CO-3: Propagate allowed tools to OpenClaw agent entry
-  if (config.allowedTools && config.allowedTools.length > 0) {
-    entry.allowedTools = config.allowedTools;
-  }
-
-  // Track which domain owns this agent for collision detection
-  if (domain) {
-    entry.clawforce_domain = domain;
-  }
-
   return entry;
 }
 
 /**
- * User-wins merge: existing fields are always preserved.
- * Only fills in fields that are `undefined` in the existing entry.
+ * Merge an incoming ClawForce projection into an existing OpenClaw entry.
+ * ClawForce remains authoritative for security-sensitive runtime fields.
  */
 export function mergeAgentEntry(
   existing: OpenClawAgentEntry,
@@ -169,7 +203,7 @@ export function mergeAgentEntry(
   const merged = { ...existing };
 
   // Fields where ClawForce config wins over existing OpenClaw config
-  const CLAWFORCE_WINS = new Set(["model", "allowedTools", "bootstrapMaxChars", "bootstrapTotalMaxChars", "clawforce_domain"]);
+  const CLAWFORCE_WINS = new Set(["model", "workspace", "tools"]);
 
   for (const key of Object.keys(incoming) as (keyof OpenClawAgentEntry)[]) {
     if (key === "id") continue; // id is always from existing
@@ -182,6 +216,46 @@ export function mergeAgentEntry(
   }
 
   return merged;
+}
+
+function resolveWorkspaceRoots(
+  workspacePaths: string[] | undefined,
+  projectDir?: string,
+): string[] {
+  const rawRoots = workspacePaths && workspacePaths.length > 0
+    ? workspacePaths
+    : (projectDir ? [projectDir] : []);
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rawPath of rawRoots) {
+    const normalized = resolveWorkspacePath(rawPath, projectDir);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    resolved.push(normalized);
+  }
+
+  return resolved;
+}
+
+function resolveWorkspacePath(rawPath: string, projectDir?: string): string | null {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return null;
+
+  const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? null;
+  if (trimmed === "~" && homeDir) {
+    return homeDir;
+  }
+  if (trimmed.startsWith("~/") && homeDir) {
+    return path.join(homeDir, trimmed.slice(2));
+  }
+  if (path.isAbsolute(trimmed)) {
+    return path.normalize(trimmed);
+  }
+  if (projectDir) {
+    return path.resolve(projectDir, trimmed);
+  }
+  return path.resolve(trimmed);
 }
 
 /**
@@ -197,11 +271,12 @@ export async function syncAgentsToOpenClaw(params: SyncParams): Promise<SyncResu
   const { agents, loadConfig, writeConfigFile, logger } = params;
   const result: SyncResult = { synced: 0, skipped: 0, errors: [], collisions: [] };
 
-  if (agents.length === 0) return result;
-
   let config: OpenClawConfigSubset;
   try {
-    config = loadConfig();
+    // OpenClaw's hosted runtime persists writes by diffing the candidate config
+    // against its current runtime snapshot. Mutating the loaded snapshot in place
+    // makes that diff empty, so clone before applying sync changes.
+    config = structuredClone(loadConfig());
   } catch (err) {
     const msg = `Failed to load OpenClaw config: ${err instanceof Error ? err.message : String(err)}`;
     result.errors.push(msg);
@@ -219,31 +294,56 @@ export async function syncAgentsToOpenClaw(params: SyncParams): Promise<SyncResu
     existingById.set(entry.id, i);
   }
 
+  const previousManagedIds = getManagedAgentIds(config);
+  const nextManagedIds = new Set<string>();
   let changed = false;
+  const desiredIds = new Set<string>();
+  for (const { agentId, config: agentConfig, projectDir, domain } of agents) {
+    void agentConfig;
+    void projectDir;
+    desiredIds.add(resolveManagedOpenClawAgentId(agentId, agentConfig, domain));
+  }
+
+  const staleIndices: number[] = [];
+  for (let i = 0; i < config.agents.list.length; i++) {
+    const entry = config.agents.list[i]!;
+    const ownedByClawforce = previousManagedIds.has(entry.id);
+    if (!ownedByClawforce) continue;
+    if (desiredIds.has(entry.id)) continue;
+    staleIndices.push(i);
+  }
+
+  for (const index of staleIndices.sort((a, b) => b - a)) {
+    config.agents.list.splice(index, 1);
+    changed = true;
+  }
+
+  if (staleIndices.length > 0) {
+    existingById.clear();
+    for (let i = 0; i < config.agents.list.length; i++) {
+      existingById.set(config.agents.list[i]!.id, i);
+    }
+  }
 
   for (const { agentId, config: agentConfig, projectDir, domain } of agents) {
     try {
       const incoming = buildOpenClawAgentEntry(agentId, agentConfig, projectDir, domain);
-      const namespacedId = incoming.id; // already namespaced by buildOpenClawAgentEntry
+      const namespacedId = incoming.id;
 
-      // Collision detection: check if this namespaced ID already exists from a different domain
       const existingIdx = existingById.get(namespacedId);
       if (existingIdx !== undefined) {
         const existing = config.agents!.list![existingIdx]!;
-        const existingDomain = existing.clawforce_domain as string | undefined;
-        if (existingDomain && domain && existingDomain !== domain) {
-          const msg = `Namespace collision: "${namespacedId}" already exists from domain "${existingDomain}", incoming domain "${domain}"`;
+        const existingManaged = previousManagedIds.has(namespacedId);
+        if (domain && !existingManaged) {
+          const msg = `Namespace collision: "${namespacedId}" already exists in OpenClaw config and is not managed by Clawforce`;
           result.collisions.push(msg);
           logger?.warn(`Clawforce agent sync: ${msg}`);
-          // Skip this agent — do not overwrite another domain's entry
           result.skipped++;
           continue;
         }
 
-        // Merge with existing entry (same domain or no domain mismatch)
         const merged = mergeAgentEntry(existing, incoming);
 
-        // Check if merge actually changed anything
         if (JSON.stringify(merged) !== JSON.stringify(existing)) {
           config.agents!.list![existingIdx] = merged;
           changed = true;
@@ -251,18 +351,24 @@ export async function syncAgentsToOpenClaw(params: SyncParams): Promise<SyncResu
         } else {
           result.skipped++;
         }
+        nextManagedIds.add(namespacedId);
       } else {
-        // New agent — append
         config.agents!.list!.push(incoming);
         existingById.set(namespacedId, config.agents!.list!.length - 1);
         changed = true;
         result.synced++;
+        nextManagedIds.add(namespacedId);
       }
     } catch (err) {
       const msg = `Agent "${agentId}": ${err instanceof Error ? err.message : String(err)}`;
       result.errors.push(msg);
       logger?.warn(`Clawforce agent sync error: ${msg}`);
     }
+  }
+
+  if (!sameIdSet(previousManagedIds, nextManagedIds)) {
+    setManagedAgentIds(config, nextManagedIds);
+    changed = true;
   }
 
   if (changed) {
@@ -344,10 +450,11 @@ export function cleanupAllBootstrapFiles(
   const result: BootstrapCleanupResult = { deleted: [], skipped: [], errors: [] };
 
   for (const { agentId, config, projectDir } of agents) {
-    if (!config.bootstrapExcludeFiles || config.bootstrapExcludeFiles.length === 0) continue;
+    const bootstrapExcludeFiles = getAgentBootstrapExcludeFiles(config);
+    if (!bootstrapExcludeFiles || bootstrapExcludeFiles.length === 0) continue;
     if (!projectDir) continue;
 
-    const agentResult = cleanupBootstrapFiles(projectDir, config.bootstrapExcludeFiles);
+    const agentResult = cleanupBootstrapFiles(projectDir, bootstrapExcludeFiles);
     result.deleted.push(...agentResult.deleted.map(f => `${agentId}:${f}`));
     result.skipped.push(...agentResult.skipped.map(f => `${agentId}:${f}`));
     result.errors.push(...agentResult.errors.map(e => `${agentId}:${e}`));

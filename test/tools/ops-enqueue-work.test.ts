@@ -4,7 +4,7 @@
  * Regression guard for: "Task in non-dispatchable state: OPEN"
  * (was causing 8,000+ dispatch failures when tasks were enqueued while OPEN).
  */
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({

@@ -24,7 +24,7 @@ const KNOWN_CHANNELS = new Set<ApprovalChannel>(["inline", "telegram", "slack", 
  * Falls back to "dashboard" when unset or unknown.
  */
 export function resolveApprovalChannel(projectId: string, agentId: string): ChannelConfig {
-  const entry = getAgentConfig(agentId);
+  const entry = getAgentConfig(agentId, projectId);
   if (!entry || !entry.config.channel) {
     return { channel: "dashboard" };
   }

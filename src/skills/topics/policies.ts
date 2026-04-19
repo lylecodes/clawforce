@@ -46,7 +46,7 @@ export function generate(): string {
   }
 
   sections.push("");
-  sections.push("## Defining Policies in project.yaml");
+  sections.push("## Defining Policies in Domain Config");
   sections.push("");
   sections.push("```yaml");
   sections.push("policies:");
@@ -82,7 +82,6 @@ export function generate(): string {
   sections.push("");
   sections.push("- **manager**: `clawforce_task`, `clawforce_log`, `clawforce_verify`, `clawforce_compact`, `clawforce_workflow`, `clawforce_ops`, `clawforce_setup`");
   sections.push("- **employee**: `clawforce_task`, `clawforce_log`, `clawforce_verify`, `clawforce_compact`");
-  sections.push("- **scheduled**: `clawforce_log`");
   sections.push("");
   sections.push("If you define an explicit `action_scope` policy targeting an agent, the auto-generated policy is skipped for that agent.");
   sections.push("");

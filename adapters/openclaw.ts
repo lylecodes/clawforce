@@ -9,7 +9,14 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { OpenClawPluginApi as _OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type {
+  OpenClawPluginApi as _OpenClawPluginApi,
+  OpenClawPluginConfigSchema,
+} from "openclaw/plugin-sdk";
+import {
+  createManagedRuntimeController,
+} from "./openclaw-bootstrap.js";
+import { getAgentAllowedTools } from "../src/agent-runtime-config.js";
 
 type OpenClawPluginApi = _OpenClawPluginApi;
 
@@ -114,44 +121,38 @@ import { countRecentRetries } from "../src/enforcement/retry-store.js";
 import { resolveEscalationTarget, routeEscalation } from "../src/enforcement/escalation-router.js";
 import { endSession, getSession, recordToolCall, recordSignificantResult, recoverOrphanedSessions, setDispatchContext, startTracking } from "../src/enforcement/tracker.js";
 import { emitDiagnosticEvent, setDiagnosticEmitter } from "../src/diagnostics.js";
-import { getActiveProjectIds, initClawforce, registerProject, shutdownClawforce } from "../src/lifecycle.js";
+import { getActiveProjectIds, registerProject } from "../src/lifecycle.js";
 import {
   getAgentConfig,
   getExtendedProjectConfig,
   getRegisteredAgentIds,
+  resolveOpenClawAgentId,
   resolveProjectDir,
-  loadWorkforceConfig,
-  registerWorkforceConfig,
 } from "../src/project.js";
 import { getEffectiveLifecycleConfig, getSafetyConfig } from "../src/safety.js";
-import { syncAgentsToOpenClaw, toNamespacedAgentId } from "../src/agent-sync.js";
+import type { RuntimeIntegrationMode } from "../src/types.js";
 import { approveProposal, listPendingProposals, rejectProposal } from "../src/approval/resolve.js";
-import { resolveApprovalChannel } from "../src/approval/channel-router.js";
 import {
-  type ApprovalNotifier,
-  type NotificationPayload,
-  setApprovalNotifier,
   getApprovalNotifier,
-  formatTelegramMessage,
-  buildApprovalButtons,
 } from "../src/approval/notify.js";
 import { persistToolCallIntent } from "../src/approval/intent-store.js";
 import { checkPreApproval, consumePreApproval } from "../src/approval/pre-approved.js";
 import { recordToolGateHit, getEffectiveTier } from "../src/risk/bulk-detector.js";
 import { getRiskConfig } from "../src/risk/config.js";
 import { getDb } from "../src/db.js";
+import { setProjectStorageDir } from "../src/db.js";
 import { completeItem, failItem } from "../src/dispatch/queue.js";
 import { attachEvidence, getTask, releaseTaskLease, transitionTask } from "../src/tasks/ops.js";
 import { setDispatchInjector } from "../src/dispatch/inject-dispatch.js";
-import { recoverProject } from "../src/dispatch/restart-recovery.js";
-import { registerKillFunction, killStuckAgent } from "../src/audit/auto-kill.js";
+import { killStuckAgent } from "../src/audit/auto-kill.js";
 import { checkBudget } from "../src/budget.js";
-import { disableAgent, isAgentDisabled, isAgentEffectivelyDisabled } from "../src/enforcement/disabled-store.js";
+import { isAgentDisabled, isAgentEffectivelyDisabled } from "../src/enforcement/disabled-store.js";
 import { handleWorkerSessionEnd } from "../src/tasks/session-end.js";
 import { buildOnboardingContext } from "../src/context/onboarding.js";
 import { getAllowedActionsForTool } from "../src/profiles.js";
 import { resolveEffectiveScope } from "../src/scope.js";
 import { withPolicyCheck, enforceToolPolicy } from "../src/policy/middleware.js";
+import { evaluateToolExecution } from "../src/execution/intercept.js";
 import { adaptTool, type ToolResult } from "../src/tools/common.js";
 import { createClawforceLogTool } from "../src/tools/log-tool.js";
 import { createClawforceSetupTool } from "../src/tools/setup-tool.js";
@@ -163,9 +164,7 @@ import { createClawforceOpsTool } from "../src/tools/ops-tool.js";
 import { createClawforceContextTool } from "../src/tools/context-tool.js";
 import { createClawforceMessageTool } from "../src/tools/message-tool.js";
 import { createClawforceChannelTool } from "../src/tools/channel-tool.js";
-import { setMessageNotifier, formatMessageNotification } from "../src/messaging/notify.js";
-import { setChannelNotifier, formatChannelMessage } from "../src/channels/notify.js";
-import { setDeliveryAdapter } from "../src/channels/deliver.js";
+import { createClawforceEntityTool } from "../src/tools/entity-tool.js";
 import { advanceMeetingTurn, concludeMeeting, getMeetingStatus } from "../src/channels/meeting.js";
 import { buildChannelTranscript } from "../src/channels/messages.js";
 import { getChannel } from "../src/channels/store.js";
@@ -182,13 +181,24 @@ import { recordCostFromLlmOutput } from "../src/cost.js";
 import { registerBulkPricing } from "../src/pricing.js";
 import { updateProviderUsage } from "../src/rate-limits.js";
 import { recordCall as recordRateLimitCall, checkCallLimit, clearSession as clearRateLimitSession, calculateBackoffDelay, type RateLimitConfig, type BackoffConfig } from "../src/safety/rate-limiter.js";
-import { initializeAllDomains } from "../src/config/init.js";
-import { startConfigWatcher, stopConfigWatcher } from "../src/config/watcher.js";
 // Dashboard
 import { createDashboardHandler } from "../src/dashboard/gateway-routes.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { emitSSE } from "../src/dashboard/sse.js";
-import { setCronService, getCronService } from "../src/manager-cron.js";
+import { getCronService } from "../src/manager-cron.js";
+import {
+  wireGatewayCronService,
+  wireGatewayKillBridge,
+  wireGatewayTelegramPorts,
+} from "./openclaw-runtime.js";
+import {
+  clearOpenClawSessionState,
+  incrementOpenClawSessionTurnCount,
+  isMemoryModeEnabled,
+  setOpenClawMeetingSession,
+  takeOpenClawMeetingSession,
+  toggleMemoryMode,
+} from "../src/runtime/integrations.js";
 
 type GhostRecallConfig = {
   enabled?: boolean;
@@ -216,13 +226,72 @@ type ClawforcePluginConfig = {
   cronMaxConsecutiveFailures?: number;
   ghostRecall?: GhostRecallConfig;
   memoryFlush?: MemoryFlushConfig;
-  /** Sync clawforce agents to OpenClaw config (agents.list[]). Default: true. */
+  /** How ClawForce should sit on top of the host runtime. Default: "hybrid". */
+  integrationMode?: RuntimeIntegrationMode;
+  /** Sync clawforce agents to OpenClaw config (agents.list[]). Default depends on integration mode. */
   syncAgents?: boolean;
   /** Override for domain config directory (defaults to projectsDir). */
   configDir?: string;
+  /** Additional ClawForce homes to manage in the hosted runtime. */
+  managedRoots?: string[];
+  /** Auto-discover `.clawforce` homes from OpenClaw agent workspaces. Default: true. */
+  discoverWorkspaceRoots?: boolean;
   /** Start the standalone compatibility dashboard server alongside the embedded OpenClaw route. Default: true. */
   standaloneDashboard?: boolean;
+  /** Internal list of namespaced OpenClaw agent ids currently managed by Clawforce. */
+  managedAgentIds?: string[];
 };
+
+const clawforcePluginConfigSchema = {
+  jsonSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      enabled: { type: "boolean" },
+      projectsDir: { type: "string" },
+      sweepIntervalMs: { type: "number" },
+      defaultMaxRetries: { type: "number" },
+      staleTaskHours: { type: "number" },
+      cronStuckTimeoutMs: { type: "number" },
+      cronMaxConsecutiveFailures: { type: "number" },
+      integrationMode: { type: "string", enum: ["overlay", "hybrid", "clawforce-owned"] },
+      syncAgents: { type: "boolean" },
+      configDir: { type: "string" },
+      managedRoots: {
+        type: "array",
+        items: { type: "string" },
+      },
+      managedAgentIds: {
+        type: "array",
+        items: { type: "string" },
+      },
+      discoverWorkspaceRoots: { type: "boolean" },
+      standaloneDashboard: { type: "boolean" },
+      ghostRecall: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          enabled: { type: "boolean" },
+          intensity: { type: "string", enum: ["low", "medium", "high"] },
+          windowSize: { type: "number" },
+          maxInjectedChars: { type: "number" },
+          maxSearches: { type: "number" },
+          debug: { type: "boolean" },
+          injectExpectations: { type: "boolean" },
+        },
+      },
+      memoryFlush: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          enabled: { type: "boolean" },
+          flushInterval: { type: "number" },
+          minToolCalls: { type: "number" },
+        },
+      },
+    },
+  },
+} satisfies OpenClawPluginConfigSchema;
 
 const DEFAULT_GHOST_RECALL: Required<GhostRecallConfig> = {
   enabled: true,
@@ -248,6 +317,7 @@ const DEFAULT_CONFIG = {
   staleTaskHours: 4,
   cronStuckTimeoutMs: 300_000,
   cronMaxConsecutiveFailures: 3,
+  integrationMode: "hybrid",
   ghostRecall: DEFAULT_GHOST_RECALL,
   memoryFlush: DEFAULT_MEMORY_FLUSH,
 } as const;
@@ -278,16 +348,23 @@ type ResolvedConfig = {
   enabled: boolean;
   projectsDir: string;
   configDir?: string;
+  managedRoots?: string[];
+  discoverWorkspaceRoots: boolean;
   sweepIntervalMs: number;
   defaultMaxRetries: number;
   staleTaskHours: number;
   cronStuckTimeoutMs: number;
   cronMaxConsecutiveFailures: number;
+  integrationMode: RuntimeIntegrationMode;
   ghostRecall: Required<GhostRecallConfig>;
   memoryFlush: Required<MemoryFlushConfig>;
   syncAgents: boolean;
   standaloneDashboard: boolean;
 };
+
+function expandHome(p: string): string {
+  return p.startsWith("~/") ? path.join(process.env.HOME ?? "", p.slice(2)) : p;
+}
 
 function resolveConfig(raw?: Record<string, unknown>): ResolvedConfig {
   const envStandalone = process.env.CLAWFORCE_DASHBOARD_STANDALONE;
@@ -297,24 +374,38 @@ function resolveConfig(raw?: Record<string, unknown>): ResolvedConfig {
   if (!raw) {
     return {
       ...DEFAULT_CONFIG,
+      projectsDir: expandHome(DEFAULT_CONFIG.projectsDir),
+      managedRoots: undefined,
+      discoverWorkspaceRoots: true,
+      integrationMode: DEFAULT_CONFIG.integrationMode,
       ghostRecall: { ...DEFAULT_GHOST_RECALL },
       memoryFlush: { ...DEFAULT_MEMORY_FLUSH },
       syncAgents: true,
       standaloneDashboard: standaloneOverride ?? true,
     };
   }
+  const integrationMode = raw.integrationMode === "overlay"
+    || raw.integrationMode === "hybrid"
+    || raw.integrationMode === "clawforce-owned"
+    ? raw.integrationMode
+    : DEFAULT_CONFIG.integrationMode;
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONFIG.enabled,
-    projectsDir: typeof raw.projectsDir === "string" ? raw.projectsDir : DEFAULT_CONFIG.projectsDir,
-    configDir: typeof raw.configDir === "string" ? raw.configDir : undefined,
+    projectsDir: expandHome(typeof raw.projectsDir === "string" ? raw.projectsDir : DEFAULT_CONFIG.projectsDir),
+    configDir: typeof raw.configDir === "string" ? expandHome(raw.configDir) : undefined,
+    managedRoots: Array.isArray(raw.managedRoots)
+      ? raw.managedRoots.filter((value): value is string => typeof value === "string").map(expandHome)
+      : undefined,
+    discoverWorkspaceRoots: typeof raw.discoverWorkspaceRoots === "boolean" ? raw.discoverWorkspaceRoots : true,
     sweepIntervalMs: typeof raw.sweepIntervalMs === "number" ? raw.sweepIntervalMs : DEFAULT_CONFIG.sweepIntervalMs,
     defaultMaxRetries: typeof raw.defaultMaxRetries === "number" ? raw.defaultMaxRetries : DEFAULT_CONFIG.defaultMaxRetries,
     staleTaskHours: typeof raw.staleTaskHours === "number" ? raw.staleTaskHours : DEFAULT_CONFIG.staleTaskHours,
     cronStuckTimeoutMs: typeof raw.cronStuckTimeoutMs === "number" ? raw.cronStuckTimeoutMs : DEFAULT_CONFIG.cronStuckTimeoutMs,
     cronMaxConsecutiveFailures: typeof raw.cronMaxConsecutiveFailures === "number" ? raw.cronMaxConsecutiveFailures : DEFAULT_CONFIG.cronMaxConsecutiveFailures,
+    integrationMode,
     ghostRecall: resolveGhostRecall(raw.ghostRecall as Record<string, unknown> | undefined),
     memoryFlush: resolveMemoryFlush(raw.memoryFlush as Record<string, unknown> | undefined),
-    syncAgents: typeof raw.syncAgents === "boolean" ? raw.syncAgents : true,
+    syncAgents: typeof raw.syncAgents === "boolean" ? raw.syncAgents : integrationMode !== "overlay",
     standaloneDashboard: standaloneOverride
       ?? (typeof raw.standaloneDashboard === "boolean" ? raw.standaloneDashboard : true),
   };
@@ -325,6 +416,7 @@ const clawforcePlugin = {
   name: "Clawforce",
   description: "Reliability and accountability layer for autonomous agents. Task lifecycle, context injection, compliance, and auditing.",
   version: "0.2.0",
+  configSchema: clawforcePluginConfigSchema,
 
   register(api: OpenClawPluginApi) {
     const cfg = resolveConfig(api.pluginConfig as Record<string, unknown> | undefined);
@@ -341,24 +433,22 @@ const clawforcePlugin = {
       return subagentRuntime.run(params);
     });
 
-    // --- Disabled agent tracking (persistent) ---
-    async function handleDisable(agentId: string): Promise<void> {
-      // Persist to SQLite via the agent's project
-      const entry = getAgentConfig(agentId);
-      if (entry) {
-        disableAgent(entry.projectId, agentId, "Underperforming or unresponsive");
-      }
-      emitDiagnosticEvent({ type: "agent_disabled", agentId });
-    }
-
-    // --- Memory mode toggle (per-session) ---
-    const memoryModeStore = new Map<string, boolean>();
-
-    // --- Turn counter (per-session) for maxTurnsPerCycle ---
-    const sessionTurnCountStore = new Map<string, number>();
-
-    // --- Meeting session tracking (per-session) ---
-    const meetingSessionStore = new Map<string, { channelId: string; turnIndex: number; projectId: string }>();
+    const managedRuntime = createManagedRuntimeController({
+      config: {
+        projectsDir: cfg.projectsDir,
+        managedConfigDir: cfg.configDir ?? cfg.projectsDir,
+        managedRoots: cfg.managedRoots,
+        discoverWorkspaceRoots: cfg.discoverWorkspaceRoots,
+        sweepIntervalMs: cfg.sweepIntervalMs,
+        defaultMaxRetries: cfg.defaultMaxRetries,
+        syncAgents: cfg.syncAgents,
+      },
+      logger: api.logger,
+      runtimeConfig: {
+        loadConfig: () => api.runtime.config.loadConfig() as never,
+        writeConfigFile: (config) => api.runtime.config.writeConfigFile(config as never),
+      },
+    });
 
     // --- Context injection via before_prompt_build ---
     api.on("before_prompt_build", async (event, ctx) => {
@@ -396,40 +486,6 @@ const clawforcePlugin = {
         //   for (const s of summary.providers) updateProviderUsage(s.provider, s);
         // For now, rate limit data comes from llm_output hook headers if available.
 
-        // H7: Assemble context first — only start tracking if context assembly succeeds
-        let content: string | null = null;
-        try {
-          content = assembleContext(agentId, config, {
-            projectId: entry.projectId,
-            projectDir: entry.projectDir,
-            sessionKey,
-          });
-        } catch (err) {
-          api.logger.warn(`Clawforce: context assembly failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
-          return;
-        }
-
-        if (!content || content.trim().length === 0) {
-          api.logger.warn(`Clawforce: empty context for ${agentId} — injecting fallback`);
-          content = `You are ${agentId}. Check your task board for assigned work using clawforce_task list.`;
-        }
-
-        // Telemetry: detect config changes and store context hash
-        try {
-          const { detectConfigChange } = await import("../src/telemetry/config-tracker.js");
-          detectConfigChange(entry.projectId, content, agentId, getDb(entry.projectId));
-        } catch { /* telemetry must never break the main flow */ }
-
-        // Start compliance tracking after confirmed context success
-        startTracking(sessionKey, agentId, entry.projectId, config, jobName ?? undefined);
-
-        // SSE: notify dashboard that agent is now active
-        emitSSE(entry.projectId, "agent:status", {
-          agentId,
-          status: "active",
-          sessionKey,
-        });
-
         // Detect dispatch context (links session to dispatch queue item)
         // Check event.prompt first (cron/job path), then fall back to user messages (CLI spawn path)
         const rawPrompt = (event as { prompt?: string }).prompt;
@@ -464,6 +520,43 @@ const clawforcePlugin = {
             }
           }
         }
+
+        // H7: Assemble context first — only start tracking if context assembly succeeds
+        let content: string | null = null;
+        try {
+          content = assembleContext(agentId, config, {
+            projectId: entry.projectId,
+            projectDir: entry.projectDir,
+            sessionKey,
+            taskId: dispatchCtx?.taskId,
+            queueItemId: dispatchCtx?.queueItemId,
+          });
+        } catch (err) {
+          api.logger.warn(`Clawforce: context assembly failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+
+        if (!content || content.trim().length === 0) {
+          api.logger.warn(`Clawforce: empty context for ${agentId} — injecting fallback`);
+          content = `You are ${agentId}. Check your task board for assigned work using clawforce_task list.`;
+        }
+
+        // Telemetry: detect config changes and store context hash
+        try {
+          const { detectConfigChange } = await import("../src/telemetry/config-tracker.js");
+          detectConfigChange(entry.projectId, content, agentId, getDb(entry.projectId));
+        } catch { /* telemetry must never break the main flow */ }
+
+        // Start compliance tracking after confirmed context success
+        startTracking(sessionKey, agentId, entry.projectId, config, jobName ?? undefined);
+
+        // SSE: notify dashboard that agent is now active
+        emitSSE(entry.projectId, "agent:status", {
+          agentId,
+          status: "active",
+          sessionKey,
+        });
+
         if (dispatchCtx) {
           setDispatchContext(sessionKey, dispatchCtx);
 
@@ -486,7 +579,11 @@ const clawforcePlugin = {
         if (meetingMatch) {
           const meetingChannelId = meetingMatch[1]!;
           const turnIndex = parseInt(meetingMatch[2]!, 10);
-          meetingSessionStore.set(sessionKey, { channelId: meetingChannelId, turnIndex, projectId: entry.projectId });
+          setOpenClawMeetingSession(sessionKey, {
+            channelId: meetingChannelId,
+            turnIndex,
+            projectId: entry.projectId,
+          });
 
           // Inject full channel transcript + meeting prompt into context
           try {
@@ -521,7 +618,7 @@ const clawforcePlugin = {
         let ghostContext: string | null = null;
         if (recallEnabled && _createMemorySearchTool) {
           try {
-            const isMemMode = memoryModeStore.get(sessionKey) ?? false;
+            const isMemMode = isMemoryModeEnabled(sessionKey);
             const isCron = !!jobName;
             let recallResult: GhostRecallResult | null = null;
 
@@ -604,8 +701,7 @@ const clawforcePlugin = {
         let wrapUpContext: string | null = null;
         const maxTurns = config.scheduling?.maxTurnsPerCycle;
         if (maxTurns !== undefined) {
-          const currentTurn = (sessionTurnCountStore.get(sessionKey) ?? 0) + 1;
-          sessionTurnCountStore.set(sessionKey, currentTurn);
+          const currentTurn = incrementOpenClawSessionTurnCount(sessionKey);
           if (currentTurn > maxTurns) {
             wrapUpContext = `## Coordination Cycle Limit\n\nYou've been running for ${currentTurn} turns this cycle (limit: ${maxTurns}). Wrap up your current work, log your decisions, and conclude. Your next coordination cycle will continue where you left off.`;
           }
@@ -685,7 +781,7 @@ const clawforcePlugin = {
 
           // Disable agent if action requires it
           if (actionResult.disabled) {
-            await handleDisable(session.agentId);
+            await managedRuntime.handleDisable(session.agentId);
           }
 
           // H9: Escalation with error boundary
@@ -889,6 +985,14 @@ const clawforcePlugin = {
         return;
       }
 
+      const allowedTools = getAgentAllowedTools(entry.config);
+      if (allowedTools && allowedTools.length > 0 && !allowedTools.includes(event.toolName)) {
+        return {
+          block: true,
+          blockReason: `Clawforce runtime scope: tool "${event.toolName}" is not in allowedTools for ${ctx.agentId}`,
+        };
+      }
+
       const result = enforceToolPolicy(
         {
           projectId: entry.projectId,
@@ -903,6 +1007,31 @@ const clawforcePlugin = {
         return {
           block: true,
           blockReason: `Clawforce policy: ${result.reason}`,
+        };
+      }
+
+      const session = ctx.sessionKey ? getSession(ctx.sessionKey) : null;
+      const taskId = session?.dispatchContext?.taskId;
+      if (taskId && checkPreApproval({ projectId: entry.projectId, taskId, toolName: event.toolName })) {
+        consumePreApproval({ projectId: entry.projectId, taskId, toolName: event.toolName });
+        return;
+      }
+
+      const executionDecision = evaluateToolExecution(
+        {
+          projectId: entry.projectId,
+          agentId: ctx.agentId,
+          sessionKey: ctx.sessionKey,
+          toolName: event.toolName,
+          taskId,
+        },
+        (event.params ?? {}) as Record<string, unknown>,
+      );
+
+      if (executionDecision.effect !== "allow") {
+        return {
+          block: true,
+          blockReason: `${executionDecision.reason} [simulated_action:${executionDecision.simulatedAction.id}]${executionDecision.proposal ? ` [proposal:${executionDecision.proposal.id}]` : ""}`,
         };
       }
 
@@ -1034,13 +1163,11 @@ const clawforcePlugin = {
       clearCooldown(ctx.sessionKey);
       clearAssemblerCache(ctx.sessionKey);
       clearRateLimitSession(ctx.sessionKey);
-      memoryModeStore.delete(ctx.sessionKey);
-      sessionTurnCountStore.delete(ctx.sessionKey);
+      clearOpenClawSessionState(ctx.sessionKey);
 
       // --- Meeting turn advancement ---
-      const meetingCtx = meetingSessionStore.get(ctx.sessionKey);
+      const meetingCtx = takeOpenClawMeetingSession(ctx.sessionKey);
       if (meetingCtx) {
-        meetingSessionStore.delete(ctx.sessionKey);
         try {
           const result = advanceMeetingTurn(meetingCtx.projectId, meetingCtx.channelId);
           if (result.done) {
@@ -1351,7 +1478,7 @@ const clawforcePlugin = {
 
       // Disable agent if action requires it
       if (actionResult.disabled) {
-        await handleDisable(session.agentId);
+        await managedRuntime.handleDisable(session.agentId);
       }
 
       // H9: Escalation with error boundary
@@ -1695,6 +1822,17 @@ const clawforcePlugin = {
       { name: "clawforce_channel" },
     );
 
+    api.registerTool(
+      scopedToolFactory("clawforce_entity", (ctx) => {
+        const agentEntry = ctx.agentId ? getAgentConfig(ctx.agentId) : null;
+        return adaptTool(createClawforceEntityTool({
+          agentSessionKey: ctx.sessionKey,
+          projectId: agentEntry?.projectId,
+        }));
+      }),
+      { name: "clawforce_entity" },
+    );
+
     // --- OpenClaw RAG memory tools ---
     // Lazy-import factories from OpenClaw's internal memory tool module.
     let _createMemorySearchTool: MemoryToolFactory | null | undefined;
@@ -1766,151 +1904,21 @@ const clawforcePlugin = {
     // --- Gateway methods: kill + channel ---
     // Gateway method to bootstrap kill + channel APIs — invoked lazily on first gateway call
     api.registerGatewayMethod("clawforce.init", async ({ context, respond }) => {
-      // Capture kill function from abort controllers
-      if (context.chatAbortControllers) {
-        registerKillFunction(async (sessionKey, reason) => {
-          for (const [runId, entry] of context.chatAbortControllers) {
-            if (entry.sessionKey === sessionKey) {
-              entry.controller.abort();
-              context.chatAbortControllers.delete(runId);
-              api.logger.info(`Clawforce: killed session ${sessionKey} — ${reason}`);
-              return true;
-            }
-          }
-          return false;
-        });
-      }
+      wireGatewayKillBridge({
+        chatAbortControllers: context.chatAbortControllers,
+        logger: api.logger,
+      });
 
-      // Capture channel APIs for delivery and notifications
-      const channelApis = api.runtime?.channel;
-      if (channelApis?.telegram?.sendMessageTelegram) {
-        const sendTelegram = channelApis.telegram.sendMessageTelegram;
+      wireGatewayTelegramPorts({
+        logger: api.logger,
+        sendTelegram: api.runtime?.channel?.telegram?.sendMessageTelegram,
+      });
 
-        // Wire unified delivery adapter
-        setDeliveryAdapter({
-          send: async (channel, content, target, options) => {
-            switch (channel) {
-              case "telegram": {
-                if (!sendTelegram) return { sent: false, error: "Telegram not configured" };
-                try {
-                  const sendOpts: Record<string, unknown> = {
-                    textMode: options?.format ?? "markdown",
-                  };
-                  if (options?.buttons) sendOpts.buttons = options.buttons;
-                  if (target.threadId) sendOpts.messageThreadId = Number(target.threadId);
-                  const result = await sendTelegram(
-                    String(target.chatId ?? ""),
-                    content,
-                    sendOpts as never,
-                  );
-                  return { sent: !!result, messageId: result?.messageId };
-                } catch (err) {
-                  return { sent: false, error: err instanceof Error ? err.message : String(err) };
-                }
-              }
-              default:
-                return { sent: false, error: `Unsupported channel: ${channel}` };
-            }
-          },
-        });
-        api.logger.info("Clawforce: unified delivery adapter configured (Telegram)");
-
-        const notifier: ApprovalNotifier = {
-          async sendProposalNotification(payload: NotificationPayload) {
-            const channel = resolveApprovalChannel(payload.projectId, payload.proposedBy);
-            if (channel.channel !== "telegram") {
-              return { sent: false, channel: channel.channel };
-            }
-
-            const target = channel.target;
-            if (!target) {
-              return { sent: false, channel: "telegram", error: "No Telegram target configured" };
-            }
-
-            try {
-              const message = formatTelegramMessage(payload);
-              const buttons = buildApprovalButtons(payload.projectId, payload.proposalId);
-              const result = await sendTelegram(target, message, {
-                textMode: "markdown",
-                buttons,
-                messageThreadId: channel.threadId,
-              });
-
-              // Store notification_message_id for audit trail
-              try {
-                const db = getDb(payload.projectId);
-                db.prepare(
-                  "UPDATE proposals SET notification_message_id = ?, channel = 'telegram' WHERE id = ? AND project_id = ?",
-                ).run(result.messageId, payload.proposalId, payload.projectId);
-              } catch { /* non-fatal */ }
-
-              return { sent: true, channel: "telegram", messageId: result.messageId };
-            } catch (err) {
-              api.logger.warn(`Clawforce: failed to send Telegram notification: ${err instanceof Error ? err.message : String(err)}`);
-              return { sent: false, channel: "telegram", error: err instanceof Error ? err.message : String(err) };
-            }
-          },
-
-          async editProposalMessage(_proposalId, _projectId, _resolution, _feedback) {
-            // Message editing requires editMessageTelegram which isn't on the runtime channel API.
-            // Resolution is communicated via the callback response to the user.
-          },
-        };
-
-        setApprovalNotifier(notifier);
-        api.logger.info("Clawforce: approval notifier configured (Telegram)");
-
-        // Wire message notifier using same Telegram channel
-        setMessageNotifier({
-          async sendMessageNotification(message) {
-            try {
-              const msgChannel = resolveApprovalChannel(message.projectId, message.toAgent);
-              if (msgChannel.channel !== "telegram" || !msgChannel.target) {
-                return { sent: false, error: "No Telegram target" };
-              }
-              const text = formatMessageNotification(message);
-              const result = await sendTelegram(msgChannel.target, text, { textMode: "markdown" });
-              return { sent: true, messageId: result?.messageId };
-            } catch (err) {
-              return { sent: false, error: err instanceof Error ? err.message : String(err) };
-            }
-          },
-        });
-        api.logger.info("Clawforce: message notifier configured (Telegram)");
-
-        // Wire channel notifier for Telegram mirroring
-        setChannelNotifier({
-          async sendChannelNotification({ channel, message }) {
-            const telegramGroupId = (channel.metadata as Record<string, unknown> | undefined)?.telegramGroupId as string | undefined;
-            if (!telegramGroupId) return { sent: false, error: "No Telegram group configured" };
-
-            try {
-              const text = formatChannelMessage(channel, message);
-              const telegramThreadId = (channel.metadata as Record<string, unknown> | undefined)?.telegramThreadId as number | undefined;
-              const result = await sendTelegram(telegramGroupId, text, {
-                textMode: "markdown",
-                ...(telegramThreadId ? { messageThreadId: telegramThreadId } : {}),
-              });
-              return { sent: true };
-            } catch (err) {
-              return { sent: false, error: err instanceof Error ? err.message : String(err) };
-            }
-          },
-        });
-        api.logger.info("Clawforce: channel notifier configured (Telegram)");
-      }
-
-      // Wire cron service for dispatch
-      if (context.cron) {
-        setCronService({
-          add: async (input) => context.cron.add(input),
-          list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
-          update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
-          remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
-          run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
-        });
-        api.logger.info("Clawforce: cron service wired for dispatch");
-      }
+      wireGatewayCronService({
+        cron: context.cron,
+        logger: api.logger,
+        logMessage: "Clawforce: cron service wired for dispatch",
+      });
 
       respond(true);
     });
@@ -1920,20 +1928,56 @@ const clawforcePlugin = {
     // Called once at gateway_start via WebSocket RPC.
     api.registerGatewayMethod("clawforce.bootstrap", async ({ context, respond }) => {
       try {
-        if (context.cron && !getCronService()) {
-          setCronService({
-            add: async (input) => context.cron.add(input),
-            list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
-            update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
-            remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
-            run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
-          });
-          api.logger.info("Clawforce: cron service bootstrapped");
-        }
+        wireGatewayCronService({
+          cron: context.cron,
+          logger: api.logger,
+          onlyIfMissing: true,
+          logMessage: "Clawforce: cron service bootstrapped",
+        });
         respond(true);
       } catch (err) {
         api.logger.warn(`Clawforce bootstrap error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
         respond(false, undefined, { code: "BOOTSTRAP_ERROR", message: String(err) });
+      }
+    });
+
+    api.registerGatewayMethod("clawforce.roots", async ({ respond }) => {
+      try {
+        respond(true, { roots: managedRuntime.listManagedRoots() });
+      } catch (err) {
+        respond(false, undefined, { code: "ROOTS_ERROR", message: String(err) });
+      }
+    });
+
+    api.registerGatewayMethod("clawforce.bind_root", async ({ params, respond }) => {
+      try {
+        const pathHint = typeof (params as { path?: unknown }).path === "string"
+          ? (params as { path: string }).path
+          : "";
+        if (!pathHint) {
+          respond(false, undefined, { code: "INVALID_REQUEST", message: "path is required" });
+          return;
+        }
+        const result = await managedRuntime.bindManagedRoot(pathHint, "host bind");
+        respond(true, result);
+      } catch (err) {
+        respond(false, undefined, { code: "BIND_ROOT_ERROR", message: String(err) });
+      }
+    });
+
+    api.registerGatewayMethod("clawforce.unbind_root", async ({ params, respond }) => {
+      try {
+        const pathHint = typeof (params as { path?: unknown }).path === "string"
+          ? (params as { path: string }).path
+          : "";
+        if (!pathHint) {
+          respond(false, undefined, { code: "INVALID_REQUEST", message: "path is required" });
+          return;
+        }
+        const result = await managedRuntime.unbindManagedRoot(pathHint, "host unbind");
+        respond(true, result);
+      } catch (err) {
+        respond(false, undefined, { code: "UNBIND_ROOT_ERROR", message: String(err) });
       }
     });
 
@@ -1942,20 +1986,18 @@ const clawforcePlugin = {
     // Also defensively captures cron if bootstrap hasn't run yet.
     api.registerGatewayMethod("clawforce.dispatch", async ({ params, context, respond }) => {
       // Defensive: capture cron if bootstrap hasn't fired
-      if (context.cron && !getCronService()) {
-        setCronService({
-          add: async (input) => context.cron.add(input),
-          list: async (opts) => context.cron.list ? context.cron.list(opts) : [],
-          update: async (id, patch) => context.cron.update ? context.cron.update(id, patch) : undefined,
-          remove: async (id) => context.cron.remove ? context.cron.remove(id) : undefined,
-          run: async (id) => context.cron.run ? context.cron.run(id) : undefined,
-        });
-      }
+      wireGatewayCronService({
+        cron: context.cron,
+        logger: api.logger,
+        onlyIfMissing: true,
+        logMessage: false,
+      });
       const { agentId, message, sessionTarget, deleteAfterRun } = params as {
         agentId: string;
         message: string;
         sessionTarget?: string;
         deleteAfterRun?: boolean;
+        jobName?: string;
       };
       if (!agentId || !message) {
         respond(false, undefined, { code: "INVALID_REQUEST", message: "agentId and message required" });
@@ -1966,7 +2008,9 @@ const clawforcePlugin = {
         return;
       }
       try {
-        const jobName = `clawforce-dispatch:${Date.now()}`;
+        const jobName = typeof (params as { jobName?: unknown }).jobName === "string" && (params as { jobName: string }).jobName
+          ? (params as { jobName: string }).jobName
+          : `clawforce-dispatch:${Date.now()}`;
         await context.cron.add({
           name: jobName,
           agentId,
@@ -1980,6 +2024,74 @@ const clawforcePlugin = {
         respond(true, { ok: true, jobName });
       } catch (err) {
         respond(false, undefined, { code: "DISPATCH_FAILED", message: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    api.registerGatewayMethod("clawforce.dispatch_queue_item", async ({ params, context, respond }) => {
+      wireGatewayCronService({
+        cron: context.cron,
+        logger: api.logger,
+        onlyIfMissing: true,
+        logMessage: false,
+      });
+      const projectId = typeof (params as { projectId?: unknown }).projectId === "string"
+        ? (params as { projectId: string }).projectId
+        : "";
+      const queueItemId = typeof (params as { queueItemId?: unknown }).queueItemId === "string"
+        ? (params as { queueItemId: string }).queueItemId
+        : "";
+      const storageDir = typeof (params as { storageDir?: unknown }).storageDir === "string"
+        ? (params as { storageDir: string }).storageDir
+        : "";
+      if (!projectId || !queueItemId) {
+        respond(false, undefined, { code: "INVALID_REQUEST", message: "projectId and queueItemId required" });
+        return;
+      }
+      if (!context.cron) {
+        respond(false, undefined, { code: "UNAVAILABLE", message: "cron service not available" });
+        return;
+      }
+      try {
+        if (storageDir) {
+          setProjectStorageDir(projectId, storageDir);
+        }
+        const { dispatchLeasedItem } = await import("../src/dispatch/dispatcher.js");
+        const result = await dispatchLeasedItem(projectId, queueItemId);
+        respond(true, { ...result, handledRemotely: true });
+      } catch (err) {
+        respond(false, undefined, { code: "DISPATCH_FAILED", message: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    api.registerGatewayMethod("clawforce.sweep", async ({ params, context, respond }) => {
+      wireGatewayCronService({
+        cron: context.cron,
+        logger: api.logger,
+        onlyIfMissing: true,
+        logMessage: false,
+      });
+      const projectId = typeof (params as { projectId?: unknown }).projectId === "string"
+        ? (params as { projectId: string }).projectId
+        : "";
+      const storageDir = typeof (params as { storageDir?: unknown }).storageDir === "string"
+        ? (params as { storageDir: string }).storageDir
+        : "";
+      const backstopDispatchMode = (params as { backstopDispatchMode?: unknown }).backstopDispatchMode === "events_only"
+        ? "events_only"
+        : "full";
+      if (!projectId) {
+        respond(false, undefined, { code: "INVALID_REQUEST", message: "projectId required" });
+        return;
+      }
+      try {
+        if (storageDir) {
+          setProjectStorageDir(projectId, storageDir);
+        }
+        const { sweep } = await import("../src/sweep/actions.js");
+        const result = await sweep({ projectId, backstopDispatchMode });
+        respond(true, { mode: "gateway", ...result });
+      } catch (err) {
+        respond(false, undefined, { code: "SWEEP_FAILED", message: err instanceof Error ? err.message : String(err) });
       }
     });
 
@@ -2196,9 +2308,8 @@ const clawforcePlugin = {
       handler: (ctx) => {
         const key = ctx.senderId ?? ctx.from;
         if (!key) return { text: "No active session." };
-        const current = memoryModeStore.get(key) ?? false;
-        memoryModeStore.set(key, !current);
-        return { text: `Memory mode ${!current ? "ON — max intensity recall on every turn" : "OFF — normal recall"}` };
+        const enabled = toggleMemoryMode(key);
+        return { text: `Memory mode ${enabled ? "ON — max intensity recall on every turn" : "OFF — normal recall"}` };
       },
     });
 
@@ -2256,142 +2367,8 @@ const clawforcePlugin = {
     // --- Auto-init domains on gateway start (no external clawforce.init call needed) ---
     api.on("gateway_start", async () => {
       api.logger.info("Clawforce: gateway_start hook fired");
-      // Simulate what clawforce.init does — initialize domains from config
-      const defaultConfigDir = path.join(process.env.HOME ?? "/tmp", ".clawforce");
       try {
-        initClawforce({
-          enabled: true,
-          projectsDir: defaultConfigDir,
-          sweepIntervalMs: 60_000,
-          defaultMaxRetries: 3,
-          verificationRequired: true,
-        });
-        const domainResult = initializeAllDomains(defaultConfigDir);
-        api.logger.info(`Clawforce auto-init result: ${domainResult.domains.length} domain(s), ${domainResult.errors.length} error(s), ${domainResult.warnings.length} warning(s)`);
-        if (domainResult.domains.length > 0) {
-          api.logger.info(`Clawforce auto-init: ${domainResult.domains.length} domain(s): ${domainResult.domains.join(", ")}`);
-        }
-        for (const err of domainResult.errors) {
-          api.logger.info(`Clawforce DOMAIN-ERROR: ${err}`);
-        }
-
-        // --- Auto-activate project.yaml subdirectories ---
-        // Scan ~/.clawforce/<project-id>/project.yaml for flat project configs
-        // that aren't picked up by the domain-based initializeAllDomains path.
-        try {
-          const subdirs = fs.readdirSync(defaultConfigDir, { withFileTypes: true })
-            .filter((d) => d.isDirectory())
-            .map((d) => d.name);
-
-          for (const subdir of subdirs) {
-            const projectYaml = path.join(defaultConfigDir, subdir, "project.yaml");
-            if (!fs.existsSync(projectYaml)) continue;
-
-            // Skip if already registered by initializeAllDomains
-            const alreadyRegistered = getRegisteredAgentIds().some((aid) => {
-              const entry = getAgentConfig(aid);
-              return entry?.projectId === subdir;
-            });
-            if (alreadyRegistered) continue;
-
-            try {
-              const wfConfig = loadWorkforceConfig(projectYaml);
-              if (wfConfig && Object.keys(wfConfig.agents).length > 0) {
-                const projectDir = (wfConfig as Record<string, unknown>).project_dir as string | undefined
-                  ?? path.join(defaultConfigDir, subdir);
-                registerWorkforceConfig(subdir, wfConfig, projectDir);
-                // Register in the active-project set so getActiveProjectIds() returns
-                // this project after restart, without requiring a manual activate call.
-                registerProject(subdir);
-                const agentCount = Object.keys(wfConfig.agents).length;
-                api.logger.info(`Clawforce: auto-activated project "${subdir}" (${agentCount} agent(s))`);
-
-                // Ensure domain result includes this project for recovery
-                if (!domainResult.domains.includes(subdir)) {
-                  domainResult.domains.push(subdir);
-                }
-              }
-            } catch (err) {
-              api.logger.warn(`Clawforce: failed to auto-activate "${subdir}": ${err instanceof Error ? err.message : String(err)}`);
-            }
-          }
-        } catch (err) {
-          api.logger.warn(`Clawforce: project scan failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-
-        // --- Restart recovery: clean up orphaned state from before restart ---
-        for (const domainId of domainResult.domains) {
-          try {
-            const recovery = recoverProject(domainId);
-            const total = recovery.staleTasks + recovery.failedDispatches + recovery.releasedLeases;
-            if (total > 0) {
-              api.logger.info(
-                `Clawforce restart recovery [${domainId}]: ${recovery.staleTasks} stale tasks released, ` +
-                `${recovery.failedDispatches} dispatch items failed, ${recovery.releasedLeases} expired leases released`,
-              );
-            }
-          } catch (err) {
-            api.logger.warn(`Clawforce restart recovery failed for ${domainId}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-
-        // Sync agents to OpenClaw's agents.list so they're addressable
-        // Each agent gets namespaced with its domain (projectId) to prevent collisions
-        const agentIds = getRegisteredAgentIds();
-        const agentsToSync = agentIds
-          .map((id) => {
-            const entry = getAgentConfig(id);
-            if (!entry) return null;
-            return { agentId: id, config: entry.config, projectDir: entry.projectDir, domain: entry.projectId };
-          })
-          .filter((e): e is NonNullable<typeof e> => e !== null);
-
-        if (agentsToSync.length > 0) {
-          void syncAgentsToOpenClaw({
-            agents: agentsToSync,
-            loadConfig: () => api.runtime.config.loadConfig(),
-            writeConfigFile: (c) => api.runtime.config.writeConfigFile(c as never),
-            logger: api.logger,
-          });
-          api.logger.info(`Clawforce: synced ${agentsToSync.length} agent(s) to OpenClaw`);
-        }
-
-        // --- Config hot-reload: watch for config file changes ---
-        try {
-          startConfigWatcher(defaultConfigDir, (change) => {
-            api.logger.info(`Clawforce: config change detected (${change.file}) — reloading...`);
-            try {
-              const reloadResult = initializeAllDomains(defaultConfigDir);
-              api.logger.info(
-                `Clawforce: config reloaded — ${reloadResult.domains.length} domain(s), ` +
-                `${reloadResult.errors.length} error(s), ${reloadResult.warnings.length} warning(s)`,
-              );
-              // Re-sync agents after reload
-              const reloadedAgentIds = getRegisteredAgentIds();
-              const reloadedAgents = reloadedAgentIds
-                .map((id) => {
-                  const entry = getAgentConfig(id);
-                  if (!entry) return null;
-                  return { agentId: id, config: entry.config, projectDir: entry.projectDir, domain: entry.projectId };
-                })
-                .filter((e): e is NonNullable<typeof e> => e !== null);
-              if (reloadedAgents.length > 0) {
-                void syncAgentsToOpenClaw({
-                  agents: reloadedAgents,
-                  loadConfig: () => api.runtime.config.loadConfig(),
-                  writeConfigFile: (c) => api.runtime.config.writeConfigFile(c as never),
-                  logger: api.logger,
-                });
-                api.logger.info(`Clawforce: re-synced ${reloadedAgents.length} agent(s) after config reload`);
-              }
-            } catch (err) {
-              api.logger.warn(`Clawforce: config reload failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
-          });
-          api.logger.info("Clawforce: config watcher started");
-        } catch (err) {
-          api.logger.warn(`Clawforce: config watcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
-        }
+        await managedRuntime.bootstrap("startup");
 
         // --- Periodic cron job cleanup ---
         // One-shot dispatch jobs accumulate as disabled entries in OpenClaw's cron store.
@@ -2429,16 +2406,16 @@ const clawforcePlugin = {
         // gateway_start doesn't provide cron context, but clawforce.dispatch does.
         // Schedule a CLI dispatch to the first lead agent — this routes through
         // the gateway WS handler which provides context.cron to clawforce.dispatch.
-        if (domainResult.domains.length > 0) {
-          const firstDomain = domainResult.domains[0]!;
+        const activeDomains = getActiveProjectIds();
+        if (activeDomains.length > 0) {
+          const firstDomain = activeDomains[0]!;
           const leadIds = getRegisteredAgentIds().filter(id => {
             const e = getAgentConfig(id);
             return e?.projectId === firstDomain && (e?.config.extends === "manager" || e?.config.coordination?.enabled);
           });
           if (leadIds.length > 0) {
             const leadId = leadIds[0]!;
-            const leadEntry = getAgentConfig(leadId);
-            const namespacedLead = leadEntry ? toNamespacedAgentId(leadEntry.projectId, leadId) : leadId;
+            const namespacedLead = resolveOpenClawAgentId(leadId);
             setTimeout(() => {
               try {
                 const { execSync: exec } = require("node:child_process") as typeof import("node:child_process");
@@ -2457,8 +2434,8 @@ const clawforcePlugin = {
         // --- Auto-start continuous jobs on gateway init ---
         // Read configurable stagger from domain dispatch config.
         // Default 30s between agents to avoid API rate limits.
-        const dispatchConfig = domainResult.domains.length > 0
-          ? (getExtendedProjectConfig(domainResult.domains[0]!) as { dispatch?: { stagger_seconds?: number } } | null)?.dispatch
+        const dispatchConfig = activeDomains.length > 0
+          ? (getExtendedProjectConfig(activeDomains[0]!) as { dispatch?: { stagger_seconds?: number } } | null)?.dispatch
           : undefined;
         const staggerSec = dispatchConfig?.stagger_seconds ?? 30;
         let staggerIndex = 0;
@@ -2471,8 +2448,7 @@ const clawforcePlugin = {
             const taggedMessage = `[clawforce:job=${jobName}]\n\n${nudge}`;
             const delayMs = 10_000 + (staggerIndex * staggerSec * 1000);
             staggerIndex++;
-            // Namespace the agent ID for OpenClaw's cron service
-            const namespacedAgId = toNamespacedAgentId(ent.projectId, agId);
+            const namespacedAgId = resolveOpenClawAgentId(agId, ent.projectId);
             setTimeout(async () => {
               const cronService = getCronService();
               if (!cronService) {
@@ -2537,50 +2513,7 @@ const clawforcePlugin = {
         // H8: Await memory factory loading before anything else uses them
         await loadMemoryFactories();
 
-        initClawforce({
-          enabled: true,
-          projectsDir: cfg.projectsDir,
-          sweepIntervalMs: cfg.sweepIntervalMs,
-          defaultMaxRetries: cfg.defaultMaxRetries,
-          verificationRequired: true,
-        });
-        // Initialize domain-based configs (Phase 9)
-        try {
-          const domainResult = initializeAllDomains(cfg.configDir ?? cfg.projectsDir);
-          if (domainResult.domains.length > 0) {
-            api.logger.info(`Clawforce: initialized ${domainResult.domains.length} domain(s): ${domainResult.domains.join(", ")}`);
-          }
-          for (const warning of domainResult.warnings) {
-            api.logger.info(`Clawforce domain warning: ${warning}`);
-          }
-          for (const error of domainResult.errors) {
-            api.logger.warn(`Clawforce domain error: ${error}`);
-          }
-        } catch (err) {
-          api.logger.warn(`Clawforce: domain initialization failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-
-        // Sync clawforce agents to OpenClaw config (agents.list[])
-        // Each agent gets namespaced with its domain (projectId) to prevent collisions
-        if (cfg.syncAgents) {
-          const agentIds = getRegisteredAgentIds();
-          const agentsToSync = agentIds
-            .map((id) => {
-              const entry = getAgentConfig(id);
-              if (!entry) return null;
-              return { agentId: id, config: entry.config, projectDir: entry.projectDir, domain: entry.projectId };
-            })
-            .filter((e): e is NonNullable<typeof e> => e !== null);
-
-          if (agentsToSync.length > 0) {
-            void syncAgentsToOpenClaw({
-              agents: agentsToSync,
-              loadConfig: () => api.runtime.config.loadConfig(),
-              writeConfigFile: (c) => api.runtime.config.writeConfigFile(c as never),
-              logger: api.logger,
-            });
-          }
-        }
+        await managedRuntime.bootstrap("startup");
 
         // Load model pricing from OpenClaw's model registry
         try {
@@ -2615,9 +2548,7 @@ const clawforcePlugin = {
         api.logger.info(`Clawforce initialized (sweep every ${cfg.sweepIntervalMs}ms)`);
       },
       stop: async () => {
-        stopConfigWatcher();
-        await shutdownClawforce();
-        api.logger.info("Clawforce shut down (config watcher stopped)");
+        await managedRuntime.stop();
       },
     });
   },

@@ -233,31 +233,32 @@ describe("mixin validation", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function writeYaml(content: string) {
-    fs.writeFileSync(path.join(tmpDir, "project.yaml"), content, "utf-8");
+  function writeGlobalYaml(content: string) {
+    fs.writeFileSync(path.join(tmpDir, "config.yaml"), content, "utf-8");
+  }
+
+  function writeDomainYaml(content: string) {
+    const domainsDir = path.join(tmpDir, "domains");
+    fs.mkdirSync(domainsDir, { recursive: true });
+    fs.writeFileSync(path.join(domainsDir, "test.yaml"), content, "utf-8");
   }
 
   it("reports error for unknown mixin reference", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 agents:
   bot:
     extends: employee
     mixins: [nonexistent]
-domain:
-  agents: [bot]
 `);
+    writeDomainYaml("domain: test\nagents: [bot]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i => i.code === "UNKNOWN_MIXIN" && i.message.includes("nonexistent"))).toBe(true);
   });
 
   it("passes when mixin is defined", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 mixins:
   reviewer:
     skillCap: 10
@@ -265,25 +266,21 @@ agents:
   bot:
     extends: employee
     mixins: [reviewer]
-domain:
-  agents: [bot]
 `);
+    writeDomainYaml("domain: test\nagents: [bot]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.filter(i => i.code === "UNKNOWN_MIXIN")).toHaveLength(0);
   });
 
   it("reports error for invalid mixins section", async () => {
     const { validateAllConfigs } = await import("../../src/config/validate.js");
-    writeYaml(`
-version: "1"
-project_id: test
+    writeGlobalYaml(`
 mixins: "not-an-object"
 agents:
   bot:
     extends: employee
-domain:
-  agents: [bot]
 `);
+    writeDomainYaml("domain: test\nagents: [bot]\n");
     const report = validateAllConfigs(tmpDir);
     expect(report.issues.some(i => i.code === "INVALID_MIXINS")).toBe(true);
   });

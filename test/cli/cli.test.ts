@@ -9,18 +9,34 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, beforeAll, afterAll } from "vitest";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 import crypto from "node:crypto";
 
-// Mock child_process (used by cmdStatus, cmdHealth, cmdKill for ps/tsc)
-vi.mock("node:child_process", () => ({
-  execSync: vi.fn(() => ""),
-}));
+// Mock child_process (used by cmdStatus, cmdHealth, cmdKill, and cron bootstrap imports)
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execSync: vi.fn(() => ""),
+    execFile: vi.fn((...args: unknown[]) => {
+      const callback = typeof args[args.length - 1] === "function"
+        ? args[args.length - 1] as (err: Error | null, stdout?: string, stderr?: string) => void
+        : null;
+      callback?.(null, "", "");
+      return {} as ReturnType<typeof actual.execFile>;
+    }),
+  };
+});
 
 // Mock diagnostics module if it gets pulled in transitively
 vi.mock("../../src/diagnostics.js", () => ({
   emitDiagnosticEvent: vi.fn(),
   safeLog: vi.fn(),
+}));
+
+vi.mock("../../src/config/watcher.js", () => ({
+  startConfigWatcher: vi.fn(),
+  stopConfigWatcher: vi.fn(),
 }));
 
 vi.mock("../../src/identity.js", () => ({
@@ -34,6 +50,18 @@ import { runMigrations } from "../../src/migrations.js";
 
 // Import CLI functions — guarded main block won't execute
 const cli = await import("../../src/cli.js");
+const configInit = await import("../../src/config/init.js");
+const configWatcher = await import("../../src/config/watcher.js");
+const dbModule = await import("../../src/db.js");
+const projectModule = await import("../../src/project.js");
+const { createTask } = await import("../../src/tasks/ops.js");
+const {
+  acquireControllerLease,
+  getControllerLease,
+  resetControllerIdentityForTest,
+} = await import("../../src/runtime/controller-leases.js");
+const { ingestEvent } = await import("../../src/events/store.js");
+const lifecycle = await import("../../src/lifecycle.js");
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -282,17 +310,108 @@ function getJsonOutput(): unknown {
 // ─── Test Suite ─────────────────────────────────────────────────────
 
 let db: DatabaseSync;
+const originalControllerGeneration = process.env.CLAWFORCE_CONTROLLER_GENERATION;
 
 describe("CLI commands", () => {
   beforeEach(() => {
+    process.env.CLAWFORCE_CONTROLLER_GENERATION = originalControllerGeneration;
+    resetControllerIdentityForTest();
     db = createTestDb();
     seedTestData(db);
     captureStart();
   });
 
+  it("falls back from gateway sweep when the skipped controller is expired", () => {
+    expect(cli.shouldFallbackToLocalSweep({
+      mode: "gateway",
+      controller: {
+        skipped: true,
+        ownerId: "controller:stale",
+        expiresAt: Date.now() - 1,
+      },
+    })).toBe(true);
+
+    expect(cli.shouldFallbackToLocalSweep({
+      mode: "gateway",
+      controller: {
+        skipped: true,
+        ownerId: "controller:active",
+        expiresAt: Date.now() + 60_000,
+      },
+    })).toBe(false);
+
+    expect(cli.shouldFallbackToLocalSweep({
+      mode: "local",
+      controller: {
+        skipped: true,
+        expiresAt: Date.now() - 1,
+      },
+    })).toBe(false);
+  });
+
   afterEach(() => {
+    process.env.CLAWFORCE_CONTROLLER_GENERATION = originalControllerGeneration;
+    resetControllerIdentityForTest();
     captureStop();
     try { db.close(); } catch { /* already closed */ }
+  });
+
+  it("drainProjectWorkflow requests the current controller generation so stale controllers do not block CLI follow-on work", async () => {
+    process.env.CLAWFORCE_CONTROLLER_GENERATION = "gen-cli-current";
+    resetControllerIdentityForTest();
+
+    acquireControllerLease(PROJECT_ID, {
+      ownerId: "controller:stale",
+      ownerLabel: "stale-controller",
+      purpose: "sweep",
+      generation: "gen-stale",
+      ttlMs: 60_000,
+    }, db);
+
+    const result = await cli.drainProjectWorkflow(PROJECT_ID, 1, {
+      db,
+      reason: "test:cli_workflow_drain",
+      metadata: { test: true },
+    });
+
+    expect(result.controller?.skipped).toBe(false);
+    const lease = getControllerLease(PROJECT_ID, db);
+    expect(lease?.generation).toBe("gen-cli-current");
+    expect(lease?.requiredGeneration).toBeNull();
+  });
+
+  it("drains events without foreground dispatch for entities-event admin processing", async () => {
+    process.env.CLAWFORCE_CONTROLLER_GENERATION = "gen-cli-current";
+    resetControllerIdentityForTest();
+
+    acquireControllerLease(PROJECT_ID, {
+      ownerId: "controller:stale",
+      ownerLabel: "stale-controller",
+      purpose: "sweep",
+      generation: "gen-stale",
+      ttlMs: 60_000,
+    }, db);
+
+    ingestEvent(PROJECT_ID, "budget_changed", "internal", {
+      oldLimit: 100,
+      newLimit: 150,
+      source: "test",
+    }, undefined, db);
+
+    const result = await cli.drainProjectWorkflow(PROJECT_ID, 5, {
+      db,
+      dispatchMode: "events_only",
+      reason: "test:events_only_drain",
+      metadata: { test: true },
+    });
+
+    expect(result.eventsProcessed).toBeGreaterThan(0);
+    expect(result.dispatched).toBe(0);
+    expect(result.controller).toBeUndefined();
+    const pending = db.prepare(
+      "SELECT COUNT(*) as count FROM events WHERE project_id = ? AND status = 'pending'",
+    ).get(PROJECT_ID) as { count: number };
+    expect(pending.count).toBe(0);
   });
 
   // ─── cmdStatus ──────────────────────────────────────────────────
@@ -369,6 +488,12 @@ describe("CLI commands", () => {
       cli.cmdTasks(db, undefined, true);
       const json = getJsonOutput() as Record<string, unknown>;
       expect(json.filter).toBe("active");
+    });
+
+    it("treats filter text as a bound parameter", () => {
+      cli.cmdTasks(db, "ASSIGNED' OR 1=1 --");
+      const output = getLogOutput();
+      expect(output).toContain("No tasks found");
     });
   });
 
@@ -447,6 +572,228 @@ describe("CLI commands", () => {
       const counts = json.counts as Record<string, number>;
       expect(counts.queued).toBe(1);
       expect(counts.failed).toBe(1);
+    });
+  });
+
+  describe("cmdQueueRetry", () => {
+    it("requeues a failed dispatch item for a still-assigned task", async () => {
+      db.prepare("UPDATE tasks SET state = 'ASSIGNED', assigned_to = 'cf-worker-1' WHERE id = ? AND project_id = ?")
+        .run("task-4", PROJECT_ID);
+
+      await cli.cmdQueueRetry(PROJECT_ID, db, {
+        taskId: "task-4",
+        json: true,
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.ok).toBe(true);
+      expect(json).toHaveProperty("previousItem");
+      expect(json).toHaveProperty("queueItem");
+
+      const counts = db.prepare(
+        "SELECT COUNT(*) as cnt FROM dispatch_queue WHERE project_id = ? AND task_id = ? AND status = 'queued'",
+      ).get(PROJECT_ID, "task-4") as Record<string, unknown>;
+      expect(Number(counts.cnt)).toBeGreaterThanOrEqual(1);
+    });
+
+    it("fails cleanly when the task is not retryable", async () => {
+      db.prepare("UPDATE tasks SET state = 'BLOCKED' WHERE id = ? AND project_id = ?")
+        .run("task-4", PROJECT_ID);
+
+      await cli.cmdQueueRetry(PROJECT_ID, db, {
+        taskId: "task-4",
+        json: true,
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.ok).toBe(false);
+      expect(String(json.reason)).toContain("not a recurring workflow run");
+    });
+
+    it("processes follow-on events and can dispatch requeued work when requested", async () => {
+      db.prepare("UPDATE tasks SET state = 'ASSIGNED', assigned_to = 'cf-worker-1' WHERE id = ? AND project_id = ?")
+        .run("task-4", PROJECT_ID);
+      ingestEvent(PROJECT_ID, "budget_changed", "internal", {
+        oldLimit: 100,
+        newLimit: 150,
+        source: "test",
+      }, undefined, db);
+
+      await cli.cmdQueueRetry(PROJECT_ID, db, {
+        taskId: "task-4",
+        process: true,
+        json: true,
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      const processed = json.processed as Record<string, unknown>;
+      expect(json.ok).toBe(true);
+      expect(Number(processed.dispatched)).toBeGreaterThan(0);
+      const pending = db.prepare(
+        "SELECT COUNT(*) as count FROM events WHERE project_id = ? AND status = 'pending'",
+      ).get(PROJECT_ID) as { count: number };
+      expect(pending.count).toBe(0);
+    });
+
+    it("returns promptly with event-only follow-on when a live controller already exists", async () => {
+      db.prepare("UPDATE tasks SET state = 'ASSIGNED', assigned_to = 'cf-worker-1' WHERE id = ? AND project_id = ?")
+        .run("task-4", PROJECT_ID);
+      ingestEvent(PROJECT_ID, "budget_changed", "internal", {
+        oldLimit: 100,
+        newLimit: 150,
+        source: "test",
+      }, undefined, db);
+      acquireControllerLease(PROJECT_ID, {
+        ownerId: "controller:live",
+        ownerLabel: "live-controller",
+        purpose: "controller",
+        ttlMs: 60_000,
+      }, db);
+
+      await cli.cmdQueueRetry(PROJECT_ID, db, {
+        taskId: "task-4",
+        process: true,
+        json: true,
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      const processed = json.processed as Record<string, unknown>;
+      expect(json.ok).toBe(true);
+      expect(Number(processed.dispatched)).toBe(0);
+      const pending = db.prepare(
+        "SELECT COUNT(*) as count FROM events WHERE project_id = ? AND status = 'pending'",
+      ).get(PROJECT_ID) as { count: number };
+      expect(pending.count).toBe(0);
+    });
+
+    it("loads project config before replaying a blocked recurring run", async () => {
+      const recurringTask = createTask({
+        projectId: PROJECT_ID,
+        title: "Run recurring workflow worker.intake-triage",
+        createdBy: "system:recurring-job",
+        assignedTo: "worker",
+        description: "## Acceptance Criteria\n- recover the recurring run cleanly.",
+        metadata: {
+          recurringJob: {
+            agentId: "worker",
+            jobName: "intake-triage",
+            schedule: "*/20 * * * *",
+            reason: "never run before",
+            scheduledAt: Date.now(),
+          },
+        },
+        tags: ["recurring-job", "agent:worker", "job:intake-triage"],
+        kind: "infra",
+        origin: "reactive",
+      }, db);
+      db.prepare(`
+        INSERT INTO dispatch_queue (
+          id, project_id, task_id, priority, payload, status, dispatch_attempts, max_dispatch_attempts, last_error, created_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, 'failed', 3, 3, ?, ?, ?)
+      `).run(
+        "queue-recurring-failed",
+        PROJECT_ID,
+        recurringTask.id,
+        1,
+        JSON.stringify({ prompt: "retry this" }),
+        "Dispatch retries exhausted",
+        Date.now() - 1_000,
+        Date.now(),
+      );
+      db.prepare("UPDATE tasks SET state = 'BLOCKED', updated_at = ? WHERE id = ? AND project_id = ?")
+        .run(Date.now(), recurringTask.id, PROJECT_ID);
+
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      const agentSpy = vi.spyOn(projectModule, "getAgentConfig").mockReturnValue({
+        agentId: "worker",
+        config: {
+          jobs: {
+            "intake-triage": {
+              cron: "*/20 * * * *",
+              nudge: "Recover blocked recurring work.",
+            },
+          },
+        },
+      } as any);
+
+      try {
+        await cli.cmdQueueRetry(PROJECT_ID, db, {
+          taskId: recurringTask.id,
+          json: true,
+        });
+
+        const json = getJsonOutput() as Record<string, unknown>;
+        expect(initSpy).toHaveBeenCalled();
+        expect(json.ok).toBe(true);
+        const queueItem = json.queueItem as Record<string, unknown>;
+        expect(queueItem.taskId).not.toBe(recurringTask.id);
+      } finally {
+        initSpy.mockRestore();
+        agentSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("cmdQueueRelease", () => {
+    it("releases an active leased queue item back to queued", async () => {
+      db.prepare("UPDATE tasks SET state = 'ASSIGNED', assigned_to = 'cf-worker-1' WHERE id = ? AND project_id = ?")
+        .run("task-1", PROJECT_ID);
+      db.prepare("UPDATE dispatch_queue SET status = 'leased', leased_by = 'dispatcher:test', leased_at = ?, lease_expires_at = ? WHERE id = ?")
+        .run(Date.now(), Date.now() + 60_000, "q-1");
+
+      await cli.cmdQueueRelease(PROJECT_ID, db, {
+        taskId: "task-1",
+        reason: "restart controller",
+        json: true,
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.ok).toBe(true);
+      const queueItem = json.queueItem as Record<string, unknown>;
+      expect(queueItem.status).toBe("queued");
+    });
+
+    it("fails cleanly when no active queue item exists", async () => {
+      await cli.cmdQueueRelease(PROJECT_ID, db, {
+        taskId: "task-missing-active",
+        json: true,
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.ok).toBe(false);
+      expect(String(json.reason)).toContain("No active leased/dispatched queue item");
+    });
+
+    it("drains follow-on events and can dispatch released work when requested", async () => {
+      db.prepare("UPDATE tasks SET state = 'ASSIGNED', assigned_to = 'cf-worker-1' WHERE id = ? AND project_id = ?")
+        .run("task-1", PROJECT_ID);
+      db.prepare("UPDATE dispatch_queue SET status = 'leased', leased_by = 'dispatcher:test', leased_at = ?, lease_expires_at = ? WHERE id = ?")
+        .run(Date.now(), Date.now() + 60_000, "q-1");
+      ingestEvent(PROJECT_ID, "budget_changed", "internal", {
+        oldLimit: 150,
+        newLimit: 175,
+        source: "test",
+      }, undefined, db);
+
+      await cli.cmdQueueRelease(PROJECT_ID, db, {
+        taskId: "task-1",
+        process: true,
+        json: true,
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      const processed = json.processed as Record<string, unknown>;
+      expect(json.ok).toBe(true);
+      expect(Number(processed.dispatched)).toBeGreaterThan(0);
+      const pending = db.prepare(
+        "SELECT COUNT(*) as count FROM events WHERE project_id = ? AND status = 'pending'",
+      ).get(PROJECT_ID) as { count: number };
+      expect(pending.count).toBe(0);
     });
   });
 
@@ -611,6 +958,31 @@ describe("CLI commands", () => {
       cli.cmdSessions(db, PROJECT_ID, 24, "cf-lead", true);
       const json = getJsonOutput() as Record<string, unknown>;
       expect(json.agent_filter).toBe("cf-lead");
+    });
+
+    it("renders colon-bearing agent IDs without truncating them", () => {
+      const now = Date.now();
+      db.prepare(`
+        INSERT INTO session_archives (id, session_key, agent_id, project_id, outcome, total_cost_cents, started_at, ended_at, duration_ms, tool_call_count, error_count, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        "sa-colon",
+        "agent:agent:verifier:cron:session-colon",
+        "agent:verifier",
+        PROJECT_ID,
+        "success",
+        25,
+        now - 120_000,
+        now - 60_000,
+        60_000,
+        1,
+        0,
+        now,
+      );
+
+      cli.cmdSessions(db, PROJECT_ID, 24, "agent:verifier");
+      const output = getLogOutput();
+      expect(output).toContain("agent:verifier (cron)");
     });
   });
 
@@ -807,44 +1179,235 @@ describe("CLI commands", () => {
   // ─── cmdApprove ─────────────────────────────────────────────────
 
   describe("cmdApprove", () => {
-    it("approves a pending proposal", () => {
-      cli.cmdApprove(db, PROJECT_ID, "proposal-0");
+    it("approves a pending proposal", async () => {
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      await cli.cmdApprove(db, PROJECT_ID, "proposal-0", { processFollowOn: false });
       const output = getLogOutput();
       expect(output).toContain("Approved:");
+      expect(initSpy).toHaveBeenCalled();
 
       // Verify DB update
       const proposal = db.prepare("SELECT status FROM proposals WHERE id = 'proposal-0'").get() as { status: string };
       expect(proposal.status).toBe("approved");
     });
 
-    it("creates an approval event", () => {
-      cli.cmdApprove(db, PROJECT_ID, "proposal-3");
+    it("records feedback when provided", async () => {
+      await cli.cmdApprove(db, PROJECT_ID, "proposal-0", {
+        feedback: "Approved during dogfood",
+        processFollowOn: false,
+      });
+      const output = getLogOutput();
+      expect(output).toContain("Feedback: Approved during dogfood");
+
+      const proposal = db.prepare(
+        "SELECT user_feedback FROM proposals WHERE id = 'proposal-0'",
+      ).get() as { user_feedback: string };
+      expect(proposal.user_feedback).toBe("Approved during dogfood");
+    });
+
+    it("creates an approval event", async () => {
+      await cli.cmdApprove(db, PROJECT_ID, "proposal-3", { processFollowOn: false });
       const event = db.prepare(
         "SELECT type FROM events WHERE type = 'proposal_approved' ORDER BY created_at DESC LIMIT 1"
       ).get() as { type: string } | undefined;
       expect(event?.type).toBe("proposal_approved");
+    });
+
+    it("drains follow-on events without foreground dispatch by default", async () => {
+      vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      await cli.cmdApprove(db, PROJECT_ID, "proposal-0", {
+        json: true,
+        processFollowOn: true,
+      });
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.followOnEventsProcessed).toBeGreaterThanOrEqual(0);
+      expect(json.followOnDispatches).toBe(0);
     });
   });
 
   // ─── cmdReject ──────────────────────────────────────────────────
 
   describe("cmdReject", () => {
-    it("rejects a pending proposal", () => {
-      cli.cmdReject(db, PROJECT_ID, "proposal-0");
+    it("rejects a pending proposal", async () => {
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      await cli.cmdReject(db, PROJECT_ID, "proposal-0", undefined, { processFollowOn: false });
       const output = getLogOutput();
       expect(output).toContain("Rejected:");
+      expect(initSpy).toHaveBeenCalled();
 
       const proposal = db.prepare("SELECT status FROM proposals WHERE id = 'proposal-0'").get() as { status: string };
       expect(proposal.status).toBe("rejected");
     });
 
-    it("includes feedback", () => {
-      cli.cmdReject(db, PROJECT_ID, "proposal-3", "Not appropriate");
+    it("includes feedback", async () => {
+      await cli.cmdReject(db, PROJECT_ID, "proposal-3", "Not appropriate", { processFollowOn: false });
       const output = getLogOutput();
       expect(output).toContain("Feedback: Not appropriate");
 
       const proposal = db.prepare("SELECT user_feedback FROM proposals WHERE id = 'proposal-3'").get() as { user_feedback: string };
       expect(proposal.user_feedback).toBe("Not appropriate");
+    });
+  });
+
+  // ─── cmdVerdict ─────────────────────────────────────────────────
+
+  describe("cmdVerdict", () => {
+    it("passes a review task and records DONE", async () => {
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      await cli.cmdVerdict(db, PROJECT_ID, "task-3", true, {
+        actor: "operator:cli",
+        reason: "Looks good",
+        processFollowOn: false,
+      });
+      const output = getLogOutput();
+      expect(output).toContain("Passed review");
+      expect(output).toContain("DONE");
+
+      const task = db.prepare("SELECT state FROM tasks WHERE id = 'task-3'").get() as { state: string };
+      expect(task.state).toBe("DONE");
+      expect(initSpy).toHaveBeenCalled();
+    });
+
+    it("returns JSON for failed verdicts", async () => {
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      await cli.cmdVerdict(db, PROJECT_ID, "task-3", false, {
+        actor: "operator:cli",
+        reason: "Needs more work",
+        reasonCode: "verification_environment_blocked",
+        json: true,
+        processFollowOn: false,
+      });
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.taskId).toBe("task-3");
+      expect(json.passed).toBe(false);
+       expect(json.reasonCode).toBe("verification_environment_blocked");
+      expect((json.result as Record<string, unknown>).ok).toBe(true);
+      expect(((json.result as Record<string, unknown>).task as Record<string, unknown>).state).toBe("BLOCKED");
+      expect(json.followOnEventsProcessed).toBe(0);
+      expect(initSpy).toHaveBeenCalled();
+    });
+
+    it("prints BLOCKED for verification_environment_blocked verdicts in human output", async () => {
+      vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      await cli.cmdVerdict(db, PROJECT_ID, "task-3", false, {
+        actor: "operator:cli",
+        reason: "Sandbox blocked the decisive rerun",
+        reasonCode: "verification_environment_blocked",
+        processFollowOn: false,
+      });
+
+      const output = getLogOutput();
+      expect(output).toContain("Failed review");
+      expect(output).toContain("BLOCKED");
+      expect(output).toContain("Reason code: verification_environment_blocked");
+    });
+
+    it("defaults to event-only follow-on processing unless wait is requested", async () => {
+      vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      await cli.cmdVerdict(db, PROJECT_ID, "task-3", true, {
+        actor: "operator:cli",
+        reason: "Looks good",
+        json: true,
+        processFollowOn: true,
+      });
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.passed).toBe(true);
+      expect(json.followOnDispatches).toBe(0);
+    });
+  });
+
+  describe("cmdReview", () => {
+    it("shows task review detail", () => {
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      db.prepare(`
+        INSERT INTO manager_reviews (
+          id, project_id, task_id, reviewer_agent_id, verdict, reason_code, reasoning, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("review-1", PROJECT_ID, "task-3", "operator:cli", "rejected", "verification_environment_blocked", "Sandbox blocked the decisive rerun", Date.now());
+      db.prepare(`
+        INSERT INTO session_archives (
+          id, session_key, agent_id, project_id, task_id, outcome, compliance_detail, started_at, ended_at, duration_ms, tool_call_count, error_count, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        "review-session-1",
+        "dispatch:test-review-1",
+        "workflow-steward",
+        PROJECT_ID,
+        "task-3",
+        "untracked",
+        JSON.stringify({
+          exitCode: 0,
+          summarySynthetic: true,
+          observedWork: false,
+          resultSource: "synthetic",
+          outputChars: 0,
+          stdoutChars: 0,
+          stderrChars: 68,
+          promptChars: 2048,
+          finalPromptChars: 3072,
+          mcpBridgeDisabled: true,
+          configOverrideCount: 3,
+          stderrLooksLikeLaunchTranscript: true,
+          stderr: "Reading additional input from stdin...\nOpenAI Codex v0.118.0",
+        }),
+        Date.now() - 5_000,
+        Date.now() - 4_000,
+        1_000,
+        0,
+        0,
+        Date.now(),
+      );
+
+      cli.cmdReview(db, PROJECT_ID, "task-3", false);
+      const output = getLogOutput();
+      expect(output).toContain("## Review: Test task 3");
+      expect(output).toContain("Reviews:");
+      expect(output).toContain("[verification_environment_blocked]");
+      expect(output).toContain("diag=source=synthetic");
+      expect(output).toContain("config_overrides=3");
+      expect(output).toContain("mcp_disabled=yes");
+      expect(output).toContain("stderr_preview=Reading additional input from stdin...");
+      expect(initSpy).toHaveBeenCalled();
     });
   });
 
@@ -969,6 +1532,47 @@ describe("CLI commands", () => {
       expect(output).toContain("Domain:");
     });
 
+    it("shows tracked sessions as active without relying on ended_at", () => {
+      db.prepare(`
+        INSERT INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at, dispatch_context)
+        VALUES (?, ?, ?, ?, '[]', '{}', 0, ?, ?)
+      `).run(
+        "dispatch:active-running",
+        "worker-1",
+        PROJECT_ID,
+        Date.now() - 30_000,
+        Date.now(),
+        JSON.stringify({ taskId: "task-1", queueItemId: "queue-1" }),
+      );
+
+      cli.cmdRunning(db, PROJECT_ID);
+      const output = getLogOutput();
+      expect(output).toContain("Active Sessions: 2");
+      expect(output).toContain("worker-1");
+      expect(output).toContain("heartbeat=");
+      expect(output).toContain("[live]");
+    });
+
+    it("hides stale tracked sessions from active running output", () => {
+      db.prepare(`
+        INSERT INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at, dispatch_context)
+        VALUES (?, ?, ?, ?, '[]', '{}', 0, ?, ?)
+      `).run(
+        "dispatch:stale-probe",
+        "workflow-steward",
+        PROJECT_ID,
+        Date.now() - 3_600_000,
+        Date.now() - 3_600_000,
+        JSON.stringify({ taskId: "task-1", queueItemId: "queue-stale" }),
+      );
+
+      cli.cmdRunning(db, PROJECT_ID);
+      const output = getLogOutput();
+      expect(output).toContain("Active Sessions: 1");
+      expect(output).not.toContain("dispatch:stale-probe");
+      expect(output).not.toContain("[stale]");
+    });
+
     it("shows disabled scopes", () => {
       cli.cmdRunning(db, PROJECT_ID);
       const output = getLogOutput();
@@ -980,6 +1584,101 @@ describe("CLI commands", () => {
       cli.cmdRunning(db, PROJECT_ID);
       const output = getLogOutput();
       expect(output).toContain("Queue:");
+    });
+  });
+
+  describe("cmdController", () => {
+    beforeEach(() => {
+      vi.mocked(configWatcher.startConfigWatcher).mockClear();
+      vi.mocked(configWatcher.stopConfigWatcher).mockClear();
+    });
+
+    it("stays alive until explicitly aborted", async () => {
+      const abortController = new AbortController();
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      const runPromise = cli.cmdController(PROJECT_ID, {
+        intervalMs: 25,
+        initialSweep: false,
+        signal: abortController.signal,
+      });
+
+      const stateBeforeAbort = await Promise.race([
+        runPromise.then(() => "resolved"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 20)),
+      ]);
+      expect(stateBeforeAbort).toBe("pending");
+
+      abortController.abort();
+      await expect(runPromise).resolves.toBeUndefined();
+      expect(initSpy).toHaveBeenCalled();
+      expect(configWatcher.startConfigWatcher).toHaveBeenCalledTimes(1);
+      expect(configWatcher.stopConfigWatcher).toHaveBeenCalledTimes(1);
+    });
+
+    it("starts and stops a local controller cleanly on abort", async () => {
+      const abortController = new AbortController();
+
+      const runPromise = cli.cmdController(PROJECT_ID, {
+        intervalMs: 25,
+        initialSweep: false,
+        signal: abortController.signal,
+        onStarted: () => {
+          expect(lifecycle.isClawforceInitialized()).toBe(true);
+          expect(lifecycle.getActiveProjectIds()).toContain(PROJECT_ID);
+          abortController.abort();
+        },
+      });
+
+      await expect(runPromise).resolves.toBeUndefined();
+
+      const output = getLogOutput();
+      expect(output).toContain("## Controller");
+      expect(output).toContain("State: running");
+      expect(lifecycle.isClawforceInitialized()).toBe(false);
+      expect(lifecycle.getActiveProjectIds()).not.toContain(PROJECT_ID);
+      expect(configWatcher.startConfigWatcher).toHaveBeenCalledTimes(1);
+      expect(configWatcher.stopConfigWatcher).toHaveBeenCalledTimes(1);
+    });
+
+    it("emits JSON startup output", async () => {
+      const abortController = new AbortController();
+
+      await cli.cmdController(PROJECT_ID, {
+        intervalMs: 25,
+        initialSweep: false,
+        json: true,
+        signal: abortController.signal,
+        onStarted: () => abortController.abort(),
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.ok).toBe(true);
+      expect(json.mode).toBe("controller");
+      expect(json.projectId).toBe(PROJECT_ID);
+      expect(json.intervalMs).toBe(25);
+      expect(json.initialSweep).toBeNull();
+    });
+
+    it("refuses to start when another live controller already owns the lease", async () => {
+      const runtimeDb = dbModule.getDb(PROJECT_ID);
+      acquireControllerLease(PROJECT_ID, {
+        ownerId: "controller:live",
+        ownerLabel: "live-controller",
+        purpose: "controller",
+        ttlMs: 60_000,
+      }, runtimeDb);
+
+      await expect(cli.cmdController(PROJECT_ID, {
+        intervalMs: 25,
+        initialSweep: false,
+      })).rejects.toThrow(/live-controller/);
+
+      expect(configWatcher.startConfigWatcher).not.toHaveBeenCalled();
     });
   });
 
@@ -1036,6 +1735,46 @@ describe("CLI commands", () => {
       expect(json).toHaveProperty("new_sessions");
       expect(json).toHaveProperty("state_changes");
       expect(json).toHaveProperty("new_proposals");
+    });
+
+    it("includes active tracked sessions in the rendered watch output", () => {
+      db.prepare(`
+        INSERT INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at, dispatch_context)
+        VALUES (?, ?, ?, ?, '[]', '{}', 0, ?, ?)
+      `).run(
+        "dispatch:watch-active",
+        "worker-2",
+        PROJECT_ID,
+        Date.now() - 45_000,
+        Date.now(),
+        JSON.stringify({ taskId: "task-1", queueItemId: "queue-2" }),
+      );
+
+      cli.cmdWatch(db, PROJECT_ID, false, false);
+      const output = getLogOutput();
+      expect(output).toContain("Active:");
+      expect(output).toContain("worker-2");
+      expect(output).toContain("Test task 1");
+      expect(output).toContain("heartbeat");
+    });
+
+    it("omits stale tracked sessions from watch JSON", () => {
+      db.prepare(`
+        INSERT INTO tracked_sessions (session_key, agent_id, project_id, started_at, requirements, satisfied, tool_call_count, last_persisted_at, dispatch_context)
+        VALUES (?, ?, ?, ?, '[]', '{}', 0, ?, ?)
+      `).run(
+        "dispatch:stale-probe",
+        "workflow-steward",
+        PROJECT_ID,
+        Date.now() - 3_600_000,
+        Date.now() - 3_600_000,
+        JSON.stringify({ taskId: "task-1", queueItemId: "queue-stale" }),
+      );
+
+      cli.cmdWatch(db, PROJECT_ID, false, true);
+      const json = getJsonOutput() as { active_sessions?: Array<{ session_key?: string }> };
+      expect(Array.isArray(json.active_sessions)).toBe(true);
+      expect(json.active_sessions?.some((entry) => entry.session_key === "dispatch:stale-probe")).toBe(false);
     });
   });
 

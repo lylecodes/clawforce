@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -18,6 +18,11 @@ const { getMemoryDb } = await import("../../src/db.js");
 const dbModule = await import("../../src/db.js");
 const { createClawforceTaskTool } = await import("../../src/tools/task-tool.js");
 const { approveProposal } = await import("../../src/approval/resolve.js");
+const trackerModule = await import("../../src/enforcement/tracker.js");
+const { createEntity } = await import("../../src/entities/ops.js");
+const { createTask } = await import("../../src/tasks/ops.js");
+const { registerWorkforceConfig, resetEnforcementConfigForTest } = await import("../../src/project.js");
+const { getDefaultRuntimeState } = await import("../../src/runtime/default-runtime.js");
 
 describe("clawforce_task tool", () => {
   let db: DatabaseSync;
@@ -26,10 +31,14 @@ describe("clawforce_task tool", () => {
   beforeEach(() => {
     db = getMemoryDb();
     vi.spyOn(dbModule, "getDb").mockReturnValue(db);
+    resetEnforcementConfigForTest();
+    getDefaultRuntimeState().taskTool.sessionTaskCreationCounts.clear();
   });
 
   afterEach(() => {
     try { db.close(); } catch {}
+    resetEnforcementConfigForTest();
+    getDefaultRuntimeState().taskTool.sessionTaskCreationCounts.clear();
     vi.restoreAllMocks();
   });
 
@@ -75,6 +84,82 @@ describe("clawforce_task tool", () => {
       expect(result.task.assignedTo).toBe("agent:worker");
       expect(result.task.state).toBe("ASSIGNED");
       expect(result.task.maxRetries).toBe(5);
+    });
+
+    it("auto-links same-entity child work to the current task", async () => {
+      registerWorkforceConfig(PROJECT, {
+        agents: {},
+        entities: {
+          jurisdiction: {
+            title: "Jurisdiction",
+            runtimeCreate: true,
+            states: {
+              proposed: { initial: true },
+            },
+            health: {
+              values: ["healthy", "warning", "degraded", "blocked"],
+              default: "healthy",
+            },
+            metadataSchema: {},
+          },
+        },
+      });
+
+      const entity = createEntity({
+        projectId: PROJECT,
+        kind: "jurisdiction",
+        title: "Sacramento",
+        state: "proposed",
+        createdBy: "agent:pm",
+      }, db);
+      const parent = createTask({
+        projectId: PROJECT,
+        title: "Create Sacramento owner coverage and bootstrapping scaffold",
+        createdBy: "source-onboarding-steward",
+        assignedTo: "org-builder",
+        entityId: entity.id,
+        entityType: "jurisdiction",
+      }, db);
+
+      vi.spyOn(trackerModule, "getSession").mockReturnValue({
+        sessionKey: "test-session",
+        agentId: "org-builder",
+        projectId: PROJECT,
+        requirements: [],
+        satisfied: new Map(),
+        metrics: {
+          startedAt: Date.now(),
+          toolCalls: [],
+          firstToolCallAt: null,
+          lastToolCallAt: null,
+          firstProgressAt: null,
+          lastProgressAt: null,
+          progressSignalCount: 0,
+          requiredCallTimings: [],
+          errorCount: 0,
+          exploratoryErrorCount: 0,
+          significantResults: [],
+          toolCallBuffer: [],
+        },
+        dispatchContext: {
+          queueItemId: "queue-1",
+          taskId: parent.id,
+        },
+      } as any);
+
+      const result = await execute({
+        action: "create",
+        project_id: PROJECT,
+        title: "Onboard Sacramento authoritative sources",
+        assigned_to: "source-onboarding-steward",
+        entity_id: entity.id,
+        entity_type: "jurisdiction",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.autoLinkedParentTaskId).toBe(parent.id);
+      expect(result.task.parentTaskId).toBe(parent.id);
+      expect(result.task.state).toBe("BLOCKED");
     });
   });
 

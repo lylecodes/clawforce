@@ -149,6 +149,35 @@ describe("config writer", () => {
         }),
       );
     });
+
+    it("preserves unrelated comments when patching global config", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "config.yaml"),
+        [
+          "# top comment",
+          "agents:",
+          "  bot:",
+          "    extends: employee",
+          "# defaults comment",
+          "defaults:",
+          "  retries: 1",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = updateGlobalConfig(
+        tmpDir,
+        { defaults: { retries: 2, timeout: 30 } },
+        "actor",
+      );
+
+      expect(result.ok).toBe(true);
+      const raw = fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8");
+      expect(raw).toContain("# top comment");
+      expect(raw).toContain("# defaults comment");
+      expect(raw).toContain("timeout: 30");
+    });
   });
 
   // --- Domain config ---
@@ -186,13 +215,13 @@ describe("config writer", () => {
 
       const result = updateDomainConfig(
         tmpDir, "proj",
-        { orchestrator: "a" },
+        { manager: { enabled: true, agentId: "a" } },
         "actor",
       );
 
       expect(result.ok).toBe(true);
       const config = readDomainConfig(tmpDir, "proj")!;
-      expect(config.orchestrator).toBe("a");
+      expect(config.manager).toEqual({ enabled: true, agentId: "a" });
       expect(config.agents).toEqual(["a"]); // preserved
       expect(config.budget).toBeDefined(); // preserved
     });
@@ -221,6 +250,73 @@ describe("config writer", () => {
       const result = updateDomainConfig(tmpDir, "ghost", {}, "actor");
       expect(result.ok).toBe(false);
     });
+
+    it("preserves unrelated comments when patching a domain config", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "domains", "proj.yaml"),
+        [
+          "# domain comment",
+          "domain: proj",
+          "agents:",
+          "  - a",
+          "# safety comment",
+          "safety:",
+          "  costCircuitBreaker: 2",
+          "budget:",
+          "  project:",
+          "    dailyCents: 100",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = updateDomainConfig(
+        tmpDir,
+        "proj",
+        { budget: { project: { dailyCents: 200, hourlyCents: 25 } } },
+        "actor",
+      );
+
+      expect(result.ok).toBe(true);
+      const raw = fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8");
+      expect(raw).toContain("# domain comment");
+      expect(raw).toContain("# safety comment");
+      expect(raw).toContain("hourlyCents: 25");
+    });
+
+    it("preserves unchanged comments inside a replaced section", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "domains", "proj.yaml"),
+        [
+          "domain: proj",
+          "agents:",
+          "  - lead",
+          "briefing:",
+          "  - source: soul # keep",
+          "  - source: task_board",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = setDomainSection(
+        tmpDir,
+        "proj",
+        "briefing",
+        [
+          { source: "soul" },
+          { source: "task_board", optional: true },
+          { source: "velocity" },
+        ],
+        "actor",
+      );
+
+      expect(result.ok).toBe(true);
+      const raw = fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8");
+      expect(raw).toContain("source: soul # keep");
+      expect(raw).toContain("optional: true");
+      expect(raw).toContain("- source: velocity");
+    });
   });
 
   // --- Agent operations ---
@@ -245,6 +341,31 @@ describe("config writer", () => {
       expect(config.agents.bot?.title).toBe("New");
     });
 
+    it("preserves unrelated comments when upserting an agent", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "config.yaml"),
+        [
+          "# top comment",
+          "agents:",
+          "  bot:",
+          "    extends: employee",
+          "# defaults comment",
+          "defaults:",
+          "  retries: 1",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = upsertGlobalAgent(tmpDir, "bot", { extends: "manager", title: "Lead" }, "actor");
+      expect(result.ok).toBe(true);
+
+      const raw = fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8");
+      expect(raw).toContain("# top comment");
+      expect(raw).toContain("# defaults comment");
+      expect(raw).toContain("title: Lead");
+    });
+
     it("removes agent from global config", () => {
       writeConfig({ bot: { extends: "employee" }, keeper: { extends: "manager" } });
       const result = removeGlobalAgent(tmpDir, "bot", false, "actor");
@@ -257,7 +378,7 @@ describe("config writer", () => {
 
     it("removes agent from domains too", () => {
       writeConfig({ bot: { extends: "employee" } });
-      writeDomain("proj", { agents: ["bot", "other"], orchestrator: "bot" });
+      writeDomain("proj", { agents: ["bot", "other"], manager: { enabled: true, agentId: "bot" } });
 
       const result = removeGlobalAgent(tmpDir, "bot", true, "actor");
       expect(result.ok).toBe(true);
@@ -265,7 +386,7 @@ describe("config writer", () => {
       const domain = readDomainConfig(tmpDir, "proj")!;
       expect(domain.agents.includes("bot")).toBe(false);
       expect(domain.agents.includes("other")).toBe(true);
-      expect(domain.orchestrator).toBeUndefined(); // cleared because was bot
+      expect(domain.manager).toBeUndefined();
     });
 
     it("fails to remove non-existent agent", () => {
@@ -284,6 +405,27 @@ describe("config writer", () => {
       expect(config.agents.bot?.title).toBe("Senior Worker");
       expect((config.agents.bot as any).model).toBe("opus");
       expect((config.agents.bot as any).department).toBe("eng"); // preserved
+    });
+
+    it("preserves inline field comments when updating a global agent field", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "config.yaml"),
+        [
+          "agents:",
+          "  bot:",
+          "    extends: employee # keep this",
+          "    title: Worker",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = updateGlobalAgent(tmpDir, "bot", { title: "Lead" }, "actor");
+      expect(result.ok).toBe(true);
+
+      const raw = fs.readFileSync(path.join(tmpDir, "config.yaml"), "utf-8");
+      expect(raw).toContain("extends: employee # keep this");
+      expect(raw).toContain("title: Lead");
     });
 
     it("fails to update non-existent agent", () => {
@@ -310,14 +452,64 @@ describe("config writer", () => {
       expect(domain.agents.length).toBe(1); // not duplicated
     });
 
+    it("preserves existing agent item comments when appending to a domain list", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "domains", "proj.yaml"),
+        [
+          "domain: proj",
+          "agents:",
+          "  - a # first agent",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = addAgentToDomain(tmpDir, "proj", "b", "actor");
+      expect(result.ok).toBe(true);
+
+      const raw = fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8");
+      expect(raw).toContain("- a # first agent");
+      expect(raw).toContain("- b");
+    });
+
     it("removes agent from domain", () => {
-      writeDomain("proj", { agents: ["a", "b"], orchestrator: "a" });
+      writeDomain("proj", { agents: ["a", "b"], manager: { enabled: true, agentId: "a" } });
       const result = removeAgentFromDomain(tmpDir, "proj", "a", "actor");
       expect(result.ok).toBe(true);
 
       const domain = readDomainConfig(tmpDir, "proj")!;
       expect(domain.agents).toEqual(["b"]);
-      expect(domain.orchestrator).toBeUndefined(); // cleared
+      expect(domain.manager).toBeUndefined();
+    });
+
+    it("preserves unrelated comments when removing an agent from a domain", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "domains", "proj.yaml"),
+        [
+          "# domain comment",
+          "domain: proj",
+          "agents:",
+          "  - a",
+          "  - b",
+          "# safety comment",
+          "safety:",
+          "  costCircuitBreaker: 2",
+          "manager:",
+          "  enabled: true",
+          "  agentId: a",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = removeAgentFromDomain(tmpDir, "proj", "a", "actor");
+      expect(result.ok).toBe(true);
+
+      const raw = fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8");
+      expect(raw).toContain("# domain comment");
+      expect(raw).toContain("# safety comment");
+      expect(raw).not.toContain("agentId: a");
+      expect(raw).toContain("- b");
     });
 
     it("removing agent from domain is idempotent", () => {
@@ -369,6 +561,35 @@ describe("config writer", () => {
       expect(preview.valid).toBe(true);
       expect((preview.before.budget as any).dailyCents).toBe(100);
       expect((preview.after.budget as any).dailyCents).toBe(500);
+    });
+
+    it("preserves unrelated comments on full domain writes when fields are unchanged", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "domains", "proj.yaml"),
+        [
+          "domain: proj",
+          "manager:",
+          "  enabled: true # keep",
+          "  agentId: lead",
+          "budget:",
+          "  project:",
+          "    dailyCents: 100",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const result = writeDomainConfig(tmpDir, "proj", {
+        domain: "proj",
+        agents: [],
+        manager: { enabled: true, agentId: "lead" },
+        budget: { project: { dailyCents: 250 } },
+      } as any);
+
+      expect(result.ok).toBe(true);
+      const raw = fs.readFileSync(path.join(tmpDir, "domains", "proj.yaml"), "utf-8");
+      expect(raw).toContain("enabled: true # keep");
+      expect(raw).toContain("dailyCents: 250");
     });
 
     it("reports validation errors in preview", () => {

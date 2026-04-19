@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getClawforceHome } from "../paths.js";
-import type { SQLInputValue } from "node:sqlite";
+import type { SQLInputValue } from "../sqlite-driver.js";
 import { Type } from "@sinclair/typebox";
 import { getInitQuestions, buildConfigFromAnswers, getBudgetGuidance } from "../config/init-flow.js";
 import { scaffoldConfigDir, initDomain } from "../config/wizard.js";
@@ -533,7 +533,7 @@ export function createClawforceOpsTool(options?: {
           case "refresh_context": {
             const agentIdForCtx = readStringParam(params, "agent_id_context") ?? caller;
 
-            const entry = getAgentConfig(agentIdForCtx);
+            const entry = getAgentConfig(agentIdForCtx, projectId);
             if (!entry) {
               return jsonResult({ ok: false, reason: `Agent config not found for "${agentIdForCtx}".` });
             }
@@ -752,7 +752,7 @@ export function createClawforceOpsTool(options?: {
 
           case "list_jobs": {
             const targetAgentId = readStringParam(params, "target_agent_id", { required: true })!;
-            const jobs = listJobs(targetAgentId);
+            const jobs = listJobs(targetAgentId, projectId);
             if (jobs === null) {
               return jsonResult({ ok: false, reason: `Agent not found: ${targetAgentId}` });
             }
@@ -779,7 +779,7 @@ export function createClawforceOpsTool(options?: {
             }
 
             // Check job doesn't already exist
-            const existingJobs = listJobs(targetAgentId);
+            const existingJobs = listJobs(targetAgentId, projectId);
             if (existingJobs && existingJobs[jobName]) {
               return jsonResult({ ok: false, reason: `Job "${jobName}" already exists on agent ${targetAgentId}. Use update_job to modify it.` });
             }
@@ -792,7 +792,7 @@ export function createClawforceOpsTool(options?: {
             }
 
             const job = parseJobConfig(jobConfig);
-            if (!upsertJob(targetAgentId, jobName, job)) {
+            if (!upsertJob(targetAgentId, jobName, job, projectId)) {
               return jsonResult({ ok: false, reason: `Agent not found: ${targetAgentId}` });
             }
 
@@ -826,7 +826,7 @@ export function createClawforceOpsTool(options?: {
               return jsonResult({ ok: false, reason: `Not authorized to manage jobs for agent ${targetAgentId}` });
             }
 
-            const currentJobs = listJobs(targetAgentId);
+            const currentJobs = listJobs(targetAgentId, projectId);
             if (!currentJobs || !currentJobs[jobName]) {
               return jsonResult({ ok: false, reason: `Job "${jobName}" not found on agent ${targetAgentId}` });
             }
@@ -844,7 +844,7 @@ export function createClawforceOpsTool(options?: {
 
             // Enforce wake bounds if agent has scheduling config
             if (merged.cron) {
-              const agentEntry = getAgentConfig(targetAgentId);
+              const agentEntry = getAgentConfig(targetAgentId, projectId);
               const wakeBounds = agentEntry?.config.scheduling?.wakeBounds;
               if (wakeBounds) {
                 const { clampCronToWakeBounds } = await import("../scheduling/wake-bounds.js");
@@ -852,7 +852,7 @@ export function createClawforceOpsTool(options?: {
               }
             }
 
-            upsertJob(targetAgentId, jobName, merged);
+            upsertJob(targetAgentId, jobName, merged, projectId);
 
             writeAuditEntry({
               projectId,
@@ -883,7 +883,7 @@ export function createClawforceOpsTool(options?: {
               return jsonResult({ ok: false, reason: `Not authorized to manage jobs for agent ${targetAgentId}` });
             }
 
-            if (!deleteJob(targetAgentId, jobName)) {
+            if (!deleteJob(targetAgentId, jobName, projectId)) {
               return jsonResult({ ok: false, reason: `Job "${jobName}" not found on agent ${targetAgentId}` });
             }
 
@@ -910,7 +910,7 @@ export function createClawforceOpsTool(options?: {
             const callerSession = getSession(caller);
             const callerAgentId = callerSession?.agentId ?? caller;
 
-            const entry = getAgentConfig(callerAgentId);
+            const entry = getAgentConfig(callerAgentId, projectId);
             if (!entry) {
               return jsonResult({ ok: false, reason: `Agent config not found for "${callerAgentId}"` });
             }

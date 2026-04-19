@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 
 describe("checkBudgetV2", () => {
   let db: DatabaseSync;

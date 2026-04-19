@@ -7,7 +7,7 @@
  * - intervention_suggestions: pattern-detected recommendations
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../sqlite-driver.js";
 import { safeLog } from "../../diagnostics.js";
 
 type WelcomeContext = {

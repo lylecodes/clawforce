@@ -18,10 +18,12 @@ const ClawforceVerifySchema = Type.Object({
   project_id: Type.Optional(Type.String({ description: "Project identifier (defaults to 'default')." })),
   task_id: Type.String({ description: "Task ID to verify." }),
   project_dir: Type.Optional(Type.String({ description: "Project directory (for request, defaults to cwd)." })),
+  agent_id: Type.Optional(Type.String({ description: "Verifier agent ID to dispatch for a REVIEW task (for request)." })),
   profile: Type.Optional(Type.String({ description: "Verifier agent profile (for request)." })),
   model: Type.Optional(Type.String({ description: "Verifier model override (for request)." })),
   prompt: Type.Optional(Type.String({ description: "Custom verification prompt (for request)." })),
   passed: Type.Optional(Type.Union([Type.String(), Type.Boolean()], { description: "Verdict: true/\"true\" for PASS, false/\"false\" for FAIL (for verdict)." })),
+  reason_code: Type.Optional(Type.String({ description: "Structured review reason code for failed verdicts (for verdict)." })),
   reason: Type.Optional(Type.String({ description: "Reason for the verdict (for verdict)." })),
 });
 
@@ -53,6 +55,7 @@ export function createClawforceVerifyTool(options?: {
               projectId,
               taskId,
               projectDir,
+              verifierAgentId: readStringParam(params, "agent_id") ?? undefined,
               verifierProfile: readStringParam(params, "profile") ?? undefined,
               verifierModel: readStringParam(params, "model") ?? undefined,
               verificationPrompt: readStringParam(params, "prompt") ?? undefined,
@@ -70,6 +73,7 @@ export function createClawforceVerifyTool(options?: {
               taskId,
               verifier: actor,
               passed,
+              reasonCode: readStringParam(params, "reason_code") as import("../types.js").ReviewReasonCode | undefined,
               reason,
               sessionKey: options?.agentSessionKey,
             });

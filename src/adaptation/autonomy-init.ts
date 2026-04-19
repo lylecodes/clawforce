@@ -5,7 +5,7 @@
  * Overrides decay naturally as real trust decisions accumulate.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { applyTrustOverride } from "../trust/tracker.js";
 import type { Autonomy } from "../direction.js";
 

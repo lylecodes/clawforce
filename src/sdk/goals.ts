@@ -36,6 +36,8 @@ function toPublicGoal(g: InternalGoal): Goal {
     group: g.department,
     owner: g.ownerAgentId,
     priority: g.priority ?? "medium",
+    entityId: g.entityId,
+    entityType: g.entityType,
     createdAt: g.createdAt,
   };
   // deadline is stored in metadata when provided via GoalParams, not a first-class DB column
@@ -60,6 +62,8 @@ export class GoalsNamespace {
       ownerAgentId: params.owner,
       priority: params.priority as InternalGoal["priority"] | undefined,
       parentGoalId: params.parentGoalId,
+      entityId: params.entityId,
+      entityType: params.entityType,
       metadata: params.metadata,
       createdBy: actor ?? "sdk",
     });
@@ -81,12 +85,16 @@ export class GoalsNamespace {
     status?: Goal["status"];
     group?: string;
     owner?: string;
+    entityId?: string;
+    entityType?: string;
     limit?: number;
   }): Goal[] {
     const internal = internalListGoals(this.domain, {
       status: filters?.status,
       department: filters?.group,
       ownerAgentId: filters?.owner,
+      entityId: filters?.entityId,
+      entityType: filters?.entityType,
       limit: filters?.limit,
     });
     return internal.map(toPublicGoal);
@@ -102,6 +110,8 @@ export class GoalsNamespace {
       department: updates.group,
       ownerAgentId: updates.owner,
       priority: updates.priority as InternalGoal["priority"] | undefined,
+      entityId: updates.entityId,
+      entityType: updates.entityType,
       metadata: updates.metadata,
     });
     return toPublicGoal(internal);

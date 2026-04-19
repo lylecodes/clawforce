@@ -38,6 +38,7 @@ export function runVerificationIfConfigured(
   if (!projectDir) return null;
 
   const result = runVerificationGates(config.gates, projectDir, {
+    projectId,
     totalTimeoutMs: (config.total_timeout_seconds ?? 300) * 1000,
     defaultGateTimeoutSeconds: config.defaultGateTimeoutSeconds,
   });

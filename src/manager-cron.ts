@@ -11,6 +11,10 @@
 
 import { getDb } from "./db.js";
 import { getExtendedProjectConfig } from "./project.js";
+import {
+  getCronServicePort,
+  setCronServicePort,
+} from "./runtime/integrations.js";
 import { buildOodaPrompt } from "./planning/ooda.js";
 import { computeVelocity, analyzeBlockerImpact, computeCostTrajectory } from "./planning/velocity.js";
 import type { CronDelivery, CronFailureAlert, CronRegistrarInput, CronSchedule, JobDefinition } from "./types.js";
@@ -64,16 +68,14 @@ export type CronServiceLike = {
   run?(id: string): Promise<unknown>;
 };
 
-let cronService: CronServiceLike | null = null;
-
 /** Store the cron service for runtime management (called during init). */
 export function setCronService(service: CronServiceLike | null): void {
-  cronService = service;
+  setCronServicePort(service);
 }
 
 /** Get the cron service for runtime cron management. */
 export function getCronService(): CronServiceLike | null {
-  return cronService;
+  return getCronServicePort();
 }
 
 /**

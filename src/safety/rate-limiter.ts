@@ -6,6 +6,8 @@
  * Uses in-memory sliding windows — no DB required.
  */
 
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
+
 // --- Types ---
 
 export type RateLimitCheckResult =
@@ -43,19 +45,20 @@ export const BACKOFF_DEFAULTS: Readonly<BackoffConfig> = {
 
 // --- In-memory state ---
 
-/** Per-session call counts: sessionKey -> count */
-const sessionCallCounts = new Map<string, number>();
-
-/** Global sliding window: timestamps[] */
-let globalCallTimestamps: number[] = [];
-
-/** Per-agent sliding window: agentId -> timestamps[] */
-const agentCallTimestamps = new Map<string, number[]>();
-
-/** Per-project sliding window: projectId -> timestamps[] */
-const projectCallTimestamps = new Map<string, number[]>();
-
 const ONE_MINUTE_MS = 60_000;
+
+type RateLimiterRuntimeState = {
+  sessionCallCounts: Map<string, number>;
+  globalCallTimestamps: number[];
+  agentCallTimestamps: Map<string, number[]>;
+  projectCallTimestamps: Map<string, number[]>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getRateLimiterState(): RateLimiterRuntimeState {
+  return runtime.rateLimiter as RateLimiterRuntimeState;
+}
 
 // --- Core functions ---
 
@@ -68,24 +71,25 @@ export function recordCall(
   agentId: string,
   sessionKey: string,
 ): void {
+  const state = getRateLimiterState();
   const now = Date.now();
 
   // Per-session increment
-  const current = sessionCallCounts.get(sessionKey) ?? 0;
-  sessionCallCounts.set(sessionKey, current + 1);
+  const current = state.sessionCallCounts.get(sessionKey) ?? 0;
+  state.sessionCallCounts.set(sessionKey, current + 1);
 
   // Global sliding window
-  globalCallTimestamps.push(now);
+  state.globalCallTimestamps.push(now);
 
   // Per-agent sliding window
-  const agentTs = agentCallTimestamps.get(agentId) ?? [];
+  const agentTs = state.agentCallTimestamps.get(agentId) ?? [];
   agentTs.push(now);
-  agentCallTimestamps.set(agentId, agentTs);
+  state.agentCallTimestamps.set(agentId, agentTs);
 
   // Per-project sliding window
-  const projectTs = projectCallTimestamps.get(projectId) ?? [];
+  const projectTs = state.projectCallTimestamps.get(projectId) ?? [];
   projectTs.push(now);
-  projectCallTimestamps.set(projectId, projectTs);
+  state.projectCallTimestamps.set(projectId, projectTs);
 }
 
 /**
@@ -98,11 +102,12 @@ export function checkCallLimit(
   sessionKey: string,
   config: RateLimitConfig = RATE_LIMIT_DEFAULTS,
 ): RateLimitCheckResult {
+  const state = getRateLimiterState();
   const now = Date.now();
   const cutoff = now - ONE_MINUTE_MS;
 
   // 1. Per-session total
-  const sessionCount = sessionCallCounts.get(sessionKey) ?? 0;
+  const sessionCount = state.sessionCallCounts.get(sessionKey) ?? 0;
   if (sessionCount >= config.maxCallsPerSession) {
     return {
       allowed: false,
@@ -111,8 +116,8 @@ export function checkCallLimit(
   }
 
   // 2. Global per-minute
-  const recentGlobal = pruneAndCount(globalCallTimestamps, cutoff);
-  globalCallTimestamps = globalCallTimestamps.filter((t) => t > cutoff);
+  const recentGlobal = pruneAndCount(state.globalCallTimestamps, cutoff);
+  state.globalCallTimestamps = state.globalCallTimestamps.filter((t) => t > cutoff);
   if (recentGlobal >= config.maxCallsPerMinute) {
     return {
       allowed: false,
@@ -121,9 +126,9 @@ export function checkCallLimit(
   }
 
   // 3. Per-agent per-minute
-  const agentTs = agentCallTimestamps.get(agentId) ?? [];
+  const agentTs = state.agentCallTimestamps.get(agentId) ?? [];
   const recentAgent = pruneAndCount(agentTs, cutoff);
-  agentCallTimestamps.set(agentId, agentTs.filter((t) => t > cutoff));
+  state.agentCallTimestamps.set(agentId, agentTs.filter((t) => t > cutoff));
   if (recentAgent >= config.maxCallsPerMinutePerAgent) {
     return {
       allowed: false,
@@ -146,13 +151,14 @@ export function getRateLimitInfo(
   globalCallsPerMinute: number;
   agentCallsPerMinute: number;
 } {
+  const state = getRateLimiterState();
   const now = Date.now();
   const cutoff = now - ONE_MINUTE_MS;
 
   return {
-    sessionCalls: sessionCallCounts.get(sessionKey) ?? 0,
-    globalCallsPerMinute: pruneAndCount(globalCallTimestamps, cutoff),
-    agentCallsPerMinute: pruneAndCount(agentCallTimestamps.get(agentId) ?? [], cutoff),
+    sessionCalls: state.sessionCallCounts.get(sessionKey) ?? 0,
+    globalCallsPerMinute: pruneAndCount(state.globalCallTimestamps, cutoff),
+    agentCallsPerMinute: pruneAndCount(state.agentCallTimestamps.get(agentId) ?? [], cutoff),
   };
 }
 
@@ -160,7 +166,7 @@ export function getRateLimitInfo(
  * Remove tracking for a session (call when session ends).
  */
 export function clearSession(sessionKey: string): void {
-  sessionCallCounts.delete(sessionKey);
+  getRateLimiterState().sessionCallCounts.delete(sessionKey);
 }
 
 /**
@@ -196,10 +202,11 @@ export function calculateBackoffDelayDeterministic(
 // --- Reset (for testing) ---
 
 export function resetRateLimiter(): void {
-  sessionCallCounts.clear();
-  globalCallTimestamps = [];
-  agentCallTimestamps.clear();
-  projectCallTimestamps.clear();
+  const state = getRateLimiterState();
+  state.sessionCallCounts.clear();
+  state.globalCallTimestamps = [];
+  state.agentCallTimestamps.clear();
+  state.projectCallTimestamps.clear();
 }
 
 // --- Helpers ---

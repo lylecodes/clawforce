@@ -5,37 +5,35 @@
  * Called from gateway server.impl.ts.
  */
 
-import fs from "node:fs";
-import path from "node:path";
 import type { ClawforceConfig } from "./types.js";
 import { closeAllDbs, setProjectsDir } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import { sweep } from "./sweep/actions.js";
 import { initializeAllDomains } from "./config/init.js";
-import { loadProject, loadWorkforceConfig, initProject, registerWorkforceConfig } from "./project.js";
+import { getDefaultRuntimeState } from "./runtime/default-runtime.js";
+import { acquireControllerLease, releaseControllerLease } from "./runtime/controller-leases.js";
 
-let sweepTimer: ReturnType<typeof setInterval> | null = null;
-let initialized = false;
-let activeProjectIds: Set<string> = new Set();
-const inFlightSweeps: Set<Promise<unknown>> = new Set();
+const runtime = getDefaultRuntimeState();
 
 export function initClawforce(config: ClawforceConfig): void {
   if (!config.enabled) return;
-  if (initialized) return;
+  if (runtime.initialized) return;
 
   setProjectsDir(config.projectsDir);
 
-  autoActivateProjects(config.projectsDir);
+  if (config.autoInitialize !== false) {
+    autoActivateProjects(config.projectsDir);
+  }
 
   if (config.sweepIntervalMs > 0) {
-    sweepTimer = setInterval(() => {
-      for (const projectId of activeProjectIds) {
+    runtime.sweepTimer = setInterval(() => {
+      for (const projectId of runtime.activeProjectIds) {
         try {
           const p = sweep({ projectId }).catch((err) => {
             safeLog(`lifecycle.sweep.${projectId}`, err);
           });
-          inFlightSweeps.add(p);
-          p.finally(() => inFlightSweeps.delete(p));
+          runtime.inFlightSweeps.add(p);
+          p.finally(() => runtime.inFlightSweeps.delete(p));
         } catch (err) {
           // Synchronous errors (e.g., DatabaseSync throws) must not
           // interrupt the loop for remaining projects.
@@ -43,96 +41,75 @@ export function initClawforce(config: ClawforceConfig): void {
         }
       }
     }, config.sweepIntervalMs);
-    sweepTimer.unref();
+    runtime.sweepTimer.unref();
+
+    for (const projectId of runtime.activeProjectIds) {
+      try {
+        acquireControllerLease(projectId, { purpose: "lifecycle" });
+      } catch (err) {
+        safeLog(`lifecycle.controllerLease.${projectId}`, err);
+      }
+    }
   }
 
-  initialized = true;
+  runtime.initialized = true;
 }
 
 function autoActivateProjects(projectsDir: string): void {
-  // 1) Prefer domain-based config initialization (config.yaml + domains/*.yaml)
   try {
     initializeAllDomains(projectsDir);
   } catch (err) {
     safeLog("lifecycle.autoActivate.initializeAllDomains", err);
   }
-
-  // 2) Backward compatibility: auto-activate legacy project.yaml projects
-  try {
-    if (!fs.existsSync(projectsDir)) return;
-    const entries = fs.readdirSync(projectsDir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-
-      const projectId = entry.name;
-      const projectDir = path.join(projectsDir, projectId);
-      const configPath = path.join(projectDir, "project.yaml");
-      if (!fs.existsSync(configPath)) continue;
-
-      try {
-        const wfConfig = loadWorkforceConfig(configPath);
-        if (wfConfig) {
-          registerWorkforceConfig(projectId, wfConfig, projectDir);
-          // Register in the active-project set so getActiveProjectIds() returns
-          // this project without requiring a separate initProject() call.
-          registerProject(projectId);
-          continue;
-        }
-
-        // Legacy project format without workforce agents
-        const projectConfig = loadProject(configPath);
-        initProject(projectConfig);
-      } catch (err) {
-        safeLog(`lifecycle.autoActivate.${projectId}`, err);
-      }
-    }
-  } catch (err) {
-    safeLog("lifecycle.autoActivate.scan", err);
-  }
 }
 
 export async function shutdownClawforce(): Promise<void> {
-  if (sweepTimer) {
-    clearInterval(sweepTimer);
-    sweepTimer = null;
+  if (runtime.sweepTimer) {
+    clearInterval(runtime.sweepTimer);
+    runtime.sweepTimer = null;
   }
   // Wait for any in-flight sweeps to complete before closing databases
-  if (inFlightSweeps.size > 0) {
-    await Promise.allSettled([...inFlightSweeps]);
-    inFlightSweeps.clear();
+  if (runtime.inFlightSweeps.size > 0) {
+    await Promise.allSettled([...runtime.inFlightSweeps]);
+    runtime.inFlightSweeps.clear();
   }
   closeAllDbs();
-  activeProjectIds.clear();
-  initialized = false;
+  for (const projectId of runtime.activeProjectIds) {
+    try {
+      releaseControllerLease(projectId);
+    } catch (err) {
+      safeLog(`lifecycle.releaseLease.${projectId}`, err);
+    }
+  }
+  runtime.activeProjectIds.clear();
+  runtime.configInit.reloadStatusByDomain.clear();
+  runtime.initialized = false;
 }
 
 export function registerProject(projectId: string): void {
-  activeProjectIds.add(projectId);
+  runtime.activeProjectIds.add(projectId);
+  if (runtime.sweepTimer) {
+    try {
+      acquireControllerLease(projectId, { purpose: "lifecycle" });
+    } catch (err) {
+      safeLog(`lifecycle.registerLease.${projectId}`, err);
+    }
+  }
 }
 
 export function unregisterProject(projectId: string): void {
-  activeProjectIds.delete(projectId);
+  try {
+    releaseControllerLease(projectId);
+  } catch (err) {
+    safeLog(`lifecycle.unregisterLease.${projectId}`, err);
+  }
+  runtime.activeProjectIds.delete(projectId);
 }
 
 export function getActiveProjectIds(): string[] {
-  return [...activeProjectIds];
-}
-
-// Domain aliases — pass through to existing project tracking.
-// During the migration to domain-based config, both vocabularies work.
-export function registerDomain(domainId: string): void {
-  activeProjectIds.add(domainId);
-}
-
-export function unregisterDomain(domainId: string): void {
-  activeProjectIds.delete(domainId);
-}
-
-export function getActiveDomainIds(): string[] {
-  return [...activeProjectIds];
+  return [...runtime.activeProjectIds];
 }
 
 export function isClawforceInitialized(): boolean {
-  return initialized;
+  return runtime.initialized;
 }

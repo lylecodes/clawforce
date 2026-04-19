@@ -258,10 +258,12 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     coordination: { enabled: true, schedule: "*/30 * * * *" },
     scheduling: { adaptiveWake: true, planning: true, wakeBounds: ["*/15 * * * *", "*/120 * * * *"], maxTurnsPerCycle: 50 },
     skillCap: 12,
-    // Cost optimization: managers get a higher bootstrap budget than workers but still reduced
-    bootstrapConfig: { maxChars: 12000, totalMaxChars: 50000 },
-    // Cost optimization: exclude assistant-oriented bootstrap files (managers use ClawForce briefing)
-    bootstrapExcludeFiles: ["HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"],
+    runtime: {
+      // Cost optimization: managers get a higher bootstrap budget than workers but still reduced
+      bootstrapConfig: { maxChars: 12000, totalMaxChars: 50000 },
+      // Cost optimization: exclude assistant-oriented bootstrap files (managers use ClawForce briefing)
+      bootstrapExcludeFiles: ["HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"],
+    },
   },
   employee: {
     title: "Employee",
@@ -275,12 +277,14 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     compaction: false,
     coordination: { enabled: false },
     skillCap: 8,
-    // Cost optimization: workers only need core coding tools
-    allowedTools: ["Bash", "Read", "Edit", "Write", "WebSearch"],
-    // Cost optimization: reduce bootstrap budget — workers get context via ClawForce briefing
-    bootstrapConfig: { maxChars: 8000, totalMaxChars: 30000 },
-    // Cost optimization: exclude assistant-oriented bootstrap files
-    bootstrapExcludeFiles: ["AGENTS.md", "HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"],
+    runtime: {
+      // Cost optimization: workers only need core coding tools
+      allowedTools: ["Bash", "Read", "Edit", "Write", "WebSearch"],
+      // Cost optimization: reduce bootstrap budget — workers get context via ClawForce briefing
+      bootstrapConfig: { maxChars: 8000, totalMaxChars: 30000 },
+      // Cost optimization: exclude assistant-oriented bootstrap files
+      bootstrapExcludeFiles: ["AGENTS.md", "HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"],
+    },
   },
   assistant: {
     title: "Personal Assistant",
@@ -313,7 +317,7 @@ export const BUILTIN_AGENT_PRESETS: Record<string, Record<string, unknown>> = {
     persona: `You are the Clawforce onboarding guide. Help users set up their AI workforce.
 
 You understand three scenarios:
-1. EXISTING PROJECT: The user has OpenClaw agents already. Help them create a Clawforce domain that adds governance (budgets, compliance, org structure) on top of their existing setup. Ask about their current agents, what they do, and how they relate to each other.
+1. EXISTING PROJECT: The user already has an AI workforce or runtime setup. Help them create a Clawforce domain that adds governance (budgets, compliance, org structure) on top of their existing execution environment. Ask about their current agents, what they do, how they relate to each other, and which executor/runtime they plan to keep using.
 
 2. NEW PROJECT: The user is starting fresh. Help them design their AI workforce. Ask about their use case, how many agents they need, what roles, and their budget. Generate the full config.
 
@@ -359,16 +363,14 @@ You have access to all Clawforce tools. Use clawforce_setup to create configs, c
     compaction: false,
     coordination: { enabled: false },
     skillCap: 4,
-    // Cost optimization: verifiers only need read-only tools (no Edit/Write)
-    allowedTools: ["Bash", "Read", "WebSearch"],
-    // Cost optimization: reduce bootstrap budget — verifiers get context via ClawForce briefing
-    bootstrapConfig: { maxChars: 8000, totalMaxChars: 30000 },
-    // Cost optimization: exclude assistant-oriented bootstrap files
-    bootstrapExcludeFiles: ["AGENTS.md", "HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"],
-  },
-  /** @deprecated Use employee instead. */
-  scheduled: {
-    extends: "employee",
+    runtime: {
+      // Cost optimization: verifiers only need read-only tools (no Edit/Write)
+      allowedTools: ["Bash", "Read", "WebSearch"],
+      // Cost optimization: reduce bootstrap budget — verifiers get context via ClawForce briefing
+      bootstrapConfig: { maxChars: 8000, totalMaxChars: 30000 },
+      // Cost optimization: exclude assistant-oriented bootstrap files
+      bootstrapExcludeFiles: ["AGENTS.md", "HEARTBEAT.md", "IDENTITY.md", "BOOTSTRAP.md"],
+    },
   },
 };
 
@@ -401,7 +403,7 @@ export const BUILTIN_JOB_PRESETS: Record<string, Record<string, unknown>> = {
   },
   memory_review: {
     cron: "0 18 * * *",
-    model: "anthropic/claude-sonnet-4-6",
+    model: "gpt-5.4-mini",
     sessionTarget: "isolated",
     briefing: ["memory_review_context"],
     expectations: [

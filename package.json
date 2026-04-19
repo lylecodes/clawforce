@@ -23,13 +23,18 @@
     "dispatch",
     "validation",
     "sdk",
+    "codex",
+    "openai",
     "openclaw"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.22.0"
   },
   "main": "./dist/src/sdk/index.js",
   "types": "./dist/src/sdk/index.d.ts",
+  "bin": {
+    "cf": "./bin/cf"
+  },
   "exports": {
     ".": {
       "types": "./dist/src/sdk/index.d.ts",
@@ -39,9 +44,13 @@
       "types": "./dist/src/sdk/index.d.ts",
       "default": "./dist/src/sdk/index.js"
     },
+    "./advanced": {
+      "types": "./dist/src/advanced.d.ts",
+      "default": "./dist/src/advanced.js"
+    },
     "./internal": {
-      "types": "./dist/src/index.d.ts",
-      "default": "./dist/src/index.js"
+      "types": "./dist/src/internal.d.ts",
+      "default": "./dist/src/internal.js"
     },
     "./dashboard": {
       "types": "./dist/src/dashboard/plugin.d.ts",
@@ -57,6 +66,7 @@
     }
   },
   "files": [
+    "bin",
     "dist",
     "adapters",
     "README.md",
@@ -68,25 +78,33 @@
     ]
   },
   "scripts": {
-    "build": "tsc",
+    "build": "./scripts/with-runtime-node.sh ./node_modules/typescript/bin/tsc",
     "prepublishOnly": "npm run build && npm run test",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit",
-    "cf": "npx tsx src/cli.ts"
+    "test": "./scripts/vitest-runtime.sh",
+    "test:watch": "./scripts/vitest-runtime.sh watch",
+    "typecheck": "./scripts/with-runtime-node.sh ./node_modules/typescript/bin/tsc --noEmit",
+    "check": "./scripts/with-runtime-node.sh ./node_modules/typescript/bin/tsc --noEmit",
+    "runtime:doctor": "./scripts/runtime-doctor.sh",
+    "cf": "./bin/cf"
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
+    "better-sqlite3": "^12.8.0",
     "filtrex": "3.1.0",
     "ws": "^8.20.0",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.3.2",
     "@types/ws": "^8.18.1",
     "openclaw": "^2026.3.13",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
   }
 }

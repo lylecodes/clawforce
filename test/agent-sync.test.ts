@@ -51,6 +51,21 @@ describe("buildOpenClawAgentEntry", () => {
     expect(entry.workspace).toBe("/home/user/project");
   });
 
+  it("projects nested runtime workspacePaths and allowedTools into the OpenClaw entry", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig({
+        runtime: {
+          workspacePaths: ["packages/core", "/tmp/shared"],
+          allowedTools: ["Read", "Edit"],
+        },
+      }),
+      "/home/user/project",
+    );
+    expect(entry.workspace).toBe("/home/user/project/packages/core");
+    expect(entry.tools).toEqual(["Read", "Edit"]);
+  });
+
   it("sets subagents.allowAgents for manager role", () => {
     const entry = buildOpenClawAgentEntry(
       "mgr",
@@ -75,32 +90,43 @@ describe("buildOpenClawAgentEntry", () => {
     expect(entry.workspace).toBeUndefined();
     expect(entry.identity).toBeUndefined();
   });
+
+  it("uses runtimeRef as the managed OpenClaw agent id when provided", () => {
+    const entry = buildOpenClawAgentEntry(
+      "worker",
+      makeAgentConfig({ runtimeRef: "existing-openclaw-worker" }),
+      "/home/user/project",
+      "demo-company",
+    );
+    expect(entry.id).toBe("existing-openclaw-worker");
+  });
 });
 
 // --- mergeAgentEntry ---
 
 describe("mergeAgentEntry", () => {
-  it("preserves all existing user fields (user-wins)", () => {
+  it("preserves user fields except ClawForce-owned runtime scope", () => {
     const existing: OpenClawAgentEntry = {
       id: "agent1",
       name: "Custom Name",
       model: "my-custom-model",
       workspace: "/custom/path",
+      tools: ["Read"],
     };
     const incoming: OpenClawAgentEntry = {
       id: "agent1",
       name: "Auto Name",
       model: { primary: "claude-opus-4-6" },
       workspace: "/auto/path",
+      tools: ["Read", "Edit"],
       identity: { name: "Auto Name" },
     };
     const merged = mergeAgentEntry(existing, incoming);
 
     expect(merged.name).toBe("Custom Name");
-    // model is in CLAWFORCE_WINS — incoming (ClawForce) wins over existing user config
     expect(merged.model).toEqual({ primary: "claude-opus-4-6" });
-    expect(merged.workspace).toBe("/custom/path");
-    // identity was missing in existing, so it gets filled
+    expect(merged.workspace).toBe("/auto/path");
+    expect(merged.tools).toEqual(["Read", "Edit"]);
     expect(merged.identity).toEqual({ name: "Auto Name" });
   });
 
@@ -178,6 +204,32 @@ describe("CLAWFORCE_WINS fields", () => {
     const merged = mergeAgentEntry(existing, incoming);
     expect(merged.model).toBe("user-preferred-model");
   });
+
+  it("workspace always overrides existing OpenClaw value", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      workspace: "/user/custom/path",
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      workspace: "/clawforce/auto/path",
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.workspace).toBe("/clawforce/auto/path");
+  });
+
+  it("tools always override existing OpenClaw value", () => {
+    const existing: OpenClawAgentEntry = {
+      id: "bot1",
+      tools: ["Read"],
+    };
+    const incoming: OpenClawAgentEntry = {
+      id: "bot1",
+      tools: ["Read", "Edit"],
+    };
+    const merged = mergeAgentEntry(existing, incoming);
+    expect(merged.tools).toEqual(["Read", "Edit"]);
+  });
 });
 
 describe("non-CLAWFORCE_WINS fields (user-wins)", () => {
@@ -192,19 +244,6 @@ describe("non-CLAWFORCE_WINS fields (user-wins)", () => {
     };
     const merged = mergeAgentEntry(existing, incoming);
     expect(merged.name).toBe("User Custom Name");
-  });
-
-  it("workspace preserves existing user value", () => {
-    const existing: OpenClawAgentEntry = {
-      id: "bot1",
-      workspace: "/user/custom/path",
-    };
-    const incoming: OpenClawAgentEntry = {
-      id: "bot1",
-      workspace: "/clawforce/auto/path",
-    };
-    const merged = mergeAgentEntry(existing, incoming);
-    expect(merged.workspace).toBe("/user/custom/path");
   });
 
   it("identity preserves existing user value", () => {
@@ -254,12 +293,27 @@ describe("buildOpenClawAgentEntry — extended", () => {
     expect(entry.subagents).toEqual({ allowAgents: ["*"] });
   });
 
-  it("maps model string to model.primary", () => {
+  it("does not project model into OpenClaw agent entries", () => {
     const entry = buildOpenClawAgentEntry(
       "coder",
       makeAgentConfig({ model: "anthropic/claude-sonnet-4-6" }),
     );
-    expect(entry.model).toEqual({ primary: "anthropic/claude-sonnet-4-6" });
+    expect(entry.model).toBeUndefined();
+  });
+
+  it("does not project unsupported bootstrap size fields into OpenClaw config", () => {
+    const entry = buildOpenClawAgentEntry(
+      "coder",
+      makeAgentConfig({
+        bootstrapConfig: {
+          enabled: true,
+          maxChars: 1200,
+          totalMaxChars: 2400,
+        },
+      }),
+    );
+    expect(entry).not.toHaveProperty("bootstrapMaxChars");
+    expect(entry).not.toHaveProperty("bootstrapTotalMaxChars");
   });
 
   it("does not set model when agent has no model", () => {
@@ -384,7 +438,50 @@ describe("syncAgentsToOpenClaw", () => {
     expect(written.agents!.list![1]!.workspace).toBe("/proj");
   });
 
-  it("idempotent re-sync skips and does not write", async () => {
+  it("does not mutate the loaded OpenClaw config snapshot in place", async () => {
+    const initialConfig: OpenClawConfigSubset = {
+      agents: {
+        list: [
+          { id: "personal-agent", name: "Personal Agent" },
+        ],
+      },
+      plugins: {
+        entries: {
+          clawforce: {
+            config: {
+              managedAgentIds: [],
+            },
+          },
+        },
+      },
+    };
+    const { config, loadConfig, writeConfigFile, logger } = makeMocks(initialConfig);
+
+    await syncAgentsToOpenClaw({
+      agents: [
+        {
+          agentId: "data-director",
+          config: makeAgentConfig({ title: "Data Director" }),
+          domain: "rentright-data",
+        },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    expect(config.agents?.list).toEqual([{ id: "personal-agent", name: "Personal Agent" }]);
+    expect(config.plugins?.entries?.clawforce?.config?.managedAgentIds).toEqual([]);
+
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written).not.toBe(config);
+    expect(written.agents?.list?.some((entry) => entry.id === "rentright-data:data-director")).toBe(true);
+    expect(written.plugins?.entries?.clawforce?.config?.managedAgentIds).toEqual([
+      "rentright-data:data-director",
+    ]);
+  });
+
+  it("idempotent re-sync establishes managed ownership metadata when missing", async () => {
     const existingConfig: OpenClawConfigSubset = {
       agents: {
         list: [
@@ -405,7 +502,9 @@ describe("syncAgentsToOpenClaw", () => {
 
     expect(result.synced).toBe(0);
     expect(result.skipped).toBe(1);
-    expect(writeConfigFile).not.toHaveBeenCalled();
+    expect(writeConfigFile).toHaveBeenCalledTimes(1);
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written.plugins?.entries?.clawforce?.config?.managedAgentIds).toEqual(["bot1"]);
   });
 
   it("merge preserves existing customizations", async () => {
@@ -471,7 +570,7 @@ describe("syncAgentsToOpenClaw", () => {
     expect(writeConfigFile).toHaveBeenCalledTimes(1);
   });
 
-  it("empty agents list is a no-op", async () => {
+  it("empty agents list still inspects config but does not write when nothing is owned", async () => {
     const { loadConfig, writeConfigFile, logger } = makeMocks({});
 
     const result = await syncAgentsToOpenClaw({
@@ -484,7 +583,7 @@ describe("syncAgentsToOpenClaw", () => {
     expect(result.synced).toBe(0);
     expect(result.skipped).toBe(0);
     expect(result.errors).toHaveLength(0);
-    expect(loadConfig).not.toHaveBeenCalled();
+    expect(loadConfig).toHaveBeenCalledTimes(1);
     expect(writeConfigFile).not.toHaveBeenCalled();
   });
 
@@ -602,7 +701,6 @@ describe("buildOpenClawAgentEntry — namespace isolation", () => {
       "demo-company",
     );
     expect(entry.id).toBe("demo-company:backend");
-    expect(entry.clawforce_domain).toBe("demo-company");
     expect(entry.name).toBe("Backend Dev");
   });
 
@@ -612,7 +710,6 @@ describe("buildOpenClawAgentEntry — namespace isolation", () => {
       makeAgentConfig({ title: "Backend Dev" }),
     );
     expect(entry.id).toBe("backend");
-    expect(entry.clawforce_domain).toBeUndefined();
   });
 
   it("clawforce-dev domain namespaces correctly", () => {
@@ -623,7 +720,6 @@ describe("buildOpenClawAgentEntry — namespace isolation", () => {
       "clawforce-dev",
     );
     expect(entry.id).toBe("clawforce-dev:cf-lead");
-    expect(entry.clawforce_domain).toBe("clawforce-dev");
     expect(entry.subagents).toEqual({ allowAgents: ["*"] });
   });
 
@@ -636,9 +732,8 @@ describe("buildOpenClawAgentEntry — namespace isolation", () => {
     );
     expect(entry.id).toBe("my-domain:coder");
     expect(entry.workspace).toBe("/workspace");
-    expect(entry.model).toEqual({ primary: "anthropic/claude-sonnet-4-6" });
-    expect(entry.allowedTools).toEqual(["Read", "Write"]);
-    expect(entry.clawforce_domain).toBe("my-domain");
+    expect(entry.model).toBeUndefined();
+    expect(entry).not.toHaveProperty("allowedTools");
   });
 });
 
@@ -670,8 +765,11 @@ describe("syncAgentsToOpenClaw — namespace isolation", () => {
     expect(result.collisions).toHaveLength(0);
     const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
     expect(written.agents!.list![0]!.id).toBe("demo-company:backend");
-    expect(written.agents!.list![0]!.clawforce_domain).toBe("demo-company");
     expect(written.agents!.list![1]!.id).toBe("demo-company:frontend");
+    expect(written.plugins?.entries?.clawforce?.config?.managedAgentIds).toEqual([
+      "demo-company:backend",
+      "demo-company:frontend",
+    ]);
   });
 
   it("agents from different domains do not collide", async () => {
@@ -699,7 +797,7 @@ describe("syncAgentsToOpenClaw — namespace isolation", () => {
     const existingConfig: OpenClawConfigSubset = {
       agents: {
         list: [
-          { id: "shared:backend", clawforce_domain: "domain-a", name: "Backend A" },
+          { id: "shared:backend", name: "Backend A" },
         ],
       },
     };
@@ -715,10 +813,9 @@ describe("syncAgentsToOpenClaw — namespace isolation", () => {
     });
 
     // The incoming agent has domain "shared" which produces "shared:backend"
-    // The existing entry has id "shared:backend" but clawforce_domain "domain-a"
-    // This is a cross-domain collision
+    // The existing entry is not in ClawForce's managed-agent registry, so it is treated as user-owned.
     expect(result.collisions).toHaveLength(1);
-    expect(result.collisions[0]).toContain("domain-a");
+    expect(result.collisions[0]).toContain("not managed by Clawforce");
     expect(result.skipped).toBe(1);
     expect(result.synced).toBe(0);
     // Should NOT overwrite the existing entry
@@ -729,8 +826,17 @@ describe("syncAgentsToOpenClaw — namespace isolation", () => {
     const existingConfig: OpenClawConfigSubset = {
       agents: {
         list: [
-          { id: "demo:backend", clawforce_domain: "demo", name: "Old Name" },
+          { id: "demo:backend", name: "Old Name" },
         ],
+      },
+      plugins: {
+        entries: {
+          clawforce: {
+            config: {
+              managedAgentIds: ["demo:backend"],
+            },
+          },
+        },
       },
     };
     const { loadConfig, writeConfigFile, logger } = makeMocks(existingConfig);
@@ -749,7 +855,7 @@ describe("syncAgentsToOpenClaw — namespace isolation", () => {
     const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
     expect(written.agents!.list![0]!.name).toBe("Old Name"); // user-wins
     expect(written.agents!.list![0]!.workspace).toBe("/ws"); // filled in
-    expect(written.agents!.list![0]!.clawforce_domain).toBe("demo"); // domain preserved
+    expect(written.plugins?.entries?.clawforce?.config?.managedAgentIds).toEqual(["demo:backend"]);
   });
 
   it("result.collisions is empty array when no collisions", async () => {
@@ -763,5 +869,73 @@ describe("syncAgentsToOpenClaw — namespace isolation", () => {
     });
 
     expect(result.collisions).toHaveLength(0);
+  });
+
+  it("removes stale clawforce-owned entries that are no longer registered", async () => {
+    const existingConfig: OpenClawConfigSubset = {
+      agents: {
+        list: [
+          { id: "demo:lead", name: "Lead" },
+          { id: "demo:worker", name: "Worker" },
+          { id: "personal-helper", name: "Personal Helper" },
+        ],
+      },
+      plugins: {
+        entries: {
+          clawforce: {
+            config: {
+              managedAgentIds: ["demo:lead", "demo:worker"],
+            },
+          },
+        },
+      },
+    };
+    const { loadConfig, writeConfigFile, logger } = makeMocks(existingConfig);
+
+    await syncAgentsToOpenClaw({
+      agents: [
+        { agentId: "lead", config: makeAgentConfig({ title: "Lead" }), domain: "demo" },
+      ],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written.agents!.list!.map((entry) => entry.id)).toEqual(["demo:lead", "personal-helper"]);
+    expect(written.plugins?.entries?.clawforce?.config?.managedAgentIds).toEqual(["demo:lead"]);
+  });
+
+  it("prunes clawforce-owned entries even when no agents remain", async () => {
+    const existingConfig: OpenClawConfigSubset = {
+      agents: {
+        list: [
+          { id: "demo:lead", name: "Lead" },
+          { id: "demo:worker", name: "Worker" },
+          { id: "personal-helper", name: "Personal Helper" },
+        ],
+      },
+      plugins: {
+        entries: {
+          clawforce: {
+            config: {
+              managedAgentIds: ["demo:lead", "demo:worker"],
+            },
+          },
+        },
+      },
+    };
+    const { loadConfig, writeConfigFile, logger } = makeMocks(existingConfig);
+
+    await syncAgentsToOpenClaw({
+      agents: [],
+      loadConfig,
+      writeConfigFile,
+      logger,
+    });
+
+    const written = writeConfigFile.mock.calls[0]![0] as OpenClawConfigSubset;
+    expect(written.agents!.list!.map((entry) => entry.id)).toEqual(["personal-helper"]);
+    expect(written.plugins?.entries?.clawforce?.config?.managedAgentIds).toEqual([]);
   });
 });

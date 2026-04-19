@@ -6,7 +6,7 @@
  * persistent operator-facing notification records.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { emitNotification } from "./emitter.js";
 import { safeLog } from "../diagnostics.js";
 

@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -69,7 +69,7 @@ describe("task leases", () => {
   it("allows same holder to re-acquire", () => {
     const task = createTask({ projectId: PROJECT, title: "Test", createdBy: "agent:pm" }, db);
 
-    acquireTaskLease(PROJECT, task.id, "agent:worker", -1000, db);
+    acquireTaskLease(PROJECT, task.id, "agent:worker", 1000, db);
     const a2 = acquireTaskLease(PROJECT, task.id, "agent:worker", 60000, db);
     expect(a2).toBe(true);
   });

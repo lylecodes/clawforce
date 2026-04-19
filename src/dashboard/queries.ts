@@ -5,24 +5,41 @@
  * Reuses existing core functions — no direct DB access.
  */
 
+import path from "node:path";
+import {
+  getAgentRuntimeConfig,
+  normalizeConfiguredAgentRuntime,
+} from "../agent-runtime-config.js";
 import { getActiveProjectIds } from "../lifecycle.js";
-import { getAgentConfig, getRegisteredAgentIds, getExtendedProjectConfig } from "../project.js";
+import { getAgentConfig, getRegisteredAgentIds, getExtendedProjectConfig, parseWorkforceConfigContent } from "../project.js";
 import { listTasks, getTask, getTaskEvidence, getTaskTransitions } from "../tasks/ops.js";
-import { listSessionArchives, getSessionArchive, countSessionArchives } from "../telemetry/session-archive.js";
+import {
+  getChildEntities,
+  getEntity,
+  getEntityIssue,
+  getEntityTransitions,
+  listEntities,
+  listEntityIssues,
+  summarizeEntityIssues,
+} from "../entities/ops.js";
+import { listEntityCheckRuns } from "../entities/checks.js";
+import {
+  listSessionArchives,
+  getSessionArchive,
+  countSessionArchives,
+  extractSessionArchiveDiagnostics,
+} from "../telemetry/session-archive.js";
 import { queryMetrics, aggregateMetrics } from "../metrics.js";
 import { getCostSummary } from "../cost.js";
-import { evaluateSlos } from "../monitoring/slo.js";
-import { evaluateAlertRules } from "../monitoring/alerts.js";
-import { computeHealthTier } from "../monitoring/health-tier.js";
 import { listEvents, countEvents } from "../events/store.js";
 import { searchMessages } from "../messaging/store.js";
 import { getActiveProtocols } from "../messaging/protocols.js";
-import type { MessageType, MessageStatus, ProtocolStatus, GoalStatus, TaskOrigin } from "../types.js";
+import type { AgentConfig, MessageType, MessageStatus, ProtocolStatus, GoalStatus, TaskOrigin } from "../types.js";
 import { listGoals, getGoal, getChildGoals, getGoalTasks } from "../goals/ops.js";
 import { computeGoalProgress } from "../goals/cascade.js";
 import { getDirectReports, getDepartmentAgents } from "../org.js";
 import { listDisabledAgents, isDomainDisabled } from "../enforcement/disabled-store.js";
-import { getActiveSessions } from "../enforcement/tracker.js";
+import { getActiveSessions, getSessionHeartbeatStatus } from "../enforcement/tracker.js";
 import type { TaskState, TaskPriority, TaskKind, EventStatus } from "../types.js";
 import { listPendingProposals } from "../approval/resolve.js";
 import { getBudgetStatus } from "../budget-windows.js";
@@ -33,81 +50,49 @@ import { listChannels, getChannel, getChannelMessages } from "../channels/store.
 import { buildChannelTranscript } from "../channels/messages.js";
 import { getMeetingStatus } from "../channels/meeting.js";
 import { getDb } from "../db.js";
-import { writeAuditEntry } from "../audit.js";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getAllOperationalMetrics } from "../metrics/operational.js";
 import type { OperationalMetrics } from "../metrics/operational.js";
 import { listActionRecords } from "./action-status.js";
 import type { ActionStatus } from "./action-status.js";
-import { isEmergencyStopActive } from "../safety.js";
 import {
   readDomainConfig as readDomainConfigViaService,
   readGlobalConfig as readGlobalConfigViaService,
 } from "../config/api-service.js";
-import type { ConfigQueryResult } from "../api/contract.js";
+import type {
+  ConfigQueryResult,
+  OperatorCommsResponse,
+  OperatorCommsThread,
+  SetupContextReference,
+  SetupExperienceResponse,
+  SetupOperatorAction,
+  SetupTopologyAgent,
+} from "../api/contract.js";
 import { listLocks } from "../locks/store.js";
-import fs from "node:fs";
-import path from "node:path";
+import {
+  queryDomainAlerts,
+  queryDomainHealth,
+  queryDomainSlos,
+} from "../app/queries/domain-monitoring.js";
+import { buildSetupExplanation, buildSetupReport } from "../setup/report.js";
+import { buildSetupPreflight, type SetupPreflightScenario } from "../setup/preflight.js";
+import { getClawforceHome } from "../paths.js";
+import { assessAgentRuntimeScope } from "../dispatch/runtime-scope.js";
+import { queryDashboardAssistantStatus } from "../app/queries/dashboard-assistant.js";
+import { normalizeExecutionConfig } from "../execution/config.js";
+import { getSimulatedActionStats } from "../execution/simulated-actions.js";
+import { getDomainRuntimeReloadStatus } from "../config/init.js";
+import { getConfigHistory } from "../telemetry/config-tracker.js";
+export {
+  ContextFileError,
+  readContextFile,
+  writeContextFile,
+} from "../app/queries/context-files.js";
 
 export type PaginationParams = {
   limit?: number;
   offset?: number;
 };
-
-export class ContextFileError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = "ContextFileError";
-    this.status = status;
-  }
-}
-
-function resolveContextFilePath(projectDir: string, relativePath: string): string {
-  if (!relativePath || typeof relativePath !== "string") {
-    throw new ContextFileError("Invalid path", 400);
-  }
-
-  if (path.isAbsolute(relativePath)) {
-    throw new ContextFileError("Path must be relative", 403);
-  }
-
-  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
-  if (segments.length === 0 || segments.includes("..")) {
-    throw new ContextFileError("Path traversal is not allowed", 403);
-  }
-
-  const resolvedPath = path.resolve(projectDir, relativePath);
-  const normalizedProjectDir = path.resolve(projectDir);
-  if (!resolvedPath.startsWith(normalizedProjectDir + path.sep) && resolvedPath !== normalizedProjectDir) {
-    throw new ContextFileError("Path traversal is not allowed", 403);
-  }
-
-  return resolvedPath;
-}
-
-export function readContextFile(projectDir: string, relativePath: string) {
-  const filePath = resolveContextFilePath(projectDir, relativePath);
-
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-    throw new ContextFileError("File not found", 404);
-  }
-
-  const stat = fs.statSync(filePath);
-  const content = fs.readFileSync(filePath, "utf8");
-  return {
-    content,
-    path: relativePath,
-    lastModified: stat.mtimeMs,
-  };
-}
-
-export function writeContextFile(projectDir: string, relativePath: string, content: string) {
-  const filePath = resolveContextFilePath(projectDir, relativePath);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, content, "utf8");
-  return { ok: true as const };
-}
 
 function buildBudgetWindowConfig(
   budgetRow: Record<string, unknown>,
@@ -271,6 +256,8 @@ export function queryTasks(
     priority?: TaskPriority;
     department?: string;
     team?: string;
+    entityType?: string;
+    entityId?: string;
     kind?: TaskKind;
     excludeKinds?: TaskKind[];
     origin?: TaskOrigin;
@@ -288,6 +275,8 @@ export function queryTasks(
     priority: filters?.priority,
     department: filters?.department,
     team: filters?.team,
+    entityType: filters?.entityType,
+    entityId: filters?.entityId,
     kind: filters?.kind,
     excludeKinds: filters?.excludeKinds,
     origin: filters?.origin,
@@ -303,14 +292,127 @@ export function queryTasks(
 }
 
 /** Get task detail with evidence and transitions. */
-export function queryTaskDetail(projectId: string, taskId: string) {
-  const task = getTask(projectId, taskId);
+export function queryTaskDetail(projectId: string, taskId: string, dbOverride?: DatabaseSync) {
+  const task = getTask(projectId, taskId, dbOverride);
   if (!task) return null;
 
-  const evidence = getTaskEvidence(projectId, taskId);
-  const transitions = getTaskTransitions(projectId, taskId);
+  const evidence = getTaskEvidence(projectId, taskId, dbOverride);
+  const transitions = getTaskTransitions(projectId, taskId, dbOverride);
+  const reviews = queryManagerReviews(projectId, taskId, 20, dbOverride).reviews;
+  const activeSessions = queryTaskActiveSessions(projectId, taskId, dbOverride);
+  const recentSessions = listSessionArchives(projectId, { taskId, limit: 5 }, dbOverride)
+    .map((session) => ({
+      ...session,
+      diagnostics: extractSessionArchiveDiagnostics(session),
+    }));
+  const linkedIssue = task.origin === "reactive" && task.originId
+    ? getEntityIssue(projectId, task.originId, dbOverride)
+    : null;
+  let entityIssueSummary = null;
+  if (task.entityId) {
+    try {
+      entityIssueSummary = summarizeEntityIssues(projectId, task.entityId, dbOverride);
+    } catch {
+      entityIssueSummary = null;
+    }
+  }
 
-  return { task, evidence, transitions };
+  return {
+    task,
+    evidence,
+    transitions,
+    reviews,
+    activeSessions,
+    recentSessions,
+    linkedIssue,
+    entityIssueSummary,
+  };
+}
+
+function queryTaskActiveSessions(projectId: string, taskId: string, dbOverride?: DatabaseSync) {
+  const db = dbOverride ?? getDb(projectId);
+  try {
+    const rows = db.prepare(
+      "SELECT session_key, agent_id, started_at, tool_call_count, last_persisted_at, dispatch_context FROM tracked_sessions WHERE project_id = ? ORDER BY started_at DESC",
+    ).all(projectId) as Array<{
+      session_key: string;
+      agent_id: string;
+      started_at: number;
+      tool_call_count: number;
+      last_persisted_at: number;
+      dispatch_context?: string | null;
+    }>;
+
+    return rows.flatMap((row) => {
+      if (!row.dispatch_context) return [];
+      try {
+        const dispatchContext = JSON.parse(row.dispatch_context) as { taskId?: string };
+        if (dispatchContext.taskId !== taskId) return [];
+        const heartbeat = getSessionHeartbeatStatus(row.last_persisted_at);
+        if (heartbeat.state === "stale") return [];
+        return [{
+          sessionKey: row.session_key,
+          agentId: row.agent_id,
+          startedAt: row.started_at,
+          toolCallCount: row.tool_call_count,
+          lastPersistedAt: row.last_persisted_at,
+          heartbeatState: heartbeat.state,
+          heartbeatAgeMs: heartbeat.ageMs,
+        }];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** List entities with optional filters. */
+export function queryEntities(
+  projectId: string,
+  filters?: {
+    kind?: string;
+    state?: string;
+    health?: string;
+    ownerAgentId?: string;
+    parentEntityId?: string | null;
+    department?: string;
+    team?: string;
+  },
+  pagination?: PaginationParams,
+) {
+  const limit = pagination?.limit ?? 50;
+  const entities = listEntities(projectId, {
+    kind: filters?.kind,
+    state: filters?.state,
+    health: filters?.health,
+    ownerAgentId: filters?.ownerAgentId,
+    parentEntityId: filters?.parentEntityId,
+    department: filters?.department,
+    team: filters?.team,
+    limit: limit + 1,
+  });
+  const hasMore = entities.length > limit;
+  return {
+    entities: entities.slice(0, limit),
+    hasMore,
+    count: hasMore ? limit : entities.length,
+  };
+}
+
+/** Get entity detail with child entities and transition history. */
+export function queryEntityDetail(projectId: string, entityId: string) {
+  const entity = getEntity(projectId, entityId);
+  if (!entity) return null;
+
+  const children = getChildEntities(projectId, entityId);
+  const transitions = getEntityTransitions(projectId, entityId);
+  const issues = listEntityIssues(projectId, { entityId, limit: 500 });
+  const issueSummary = summarizeEntityIssues(projectId, entityId);
+  const checkRuns = listEntityCheckRuns(projectId, entityId, 20);
+
+  return { entity, children, transitions, issues, issueSummary, checkRuns };
 }
 
 /** List archived sessions with pagination, total count, and optional agent filter. */
@@ -452,92 +554,12 @@ export function queryPolicies(projectId: string) {
 
 /** Evaluate SLOs. Normalizes raw config keys to SloDefinition fields. */
 export function querySlos(projectId: string) {
-  const extConfig = getExtendedProjectConfig(projectId);
-  if (!extConfig?.monitoring?.slos) return { slos: [] };
-
-  const raw = extConfig.monitoring.slos as Record<string, Record<string, unknown>>;
-  const normalized: Record<string, Record<string, unknown>> = {};
-  for (const [name, cfg] of Object.entries(raw)) {
-    normalized[name] = {
-      name,
-      metricType: String(cfg.metric_type ?? cfg.metricType ?? ""),
-      metricKey: String(cfg.metric_key ?? cfg.metricKey ?? ""),
-      aggregation: String(cfg.aggregation ?? "avg"),
-      condition: String(cfg.condition ?? "lt"),
-      threshold: Number(cfg.threshold ?? 0),
-      windowMs: Number(cfg.window_ms ?? cfg.windowMs ?? 3600000),
-      severity: String(cfg.severity ?? "warning"),
-      denominatorKey: typeof cfg.denominator_key === "string" ? cfg.denominator_key : undefined,
-      noDataPolicy: cfg.no_data_policy ?? cfg.noDataPolicy ?? "pass",
-    };
-  }
-  const results = evaluateSlos(projectId, normalized as any);
-
-  // Post-process: compute actual values for well-known SLOs that lack metric data
-  const db = getDb(projectId);
-  for (const result of results) {
-    if (result.actual === null && result.metricKey === "completion_rate") {
-      // Compute task-completion-rate directly from the tasks table (exclude exercise tasks)
-      try {
-        const doneRow = db.prepare(
-          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state = 'DONE' AND (kind IS NULL OR kind != 'exercise')",
-        ).get(projectId) as { cnt: number } | undefined;
-        const totalRow = db.prepare(
-          "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND state != 'CANCELLED' AND (kind IS NULL OR kind != 'exercise')",
-        ).get(projectId) as { cnt: number } | undefined;
-
-        const done = doneRow?.cnt ?? 0;
-        const total = totalRow?.cnt ?? 0;
-
-        if (total > 0) {
-          result.actual = done / total;
-          // Re-evaluate the condition with the computed actual value
-          const sloConfig = normalized[result.sloName];
-          if (sloConfig) {
-            const threshold = Number(sloConfig.threshold);
-            const condition = String(sloConfig.condition);
-            switch (condition) {
-              case "lt": result.passed = result.actual < threshold; break;
-              case "gt": result.passed = result.actual > threshold; break;
-              case "lte": result.passed = result.actual <= threshold; break;
-              case "gte": result.passed = result.actual >= threshold; break;
-            }
-          }
-          result.noData = false;
-        }
-      } catch { /* tasks table may not exist */ }
-    }
-  }
-
-  return { slos: results };
+  return queryDomainSlos(projectId);
 }
 
 /** Evaluate alert rules. Normalizes raw config keys. */
 export function queryAlerts(projectId: string) {
-  const extConfig = getExtendedProjectConfig(projectId);
-  if (!extConfig?.monitoring?.alertRules) return { alerts: [] };
-
-  const raw = extConfig.monitoring.alertRules as Record<string, Record<string, unknown>>;
-  const normalized: Record<string, Record<string, unknown>> = {};
-  for (const [name, cfg] of Object.entries(raw)) {
-    // Normalize operator/condition: support both YAML field names and symbolic operators
-    const rawCondition = String(cfg.condition ?? cfg.operator ?? "gt");
-    const conditionMap: Record<string, string> = { ">": "gt", "<": "lt", ">=": "gte", "<=": "lte", "==": "eq", "=": "eq" };
-    const condition = conditionMap[rawCondition] ?? rawCondition;
-
-    normalized[name] = {
-      name,
-      metricType: String(cfg.metric_type ?? cfg.metricType ?? ""),
-      metricKey: String(cfg.metric_key ?? cfg.metricKey ?? ""),
-      aggregation: String(cfg.aggregation ?? "sum"),
-      condition,
-      threshold: Number(cfg.threshold ?? 0),
-      windowMs: Number(cfg.window_ms ?? cfg.windowMs ?? 3600000),
-      cooldownMs: Number(cfg.cooldown_ms ?? cfg.cooldownMs ?? 3600000),
-    };
-  }
-  const results = evaluateAlertRules(projectId, normalized as any);
-  return { alerts: results };
+  return queryDomainAlerts(projectId);
 }
 
 /** Get org chart for a project. */
@@ -591,45 +613,7 @@ export function queryOrgChart(projectId: string) {
 
 /** Get project health tier (based on SLO/alert/anomaly counts). */
 export function queryHealth(projectId: string) {
-  const extConfig = getExtendedProjectConfig(projectId);
-  const emergencyStop = isEmergencyStopActive(projectId);
-  const domainEnabled = !isDomainDisabled(projectId);
-
-  let sloChecked = 0;
-  let sloBreach = 0;
-  let alertsFired = 0;
-
-  // Evaluate SLOs — use querySlos which handles both config-based and DB-based SLOs
-  try {
-    const sloData = querySlos(projectId);
-    const sloResults = sloData.slos ?? [];
-    sloChecked = sloResults.filter((s: any) => !s.noData).length;
-    sloBreach = sloResults.filter((s: any) => s.passed === false && !s.noData).length;
-  } catch { /* ignore */ }
-
-  // Evaluate alerts
-  if (extConfig?.monitoring?.alertRules) {
-    try {
-      const alertResults = evaluateAlertRules(projectId, extConfig.monitoring.alertRules as Record<string, any>);
-      alertsFired = alertResults.filter((a: any) => a.fired).length;
-    } catch { /* ignore */ }
-  }
-
-  const tier = computeHealthTier({
-    sloChecked,
-    sloBreach,
-    alertsFired,
-    anomaliesDetected: 0,
-  });
-
-  return {
-    tier,
-    sloChecked,
-    sloBreach,
-    alertsFired,
-    emergencyStop,
-    domainEnabled,
-  };
+  return queryDomainHealth(projectId);
 }
 
 /** Query active and recent protocols for a project. */
@@ -667,6 +651,8 @@ export function queryGoals(
     status?: GoalStatus;
     ownerAgentId?: string;
     parentGoalId?: string | null;
+    entityType?: string;
+    entityId?: string;
     limit?: number;
   },
   pagination?: PaginationParams,
@@ -676,6 +662,8 @@ export function queryGoals(
     status: filters?.status,
     ownerAgentId: filters?.ownerAgentId,
     parentGoalId: filters?.parentGoalId,
+    entityType: filters?.entityType,
+    entityId: filters?.entityId,
     limit: limit + 1,
   });
   const hasMore = goals.length > limit;
@@ -912,6 +900,13 @@ function mapProposalRow(row: Record<string, unknown>) {
     origin: (row.origin as string) ?? "risk_gate",
     reasoning: (row.reasoning as string) ?? undefined,
     relatedGoalId: (row.related_goal_id as string) ?? undefined,
+    entityType: (row.entity_type as string) ?? undefined,
+    entityId: (row.entity_id as string) ?? undefined,
+    executionStatus: (row.execution_status as string) ?? undefined,
+    executionUpdatedAt: (row.execution_updated_at as number) ?? undefined,
+    executionError: (row.execution_error as string) ?? undefined,
+    executionTaskId: (row.execution_task_id as string) ?? undefined,
+    executionRequiredGeneration: (row.execution_required_generation as string) ?? undefined,
   };
 }
 
@@ -944,47 +939,6 @@ export function queryBudgetStatus(projectId: string) {
   } catch {
     return { windows: [], alerts: [] };
   }
-}
-
-/** Update the project-level daily budget limit (cents). */
-export function updateBudgetLimit(projectId: string, newLimitCents: number, actor = "dashboard:api") {
-  const db = getDb(projectId);
-  const now = Date.now();
-
-  const existing = db.prepare(
-    "SELECT id, daily_limit_cents FROM budgets WHERE project_id = ? AND agent_id IS NULL",
-  ).get(projectId) as { id: string; daily_limit_cents: number | null } | undefined;
-
-  const previousLimit = existing?.daily_limit_cents ?? null;
-
-  if (existing?.id) {
-    db.prepare(
-      "UPDATE budgets SET daily_limit_cents = ?, updated_at = ? WHERE id = ?",
-    ).run(newLimitCents, now, existing.id);
-  } else {
-    db.prepare(
-      `INSERT INTO budgets (
-        id, project_id, agent_id,
-        daily_limit_cents, daily_spent_cents, daily_reset_at,
-        created_at, updated_at
-      ) VALUES (?, ?, NULL, ?, 0, ?, ?, ?)`,
-    ).run(`budget-project-${now}`, projectId, newLimitCents, now + 86_400_000, now, now);
-  }
-
-  writeAuditEntry({
-    projectId,
-    actor,
-    action: "budget.update_limit",
-    targetType: "budget",
-    targetId: "project",
-    detail: JSON.stringify({ previousLimit, newLimit: newLimitCents }),
-  }, db);
-
-  return {
-    ok: true as const,
-    previousLimit,
-    newLimit: newLimitCents,
-  };
 }
 
 /** Query budget forecast (daily snapshot, weekly trend, monthly projection). */
@@ -1086,30 +1040,88 @@ export function queryConfig(projectId: string): ConfigQueryResult {
   const extConfig = getExtendedProjectConfig(projectId);
   const rawDomainConfig = readDomainConfigViaService(projectId);
   const rawGlobalConfig = readGlobalConfigViaService();
+  const normalizedGlobalAgents = (() => {
+    try {
+      return parseWorkforceConfigContent(JSON.stringify({
+        name: "dashboard-query",
+        adapter: (rawGlobalConfig as Record<string, unknown>).adapter,
+        codex: (rawGlobalConfig as Record<string, unknown>).codex,
+        claude_code: (rawGlobalConfig as Record<string, unknown>).claude_code,
+        agents: rawGlobalConfig.agents ?? {},
+      })).agents;
+    } catch {
+      return {} as Record<string, AgentConfig>;
+    }
+  })();
+  const configuredAgentIds = new Set<string>();
+  const domainAgents = Array.isArray(rawDomainConfig?.agents)
+    ? rawDomainConfig.agents.filter((agentId): agentId is string => typeof agentId === "string" && agentId.trim().length > 0)
+    : [];
+  for (const agentId of domainAgents) {
+    configuredAgentIds.add(agentId);
+  }
+  const managerAgentId = rawDomainConfig?.manager?.enabled !== false
+    && typeof rawDomainConfig?.manager?.agentId === "string"
+    && rawDomainConfig.manager.agentId.trim().length > 0
+    ? rawDomainConfig.manager.agentId.trim()
+    : null;
+  if (managerAgentId) {
+    configuredAgentIds.add(managerAgentId);
+  }
+  const domainManagerOverrides = rawDomainConfig?.manager_overrides
+    && typeof rawDomainConfig.manager_overrides === "object"
+    && !Array.isArray(rawDomainConfig.manager_overrides)
+    ? rawDomainConfig.manager_overrides as Record<string, Record<string, unknown>>
+    : {};
 
-  // Build agents list from the agent registry, preserving rich structures for round-trip editing.
-  const allAgentIds = getRegisteredAgentIds();
-  const agents = allAgentIds
+  // Build agents list from disk first, supplementing with the live registry when available.
+  const registeredAgentIds = getRegisteredAgentIds();
+  const projectAgentIds = registeredAgentIds.filter((aid) => {
+    const entry = getAgentConfig(aid, projectId) ?? getAgentConfig(aid);
+    return entry?.projectId === projectId;
+  });
+  for (const agentId of projectAgentIds) {
+    configuredAgentIds.add(agentId);
+  }
+
+  const agents = [...configuredAgentIds]
+    .sort((left, right) => left.localeCompare(right))
     .map((aid) => {
-      const entry = getAgentConfig(aid);
-      if (!entry || entry.projectId !== projectId) return null;
+      const entry = getAgentConfig(aid, projectId) ?? getAgentConfig(aid);
+      const normalizedGlobalAgent = normalizedGlobalAgents[aid] ?? null;
+      const rawGlobalAgent = rawGlobalConfig.agents?.[aid] as Record<string, unknown> | undefined;
+      const overrideAgent = domainManagerOverrides[aid];
+      const fallbackAgent = {
+        ...(normalizedGlobalAgent ?? {}),
+        ...(rawGlobalAgent ?? {}),
+        ...(overrideAgent ?? {}),
+      } as Record<string, unknown>;
+      const fallbackRuntime = normalizeConfiguredAgentRuntime(fallbackAgent);
+      const effectiveRuntime = getAgentRuntimeConfig(entry?.config) ?? fallbackRuntime;
+      const fallbackRuntimeRef = typeof (fallbackAgent.runtimeRef ?? fallbackAgent.runtime_ref) === "string"
+        ? String(fallbackAgent.runtimeRef ?? fallbackAgent.runtime_ref).trim()
+        : undefined;
+
       return {
         id: aid,
-        extends: entry.config.extends,
-        title: entry.config.title,
-        persona: entry.config.persona,
-        reports_to: entry.config.reports_to,
-        department: entry.config.department,
-        team: entry.config.team,
-        channel: entry.config.channel,
+        extends: entry?.config.extends ?? (typeof fallbackAgent.extends === "string" ? fallbackAgent.extends : undefined),
+        title: entry?.config.title ?? (typeof fallbackAgent.title === "string" ? fallbackAgent.title : undefined),
+        persona: entry?.config.persona ?? (typeof fallbackAgent.persona === "string" ? fallbackAgent.persona : undefined),
+        reports_to: entry?.config.reports_to ?? (typeof fallbackAgent.reports_to === "string" ? fallbackAgent.reports_to : undefined),
+        department: entry?.config.department ?? (typeof fallbackAgent.department === "string" ? fallbackAgent.department : undefined),
+        team: entry?.config.team ?? (typeof fallbackAgent.team === "string" ? fallbackAgent.team : undefined),
+        channel: entry?.config.channel ?? (typeof fallbackAgent.channel === "string" ? fallbackAgent.channel : undefined),
+        runtimeRef: entry?.config.runtimeRef ?? fallbackRuntimeRef,
+        runtime: effectiveRuntime,
+        allowedTools: effectiveRuntime?.allowedTools,
+        workspacePaths: effectiveRuntime?.workspacePaths,
         // Preserve full briefing source objects so the SPA can edit and re-save without data loss.
-        briefing: (entry.config.briefing ?? []) as unknown[],
+        briefing: (entry?.config.briefing ?? fallbackAgent.briefing ?? []) as unknown[],
         // Preserve full expectation objects so the SPA can edit and re-save without data loss.
-        expectations: (entry.config.expectations ?? []) as unknown[],
-        performance_policy: entry.config.performance_policy,
+        expectations: (entry?.config.expectations ?? fallbackAgent.expectations ?? []) as unknown[],
+        performance_policy: (entry?.config.performance_policy ?? fallbackAgent.performance_policy) as Record<string, unknown> | undefined,
       };
-    })
-    .filter(Boolean);
+    });
 
   // Build budget from persisted runtime limits, falling back to budget window status.
   let budget: Record<string, unknown> = {};
@@ -1206,6 +1218,13 @@ export function queryConfig(projectId: string): ConfigQueryResult {
   const memory = ((extConfig?.memory ?? rawDomainConfig?.memory) && typeof (extConfig?.memory ?? rawDomainConfig?.memory) === "object")
     ? (extConfig?.memory ?? rawDomainConfig?.memory) as Record<string, unknown>
     : {};
+  const entities = (rawDomainConfig?.entities && typeof rawDomainConfig.entities === "object")
+    ? rawDomainConfig.entities as Record<string, import("../types.js").EntityKindConfig>
+    : {};
+  const execution = ((rawDomainConfig?.execution ?? extConfig?.execution)
+      && typeof (rawDomainConfig?.execution ?? extConfig?.execution) === "object")
+    ? (rawDomainConfig?.execution ?? extConfig?.execution) as Record<string, unknown>
+    : {};
   const eventHandlers = (rawDomainConfig?.event_handlers && typeof rawDomainConfig.event_handlers === "object")
     ? rawDomainConfig.event_handlers as Record<string, unknown>
     : {};
@@ -1225,33 +1244,43 @@ export function queryConfig(projectId: string): ConfigQueryResult {
     ? rawDomainConfig.team_templates as Record<string, unknown>
     : {};
 
-  const jobs = allAgentIds.flatMap((aid) => {
-    const entry = getAgentConfig(aid);
-    if (!entry || entry.projectId !== projectId) return [];
-
+  const jobs = [...configuredAgentIds].flatMap((aid) => {
+    const entry = getAgentConfig(aid, projectId) ?? getAgentConfig(aid);
     const rawGlobalAgent = rawGlobalConfig.agents?.[aid] as Record<string, unknown> | undefined;
     const rawJobs = (rawGlobalAgent?.jobs && typeof rawGlobalAgent.jobs === "object")
       ? rawGlobalAgent.jobs as Record<string, unknown>
       : undefined;
-    const normalizedJobs = entry.config.jobs ?? {};
+    const overrideJobs = (domainManagerOverrides[aid]?.jobs && typeof domainManagerOverrides[aid]?.jobs === "object")
+      ? domainManagerOverrides[aid]?.jobs as Record<string, unknown>
+      : undefined;
+    const normalizedJobs = entry?.config.jobs ?? {};
 
     const jobNames = new Set<string>([
       ...Object.keys(rawJobs ?? {}),
+      ...Object.keys(overrideJobs ?? {}),
       ...Object.keys(normalizedJobs),
     ]);
 
     return [...jobNames].map((jobName) => {
       const rawJob = rawJobs?.[jobName];
+      const overrideJob = overrideJobs?.[jobName];
       const normalizedJob = normalizedJobs[jobName];
       const rawJobObj = (rawJob && typeof rawJob === "object") ? rawJob as Record<string, unknown> : undefined;
+      const overrideJobObj = (overrideJob && typeof overrideJob === "object") ? overrideJob as Record<string, unknown> : undefined;
       return {
         id: `${aid}:${jobName}`,
         agent: aid,
-        cron: typeof rawJobObj?.cron === "string"
+        cron: typeof overrideJobObj?.cron === "string"
+          ? overrideJobObj.cron
+          : typeof rawJobObj?.cron === "string"
           ? rawJobObj.cron
           : normalizedJob?.cron ?? "",
-        enabled: rawJobObj?.enabled !== false,
-        description: typeof rawJobObj?.description === "string" ? rawJobObj.description : undefined,
+        enabled: overrideJobObj?.enabled !== false && rawJobObj?.enabled !== false,
+        description: typeof overrideJobObj?.description === "string"
+          ? overrideJobObj.description
+          : typeof rawJobObj?.description === "string"
+            ? rawJobObj.description
+            : undefined,
       };
     });
   });
@@ -1273,6 +1302,626 @@ export function queryConfig(projectId: string): ConfigQueryResult {
     workflows: workflows as string[],
     knowledge,
     memory,
+    entities,
+    execution,
+  };
+}
+
+function classifySetupTopologyRole(agent: ConfigQueryResult["agents"][number], managerAgentId: string | null): SetupTopologyAgent["role"] {
+  if (agent.id === managerAgentId) return "manager";
+  if (agent.id.endsWith("-owner")) return "owner";
+  return "specialist";
+}
+
+function toSetupTopologyAgent(
+  agent: ConfigQueryResult["agents"][number],
+  managerAgentId: string | null,
+  projectId: string,
+  activity: {
+    jobCount: number;
+    activeSessionCount: number;
+    activeTaskCount: number;
+  },
+): SetupTopologyAgent {
+  const runtime = agent.runtime ?? (
+    agent.allowedTools || agent.workspacePaths
+      ? {
+        allowedTools: agent.allowedTools,
+        workspacePaths: agent.workspacePaths,
+      }
+      : undefined
+  );
+  const runtimeScope = assessAgentRuntimeScope(projectId, agent.id, {
+    extends: agent.extends ?? "employee",
+    title: agent.title,
+    department: agent.department,
+    team: agent.team,
+    reports_to: agent.reports_to ?? undefined,
+    runtime,
+  } as AgentConfig);
+  return {
+    id: agent.id,
+    extends: agent.extends,
+    title: agent.title,
+    department: agent.department,
+    team: agent.team,
+    reports_to: agent.reports_to ?? null,
+    jobCount: activity.jobCount,
+    activeSessionCount: activity.activeSessionCount,
+    activeTaskCount: activity.activeTaskCount,
+    executor: runtimeScope.executor,
+    enforcementGrade: runtimeScope.enforcementGrade,
+    executorSuitability: runtimeScope.executorSuitability,
+    runtime,
+    allowedTools: runtime?.allowedTools,
+    workspacePaths: runtime?.workspacePaths,
+    role: classifySetupTopologyRole(agent, managerAgentId),
+  };
+}
+
+function buildSetupContextRoute(
+  section: string,
+  params?: Record<string, string>,
+): SetupContextReference["route"] {
+  return {
+    path: "/config",
+    params: {
+      section,
+      ...(params ?? {}),
+    },
+  };
+}
+
+function buildDomainConfigPath(root: string, file?: string | null): string | undefined {
+  if (!file || !file.trim()) return undefined;
+  return path.resolve(root, file);
+}
+
+function dedupeSetupContextReferences(references: SetupContextReference[]): SetupContextReference[] {
+  const seen = new Set<string>();
+  const deduped: SetupContextReference[] = [];
+  for (const reference of references) {
+    if (seen.has(reference.id)) continue;
+    seen.add(reference.id);
+    deduped.push(reference);
+  }
+  return deduped;
+}
+
+function buildAgentSetupReference(
+  domainId: string,
+  filePath: string | undefined,
+  agentId: string,
+  label = agentId,
+): SetupContextReference {
+  return {
+    id: `agent:${domainId}:${agentId}`,
+    label,
+    kind: "agent",
+    domainId,
+    filePath,
+    configSection: "agents",
+    configPath: `agents[${agentId}]`,
+    agentId,
+    route: buildSetupContextRoute("agents", { agentId }),
+  };
+}
+
+function buildJobSetupReference(
+  domainId: string,
+  filePath: string | undefined,
+  agentId: string,
+  jobId: string,
+  label = `${agentId}.${jobId}`,
+): SetupContextReference {
+  const compositeJobId = `${agentId}:${jobId}`;
+  return {
+    id: `job:${domainId}:${compositeJobId}`,
+    label,
+    kind: "job",
+    domainId,
+    filePath,
+    configSection: "jobs",
+    configPath: `jobs[${compositeJobId}]`,
+    agentId,
+    jobId: compositeJobId,
+    route: buildSetupContextRoute("jobs", { jobId: compositeJobId }),
+  };
+}
+
+function buildWorkflowSetupReference(
+  domainId: string,
+  filePath: string | undefined,
+  workflowId: string,
+): SetupContextReference {
+  return {
+    id: `workflow:${domainId}:${workflowId}`,
+    label: workflowId,
+    kind: "workflow",
+    domainId,
+    filePath,
+    configSection: "workflows",
+    configPath: `workflows[${workflowId}]`,
+    route: buildSetupContextRoute("workflows", { workflowId }),
+  };
+}
+
+function buildConfigSetupReference(args: {
+  id: string;
+  label: string;
+  domainId?: string;
+  filePath?: string;
+  configSection?: string;
+  configPath?: string;
+  route?: SetupContextReference["route"];
+}): SetupContextReference {
+  return {
+    id: args.id,
+    label: args.label,
+    kind: "config",
+    domainId: args.domainId,
+    filePath: args.filePath,
+    configSection: args.configSection,
+    configPath: args.configPath,
+    route: args.route,
+  };
+}
+
+function buildRuntimeSetupReference(args: {
+  id: string;
+  label: string;
+  domainId?: string;
+  filePath?: string;
+  configPath?: string;
+}): SetupContextReference {
+  return {
+    id: args.id,
+    label: args.label,
+    kind: "runtime",
+    domainId: args.domainId,
+    filePath: args.filePath,
+    configPath: args.configPath,
+  };
+}
+
+function buildSetupCheckContextReferences(args: {
+  root: string;
+  projectId: string;
+  checkId: string;
+  managerAgentId: string | null;
+  domainSummary?: SetupExperienceResponse["report"]["domains"][number];
+}): SetupContextReference[] {
+  const { root, projectId, checkId, managerAgentId, domainSummary } = args;
+  const domainId = domainSummary?.id ?? projectId;
+  const filePath = buildDomainConfigPath(root, domainSummary?.file ?? null);
+
+  if (checkId === `domain:${domainId}:agents`) {
+    return [buildConfigSetupReference({
+      id: `config:${domainId}:agents`,
+      label: "agents",
+      domainId,
+      filePath,
+      configSection: "agents",
+      configPath: "agents",
+      route: buildSetupContextRoute("agents"),
+    })];
+  }
+
+  if (checkId === `domain:${domainId}:manager`) {
+    return dedupeSetupContextReferences([
+      buildConfigSetupReference({
+        id: `config:${domainId}:manager`,
+        label: "manager.agentId",
+        domainId,
+        filePath,
+        configPath: "manager.agentId",
+      }),
+      ...(managerAgentId ? [buildAgentSetupReference(domainId, filePath, managerAgentId, `manager -> ${managerAgentId}`)] : []),
+    ]);
+  }
+
+  if (checkId === `domain:${domainId}:paths`) {
+    return [buildConfigSetupReference({
+      id: `config:${domainId}:paths`,
+      label: "paths",
+      domainId,
+      filePath,
+      configPath: "paths",
+    })];
+  }
+
+  const workflowMatch = checkId.match(/^domain:([^:]+):workflow:(.+)$/);
+  if (workflowMatch) {
+    const [, workflowDomainId, workflowId] = workflowMatch;
+    const workflowFilePath = workflowDomainId === domainId ? filePath : undefined;
+    return [buildWorkflowSetupReference(workflowDomainId, workflowFilePath, workflowId)];
+  }
+
+  if (checkId === `domain:${domainId}:controller`) {
+    return [buildRuntimeSetupReference({
+      id: `runtime:${domainId}:controller`,
+      label: "controller lease",
+      domainId,
+      filePath,
+      configPath: "runtime.controller",
+    })];
+  }
+
+  const recurringMatch = checkId.match(/^domain:([^:]+):recurring:([^:]+):([^:]+):(orphaned|stalled|blocked)$/);
+  if (recurringMatch) {
+    const [, recurringDomainId, agentId, jobId] = recurringMatch;
+    const recurringFilePath = recurringDomainId === domainId ? filePath : undefined;
+    return dedupeSetupContextReferences([
+      buildJobSetupReference(recurringDomainId, recurringFilePath, agentId, jobId),
+      buildAgentSetupReference(recurringDomainId, recurringFilePath, agentId),
+    ]);
+  }
+
+  if (checkId === `domain:${domainId}:validation`) {
+    return [buildConfigSetupReference({
+      id: `config:${domainId}:validation`,
+      label: domainSummary?.file ?? `${domainId}.yaml`,
+      domainId,
+      filePath,
+    })];
+  }
+
+  return [];
+}
+
+function buildSetupPreflightContextReferences(args: {
+  root: string;
+  projectId: string;
+  scenario: SetupPreflightScenario;
+  domainSummary?: SetupExperienceResponse["report"]["domains"][number];
+}): SetupContextReference[] {
+  const { root, projectId, scenario, domainSummary } = args;
+  const domainId = domainSummary?.id ?? projectId;
+  const filePath = buildDomainConfigPath(root, domainSummary?.file ?? null);
+
+  if (scenario.category === "workflow") {
+    return dedupeSetupContextReferences([
+      ...(scenario.workflowId
+        ? [buildWorkflowSetupReference(domainId, filePath, scenario.workflowId)]
+        : []),
+      ...(scenario.agentId && scenario.jobId
+        ? [buildJobSetupReference(domainId, filePath, scenario.agentId, scenario.jobId)]
+        : []),
+      ...(scenario.agentId
+        ? [buildAgentSetupReference(domainId, filePath, scenario.agentId)]
+        : []),
+    ]);
+  }
+
+  if (scenario.category === "issue" && scenario.entityKind) {
+    return [buildConfigSetupReference({
+      id: `config:${domainId}:entities:${scenario.entityKind}:state-signals`,
+      label: `${scenario.entityKind}.issues.stateSignals`,
+      domainId,
+      filePath,
+      configSection: "entities",
+      configPath: `entities.${scenario.entityKind}.issues.stateSignals`,
+    })];
+  }
+
+  if (scenario.category === "approval" && scenario.entityKind) {
+    return [buildConfigSetupReference({
+      id: `config:${domainId}:entities:${scenario.entityKind}:transitions`,
+      label: `${scenario.entityKind}.transitions`,
+      domainId,
+      filePath,
+      configSection: "entities",
+      configPath: `entities.${scenario.entityKind}.transitions`,
+    })];
+  }
+
+  if (scenario.category === "execution") {
+    return [buildConfigSetupReference({
+      id: `config:${domainId}:execution`,
+      label: "execution",
+      domainId,
+      filePath,
+      configSection: "execution",
+      configPath: "execution",
+      route: buildSetupContextRoute("execution"),
+    })];
+  }
+
+  if (scenario.category === "mutation") {
+    return dedupeSetupContextReferences([
+      buildConfigSetupReference({
+        id: `config:${domainId}:review:workflow-steward`,
+        label: "review.workflowSteward",
+        domainId,
+        filePath,
+        configSection: "review",
+        configPath: "review.workflowSteward",
+      }),
+      ...(scenario.agentId
+        ? [buildAgentSetupReference(domainId, filePath, scenario.agentId, `workflow steward -> ${scenario.agentId}`)]
+        : []),
+    ]);
+  }
+
+  return [];
+}
+
+function classifySetupRecoveryState(
+  job: SetupExperienceResponse["report"]["domains"][number]["jobs"][number],
+): "stalled" | "blocked" | "orphaned" | null {
+  if (!job.activeTaskId) return null;
+  if (job.activeTaskState === "BLOCKED") return "blocked";
+  if ((job.activeQueueStatus === "leased" || job.activeQueueStatus === "dispatched") && job.activeSessionState === "stale") {
+    return "stalled";
+  }
+  if (job.activeSessionState === "live" || job.activeSessionState === "quiet" || job.activeQueueStatus === "queued") {
+    return null;
+  }
+  return "orphaned";
+}
+
+function buildSetupImmediateOperatorActions(args: {
+  projectId: string;
+  checkId: string;
+  domainSummary?: SetupExperienceResponse["report"]["domains"][number];
+}): SetupOperatorAction[] {
+  const { projectId, checkId, domainSummary } = args;
+  const domainId = domainSummary?.id ?? projectId;
+  if (checkId === `domain:${domainId}:controller` || checkId === `domain:${domainId}:controller-config`) {
+    return [{
+      id: `setup-action:${domainId}:controller:handoff`,
+      label: "Request controller handoff",
+      description: "Mark this domain for takeover by the current controller generation so setup and recurring work can move again.",
+      operation: { type: "request_controller_handoff" },
+      tone: "primary",
+    }];
+  }
+
+  const recurringMatch = checkId.match(/^domain:([^:]+):recurring:([^:]+):([^:]+):(orphaned|stalled|blocked)$/);
+  if (!recurringMatch) return [];
+
+  const [, recurringDomainId, agentId, jobId, state] = recurringMatch;
+  const job = domainSummary?.jobs.find((entry) => entry.agentId === agentId && entry.jobId === jobId);
+  if (!job?.activeTaskId) return [];
+
+  const label = state === "stalled"
+    ? "Recover stalled run"
+    : state === "blocked"
+      ? "Replay blocked run"
+      : "Recover stranded run";
+  const description = state === "stalled"
+    ? "Release or replay the stale recurring dispatch, then request controller handoff so the next live controller can continue it."
+    : state === "blocked"
+      ? "Create a fresh recurring run and request controller handoff so the workflow can continue from a clean task."
+      : "Recover the stranded recurring run and request controller handoff so the workflow can make progress again.";
+
+  return [{
+    id: `setup-action:${recurringDomainId}:${agentId}:${jobId}:recover`,
+    label,
+    description,
+    operation: { type: "recover_recurring_run", taskId: job.activeTaskId },
+    tone: "primary",
+  }];
+}
+
+function buildSetupJobOperatorActions(
+  domainId: string,
+  job: SetupExperienceResponse["report"]["domains"][number]["jobs"][number],
+): SetupOperatorAction[] {
+  const recoveryState = classifySetupRecoveryState(job);
+  if (!recoveryState || !job.activeTaskId) return [];
+
+  const label = recoveryState === "stalled"
+    ? "Recover stalled run"
+    : recoveryState === "blocked"
+      ? "Replay blocked run"
+      : "Recover stranded run";
+  const description = recoveryState === "stalled"
+    ? "Release or replay this recurring dispatch and request controller handoff."
+    : recoveryState === "blocked"
+      ? "Replay this blocked recurring run with a fresh task and request controller handoff."
+      : "Recover this recurring run with a fresh task or retry path and request controller handoff.";
+
+  return [{
+    id: `setup-job-action:${domainId}:${job.agentId}:${job.jobId}:recover`,
+    label,
+    description,
+    operation: { type: "recover_recurring_run", taskId: job.activeTaskId },
+    tone: "primary",
+  }];
+}
+
+function safeDashboardQuery<T>(query: () => T, fallback: T): T {
+  try {
+    return query();
+  } catch {
+    return fallback;
+  }
+}
+
+export function querySetupExperience(projectId: string): SetupExperienceResponse {
+  const root = getClawforceHome();
+  const report = buildSetupReport(root, projectId);
+  const explanation = buildSetupExplanation(report);
+  const config = queryConfig(projectId);
+  const domainSummary = report.domains.find((domain) => domain.id === projectId);
+  const managerAgentId = domainSummary?.managerAgentId ?? null;
+  const normalizedExecution = normalizeExecutionConfig(config.execution) ?? { mode: "live" as const };
+  const extConfig = getExtendedProjectConfig(projectId);
+  const preflight = buildSetupPreflight({
+    domainId: projectId,
+    domainSummary: domainSummary ?? null,
+    entities: extConfig?.entities,
+    execution: normalizedExecution,
+    review: extConfig?.review,
+    configuredAgentIds: config.agents.map((agent) => agent.id),
+  });
+  const lastReload = getDomainRuntimeReloadStatus(projectId);
+  const simulatedActions = safeDashboardQuery(
+    () => getSimulatedActionStats(projectId),
+    {
+      total: 0,
+      pending: 0,
+      simulated: 0,
+      blocked: 0,
+      approvedForLive: 0,
+      discarded: 0,
+      latestCreatedAt: null,
+    },
+  );
+  const activeSessions = getActiveSessions().filter((session) => session.projectId === projectId);
+  const activeSessionCounts = new Map<string, number>();
+  for (const session of activeSessions) {
+    activeSessionCounts.set(session.agentId, (activeSessionCounts.get(session.agentId) ?? 0) + 1);
+  }
+  const activeTaskCounts = new Map<string, number>();
+  for (const task of listTasks(projectId, { states: ["ASSIGNED", "IN_PROGRESS", "REVIEW"] })) {
+    if (!task.assignedTo) continue;
+    activeTaskCounts.set(task.assignedTo, (activeTaskCounts.get(task.assignedTo) ?? 0) + 1);
+  }
+  const jobCounts = new Map<string, number>();
+  for (const job of domainSummary?.jobs ?? []) {
+    jobCounts.set(job.agentId, (jobCounts.get(job.agentId) ?? 0) + 1);
+  }
+  const topologyAgents = config.agents.map((agent) => toSetupTopologyAgent(agent, managerAgentId, projectId, {
+    jobCount: jobCounts.get(agent.id) ?? 0,
+    activeSessionCount: activeSessionCounts.get(agent.id) ?? 0,
+    activeTaskCount: activeTaskCounts.get(agent.id) ?? 0,
+  }));
+  const checkContext = Object.fromEntries(
+    report.checks.map((check) => [
+      check.id,
+      buildSetupCheckContextReferences({
+        root,
+        projectId,
+        checkId: check.id,
+        managerAgentId,
+        domainSummary: report.domains.find((domain) => domain.id === (check.domainId ?? projectId)),
+      }),
+    ]),
+  );
+  const immediateActionContext = Object.fromEntries(
+    explanation.immediateActions.map((action) => [
+      action.id,
+      checkContext[action.id] ?? [],
+    ]),
+  );
+  const immediateActionControls = Object.fromEntries(
+    explanation.immediateActions.map((action) => [
+      action.id,
+      buildSetupImmediateOperatorActions({
+        projectId,
+        checkId: action.id,
+        domainSummary: report.domains.find((domain) => domain.id === (action.domainId ?? projectId)),
+      }),
+    ]),
+  );
+  const preflightContext = Object.fromEntries(
+    preflight.scenarios.map((scenario) => [
+      scenario.id,
+      buildSetupPreflightContextReferences({
+        root,
+        projectId,
+        scenario,
+        domainSummary,
+      }),
+    ]),
+  );
+  const agentContext = Object.fromEntries(
+    topologyAgents.map((agent) => [
+      agent.id,
+      [buildAgentSetupReference(projectId, buildDomainConfigPath(root, domainSummary?.file ?? null), agent.id)],
+    ]),
+  );
+  const jobContext = Object.fromEntries(
+    (domainSummary?.jobs ?? []).map((job) => {
+      const jobKey = `${job.agentId}:${job.jobId}`;
+      return [
+        jobKey,
+        dedupeSetupContextReferences([
+          buildJobSetupReference(projectId, buildDomainConfigPath(root, domainSummary?.file ?? null), job.agentId, job.jobId),
+          buildAgentSetupReference(projectId, buildDomainConfigPath(root, domainSummary?.file ?? null), job.agentId),
+        ]),
+      ];
+    }),
+  );
+  const jobControls = Object.fromEntries(
+    (domainSummary?.jobs ?? []).map((job) => [
+      `${job.agentId}:${job.jobId}`,
+      buildSetupJobOperatorActions(projectId, job),
+    ]),
+  );
+
+  return {
+    domainId: projectId,
+    report,
+    explanation,
+    preflight,
+    topology: {
+      managerAgentId,
+      workflows: domainSummary?.workflows ?? config.workflows ?? [],
+      entityKinds: Object.keys(config.entities ?? {}),
+      manager: topologyAgents.find((agent) => agent.role === "manager") ?? null,
+      owners: topologyAgents.filter((agent) => agent.role === "owner"),
+      sharedSpecialists: topologyAgents.filter((agent) => agent.role === "specialist"),
+    },
+    context: {
+      immediateActions: immediateActionContext,
+      checks: checkContext,
+      preflight: preflightContext,
+      agents: agentContext,
+      jobs: jobContext,
+    },
+    actions: {
+      immediateActions: immediateActionControls,
+      jobs: jobControls,
+    },
+    config,
+    feed: safeDashboardQuery(
+      () => queryAttentionSummary(projectId),
+      { projectId, counts: { actionNeeded: 0, watching: 0, fyi: 0 }, items: [], generatedAt: Date.now() },
+    ),
+    decisionInbox: safeDashboardQuery(
+      () => queryDecisionInbox(projectId),
+      { projectId, counts: { actionNeeded: 0, watching: 0, fyi: 0 }, items: [], generatedAt: Date.now() },
+    ),
+    runtime: {
+      dashboard: safeDashboardQuery(() => queryDashboardSummary(projectId), {
+        budgetUtilization: { spent: 0, limit: 0, pct: 0, dimension: "cents" },
+        activeAgents: 0,
+        totalAgents: 0,
+        tasksInFlight: 0,
+        pendingApprovals: 0,
+      }),
+      queue: safeDashboardQuery(
+        () => queryQueueStatus(projectId),
+        {
+          queued: 0,
+          leased: 0,
+          completed: 0,
+          failed: 0,
+          cancelled: 0,
+          concurrency: { active: 0, max: null },
+          recentItems: [],
+          missingEndpoint: false,
+        },
+      ),
+      trackedSessions: safeDashboardQuery(
+        () => queryTrackedSessions(projectId, { limit: 20, offset: 0 }),
+        { sessions: [], total: 0, count: 0, limit: 20, offset: 0 },
+      ),
+      execution: {
+        mode: normalizedExecution.mode ?? "live",
+        ...(normalizedExecution.defaultMutationPolicy
+          ? { defaultMutationPolicy: normalizedExecution.defaultMutationPolicy }
+          : {}),
+        ...(normalizedExecution.environments
+          ? { environments: normalizedExecution.environments }
+          : {}),
+        simulatedActions,
+        lastReload,
+      },
+    },
   };
 }
 
@@ -1536,15 +2185,20 @@ export function queryTrackedSessions(
       last_persisted_at: number;
     }>;
 
-    const sessions = rows.map((r) => ({
-      sessionKey: r.session_key,
-      agentId: r.agent_id,
-      startedAt: r.started_at,
-      requirements: r.requirements,
-      satisfied: r.satisfied,
-      toolCallCount: r.tool_call_count,
-      lastPersistedAt: r.last_persisted_at,
-    }));
+    const sessions = rows.map((r) => {
+      const heartbeat = getSessionHeartbeatStatus(r.last_persisted_at);
+      return {
+        sessionKey: r.session_key,
+        agentId: r.agent_id,
+        startedAt: r.started_at,
+        requirements: r.requirements,
+        satisfied: r.satisfied,
+        toolCallCount: r.tool_call_count,
+        lastPersistedAt: r.last_persisted_at,
+        heartbeatState: heartbeat.state,
+        heartbeatAgeMs: heartbeat.ageMs,
+      };
+    });
 
     return { sessions, total, count: sessions.length, limit, offset };
   } catch {
@@ -1954,27 +2608,24 @@ export function queryToolCalls(
 
 /** Query config version history. */
 export function queryConfigVersions(projectId: string, limit = 50) {
-  const db = getDb(projectId);
-  const rows = db.prepare(
-    "SELECT * FROM config_versions WHERE project_id = ? ORDER BY created_at DESC LIMIT ?",
-  ).all(projectId, limit) as Record<string, unknown>[];
+  const versions = getConfigHistory(projectId).slice(0, limit);
 
   return {
-    versions: rows.map((r) => ({
-      id: r.id,
-      hash: r.hash,
-      source: r.source,
-      agentId: r.agent_id,
-      diff: r.diff,
-      createdAt: r.created_at,
+    versions: versions.map((version) => ({
+      id: version.id,
+      hash: version.contentHash,
+      files: version.files,
+      detectedBy: version.detectedBy ?? null,
+      changeSummary: version.changeSummary ?? null,
+      detectedAt: version.detectedAt,
     })),
-    count: rows.length,
+    count: versions.length,
   };
 }
 
 /** Query manager reviews with optional task filter. */
-export function queryManagerReviews(projectId: string, taskId?: string, limit = 50) {
-  const db = getDb(projectId);
+export function queryManagerReviews(projectId: string, taskId?: string, limit = 50, dbOverride?: DatabaseSync) {
+  const db = dbOverride ?? getDb(projectId);
   let sql = "SELECT * FROM manager_reviews WHERE project_id = ?";
   const params: (string | number)[] = [projectId];
 
@@ -1989,13 +2640,14 @@ export function queryManagerReviews(projectId: string, taskId?: string, limit = 
 
   return {
     reviews: rows.map((r) => ({
-      id: r.id,
-      taskId: r.task_id,
-      reviewerAgentId: r.reviewer_agent_id,
-      sessionKey: r.session_key,
-      verdict: r.verdict,
-      reasoning: r.reasoning,
-      createdAt: r.created_at,
+      id: r.id as string,
+      taskId: r.task_id as string,
+      reviewerAgentId: r.reviewer_agent_id as string,
+      sessionKey: (r.session_key as string | null) ?? undefined,
+      verdict: r.verdict as string,
+      reasonCode: (r.reason_code as string | null) ?? undefined,
+      reasoning: (r.reasoning as string | null) ?? undefined,
+      createdAt: r.created_at as number,
     })),
     count: rows.length,
   };
@@ -2232,12 +2884,75 @@ export type UserInboxMessage = {
   status: string;
   parentMessageId?: string;
   proposalId?: string;
+  taskId?: string;
+  entityId?: string;
+  issueId?: string;
 };
 
 export type UserInboxResponse = {
   messages: UserInboxMessage[];
   count: number;
 };
+
+type OperatorCommsMessageRow = {
+  id: string;
+  from_agent: string;
+  to_agent: string;
+  content: string;
+  created_at: number;
+  status: string;
+  read_at: number | null;
+  metadata: string | null;
+};
+
+type MessageContextRefs = {
+  proposalId?: string;
+  taskId?: string;
+  entityId?: string;
+  issueId?: string;
+};
+
+function parseMessageContextRefs(metadata: string | null | undefined): MessageContextRefs {
+  if (!metadata) return {};
+  try {
+    const parsed = JSON.parse(metadata) as Record<string, unknown>;
+    const normalize = (value: unknown): string | undefined =>
+      typeof value === "string" && value.trim().length > 0
+        ? value.trim()
+        : undefined;
+
+    return {
+      proposalId: normalize(parsed.proposalId),
+      taskId: normalize(parsed.taskId),
+      entityId: normalize(parsed.entityId),
+      issueId: normalize(parsed.issueId),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function collectThreadRefLists(rows: Array<{ metadata: string | null }>) {
+  const proposalIds = new Set<string>();
+  const taskIds = new Set<string>();
+  const entityIds = new Set<string>();
+  const issueIds = new Set<string>();
+
+  for (const row of rows) {
+    const refs = parseMessageContextRefs(row.metadata);
+    if (refs.proposalId) proposalIds.add(refs.proposalId);
+    if (refs.taskId) taskIds.add(refs.taskId);
+    if (refs.entityId) entityIds.add(refs.entityId);
+    if (refs.issueId) issueIds.add(refs.issueId);
+  }
+
+  return {
+    proposalIds: [...proposalIds],
+    taskIds: [...taskIds],
+    entityIds: [...entityIds],
+    issueIds: [...issueIds],
+  };
+}
 
 /** Query messages to/from the "user" pseudo-agent for dashboard messaging. */
 export function queryUserInbox(
@@ -2266,29 +2981,157 @@ export function queryUserInbox(
 
     const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
 
-    const messages: UserInboxMessage[] = rows.map((r) => {
-      let proposalId: string | undefined;
-      if (r.metadata) {
-        try {
-          const meta = JSON.parse(r.metadata as string);
-          proposalId = meta.proposalId;
-        } catch { /* ignore */ }
-      }
-      return {
-        id: r.id as string,
-        fromAgent: r.from_agent as string,
-        toAgent: r.to_agent as string,
-        content: r.content as string,
-        createdAt: r.created_at as number,
-        status: r.status as string,
-        parentMessageId: (r.parent_message_id as string) ?? undefined,
-        proposalId,
-      };
-    });
+    const messages: UserInboxMessage[] = rows.map((r) => ({
+      id: r.id as string,
+      fromAgent: r.from_agent as string,
+      toAgent: r.to_agent as string,
+      content: r.content as string,
+      createdAt: r.created_at as number,
+      status: r.status as string,
+      parentMessageId: (r.parent_message_id as string) ?? undefined,
+      ...parseMessageContextRefs((r.metadata as string | null | undefined) ?? null),
+    }));
 
     return { messages, count: messages.length };
   } catch {
     return { messages: [], count: 0 };
+  }
+}
+
+export function queryOperatorComms(
+  projectId: string,
+  filters?: { agentId?: string; limit?: number; since?: number },
+): OperatorCommsResponse {
+  const db = getDb(projectId);
+  const limit = Math.max(1, Math.min(filters?.limit ?? 25, 100));
+  const assistant = queryDashboardAssistantStatus(projectId);
+  const feed = buildAttentionSummary(projectId, db);
+  const decisionInbox = buildDecisionInboxFromSummary(feed);
+
+  const baseConditions = ["project_id = ?", "(from_agent = 'user' OR to_agent = 'user')"];
+  const baseParams: Array<string | number> = [projectId];
+
+  if (filters?.agentId) {
+    baseConditions.push("(from_agent = ? OR to_agent = ?)");
+    baseParams.push(filters.agentId, filters.agentId);
+  }
+  if (filters?.since) {
+    baseConditions.push("created_at > ?");
+    baseParams.push(filters.since);
+  }
+
+  const whereClause = baseConditions.join(" AND ");
+
+  try {
+    const threadRows = db.prepare(
+      `SELECT
+         CASE WHEN from_agent = 'user' THEN to_agent ELSE from_agent END AS agent_id,
+         COUNT(*) AS message_count,
+         SUM(CASE WHEN to_agent = 'user' AND read_at IS NULL THEN 1 ELSE 0 END) AS unread_count,
+         SUM(CASE WHEN from_agent = 'user' AND to_agent != 'user' AND status = 'queued' THEN 1 ELSE 0 END) AS queued_for_agent_count,
+         MAX(created_at) AS last_message_at
+       FROM messages
+       WHERE ${whereClause}
+       GROUP BY agent_id
+       ORDER BY last_message_at DESC
+       LIMIT ?`,
+    ).all(...baseParams, limit) as Array<Record<string, unknown>>;
+
+    const directThreads: OperatorCommsThread[] = threadRows.map((row) => {
+      const agentId = String(row.agent_id ?? "");
+      const latestRow = db.prepare(
+        `SELECT id, from_agent, to_agent, content, created_at, status, read_at, metadata
+         FROM messages
+         WHERE project_id = ?
+           AND (
+             (from_agent = 'user' AND to_agent = ?)
+             OR
+             (to_agent = 'user' AND from_agent = ?)
+           )
+           ${filters?.since ? "AND created_at > ?" : ""}
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      ).get(
+        projectId,
+        agentId,
+        agentId,
+        ...(filters?.since ? [filters.since] : []),
+      ) as OperatorCommsMessageRow | undefined;
+
+      const proposalRows = db.prepare(
+        `SELECT metadata
+         FROM messages
+         WHERE project_id = ?
+           AND metadata IS NOT NULL
+           AND (
+             (from_agent = 'user' AND to_agent = ?)
+             OR
+             (to_agent = 'user' AND from_agent = ?)
+           )
+           ${filters?.since ? "AND created_at > ?" : ""}
+         ORDER BY created_at DESC
+         LIMIT 50`,
+      ).all(
+        projectId,
+        agentId,
+        agentId,
+        ...(filters?.since ? [filters.since] : []),
+      ) as Array<{ metadata: string | null }>;
+
+      const threadRefs = collectThreadRefLists(proposalRows);
+
+      const agentEntry = getAgentConfig(agentId);
+      const lastDirection: OperatorCommsThread["lastDirection"] = latestRow?.from_agent === "user"
+        ? "outbound"
+        : "inbound";
+
+      return {
+        id: `operator:${agentId}`,
+        agentId,
+        agentTitle: agentEntry?.projectId === projectId ? agentEntry.config.title : undefined,
+        messageCount: Number(row.message_count ?? 0),
+        unreadCount: Number(row.unread_count ?? 0),
+        queuedForAgentCount: Number(row.queued_for_agent_count ?? 0),
+        lastMessageAt: Number(row.last_message_at ?? 0),
+        lastDirection,
+        lastMessage: latestRow?.content ? latestRow.content.slice(0, 240) : undefined,
+        ...threadRefs,
+      };
+    });
+
+    const inboxRow = db.prepare(
+      `SELECT
+         COUNT(CASE WHEN to_agent = 'user' THEN 1 END) AS inbox_count,
+         COUNT(CASE WHEN to_agent = 'user' AND read_at IS NULL THEN 1 END) AS unread_count,
+         COUNT(CASE WHEN from_agent = 'user' AND to_agent != 'user' AND status = 'queued' THEN 1 END) AS queued_for_agents_count
+       FROM messages
+       WHERE ${whereClause}`,
+    ).get(...baseParams) as Record<string, unknown> | undefined;
+
+    const extConfig = getExtendedProjectConfig(projectId);
+    const channelsConfigured = !!(extConfig?.channels && (extConfig.channels as unknown[]).length > 0);
+
+    return {
+      assistant,
+      feed,
+      directThreads,
+      inboxCount: Number(inboxRow?.inbox_count ?? 0),
+      unreadCount: Number(inboxRow?.unread_count ?? 0),
+      queuedForAgentsCount: Number(inboxRow?.queued_for_agents_count ?? 0),
+      decisionInbox,
+      channelsConfigured,
+    };
+  } catch {
+    return {
+      assistant,
+      feed,
+      directThreads: [],
+      inboxCount: 0,
+      unreadCount: 0,
+      queuedForAgentsCount: 0,
+      decisionInbox,
+      channelsConfigured: false,
+    };
   }
 }
 
@@ -2413,7 +3256,7 @@ export function queryUnreadCount(projectId: string): { unreadCount: number } {
 
 // --- Attention queries ---
 
-import { buildAttentionSummary } from "../attention/builder.js";
+import { buildAttentionSummary, buildDecisionInboxFromSummary } from "../attention/builder.js";
 import type { AttentionSummary } from "../attention/types.js";
 
 /**
@@ -2421,6 +3264,13 @@ import type { AttentionSummary } from "../attention/types.js";
  */
 export function queryAttentionSummary(projectId: string): AttentionSummary {
   return buildAttentionSummary(projectId);
+}
+
+/**
+ * Query the human-decision subset of the operator feed for a single domain.
+ */
+export function queryDecisionInbox(projectId: string): AttentionSummary {
+  return buildDecisionInboxFromSummary(buildAttentionSummary(projectId));
 }
 
 /**

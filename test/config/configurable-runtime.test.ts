@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -123,6 +123,32 @@ describe("configurable defaults runtime", () => {
     expect(extConfig?.dispatch?.queueLeaseMs).toBe(600000);
     expect(extConfig?.dispatch?.maxDispatchAttempts).toBe(5);
     expect(extConfig?.dispatch?.roleAliases).toEqual({ supervisor: "manager" });
+  });
+
+  it("extended project config stores execution config", () => {
+    registerWorkforceConfig(PROJECT + "-exec", {
+      name: "test",
+      agents: { lead: { extends: "manager", briefing: [], expectations: [], performancePolicy: { action: "retry" } } },
+      execution: {
+        mode: "dry_run",
+        defaultMutationPolicy: "simulate",
+        policies: {
+          tools: {
+            clawforce_entity: {
+              actions: {
+                create: "allow",
+                transition: "require_approval",
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const extConfig = getExtendedProjectConfig(PROJECT + "-exec");
+    expect(extConfig?.execution?.mode).toBe("dry_run");
+    expect(extConfig?.execution?.defaultMutationPolicy).toBe("simulate");
+    expect(extConfig?.execution?.policies?.tools?.clawforce_entity?.actions?.transition).toBe("require_approval");
   });
 
   it("effective lifecycle config includes workerNonComplianceAction with default", () => {

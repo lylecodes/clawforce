@@ -5,7 +5,15 @@
  * plus runtime validators that return structured error lists.
  */
 
-import type { OperationalProfile, RuleDefinition, MemoryRecallConfig, MemoryPersistConfig, MemoryProviderConfig } from "../types.js";
+import type {
+  EntityKindConfig,
+  OperationalProfile,
+  RuleDefinition,
+  MemoryRecallConfig,
+  MemoryPersistConfig,
+  MemoryProviderConfig,
+} from "../types.js";
+import { normalizeExecutionConfig } from "../execution/config.js";
 
 // --- Types ---
 
@@ -28,7 +36,7 @@ export type GlobalDefaults = {
 };
 
 /** Supported adapter backends for ClawForce dispatch. */
-export type AdapterType = "openclaw" | "claude-code";
+export type AdapterType = "openclaw" | "codex" | "claude-code";
 
 /** A named mixin: a reusable partial agent config applied via `mixins: [name]`. */
 export type MixinDef = {
@@ -42,9 +50,11 @@ export type GlobalConfig = {
   agents: Record<string, GlobalAgentDef>;
   /** Reusable behavior bundles that agents can compose via `mixins: [name]`. */
   mixins?: Record<string, MixinDef>;
-  /** Adapter backend to use for dispatch (default: "openclaw"). */
+  /** Adapter backend to use for dispatch (default: "codex"). */
   adapter?: AdapterType;
-  /** Claude Code adapter configuration (used when adapter is "claude-code"). */
+  /** Codex executor configuration (used when adapter is "codex"). */
+  codex?: Record<string, unknown>;
+  /** Claude Code adapter configuration (used when adapter is "claude-code"). Legacy compatibility only. */
   claude_code?: Record<string, unknown>;
   /**
    * Team-level config templates. Agents with a matching `team` field
@@ -61,7 +71,6 @@ export type DomainConfig = {
   direction?: string;
   /** Template preset name (e.g. "startup"). */
   template?: string;
-  orchestrator?: string;
   paths?: string[];
   agents: string[];
   policies?: unknown[];
@@ -78,6 +87,21 @@ export type DomainConfig = {
   event_handlers?: Record<string, unknown>;
   triggers?: Record<string, unknown>;
   verification?: Record<string, unknown>;
+  execution?: Record<string, unknown>;
+  entities?: Record<string, EntityKindConfig>;
+  skills?: Record<string, {
+    title: string;
+    description: string;
+    path: string;
+    presets?: string[];
+  }>;
+  monitoring?: Record<string, unknown>;
+  dispatch?: Record<string, unknown>;
+  lifecycle?: Record<string, unknown>;
+  sweep?: Record<string, unknown>;
+  trust?: Record<string, unknown>;
+  context?: Record<string, unknown>;
+  memory?: Record<string, unknown>;
   dashboard_assistant?: {
     enabled?: boolean;
     model?: string;
@@ -137,13 +161,20 @@ export function validateGlobalConfig(config: unknown): ValidationResult {
 
   // Validate adapter field
   if (config.adapter !== undefined) {
-    const validAdapters: AdapterType[] = ["openclaw", "claude-code"];
+    const validAdapters: AdapterType[] = ["openclaw", "codex", "claude-code"];
     if (typeof config.adapter !== "string" || !validAdapters.includes(config.adapter as AdapterType)) {
       errors.push({
         field: "adapter",
         message: `adapter must be one of: ${validAdapters.join(", ")}`,
       });
     }
+  }
+
+  if (config.codex !== undefined && !isObject(config.codex)) {
+    errors.push({
+      field: "codex",
+      message: "codex must be an object",
+    });
   }
 
   // Validate claude_code config shape (detailed validation delegated to adapter)
@@ -307,6 +338,17 @@ export function validateDomainConfig(config: unknown): ValidationResult {
 
   if (!Array.isArray(config.agents)) {
     errors.push({ field: "agents", message: "agents must be an array" });
+  }
+
+  if (config.execution !== undefined) {
+    try {
+      normalizeExecutionConfig(config.execution);
+    } catch (err) {
+      errors.push({
+        field: "execution",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   return { valid: errors.length === 0, errors };

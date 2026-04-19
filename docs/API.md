@@ -1,6 +1,6 @@
 # API Reference
 
-Generated from `src/index.ts` exports and declaration files in `dist/src`.
+Generated from the curated low-level source surfaces in `src/advanced.ts` and `src/internal.ts`, plus declaration files in `dist/src`.
 
 ## Lifecycle & Configuration
 
@@ -18,12 +18,6 @@ Generated from `src/index.ts` exports and declaration files in `dist/src`.
   - Signature: `function unregisterProject(projectId: string): void`
 - **`isClawforceInitialized`**
   - Signature: `function isClawforceInitialized(): boolean`
-- **`registerDomain`**
-  - Signature: `function registerDomain(domainId: string): void`
-- **`unregisterDomain`**
-  - Signature: `function unregisterDomain(domainId: string): void`
-- **`getActiveDomainIds`**
-  - Signature: `function getActiveDomainIds(): string[]`
 
 ### `./agent-sync.js`
 
@@ -86,10 +80,12 @@ Generated from `src/index.ts` exports and declaration files in `dist/src`.
 
 ### `./config/registry.js`
 
-- **`registerGlobalAgents`**
-  - Signature: `function registerGlobalAgents(agents: Record<string, GlobalAgentDef>): void`
-- **`assignAgentsToDomain`**
-  - Signature: `function assignAgentsToDomain(domainId: string, agentIds: string[]): void`
+- **`syncGlobalAgents`**
+  - Signature: `function syncGlobalAgents(agents: Record<string, GlobalAgentDef>): void`
+- **`setAgentsForDomain`**
+  - Signature: `function setAgentsForDomain(domainId: string, agentIds: string[]): void`
+- **`removeDomain`**
+  - Signature: `function removeDomain(domainId: string): void`
 - **`getGlobalAgent`**
   - Signature: `function getGlobalAgent(agentId: string): GlobalAgentDef | null`
 - **`getAgentDomain`**
@@ -137,11 +133,14 @@ Generated from `src/index.ts` exports and declaration files in `dist/src`.
 ### `./config/watcher.js`
 
 - **`startConfigWatcher`**
-  - Description: Start watching config directory for changes. Debounces 500ms. Validates before applying.
+  - Description: Start watching config directory for changes. Debounces 500ms, validates the edited file, and emits diffs against the last good snapshot.
   - Signature: `function startConfigWatcher(baseDir: string, onReload: ReloadCallback): void`
 - **`stopConfigWatcher`**
   - Description: Stop all config file watchers.
   - Signature: `function stopConfigWatcher(): void`
+- **`loadConfigSnapshot`**
+  - Description: Load the current validated `config.yaml` plus `domains/*.yaml` snapshot used by the watcher.
+  - Signature: `function loadConfigSnapshot(baseDir: string): ConfigSnapshot`
 - **`diffConfigs`**
   - Description: Compare two global configs and return what changed.
   - Signature: `function diffConfigs(oldConfig: GlobalConfig, newConfig: GlobalConfig): GlobalConfigDiff`
@@ -308,7 +307,7 @@ Generated from `src/index.ts` exports and declaration files in `dist/src`.
 ### `./rules/evolution.js`
 
 - **`formatEvolutionPrompt`**
-  - Description: Format the evolution prompt for orchestrator agents. This gets injected into ghost turns alongside expectations reminders.
+  - Description: Format the evolution prompt for manager agents. This gets injected into ghost turns alongside expectations reminders.
   - Signature: `function formatEvolutionPrompt(): string`
 
 ## Streams
@@ -564,7 +563,7 @@ Generated from `src/index.ts` exports and declaration files in `dist/src`.
   - Description: Get the list of topics available for a given preset. Empty presets array means the topic is available to all presets. When projectId is provided, includes custom topics from that project.
   - Signature: `function getTopicList(preset: string, projectId?: string): Array<{ id: string; title: string; description: string; }>`
 - **`registerCustomSkills`**
-  - Description: Register custom skill topics from a project's config. Called during project initialization when project.yaml has a `skills` section.
+  - Description: Register custom skill topics from config.yaml. Called during project initialization when the shared config has a `skills` section.
   - Signature: `function registerCustomSkills(projectId: string, skills: Record<string, { title: string; description: string; path: string; presets?: string[]; }>, projectDir: string): void`
 - **`SKILL_TOPICS`**
   - Description: All registered skill topics. Order determines display order in the table of contents.
@@ -1817,4 +1816,3 @@ Generated from `src/index.ts` exports and declaration files in `dist/src`.
   - Signature: `function setDataDir(dir: string): void`
 - **`getDataDir`**
   - Signature: `function getDataDir(): string`
-

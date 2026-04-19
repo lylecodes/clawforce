@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { deflateSync } from "node:zlib";
 
 // Mock all downstream dependencies
 vi.mock("../../src/lifecycle.js", () => ({
@@ -18,7 +19,13 @@ vi.mock("../../src/project.js", () => {
     getAgentConfig: vi.fn((id: string) => configs.get(id) ?? null),
     getRegisteredAgentIds: vi.fn(() => [...configs.keys()]),
     getExtendedProjectConfig: vi.fn((pid: string) => {
-      if (pid === "proj1") return { policies: [{ id: "p1" }], monitoring: { slos: {}, alertRules: {} } };
+      if (pid === "proj1") {
+        return {
+          policies: [{ id: "p1" }],
+          monitoring: { slos: {}, alertRules: {} },
+          channels: [{ id: "ops" }],
+        };
+      }
       return null;
     }),
   };
@@ -31,9 +38,34 @@ vi.mock("../../src/tasks/ops.js", () => ({
   getTaskTransitions: vi.fn(() => []),
 }));
 
+vi.mock("../../src/entities/ops.js", () => ({
+  getChildEntities: vi.fn(() => []),
+  getEntity: vi.fn(() => null),
+  getEntityIssue: vi.fn(() => null),
+  getEntityTransitions: vi.fn(() => []),
+  listEntities: vi.fn(() => []),
+  listEntityIssues: vi.fn(() => []),
+  summarizeEntityIssues: vi.fn(() => ({ openCount: 0, pendingProposalCount: 0 })),
+}));
+
 vi.mock("../../src/telemetry/session-archive.js", () => ({
   listSessionArchives: vi.fn(() => [{ sessionKey: "s1", agentId: "agent-dev", durationMs: 1200, toolCallCount: 3, totalCostCents: 15 }]),
   countSessionArchives: vi.fn(() => 1),
+  extractSessionArchiveDiagnostics: vi.fn((archive: { complianceDetail?: string }) => {
+    if (!archive.complianceDetail) return null;
+    const detail = JSON.parse(archive.complianceDetail) as Record<string, unknown>;
+    return {
+      exitCode: detail.exitCode,
+      summarySynthetic: detail.summarySynthetic,
+      observedWork: detail.observedWork,
+      resultSource: detail.resultSource,
+      stderrLooksLikeLaunchTranscript: detail.stderrLooksLikeLaunchTranscript,
+      promptChars: detail.promptChars,
+      stderrPreview: typeof detail.stderr === "string"
+        ? detail.stderr.replace(/\s+/g, " ").trim()
+        : undefined,
+    };
+  }),
 }));
 
 vi.mock("../../src/metrics.js", () => ({
@@ -48,6 +80,98 @@ vi.mock("../../src/cost.js", () => ({
 vi.mock("../../src/db.js", () => ({
   getDb: vi.fn(() => ({
     prepare: vi.fn((sql: string) => {
+      if (sql.includes("CASE WHEN from_agent = 'user' THEN to_agent ELSE from_agent END AS agent_id")) {
+        return {
+          all: vi.fn(() => [
+            {
+              agent_id: "agent-dev",
+              message_count: 3,
+              unread_count: 1,
+              queued_for_agent_count: 1,
+              last_message_at: 2200,
+            },
+            {
+              agent_id: "agent-mgr",
+              message_count: 2,
+              unread_count: 0,
+              queued_for_agent_count: 0,
+              last_message_at: 2100,
+            },
+          ]),
+        };
+      }
+      if (sql.includes("COUNT(CASE WHEN to_agent = 'user' THEN 1 END) AS inbox_count")) {
+        return {
+          get: vi.fn(() => ({
+            inbox_count: 2,
+            unread_count: 1,
+            queued_for_agents_count: 1,
+          })),
+        };
+      }
+      if (sql.includes("FROM messages") && sql.includes("metadata IS NOT NULL")) {
+        return {
+          all: vi.fn((_projectId: string, agentId: string) => agentId === "agent-dev"
+            ? [{
+                metadata: JSON.stringify({
+                  proposalId: "prop-1",
+                  taskId: "task-9",
+                  entityId: "entity-4",
+                  issueId: "issue-2",
+                }),
+              }]
+            : []),
+        };
+      }
+      if (sql.includes("WHERE project_id = ? AND (from_agent = 'user' OR to_agent = 'user')")) {
+        return {
+          all: vi.fn(() => [
+            {
+              id: "msg-operator-1",
+              from_agent: "user",
+              to_agent: "agent-dev",
+              content: "Review task context",
+              created_at: 1234,
+              status: "queued",
+              parent_message_id: null,
+              metadata: JSON.stringify({
+                proposalId: "prop-1",
+                taskId: "task-9",
+                entityId: "entity-4",
+                issueId: "issue-2",
+              }),
+            },
+          ]),
+        };
+      }
+      if (sql.includes("FROM messages") && sql.includes("LIMIT 1")) {
+        return {
+          get: vi.fn((_projectId: string, agentId: string) => {
+            if (agentId === "agent-dev") {
+              return {
+                id: "msg-operator-1",
+                from_agent: "agent-dev",
+                to_agent: "user",
+                content: "I need approval on deploy",
+                created_at: 2200,
+                status: "delivered",
+                read_at: null,
+                metadata: JSON.stringify({ proposalId: "prop-1" }),
+              };
+            }
+            return {
+              id: "msg-operator-2",
+              from_agent: "user",
+              to_agent: "agent-mgr",
+              content: "Please rebalance staffing",
+              created_at: 2100,
+              status: "queued",
+              read_at: null,
+              metadata: null,
+            };
+          }),
+        };
+      }
       if (sql.includes("audit_log") && sql.includes("COUNT")) {
         return { get: vi.fn(() => ({ cnt: 2 })) };
       }
@@ -83,12 +207,36 @@ vi.mock("../../src/db.js", () => ({
       }
       if (sql.includes("tracked_sessions")) {
         return { all: vi.fn(() => [
-          { session_key: "sk1", agent_id: "agent-dev", started_at: 600, requirements: "[]", satisfied: "[]", tool_call_count: 3, last_persisted_at: 650 },
+          { session_key: "sk1", agent_id: "agent-dev", started_at: 600, requirements: "[]", satisfied: "[]", tool_call_count: 3, last_persisted_at: 650, dispatch_context: JSON.stringify({ taskId: "t1", queueItemId: "q1" }) },
         ]) };
       }
       if (sql.includes("worker_assignments")) {
         return { all: vi.fn(() => [
           { agent_id: "agent-dev", task_id: "t1", assigned_at: 400 },
+        ]) };
+      }
+      if (sql.includes("FROM config_versions")) {
+        return { all: vi.fn(() => [
+          {
+            id: "cfg-2",
+            content_hash: "hash-2",
+            files: JSON.stringify(["context"]),
+            content: deflateSync(Buffer.from("config v2", "utf-8")).toString("base64"),
+            detected_at: 2500,
+            detected_by: "dashboard",
+            previous_version_id: "cfg-1",
+            change_summary: "Config content changed",
+          },
+          {
+            id: "cfg-1",
+            content_hash: "hash-1",
+            files: JSON.stringify(["context"]),
+            content: deflateSync(Buffer.from("config v1", "utf-8")).toString("base64"),
+            detected_at: 1500,
+            detected_by: "controller",
+            previous_version_id: null,
+            change_summary: "Initial config version",
+          },
         ]) };
       }
       return {
@@ -116,6 +264,32 @@ vi.mock("../../src/events/store.js", () => ({
   countEvents: vi.fn(() => 1),
 }));
 
+vi.mock("../../src/attention/builder.js", () => ({
+  buildAttentionSummary: vi.fn((projectId: string) => ({
+    projectId,
+    items: [],
+    counts: { actionNeeded: 1, watching: 0, fyi: 2 },
+    generatedAt: 123,
+  })),
+  buildDecisionInboxFromSummary: vi.fn((summary: { projectId: string }) => ({
+    ...summary,
+    counts: { actionNeeded: 2, watching: 1, fyi: 0 },
+  })),
+}));
+
+vi.mock("../../src/app/queries/dashboard-assistant.js", () => ({
+  queryDashboardAssistantStatus: vi.fn((projectId: string) => ({
+    enabled: true,
+    configuredAgentId: undefined,
+    resolvedAgentId: projectId === "proj1" ? "agent-mgr" : undefined,
+    resolvedTitle: projectId === "proj1" ? "Manager" : undefined,
+    resolutionSource: projectId === "proj1" ? "lead" : undefined,
+    deliveryPolicy: projectId === "proj1" ? "live-if-session-available-else-store" : "unavailable",
+    directMentionsSupported: true,
+    note: projectId === "proj1" ? "Operator chat routes to lead." : "Assistant unavailable.",
+  })),
+}));
+
 vi.mock("../../src/org.js", () => ({
   getDirectReports: vi.fn(() => ["agent-dev"]),
   getDepartmentAgents: vi.fn(() => ["agent-mgr", "agent-dev"]),
@@ -127,6 +301,10 @@ vi.mock("../../src/enforcement/disabled-store.js", () => ({
 }));
 
 vi.mock("../../src/enforcement/tracker.js", () => ({
+  getSessionHeartbeatStatus: vi.fn((lastPersistedAt: number) => ({
+    state: lastPersistedAt >= 650 ? "live" : "quiet",
+    ageMs: 10,
+  })),
   getActiveSessions: vi.fn(() => [
     { agentId: "agent-dev", projectId: "proj1", sessionKey: "sk1", metrics: { startedAt: 0, toolCalls: [] } },
   ]),
@@ -143,8 +321,15 @@ const {
   queryPolicies, querySlos, queryAlerts, queryOrgChart, queryHealth,
   queryAuditLog, queryAuditRuns, queryEnforcementRetries,
   queryOnboardingState, queryTrackedSessions, queryWorkerAssignments,
+  queryConfigVersions,
+  queryOperatorComms,
+  queryUserInbox,
   readContextFile, writeContextFile,
 } = await import("../../src/dashboard/queries.js");
+const tasksOps = await import("../../src/tasks/ops.js");
+const entityOps = await import("../../src/entities/ops.js");
+const sessionArchive = await import("../../src/telemetry/session-archive.js");
+const dbModule = await import("../../src/db.js");
 
 describe("queryProjects", () => {
   it("returns all active projects with agent counts", () => {
@@ -184,6 +369,101 @@ describe("queryAgentDetail", () => {
   });
 });
 
+describe("queryOperatorComms", () => {
+  it("summarizes operator threads, inbox state, and assistant routing", () => {
+    expect(queryOperatorComms("proj1")).toEqual({
+      assistant: {
+        enabled: true,
+        configuredAgentId: undefined,
+        resolvedAgentId: "agent-mgr",
+        resolvedTitle: "Manager",
+        resolutionSource: "lead",
+        deliveryPolicy: "live-if-session-available-else-store",
+        directMentionsSupported: true,
+        note: "Operator chat routes to lead.",
+      },
+      feed: {
+        projectId: "proj1",
+        items: [],
+        counts: {
+          actionNeeded: 1,
+          watching: 0,
+          fyi: 2,
+        },
+        generatedAt: 123,
+      },
+      directThreads: [
+        {
+          id: "operator:agent-dev",
+          agentId: "agent-dev",
+          agentTitle: "Developer",
+          messageCount: 3,
+          unreadCount: 1,
+          queuedForAgentCount: 1,
+          lastMessageAt: 2200,
+          lastDirection: "inbound",
+          lastMessage: "I need approval on deploy",
+          proposalIds: ["prop-1"],
+          taskIds: ["task-9"],
+          entityIds: ["entity-4"],
+          issueIds: ["issue-2"],
+        },
+        {
+          id: "operator:agent-mgr",
+          agentId: "agent-mgr",
+          agentTitle: "Manager",
+          messageCount: 2,
+          unreadCount: 0,
+          queuedForAgentCount: 0,
+          lastMessageAt: 2100,
+          lastDirection: "outbound",
+          lastMessage: "Please rebalance staffing",
+          proposalIds: [],
+          taskIds: [],
+          entityIds: [],
+          issueIds: [],
+        },
+      ],
+      inboxCount: 2,
+      unreadCount: 1,
+      queuedForAgentsCount: 1,
+      decisionInbox: {
+        projectId: "proj1",
+        items: [],
+        counts: {
+          actionNeeded: 2,
+          watching: 1,
+          fyi: 0,
+        },
+        generatedAt: 123,
+      },
+      channelsConfigured: true,
+    });
+  });
+});
+
+describe("queryUserInbox", () => {
+  it("returns structured message refs from stored metadata", () => {
+    expect(queryUserInbox("proj1")).toEqual({
+      messages: [
+        {
+          id: "msg-operator-1",
+          fromAgent: "user",
+          toAgent: "agent-dev",
+          content: "Review task context",
+          createdAt: 1234,
+          status: "queued",
+          proposalId: "prop-1",
+          taskId: "task-9",
+          entityId: "entity-4",
+          issueId: "issue-2",
+        },
+      ],
+      count: 1,
+    });
+  });
+});
+
 describe("queryTasks", () => {
   it("returns tasks with hasMore flag", () => {
     const result = queryTasks("proj1");
@@ -194,15 +474,75 @@ describe("queryTasks", () => {
 });
 
 describe("queryTaskDetail", () => {
-  it("returns task with evidence and transitions", () => {
+  beforeEach(() => {
+    vi.mocked(tasksOps.getTask).mockImplementation((pid: string, tid: string) => (tid === "t1" ? { id: "t1", state: "OPEN" } as any : null));
+    vi.mocked(entityOps.getEntityIssue).mockReturnValue(null);
+    vi.mocked(entityOps.summarizeEntityIssues).mockReturnValue({ openCount: 0, pendingProposalCount: 0 } as any);
+  });
+
+  it("returns task with review detail, evidence, and transitions", () => {
     const result = queryTaskDetail("proj1", "t1");
     expect(result).not.toBeNull();
     expect(result!.task.id).toBe("t1");
     expect(result!.evidence).toEqual([]);
+    expect(result!.reviews).toEqual([]);
+    expect(result!.activeSessions).toHaveLength(1);
+    expect(result!.recentSessions).toHaveLength(1);
+    expect(result!.recentSessions[0]!.diagnostics).toBeNull();
+    expect(result!.linkedIssue).toBeNull();
+    expect(result!.entityIssueSummary).toBeNull();
+  });
+
+  it("attaches compact diagnostics to recent archived sessions", () => {
+    vi.mocked(sessionArchive.listSessionArchives).mockReturnValueOnce([{
+      sessionKey: "s-diagnostic",
+      agentId: "agent-dev",
+      durationMs: 1200,
+      toolCallCount: 0,
+      totalCostCents: 15,
+      complianceDetail: JSON.stringify({
+        exitCode: 0,
+        summarySynthetic: true,
+        observedWork: false,
+        resultSource: "synthetic",
+        stdout: "",
+        stderr: "Reading additional input from stdin...\nOpenAI Codex v0.118.0",
+        stderrLooksLikeLaunchTranscript: true,
+        promptChars: 4096,
+      }),
+    }] as any);
+
+    const result = queryTaskDetail("proj1", "t1");
+    expect(result).not.toBeNull();
+    expect(result!.recentSessions[0]!.diagnostics).toMatchObject({
+      exitCode: 0,
+      summarySynthetic: true,
+      observedWork: false,
+      resultSource: "synthetic",
+      stderrLooksLikeLaunchTranscript: true,
+      promptChars: 4096,
+    });
+    expect(result!.recentSessions[0]!.diagnostics?.stderrPreview).toContain("Reading additional input from stdin");
   });
 
   it("returns null for missing task", () => {
     expect(queryTaskDetail("proj1", "missing")).toBeNull();
+  });
+
+  it("degrades cleanly when entity issue summary cannot be computed", () => {
+    vi.mocked(tasksOps.getTask).mockReturnValue({
+      id: "t1",
+      state: "REVIEW",
+      entityId: "entity-la",
+      entityType: "jurisdiction",
+    } as any);
+    vi.mocked(entityOps.summarizeEntityIssues).mockImplementation(() => {
+      throw new Error("Entity kind not configured");
+    });
+
+    const result = queryTaskDetail("proj1", "t1");
+    expect(result).not.toBeNull();
+    expect(result!.entityIssueSummary).toBeNull();
   });
 });
 
@@ -427,7 +767,13 @@ describe("queryTrackedSessions", () => {
     const result = queryTrackedSessions("proj1");
     expect(result.sessions).toHaveLength(1);
     expect(result.total).toBe(1);
-    expect(result.sessions[0]).toMatchObject({ sessionKey: "sk1", agentId: "agent-dev", toolCallCount: 3 });
+    expect(result.sessions[0]).toMatchObject({
+      sessionKey: "sk1",
+      agentId: "agent-dev",
+      toolCallCount: 3,
+      heartbeatState: "live",
+      heartbeatAgeMs: 10,
+    });
   });
 });
 
@@ -437,6 +783,21 @@ describe("queryWorkerAssignments", () => {
     expect(result.assignments).toHaveLength(1);
     expect(result.count).toBe(1);
     expect(result.assignments[0]).toMatchObject({ agentId: "agent-dev", taskId: "t1" });
+  });
+});
+
+describe("queryConfigVersions", () => {
+  it("maps config version history from the real schema columns", () => {
+    const result = queryConfigVersions("proj1", 10);
+    expect(result.count).toBe(2);
+    expect(result.versions[0]).toEqual({
+      id: "cfg-2",
+      hash: "hash-2",
+      files: ["context"],
+      detectedBy: "dashboard",
+      changeSummary: "Config content changed",
+      detectedAt: 2500,
+    });
   });
 });
 

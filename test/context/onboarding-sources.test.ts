@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 
 vi.mock("../../src/diagnostics.js", () => ({
   emitDiagnosticEvent: vi.fn(),

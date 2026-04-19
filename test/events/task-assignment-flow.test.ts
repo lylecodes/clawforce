@@ -11,7 +11,7 @@
  * 4. reassignTask to different agent produces exactly one ASSIGNED->ASSIGNED transition
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({

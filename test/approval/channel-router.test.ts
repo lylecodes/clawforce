@@ -30,9 +30,9 @@ describe("approval/channel-router", () => {
         [agentId]: {
           extends: "employee",
           channel,
-          context_in: [],
-          required_outputs: [],
-          on_failure: { action: "alert" },
+          briefing: [],
+          expectations: [],
+          performance_policy: { action: "alert" },
         },
       },
     }, "/tmp");

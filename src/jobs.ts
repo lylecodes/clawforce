@@ -84,7 +84,7 @@ export function resolveEffectiveConfig(
 export function canManageJobs(projectId: string, callerAgentId: string, targetAgentId: string): boolean {
   if (callerAgentId === targetAgentId) return true;
 
-  const callerEntry = getAgentConfig(callerAgentId);
+  const callerEntry = getAgentConfig(callerAgentId, projectId);
   if (!callerEntry || callerEntry.projectId !== projectId) return false;
   if (!callerEntry.config.coordination?.enabled) return false;
 
@@ -96,8 +96,8 @@ export function canManageJobs(projectId: string, callerAgentId: string, targetAg
  * List all jobs defined on an agent.
  * Returns empty record if agent has no jobs, null if agent not found.
  */
-export function listJobs(agentId: string): Record<string, JobDefinition> | null {
-  const entry = getAgentConfig(agentId);
+export function listJobs(agentId: string, projectId?: string): Record<string, JobDefinition> | null {
+  const entry = getAgentConfig(agentId, projectId);
   if (!entry) return null;
   return entry.config.jobs ?? {};
 }
@@ -106,8 +106,8 @@ export function listJobs(agentId: string): Record<string, JobDefinition> | null 
  * Add or update a job on an agent (in-memory only).
  * Returns false if agent not found.
  */
-export function upsertJob(agentId: string, jobName: string, job: JobDefinition): boolean {
-  const entry = getAgentConfig(agentId);
+export function upsertJob(agentId: string, jobName: string, job: JobDefinition, projectId?: string): boolean {
+  const entry = getAgentConfig(agentId, projectId);
   if (!entry) return false;
   if (!entry.config.jobs) entry.config.jobs = {};
   entry.config.jobs[jobName] = job;
@@ -118,8 +118,8 @@ export function upsertJob(agentId: string, jobName: string, job: JobDefinition):
  * Remove a job from an agent (in-memory only).
  * Returns false if agent or job not found.
  */
-export function deleteJob(agentId: string, jobName: string): boolean {
-  const entry = getAgentConfig(agentId);
+export function deleteJob(agentId: string, jobName: string, projectId?: string): boolean {
+  const entry = getAgentConfig(agentId, projectId);
   if (!entry) return false;
   if (!entry.config.jobs || !entry.config.jobs[jobName]) return false;
   delete entry.config.jobs[jobName];

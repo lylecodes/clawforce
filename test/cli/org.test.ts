@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 import YAML from "yaml";
 
 // Mock diagnostics
@@ -266,6 +266,13 @@ describe("CLI org commands", () => {
       const output = getLogOutput();
       // cf-lead has cost data from cost_records
       expect(output).toMatch(/cf-lead.*\$8\.00/);
+    });
+
+    it("shows active session counts from tracked sessions", () => {
+      setupFsMocks(STANDARD_AGENTS, STANDARD_DOMAIN_AGENTS);
+      cmdOrg(db, PROJECT_ID, {});
+      const output = getLogOutput();
+      expect(output).toMatch(/cf-lead.*1 session today/);
     });
 
     it("shows no agents in scope for nonexistent team filter", () => {

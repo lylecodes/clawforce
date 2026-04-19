@@ -5,7 +5,7 @@
  * No ML, no external deps — just mean + stddev comparison.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { aggregateMetrics, type MetricType } from "../metrics.js";
 import type { AnomalyConfig } from "../types.js";

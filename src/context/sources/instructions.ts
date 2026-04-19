@@ -1,7 +1,7 @@
 /**
  * Clawforce — Instructions context source
  *
- * Auto-generates enforcement instructions from an agent's required_outputs config.
+ * Auto-generates enforcement instructions from an agent's expectations config.
  * Tells the agent exactly what tools it MUST call before finishing.
  */
 

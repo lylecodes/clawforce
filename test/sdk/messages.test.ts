@@ -8,7 +8,7 @@
  * vocabulary mapping.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---- Module mocks (must come before dynamic imports) ----

@@ -7,7 +7,7 @@
  * message's protocolStatus field.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import type { Message, MessagePriority, MessageType, ProtocolStatus } from "../types.js";
 import { createMessage, getMessage, updateProtocolStatus } from "./store.js";

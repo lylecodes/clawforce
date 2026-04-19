@@ -115,7 +115,7 @@ export function getInitQuestions(): InitQuestion[] {
       id: "model_preference",
       type: "choice",
       prompt:
-        "Use recommended models (Opus for managers, Sonnet for workers) or override?",
+        "Use recommended models (GPT-5.4 for managers, GPT-5.4 mini for workers) or override?",
       choices: ["recommended", "override"],
       default: "recommended",
     },
@@ -129,7 +129,7 @@ export function getBudgetGuidance(answers: Partial<InitAnswers>): string | null 
     const isManager = Object.values(answers.reporting ?? {}).includes(a.name);
     return {
       agentId: a.name,
-      model: a.model ?? (isManager ? "anthropic/claude-opus-4-6" : "anthropic/claude-sonnet-4-6"),
+      model: a.model ?? (isManager ? "gpt-5.4" : "gpt-5.4-mini"),
       role: isManager ? ("manager" as const) : ("employee" as const),
     };
   });
@@ -148,7 +148,9 @@ export function buildConfigFromAnswers(answers: InitAnswers): {
 
   for (const agent of answers.agents) {
     const def: GlobalAgentDef = { title: agent.title };
-    if (agent.model) def.model = agent.model;
+    if (agent.model) {
+      def.codex = { model: agent.model };
+    }
     if (answers.reporting[agent.name]) {
       def.reports_to = answers.reporting[agent.name];
     }

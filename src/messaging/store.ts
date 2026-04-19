@@ -7,7 +7,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { checkMessageRate } from "../safety.js";
 import type { Message, MessagePriority, MessageStatus, MessageType, ProtocolStatus } from "../types.js";

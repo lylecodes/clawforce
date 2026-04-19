@@ -6,7 +6,7 @@
  * Per-project and per-agent concurrency + rate limiting.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { checkBudget } from "../budget.js";
 import { checkBudgetV2 } from "../budget/check-v2.js";
 import { isProviderThrottled } from "../rate-limits.js";
@@ -19,23 +19,29 @@ import { classifyRisk } from "../risk/classifier.js";
 import { getRiskConfig } from "../risk/config.js";
 import { applyRiskGate } from "../risk/gate.js";
 import { findRootInitiative, getInitiativeSpend } from "../goals/ops.js";
-import { getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
+import { attachEvidence, getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
 import { acquireTaskLease, releaseTaskLease } from "../tasks/ops.js";
 import { getAgentConfig } from "../project.js";
 import { getEffectiveVerificationConfig } from "../verification/lifecycle.js";
 import { createTaskBranch } from "../verification/git.js";
 import { ingestEvent } from "../events/store.js";
 import { processEvents } from "../events/router.js";
-import { claimNext, failItem, markDispatched, reclaimExpiredLeases, releaseToQueued } from "./queue.js";
-import { dispatchViaInject } from "./inject-dispatch.js";
+import { claimNext, completeItem, failItem, getQueueItem, markDispatched, reclaimExpiredLeases, releaseToQueued } from "./queue.js";
+import { executeDispatch } from "./executors.js";
 import { buildTaskPrompt } from "./spawn.js";
 import { getApprovedIntentsForTask } from "../approval/intent-store.js";
 import { recordMetric } from "../metrics.js";
 import { writeAuditEntry } from "../audit.js";
 import { isTaskInFuturePhase } from "../workflow.js";
-import { toNamespacedAgentId } from "../agent-sync.js";
 import type { DispatchConfig, DispatchQueueItem } from "../types.js";
 import { computeBudgetPacing } from "../budget/pacer.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
+import { resolveDispatchExecutorName } from "./executors.js";
+import { withControllerLease } from "../runtime/controller-leases.js";
+import { getSessionArchive } from "../telemetry/session-archive.js";
+import { maybeNormalizeWorkflowMutationImplementationTask } from "../workflow-mutation/implementation.js";
+import { resolveEffectiveConfig } from "../jobs.js";
+import { maybeNormalizeRecurringJobTask } from "../scheduling/recurring-jobs.js";
 
 /** Task lease duration in milliseconds — long enough for async dispatch + execution + 5min buffer. */
 const TASK_LEASE_MS = 2 * 60 * 60 * 1000 + 5 * 60 * 1000; // 2h + 5min buffer
@@ -59,31 +65,32 @@ class CronUnavailableError extends Error {
 
 /** Global hard ceiling across all projects. */
 const DEFAULT_MAX_CONCURRENCY = 3;
-let globalMaxConcurrency = DEFAULT_MAX_CONCURRENCY;
-let globalActiveDispatches = 0;
-
-/** Per-project active dispatch counts. */
-const projectDispatches = new Map<string, number>();
-
-/** Per-project dispatch timestamps for rate limiting (sliding window). */
-const projectDispatchTimestamps = new Map<string, number[]>();
-
-/** Per-agent active dispatch counts. */
-const agentDispatches = new Map<string, number>();
-
-/** Per-agent dispatch timestamps for rate limiting (sliding window). */
-const agentDispatchTimestamps = new Map<string, number[]>();
-
 const ONE_HOUR_MS = 60 * 60 * 1000;
+
+type DispatcherRuntimeState = {
+  globalMaxConcurrency: number;
+  globalActiveDispatches: number;
+  projectDispatches: Map<string, number>;
+  projectDispatchTimestamps: Map<string, number[]>;
+  agentDispatches: Map<string, number>;
+  agentDispatchTimestamps: Map<string, number[]>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getDispatcherState(): DispatcherRuntimeState {
+  return runtime.dispatch as DispatcherRuntimeState;
+}
 
 /** Set the global maximum number of concurrent dispatches. */
 export function setMaxConcurrency(max: number): void {
-  globalMaxConcurrency = max;
+  getDispatcherState().globalMaxConcurrency = max;
 }
 
 /** Get current dispatch concurrency info. */
 export function getConcurrencyInfo(): { active: number; max: number } {
-  return { active: globalActiveDispatches, max: globalMaxConcurrency };
+  const state = getDispatcherState();
+  return { active: state.globalActiveDispatches, max: state.globalMaxConcurrency };
 }
 
 /** Get per-project dispatch rate info for ops visibility. */
@@ -92,11 +99,12 @@ export function getDispatchRateInfo(projectId: string): {
   recentHour: number;
   config: DispatchConfig | null;
 } {
-  pruneTimestamps(projectDispatchTimestamps, projectId);
+  const state = getDispatcherState();
+  pruneTimestamps(state.projectDispatchTimestamps, projectId);
   const extConfig = getExtendedProjectConfig(projectId);
   return {
-    active: projectDispatches.get(projectId) ?? 0,
-    recentHour: (projectDispatchTimestamps.get(projectId) ?? []).length,
+    active: state.projectDispatches.get(projectId) ?? 0,
+    recentHour: (state.projectDispatchTimestamps.get(projectId) ?? []).length,
     config: extConfig?.dispatch ?? null,
   };
 }
@@ -116,6 +124,7 @@ function pruneTimestamps(map: Map<string, number[]>, key: string): void {
 
 /** Check if a project is at its concurrency or rate limit. Returns null if OK, or a reason string. */
 function checkProjectLimits(projectId: string, config: DispatchConfig | undefined, db: DatabaseSync): string | null {
+  const state = getDispatcherState();
   if (config?.maxConcurrentDispatches != null) {
     // Use DB state for concurrency — counts items actively being processed (leased or dispatched)
     const row = db.prepare(
@@ -127,8 +136,8 @@ function checkProjectLimits(projectId: string, config: DispatchConfig | undefine
     }
   }
   if (config?.maxDispatchesPerHour != null) {
-    pruneTimestamps(projectDispatchTimestamps, projectId);
-    const recentCount = (projectDispatchTimestamps.get(projectId) ?? []).length;
+    pruneTimestamps(state.projectDispatchTimestamps, projectId);
+    const recentCount = (state.projectDispatchTimestamps.get(projectId) ?? []).length;
     if (recentCount >= config.maxDispatchesPerHour) {
       return `Project rate limit reached (${recentCount}/${config.maxDispatchesPerHour} per hour)`;
     }
@@ -138,10 +147,11 @@ function checkProjectLimits(projectId: string, config: DispatchConfig | undefine
 
 /** Check if an agent is at its concurrency or rate limit. Returns null if OK, or a reason string. */
 function checkAgentLimits(agentId: string, config: DispatchConfig | undefined): string | null {
+  const state = getDispatcherState();
   const agentLimits = config?.agentLimits?.[agentId];
 
   if (agentLimits?.maxConcurrent != null) {
-    const active = agentDispatches.get(agentId) ?? 0;
+    const active = state.agentDispatches.get(agentId) ?? 0;
     if (active >= agentLimits.maxConcurrent) {
       return `Agent "${agentId}" concurrency limit reached (${active}/${agentLimits.maxConcurrent})`;
     }
@@ -149,8 +159,8 @@ function checkAgentLimits(agentId: string, config: DispatchConfig | undefined): 
 
   // Rate limit: use explicit per-agent limit if configured, otherwise apply default
   const effectiveMaxPerHour = agentLimits?.maxPerHour ?? DEFAULT_AGENT_DISPATCH_LIMIT;
-  pruneTimestamps(agentDispatchTimestamps, agentId);
-  const recentCount = (agentDispatchTimestamps.get(agentId) ?? []).length;
+  pruneTimestamps(state.agentDispatchTimestamps, agentId);
+  const recentCount = (state.agentDispatchTimestamps.get(agentId) ?? []).length;
   if (recentCount >= effectiveMaxPerHour) {
     return `Agent "${agentId}" rate limit reached (${recentCount}/${effectiveMaxPerHour} per hour)`;
   }
@@ -159,30 +169,32 @@ function checkAgentLimits(agentId: string, config: DispatchConfig | undefined): 
 
 /** Record a successful dispatch in tracking maps. */
 function recordDispatch(projectId: string, agentId: string): void {
-  globalActiveDispatches++;
-  projectDispatches.set(projectId, (projectDispatches.get(projectId) ?? 0) + 1);
-  agentDispatches.set(agentId, (agentDispatches.get(agentId) ?? 0) + 1);
+  const state = getDispatcherState();
+  state.globalActiveDispatches++;
+  state.projectDispatches.set(projectId, (state.projectDispatches.get(projectId) ?? 0) + 1);
+  state.agentDispatches.set(agentId, (state.agentDispatches.get(agentId) ?? 0) + 1);
 
   const now = Date.now();
-  const projTs = projectDispatchTimestamps.get(projectId) ?? [];
+  const projTs = state.projectDispatchTimestamps.get(projectId) ?? [];
   projTs.push(now);
-  projectDispatchTimestamps.set(projectId, projTs);
+  state.projectDispatchTimestamps.set(projectId, projTs);
 
-  const agentTs = agentDispatchTimestamps.get(agentId) ?? [];
+  const agentTs = state.agentDispatchTimestamps.get(agentId) ?? [];
   agentTs.push(now);
-  agentDispatchTimestamps.set(agentId, agentTs);
+  state.agentDispatchTimestamps.set(agentId, agentTs);
 }
 
 /** Release a dispatch slot from tracking maps. */
 function releaseDispatch(projectId: string, agentId: string): void {
-  globalActiveDispatches--;
-  const projCount = projectDispatches.get(projectId) ?? 0;
-  if (projCount <= 1) projectDispatches.delete(projectId);
-  else projectDispatches.set(projectId, projCount - 1);
+  const state = getDispatcherState();
+  state.globalActiveDispatches--;
+  const projCount = state.projectDispatches.get(projectId) ?? 0;
+  if (projCount <= 1) state.projectDispatches.delete(projectId);
+  else state.projectDispatches.set(projectId, projCount - 1);
 
-  const agentCount = agentDispatches.get(agentId) ?? 0;
-  if (agentCount <= 1) agentDispatches.delete(agentId);
-  else agentDispatches.set(agentId, agentCount - 1);
+  const agentCount = state.agentDispatches.get(agentId) ?? 0;
+  if (agentCount <= 1) state.agentDispatches.delete(agentId);
+  else state.agentDispatches.set(agentId, agentCount - 1);
 }
 
 /**
@@ -211,7 +223,7 @@ export async function dispatchLoop(
   const dispatchConfig = extConfig?.dispatch;
 
   // Apply global max concurrency from config if set
-  const effectiveMaxConcurrency = dispatchConfig?.globalMaxConcurrency ?? globalMaxConcurrency;
+  const effectiveMaxConcurrency = dispatchConfig?.globalMaxConcurrency ?? getDispatcherState().globalMaxConcurrency;
 
   // Use DB-based active count for global ceiling (resilient to process restarts)
   const getGlobalActiveCount = () => {
@@ -234,9 +246,7 @@ export async function dispatchLoop(
 
     // Resolve agentId early for per-agent limit check
     // Payload can override agent (e.g. verifier dispatch targets a different agent than the task assignee)
-    const task = getTask(projectId, item.taskId, db);
-    const payload = item.payload ?? {};
-    const agentId = (payload.agentId as string | undefined) ?? task?.assignedTo ?? (payload.profile ? `claude-code:${payload.profile as string}` : "claude-code:worker");
+    const agentId = resolveDispatchAgentId(projectId, item, db);
 
     // Check per-agent limits
     const agentLimitReason = checkAgentLimits(agentId, dispatchConfig);
@@ -290,6 +300,264 @@ export async function dispatchLoop(
   }
 
   return dispatched;
+}
+
+function resolveDispatchAgentId(
+  projectId: string,
+  item: DispatchQueueItem,
+  db: DatabaseSync,
+): string {
+  const task = getTask(projectId, item.taskId, db);
+  const payload = item.payload ?? {};
+  const candidateAgentId = typeof payload.agentId === "string"
+    ? payload.agentId
+    : task?.assignedTo;
+  const executor = resolveDispatchExecutorName(projectId, candidateAgentId);
+  const syntheticPrefix = executor === "openclaw" ? "dispatch" : executor;
+  return (payload.agentId as string | undefined)
+    ?? task?.assignedTo
+    ?? (payload.profile ? `${syntheticPrefix}:${payload.profile as string}` : `${syntheticPrefix}:worker`);
+}
+
+function maybeFinalizeInlineTask(
+  projectId: string,
+  taskId: string,
+  leaseHolder: string,
+  actor: string,
+  executor: string,
+  summary: string | undefined,
+  db: DatabaseSync,
+): { ok: boolean; reason?: string } {
+  const task = getTask(projectId, taskId, db);
+  if (!task) return { ok: false, reason: "Task missing during inline finalization" };
+  if (task.state !== "ASSIGNED" && task.state !== "IN_PROGRESS") return { ok: true };
+  if (!summary?.trim()) return { ok: false, reason: "Inline dispatch returned no summary" };
+
+  const releaseLease = (holder: string | null | undefined): boolean => {
+    if (!holder) return false;
+    try {
+      return releaseTaskLease(projectId, taskId, holder, db);
+    } catch (err) {
+      safeLog("dispatcher.inlineReleaseLease", err);
+      return false;
+    }
+  };
+
+  const readLeaseHolder = (): string | null => {
+    const row = db.prepare(
+      "SELECT lease_holder FROM tasks WHERE id = ? AND project_id = ?",
+    ).get(taskId, projectId) as { lease_holder?: string | null } | undefined;
+    return row?.lease_holder ?? null;
+  };
+
+  const transitionIntoProgress = (transitionActor: string) => transitionTask({
+    projectId,
+    taskId,
+    toState: "IN_PROGRESS",
+    actor: transitionActor,
+    verificationRequired: false,
+  }, db);
+
+  let activeLeaseHolder: string | null = readLeaseHolder();
+  releaseLease(leaseHolder);
+  activeLeaseHolder = readLeaseHolder();
+
+  let transitionActor = actor;
+  try {
+    if (task.state === "ASSIGNED") {
+      let started = transitionIntoProgress(transitionActor);
+      if (!started.ok && activeLeaseHolder) {
+        releaseLease(activeLeaseHolder);
+        activeLeaseHolder = readLeaseHolder();
+        started = transitionIntoProgress(transitionActor);
+      }
+      if (!started.ok && activeLeaseHolder) {
+        transitionActor = activeLeaseHolder;
+        started = transitionIntoProgress(transitionActor);
+      }
+      if (!started.ok) {
+        safeLog("dispatcher.inlineStart", started.reason);
+        return { ok: false, reason: started.reason ?? "Inline dispatch could not start task progress" };
+      }
+    }
+  } finally {
+    const currentLeaseHolder = readLeaseHolder();
+    if (currentLeaseHolder) {
+      releaseLease(currentLeaseHolder);
+    }
+  }
+
+  let evidenceId: string | undefined;
+  try {
+    const evidence = attachEvidence({
+      projectId,
+      taskId,
+      type: "output",
+      content: summary.trim(),
+      attachedBy: `system:inline-dispatch:${executor}`,
+    }, db);
+    evidenceId = evidence.id;
+  } catch (err) {
+    safeLog("dispatcher.inlineEvidence", err);
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+
+  const recurringJob = task.metadata
+    && typeof task.metadata === "object"
+    && !Array.isArray(task.metadata)
+    && typeof (task.metadata as Record<string, unknown>).recurringJob === "object"
+    ? (task.metadata as Record<string, unknown>).recurringJob
+    : null;
+
+  if (recurringJob) {
+    const review = transitionTask({
+      projectId,
+      taskId,
+      toState: "REVIEW",
+      actor: transitionActor,
+      evidenceId,
+      verificationRequired: false,
+    }, db);
+    if (!review.ok) {
+      safeLog("dispatcher.inlineRecurringReview", review.reason);
+      return { ok: false, reason: review.reason ?? "Inline dispatch could not move recurring workflow task to review" };
+    }
+
+    const done = transitionTask({
+      projectId,
+      taskId,
+      toState: "DONE",
+      actor: transitionActor,
+      verificationRequired: false,
+      reason: "Recurring workflow run completed",
+    }, db);
+    if (!done.ok) {
+      safeLog("dispatcher.inlineRecurringDone", done.reason);
+      return { ok: false, reason: done.reason ?? "Inline dispatch could not complete recurring workflow task" };
+    }
+    return { ok: true };
+  }
+
+  const review = transitionTask({
+    projectId,
+    taskId,
+    toState: "REVIEW",
+    actor: transitionActor,
+    evidenceId,
+    verificationRequired: false,
+  }, db);
+  if (!review.ok) {
+    safeLog("dispatcher.inlineReview", review.reason);
+    return { ok: false, reason: review.reason ?? "Inline dispatch could not move task to review" };
+  }
+
+  return { ok: true };
+}
+
+function recoverInlineSummary(
+  projectId: string,
+  sessionKey: string | undefined,
+  summary: string | undefined,
+  db: DatabaseSync,
+): string | undefined {
+  if (summary?.trim()) return summary.trim();
+  if (!sessionKey) return undefined;
+  const archived = getSessionArchive(projectId, sessionKey, db);
+  const transcript = archived?.transcript?.trim() || undefined;
+  if (!transcript) return buildFallbackInlineSummary(sessionKey);
+  if (looksLikeCodexLaunchTranscript(transcript)) return buildFallbackInlineSummary(sessionKey);
+  return transcript;
+}
+
+function buildFallbackInlineSummary(sessionKey: string): string {
+  return [
+    "**Completed**",
+    "",
+    `Executor session ${sessionKey} exited successfully but returned no final summary.`,
+    "Review any changed files and archived session detail before approving this task.",
+  ].join("\n");
+}
+
+function lacksSubstantiveInlineResult(result: {
+  summarySynthetic?: boolean;
+  observedWork?: boolean;
+}): boolean {
+  return result.summarySynthetic === true && result.observedWork === false;
+}
+
+function shouldAutoRequeueInlineNoop(
+  item: DispatchQueueItem,
+  reason: string | undefined,
+): boolean {
+  return reason === "Inline dispatch exited successfully without a final summary or observed work"
+    && item.dispatchAttempts === 1;
+}
+
+function markInlineNoopRetryPayload(
+  item: DispatchQueueItem,
+  executor: string,
+  db: DatabaseSync,
+): void {
+  if (executor !== "codex") return;
+  const payload = { ...(item.payload ?? {}) };
+  if (payload.disableMcpBridge === true) return;
+  payload.disableMcpBridge = true;
+  db.prepare(
+    "UPDATE dispatch_queue SET payload = ? WHERE id = ?",
+  ).run(JSON.stringify(payload), item.id);
+}
+
+function looksLikeCodexLaunchTranscript(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return trimmed.startsWith("Reading additional input from stdin...\nOpenAI Codex v")
+    || (
+      trimmed.startsWith("OpenAI Codex v")
+      && trimmed.includes("<task-metadata")
+      && !trimmed.includes("**Completed**")
+      && !trimmed.includes("**Done**")
+    );
+}
+
+export async function dispatchLeasedItem(
+  projectId: string,
+  queueItemId: string,
+  dbOverride?: DatabaseSync,
+): Promise<{ ok: boolean; queueStatus?: string; error?: string }> {
+  const db = dbOverride ?? getDb(projectId);
+  const item = getQueueItem(projectId, queueItemId, db);
+  if (!item) {
+    return { ok: false, error: `Queue item not found: ${queueItemId}` };
+  }
+  if (item.status !== "leased") {
+    return { ok: false, queueStatus: item.status, error: `Queue item ${queueItemId} is not leased` };
+  }
+
+  const agentId = resolveDispatchAgentId(projectId, item, db);
+  recordDispatch(projectId, agentId);
+  try {
+    await dispatchItem(projectId, item, db, agentId);
+  } catch (err) {
+    if (err instanceof CronUnavailableError) {
+      return { ok: false, queueStatus: "queued", error: err.message };
+    }
+    throw err;
+  } finally {
+    releaseDispatch(projectId, agentId);
+  }
+
+  const updated = getQueueItem(projectId, queueItemId, db);
+  if (!updated) {
+    return { ok: false, error: `Queue item disappeared: ${queueItemId}` };
+  }
+  if (updated.status === "dispatched" || updated.status === "completed") {
+    return { ok: true, queueStatus: updated.status };
+  }
+  return {
+    ok: false,
+    queueStatus: updated.status,
+    error: updated.lastError ?? `Queue item ${queueItemId} did not dispatch`,
+  };
 }
 
 /**
@@ -380,7 +648,7 @@ async function dispatchItem(
         const sessionType = item.payload?.sessionType as string | undefined;
         const agentEntry = (() => {
           try {
-            return getAgentConfig(resolvedAgentId);
+            return getAgentConfig(resolvedAgentId, projectId);
           } catch { return undefined; }
         })();
         const isWorker = agentEntry?.config?.extends === "employee";
@@ -455,7 +723,9 @@ async function dispatchItem(
   // Session/task per-record budget checks (bounded O(n) scope)
   try {
     const profileVal = item.payload?.profile as string | undefined;
-    const agentId = profileVal ? `claude-code:${profileVal}` : undefined;
+    const executor = resolveDispatchExecutorName(projectId);
+    const syntheticPrefix = executor === "openclaw" ? "dispatch" : executor;
+    const agentId = profileVal ? `${syntheticPrefix}:${profileVal}` : undefined;
     const sessionKey = item.payload?.sessionKey as string | undefined;
     if (sessionKey || item.taskId) {
       const perRecordResult = checkBudget({ projectId, agentId, taskId: item.taskId, sessionKey }, db);
@@ -553,13 +823,15 @@ async function dispatchItem(
     // Risk check failure is non-fatal
   }
 
-  const task = getTask(projectId, item.taskId, db);
+  let task = getTask(projectId, item.taskId, db);
   if (!task) {
     failItem(item.id, `Task not found: ${item.taskId}`, db, projectId);
     emitDispatchEvent(projectId, "dispatch_failed", item, { error: `Task not found: ${item.taskId}` }, db);
     try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "task_not_found" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
     return;
   }
+  task = maybeNormalizeWorkflowMutationImplementationTask(projectId, task, db);
+  task = maybeNormalizeRecurringJobTask(projectId, task, db);
 
   // Only dispatch tasks in dispatchable states.
   // REVIEW is dispatchable when a verifier agent is specified in the payload (verification dispatch).
@@ -606,7 +878,7 @@ async function dispatchItem(
   try {
     const verConfig = getEffectiveVerificationConfig(projectId);
     if (verConfig.git?.enabled) {
-      const cfEntry = getAgentConfig(resolvedAgentId);
+      const cfEntry = getAgentConfig(resolvedAgentId, projectId);
       const projectDir = cfEntry?.projectDir;
       if (projectDir) {
         const branchResult = createTaskBranch(
@@ -630,11 +902,17 @@ async function dispatchItem(
   }
 
   try {
+    const dispatchAgentEntry = getAgentConfig(resolvedAgentId, projectId);
     // Extract dispatch params from queue item payload
     const payload = item.payload ?? {};
     const userPrompt = (payload.prompt as string) ?? `Execute task: ${task.title}`;
     const model = payload.model as string | undefined;
     const timeoutMs = payload.timeoutMs as number | undefined;
+    const disableMcpBridge = payload.disableMcpBridge === true;
+    const jobName = typeof payload.jobName === "string" ? payload.jobName : undefined;
+    const effectiveAgentConfig = jobName && dispatchAgentEntry?.config
+      ? resolveEffectiveConfig(dispatchAgentEntry.config, jobName) ?? dispatchAgentEntry.config
+      : dispatchAgentEntry?.config;
 
     // Build full prompt (task context + retry context + pre-approvals)
     const prompt = buildTaskPrompt(task, userPrompt);
@@ -654,42 +932,102 @@ async function dispatchItem(
       } catch { /* non-fatal */ }
     }
 
-    // Namespace the agent ID at the OpenClaw dispatch boundary.
-    // Use bare agent ID for dispatch — OpenClaw resolves agents by their registered ID.
-    // Namespace prefixing is handled at the agent-sync boundary (when writing to openclaw.json),
-    // not at dispatch time.
-    const result = await dispatchViaInject({
+    const result = await executeDispatch({
       queueItemId: item.id,
       taskId: item.taskId,
       projectId,
       prompt: fullPrompt,
       agentId: resolvedAgentId,
+      jobName,
+      model,
+      timeoutSeconds: effectiveTimeoutSeconds,
+      agentConfig: effectiveAgentConfig,
+      projectDir: dispatchAgentEntry?.projectDir,
+      disableMcpBridge,
     });
 
     if (result.ok) {
-      // Session started — mark as dispatched (completion handled in agent_end hook)
-      markDispatched(item.id, db, projectId);
-      emitDispatchEvent(projectId, "dispatch_succeeded", item, { sessionKey: result.sessionKey }, db);
-      try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_success", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      if (result.completedInline) {
+        let taskAfter = getTask(projectId, item.taskId, db);
+        let inlineFinalizeResult: { ok: boolean; reason?: string } | undefined;
+        if (taskAfter && (taskAfter.state === "ASSIGNED" || taskAfter.state === "IN_PROGRESS")) {
+          if (lacksSubstantiveInlineResult(result)) {
+            inlineFinalizeResult = {
+              ok: false,
+              reason: "Inline dispatch exited successfully without a final summary or observed work",
+            };
+          } else {
+            const inlineSummary = recoverInlineSummary(projectId, result.sessionKey, result.summary, db);
+            inlineFinalizeResult = maybeFinalizeInlineTask(
+              projectId,
+              item.taskId,
+              holder,
+              resolvedAgentId,
+              result.executor,
+              inlineSummary,
+              db,
+            );
+          }
+          taskAfter = getTask(projectId, item.taskId, db);
+        }
+        if (taskAfter && taskAfter.state !== "ASSIGNED" && taskAfter.state !== "IN_PROGRESS") {
+          markDispatched(item.id, db, projectId);
+          completeItem(item.id, db, projectId);
+          emitDispatchEvent(projectId, "dispatch_succeeded", item, {
+            sessionKey: result.sessionKey,
+            executor: result.executor,
+            completedInline: true,
+          }, db);
+          try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_success", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, executor: result.executor, completion: "inline" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+        } else {
+          const error = inlineFinalizeResult?.reason
+            ? `Task remained in ${taskAfter?.state ?? "unknown"} after inline dispatch: ${inlineFinalizeResult.reason}`
+            : `Task remained in ${taskAfter?.state ?? "unknown"} after inline dispatch`;
+          if (shouldAutoRequeueInlineNoop(item, inlineFinalizeResult?.reason)) {
+            markInlineNoopRetryPayload(item, result.executor, db);
+            releaseToQueued(item.id, error, db, projectId, { undoDispatchAttempt: false });
+            safeLog("dispatcher.inlineAutoRequeue", `Queue item ${item.id} released for one automatic retry after silent inline success`);
+          } else {
+            failItem(item.id, error, db, projectId);
+            emitDispatchEvent(projectId, "dispatch_failed", item, {
+              error,
+              executor: result.executor,
+              completedInline: true,
+            }, db);
+            maybeEmitDeadLetter(projectId, item, error, db);
+            try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "inline_task_state_unchanged", executor: result.executor } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+          }
+        }
+        try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (err) { safeLog("dispatcher.releaseLease", err); }
+      } else if (!result.handledRemotely) {
+        // Session started — mark as dispatched (completion handled in agent_end hook)
+        markDispatched(item.id, db, projectId);
+        emitDispatchEvent(projectId, "dispatch_succeeded", item, {
+          sessionKey: result.sessionKey,
+          executor: result.executor,
+        }, db);
+        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_success", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, executor: result.executor } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+      }
     } else {
       const error = result.error ?? "Unknown dispatch error";
-      const isCronUnavailable = error.includes("Cron service not available");
+      const isDeferred = result.deferred || error.includes("Cron service not available");
 
-      if (isCronUnavailable) {
-        // Cron service not yet bootstrapped — release back to queue for retry
+      if (isDeferred) {
+        // Executor not ready yet — release back to queue for retry
         // on the next sweep pass instead of permanently failing the item.
         releaseToQueued(item.id, error, db, projectId);
-        safeLog("dispatcher.cronUnavailable", `Queue item ${item.id} released to queued — cron not ready`);
-        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_deferred", value: 1, tags: { queueItemId: item.id, reason: "cron_unavailable" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+        safeLog("dispatcher.dispatchDeferred", `Queue item ${item.id} released to queued — executor ${result.executor} not ready`);
+        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_deferred", value: 1, tags: { queueItemId: item.id, reason: "executor_unavailable", executor: result.executor } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
         // Release lease and abort the loop — no point trying more items
-        // when the cron service is down. They'll be retried next sweep pass.
+        // when the executor is down. They'll be retried next sweep pass.
         try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (err) { safeLog("dispatcher.releaseLease", err); }
         throw new CronUnavailableError(error);
       } else {
         failItem(item.id, error, db, projectId);
-        emitDispatchEvent(projectId, "dispatch_failed", item, { error }, db);
-        maybeEmitDeadLetter(projectId, item, error, db);
-        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "inject_error" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
+        const nonRetryable = isNonRetryableDispatchError(error);
+        emitDispatchEvent(projectId, "dispatch_failed", item, { error, executor: result.executor, nonRetryable }, db);
+        maybeEmitDeadLetter(projectId, item, error, db, { force: nonRetryable });
+        try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "executor_error", executor: result.executor } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
       }
       // Release lease on failure — no session will run
       try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (err) { safeLog("dispatcher.releaseLease", err); }
@@ -700,8 +1038,9 @@ async function dispatchItem(
 
     const message = err instanceof Error ? err.message : String(err);
     failItem(item.id, message, db, projectId);
-    emitDispatchEvent(projectId, "dispatch_failed", item, { error: message }, db);
-    maybeEmitDeadLetter(projectId, item, message, db);
+    const nonRetryable = isNonRetryableDispatchError(message);
+    emitDispatchEvent(projectId, "dispatch_failed", item, { error: message, nonRetryable }, db);
+    maybeEmitDeadLetter(projectId, item, message, db, { force: nonRetryable });
     try { recordMetric({ projectId, type: "dispatch", subject: item.taskId, key: "dispatch_failure", value: 1, tags: { queueItemId: item.id, attempt: item.dispatchAttempts, reason: "exception" } }, db); } catch (e) { safeLog("dispatcher.metric", e); }
     // Release lease on failure
     try { releaseTaskLease(projectId, item.taskId, holder, db); } catch (releaseErr) { safeLog("dispatcher.releaseLease", releaseErr); }
@@ -738,14 +1077,16 @@ function maybeEmitDeadLetter(
   item: DispatchQueueItem,
   lastError: string,
   db: DatabaseSync,
+  options?: { force?: boolean },
 ): void {
-  if (item.dispatchAttempts >= item.maxDispatchAttempts) {
+  if (options?.force || item.dispatchAttempts >= item.maxDispatchAttempts) {
     try {
       ingestEvent(projectId, "dispatch_dead_letter", "internal", {
         taskId: item.taskId,
         queueItemId: item.id,
         attempts: item.dispatchAttempts,
         lastError,
+        forced: options?.force === true,
       }, `dead-letter:${item.id}`, db);
     } catch (err) {
       safeLog("dispatcher.deadLetter", err);
@@ -759,6 +1100,14 @@ function maybeEmitDeadLetter(
       writeAuditEntry({ projectId, actor: "system:dispatch", action: "dispatch.dead_letter", targetType: "task", targetId: item.taskId, detail: JSON.stringify({ queueItemId: item.id, attempts: item.dispatchAttempts, lastError: lastError.slice(0, 500) }) }, db);
     } catch (err) { safeLog("dispatcher.deadLetter.audit", err); }
   }
+}
+
+function isNonRetryableDispatchError(error: string): boolean {
+  const normalized = error.toLowerCase();
+  return normalized.includes("not logged in")
+    || normalized.includes("please run /login")
+    || normalized.includes("unknown option")
+    || normalized.includes("binary not found");
 }
 
 /**
@@ -823,21 +1172,62 @@ function buildPreApprovalContext(
 export async function processAndDispatch(
   projectId: string,
   dbOverride?: DatabaseSync,
-): Promise<{ eventsProcessed: number; dispatched: number }> {
+) : Promise<{
+  eventsProcessed: number;
+  dispatched: number;
+  controller?: {
+    skipped: boolean;
+    ownerId: string;
+    ownerLabel: string;
+    purpose: string;
+    expiresAt: number;
+  };
+}> {
   const db = dbOverride ?? getDb(projectId);
-  const eventsProcessed = processEvents(projectId, db);
-  const dispatched = await dispatchLoop(projectId, db);
-  return { eventsProcessed, dispatched };
+  const gated = await withControllerLease(projectId, async () => {
+    const eventsProcessed = processEvents(projectId, db);
+    const dispatched = await dispatchLoop(projectId, db);
+    return { eventsProcessed, dispatched };
+  }, {
+    purpose: "process_and_dispatch",
+    persistent: false,
+  }, db);
+
+  if (gated.skipped) {
+    return {
+      eventsProcessed: 0,
+      dispatched: 0,
+      controller: {
+        skipped: true,
+        ownerId: gated.lease.ownerId,
+        ownerLabel: gated.lease.ownerLabel,
+        purpose: gated.lease.purpose,
+        expiresAt: gated.lease.expiresAt,
+      },
+    };
+  }
+
+  return {
+    ...gated.result,
+    controller: {
+      skipped: false,
+      ownerId: gated.lease.ownerId,
+      ownerLabel: gated.lease.ownerLabel,
+      purpose: gated.lease.purpose,
+      expiresAt: gated.lease.expiresAt,
+    },
+  };
 }
 
 /** Reset concurrency counters (for testing). */
 export function resetDispatcherForTest(): void {
-  globalActiveDispatches = 0;
-  globalMaxConcurrency = DEFAULT_MAX_CONCURRENCY;
-  projectDispatches.clear();
-  projectDispatchTimestamps.clear();
-  agentDispatches.clear();
-  agentDispatchTimestamps.clear();
+  const state = getDispatcherState();
+  state.globalActiveDispatches = 0;
+  state.globalMaxConcurrency = DEFAULT_MAX_CONCURRENCY;
+  state.projectDispatches.clear();
+  state.projectDispatchTimestamps.clear();
+  state.agentDispatches.clear();
+  state.agentDispatchTimestamps.clear();
 }
 
 /**

@@ -17,33 +17,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import {
-  scaffoldConfigDir,
-  initDomain,
-  updateDomain,
-  deleteDomain,
-  addAgentToGlobal,
-  removeAgentFromGlobal,
-  updateAgentInGlobal,
-} from "../config/wizard.js";
-import {
-  readGlobalConfig,
-  readDomainConfig,
-  updateDomainConfig,
-  updateGlobalConfig,
-  upsertGlobalAgent,
-  removeGlobalAgent,
-  updateGlobalAgent,
-  addAgentToDomain,
-  removeAgentFromDomain,
-  setDomainSection,
-  previewGlobalChange,
-  previewDomainChange,
   deepMerge,
 } from "../config/writer.js";
 import { loadGlobalConfig, loadAllDomains } from "../config/loader.js";
-import { validateGlobalConfig, validateDomainConfig } from "../config/schema.js";
+import { validateGlobalConfig, validateDomainConfig, type GlobalAgentDef } from "../config/schema.js";
 import { validateAllConfigs } from "../config/validate.js";
-import { initializeAllDomains } from "../config/init.js";
+import { createConfigService } from "../config/api-service.js";
 import { safeLog } from "../diagnostics.js";
 import { getDirectReports } from "../org.js";
 import { getAgentConfig } from "../project.js";
@@ -91,7 +70,7 @@ function isManagerOf(managerId: string, targetAgentId: string, projectId: string
   if (!projectId) {
     // Fall back to global config: check if target's reports_to == managerId
     // We can't use getDirectReports without a projectId, so check the agent config directly
-    const entry = getAgentConfig(targetAgentId);
+    const entry = getAgentConfig(targetAgentId, projectId ?? undefined);
     if (entry && entry.config.reports_to === managerId) return true;
     return false;
   }
@@ -102,8 +81,8 @@ function isManagerOf(managerId: string, targetAgentId: string, projectId: string
 /**
  * Determine the manager of a given agent (who the agent reports_to).
  */
-function getManagerOfAgent(targetAgentId: string): string | null {
-  const entry = getAgentConfig(targetAgentId);
+function getManagerOfAgent(targetAgentId: string, projectId: string | null): string | null {
+  const entry = getAgentConfig(targetAgentId, projectId ?? undefined);
   if (!entry) return null;
   const reportsTo = entry.config.reports_to;
   if (!reportsTo || reportsTo === "parent") return null;
@@ -138,7 +117,7 @@ export function authorizeConfigChange(
   const isSensitive = SENSITIVE_FIELDS.has(field);
   const isSelf = actorAgentId === targetAgentId;
   const actorIsManager = isManagerOf(actorAgentId, targetAgentId, projectId);
-  const targetManager = getManagerOfAgent(targetAgentId);
+  const targetManager = getManagerOfAgent(targetAgentId, projectId);
 
   // Rule 2: self-management of non-sensitive fields is always allowed
   if (isSelf && !isSensitive) {
@@ -209,7 +188,7 @@ function authorizeAgentLifecycle(
     return { allowed: true };
   }
 
-  const targetManager = getManagerOfAgent(targetAgentId);
+  const targetManager = getManagerOfAgent(targetAgentId, projectId);
   return {
     allowed: false,
     reason: `Agent "${actorAgentId}" cannot remove agent "${targetAgentId}" — only ${targetAgentId}'s manager${targetManager ? ` ("${targetManager}")` : ""} or the user can do this.`,
@@ -269,7 +248,7 @@ const ClawforceConfigSchema = Type.Object({
   // Domain creation
   agents: Type.Optional(Type.Array(Type.String(), { description: "Agent IDs for domain creation." })),
   paths: Type.Optional(Type.Array(Type.String(), { description: "Working directory paths for domain." })),
-  orchestrator: Type.Optional(Type.String({ description: "Orchestrator agent ID for domain." })),
+  manager_agent_id: Type.Optional(Type.String({ description: "Manager agent ID for domain." })),
   template: Type.Optional(Type.String({ description: "Team template (e.g. 'startup')." })),
   operational_profile: Type.Optional(Type.String({ description: "Profile level: low, medium, high, ultra." })),
 
@@ -278,6 +257,8 @@ const ClawforceConfigSchema = Type.Object({
   persona: Type.Optional(Type.String({ description: "Agent persona description." })),
   title: Type.Optional(Type.String({ description: "Agent title (e.g. 'Lead Engineer')." })),
   model: Type.Optional(Type.String({ description: "Model identifier for agent." })),
+  runtime_ref: Type.Optional(Type.String({ description: "External runtime agent ID to bind this ClawForce agent onto." })),
+  runtime: Type.Optional(Type.Unknown({ description: "Structured runtime envelope for the agent (bootstrapConfig, bootstrapExcludeFiles, allowedTools, workspacePaths)." })),
   department: Type.Optional(Type.String({ description: "Department the agent belongs to." })),
   team: Type.Optional(Type.String({ description: "Team within the department." })),
   reports_to: Type.Optional(Type.String({ description: "Agent this agent reports to." })),
@@ -407,8 +388,13 @@ export function createClawforceConfigTool(options: {
 
 // --- Handler implementations ---
 
+function getConfigService(baseDir: string) {
+  return createConfigService({ baseDir });
+}
+
 function handleCreateDomain(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const name = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: only user/system can create domains
   const authResult = authorizeDomainChange(actor, name, "create");
@@ -420,33 +406,35 @@ function handleCreateDomain(baseDir: string, params: Record<string, unknown>, ac
     return jsonResult({ ok: false, reason: "agents array is required for create_domain" });
   }
 
-  const orchestrator = readStringParam(params, "orchestrator");
+  const managerAgentId = readStringParam(params, "manager_agent_id");
   const paths = params.paths as string[] | undefined;
   const template = readStringParam(params, "template");
   const profile = readStringParam(params, "operational_profile") as "low" | "medium" | "high" | "ultra" | null;
 
-  // Ensure config dir is scaffolded
-  scaffoldConfigDir(baseDir);
-
-  try {
-    initDomain(baseDir, {
-      name,
-      agents,
-      orchestrator: orchestrator ?? undefined,
-      paths: paths ?? undefined,
-      operational_profile: profile ?? undefined,
-      template: template ?? undefined,
-    });
-  } catch (err) {
-    return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
-  }
-
   // If config_data provided for agent presets, add agents to global
   const configData = params.config_data as Record<string, unknown> | undefined;
   if (configData?.agent_presets && typeof configData.agent_presets === "object") {
-    for (const [agentId, preset] of Object.entries(configData.agent_presets as Record<string, string>)) {
-      addAgentToGlobal(baseDir, agentId, { extends: preset });
+    const presetAgents = Object.fromEntries(
+      Object.entries(configData.agent_presets as Record<string, string>)
+        .map(([agentId, preset]) => [agentId, { extends: preset }]),
+    );
+    const agentResult = configService.upsertGlobalAgents(presetAgents, actor);
+    if (!agentResult.ok) {
+      return jsonResult({ ok: false, reason: agentResult.error });
     }
+  }
+
+  const domainConfig: Record<string, unknown> = { agents };
+  if (managerAgentId) {
+    domainConfig.manager = { enabled: true, agentId: managerAgentId };
+  }
+  if (paths && paths.length > 0) domainConfig.paths = paths;
+  if (template) domainConfig.template = template;
+  if (profile) domainConfig.operational_profile = profile;
+
+  const createResult = configService.createDomain(name, domainConfig);
+  if (!createResult.ok) {
+    return jsonResult({ ok: false, reason: createResult.error });
   }
 
   return jsonResult({
@@ -460,6 +448,7 @@ function handleCreateDomain(baseDir: string, params: Record<string, unknown>, ac
 
 function handleUpdateDomain(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const name = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: only user/system can modify domain config
   const authResult = authorizeDomainChange(actor, name, "update");
@@ -471,14 +460,18 @@ function handleUpdateDomain(baseDir: string, params: Record<string, unknown>, ac
 
   // Build updates from explicit params and config_data
   const updates: Record<string, unknown> = {};
-  const orchestrator = readStringParam(params, "orchestrator");
+  const managerAgentId = readStringParam(params, "manager_agent_id");
   const paths = params.paths as string[] | undefined;
   const agents = params.agents as string[] | undefined;
   const template = readStringParam(params, "template");
   const profile = readStringParam(params, "operational_profile");
   const enabled = readBooleanParam(params, "enabled");
 
-  if (orchestrator !== null) updates.orchestrator = orchestrator;
+  if (managerAgentId !== null) {
+    updates.manager = managerAgentId
+      ? { enabled: true, agentId: managerAgentId }
+      : null;
+  }
   if (paths) updates.paths = paths;
   if (agents) updates.agents = agents;
   if (template !== null) updates.template = template;
@@ -496,7 +489,12 @@ function handleUpdateDomain(baseDir: string, params: Record<string, unknown>, ac
     return jsonResult({ ok: false, reason: "No updates provided for update_domain" });
   }
 
-  const result = updateDomainConfig(baseDir, name, updates, actor);
+  const preview = configService.previewDomainConfigChange(name, updates);
+  if (!preview.ok) {
+    return jsonResult({ ok: false, reason: preview.error });
+  }
+
+  const result = configService.saveDomainConfigChanges(name, updates, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -506,12 +504,15 @@ function handleUpdateDomain(baseDir: string, params: Record<string, unknown>, ac
     action: "update_domain",
     domain: name,
     updated_fields: Object.keys(updates),
-    diff: result.diff,
+    diff: { before: preview.preview.before, after: preview.preview.after },
+    warnings: result.warnings,
+    reload_errors: result.reloadErrors,
   });
 }
 
 function handleDeleteDomain(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const name = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: only user/system can delete domains
   const authResult = authorizeDomainChange(actor, name, "delete");
@@ -519,10 +520,9 @@ function handleDeleteDomain(baseDir: string, params: Record<string, unknown>, ac
     return jsonResult({ ok: false, reason: authResult.reason });
   }
 
-  try {
-    deleteDomain(baseDir, name);
-  } catch (err) {
-    return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
+  const result = configService.deleteDomain(name, actor);
+  if (!result.ok) {
+    return jsonResult({ ok: false, reason: result.error });
   }
 
   return jsonResult({
@@ -530,6 +530,8 @@ function handleDeleteDomain(baseDir: string, params: Record<string, unknown>, ac
     action: "delete_domain",
     domain: name,
     message: `Domain "${name}" deleted.`,
+    warnings: result.warnings,
+    reload_errors: result.reloadErrors,
   });
 }
 
@@ -554,7 +556,9 @@ function handleListDomains(baseDir: string): ToolResult {
     domain: d.domain,
     agents: d.agents,
     enabled: d.enabled !== false,
-    orchestrator: d.orchestrator,
+    manager_agent_id: typeof (d.manager as Record<string, unknown> | undefined)?.agentId === "string"
+      ? (d.manager as Record<string, unknown>).agentId
+      : null,
     paths: d.paths,
     operational_profile: d.operational_profile,
     template: d.template,
@@ -575,6 +579,7 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
   const agentId = readStringParam(params, "agent_id", { required: true })!;
   const domain = readStringParam(params, "domain");
   const reportsTo = readStringParam(params, "reports_to");
+  const configService = getConfigService(baseDir);
 
   // Authorization: only managers of the target's team or user/system can add agents
   const authResult = authorizeAgentLifecycle(actor, agentId, "add", reportsTo, projectId);
@@ -588,6 +593,8 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
   const persona = readStringParam(params, "persona");
   const title = readStringParam(params, "title");
   const model = readStringParam(params, "model");
+  const runtimeRef = readStringParam(params, "runtime_ref");
+  const runtime = readObjectParam(params, "runtime");
   const department = readStringParam(params, "department");
   const team = readStringParam(params, "team");
 
@@ -595,6 +602,11 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
   if (persona) agentDef.persona = persona;
   if (title) agentDef.title = title;
   if (model) agentDef.model = model;
+  if (runtimeRef) agentDef.runtime_ref = runtimeRef;
+  if (runtime.present) {
+    if (runtime.error) return jsonResult({ ok: false, reason: runtime.error });
+    agentDef.runtime = runtime.value;
+  }
   if (department) agentDef.department = department;
   if (team) agentDef.team = team;
   if (reportsTo) agentDef.reports_to = reportsTo;
@@ -612,11 +624,11 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
     agentDef.extends = "employee";
   }
 
-  // Ensure config dir exists
-  scaffoldConfigDir(baseDir);
-
-  const added = addAgentToGlobal(baseDir, agentId, agentDef);
-  if (!added) {
+  const added = configService.addGlobalAgent(agentId, agentDef as GlobalAgentDef, actor);
+  if (!added.ok) {
+    return jsonResult({ ok: false, reason: added.error });
+  }
+  if (added.created === false) {
     return jsonResult({
       ok: false,
       reason: `Agent "${agentId}" already exists in global config. Use update_agent to modify.`,
@@ -625,7 +637,7 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
 
   // Optionally add to domain
   if (domain) {
-    const domainResult = addAgentToDomain(baseDir, domain, agentId, actor);
+    const domainResult = configService.addAgentToDomain(domain, agentId, actor);
     if (!domainResult.ok) {
       return jsonResult({
         ok: true,
@@ -634,6 +646,7 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
         added_to_global: true,
         added_to_domain: false,
         domain_error: domainResult.error,
+        reload_errors: domainResult.reloadErrors,
       });
     }
   }
@@ -651,6 +664,7 @@ function handleAddAgent(baseDir: string, params: Record<string, unknown>, actor:
 
 function handleRemoveAgent(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const agentId = readStringParam(params, "agent_id", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: only the target's manager or user/system can remove agents
   const authResult = authorizeAgentLifecycle(actor, agentId, "remove", null, projectId);
@@ -658,8 +672,11 @@ function handleRemoveAgent(baseDir: string, params: Record<string, unknown>, act
     return jsonResult({ ok: false, reason: authResult.reason });
   }
 
-  const removed = removeAgentFromGlobal(baseDir, agentId, true);
-  if (!removed) {
+  const removed = configService.removeGlobalAgent(agentId, actor, true);
+  if (!removed.ok) {
+    return jsonResult({ ok: false, reason: removed.error });
+  }
+  if (removed.removed === false) {
     return jsonResult({ ok: false, reason: `Agent "${agentId}" not found in global config.` });
   }
 
@@ -669,12 +686,16 @@ function handleRemoveAgent(baseDir: string, params: Record<string, unknown>, act
     agent_id: agentId,
     removed_from_global: true,
     removed_from_domains: true,
+    impacted_domains: removed.impactedDomains,
+    warnings: removed.warnings,
+    reload_errors: removed.reloadErrors,
     message: `Agent "${agentId}" removed from global config and all domains.`,
   });
 }
 
 function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const agentId = readStringParam(params, "agent_id", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Build updates from params
   const updates: Record<string, unknown> = {};
@@ -682,6 +703,8 @@ function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, act
   const persona = readStringParam(params, "persona");
   const title = readStringParam(params, "title");
   const model = readStringParam(params, "model");
+  const runtimeRef = readStringParam(params, "runtime_ref");
+  const runtime = readObjectParam(params, "runtime");
   const department = readStringParam(params, "department");
   const team = readStringParam(params, "team");
   const reportsTo = readStringParam(params, "reports_to");
@@ -690,6 +713,11 @@ function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, act
   if (persona !== null) updates.persona = persona;
   if (title !== null) updates.title = title;
   if (model !== null) updates.model = model;
+  if (runtimeRef !== null) updates.runtime_ref = runtimeRef;
+  if (runtime.present) {
+    if (runtime.error) return jsonResult({ ok: false, reason: runtime.error });
+    updates.runtime = runtime.value;
+  }
   if (department !== null) updates.department = department;
   if (team !== null) updates.team = team;
   if (reportsTo !== null) updates.reports_to = reportsTo;
@@ -714,14 +742,13 @@ function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, act
     }
   }
 
-  try {
-    updateAgentInGlobal(baseDir, agentId, updates);
-  } catch (err) {
-    return jsonResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });
+  const result = configService.updateGlobalAgentConfig(agentId, updates, actor);
+  if (!result.ok) {
+    return jsonResult({ ok: false, reason: result.error });
   }
 
   // Read back the updated config
-  const globalConfig = loadGlobalConfig(baseDir);
+  const globalConfig = configService.readGlobalConfig();
   const updatedDef = globalConfig.agents[agentId];
 
   return jsonResult({
@@ -736,6 +763,7 @@ function handleUpdateAgent(baseDir: string, params: Record<string, unknown>, act
 function handleSetBudget(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain");
   const configData = params.config_data as Record<string, unknown> | undefined;
+  const configService = getConfigService(baseDir);
 
   if (!configData || typeof configData !== "object") {
     return jsonResult({ ok: false, reason: "config_data (budget object) is required for set_budget" });
@@ -760,7 +788,7 @@ function handleSetBudget(baseDir: string, params: Record<string, unknown>, actor
 
   if (domain) {
     // Set budget on domain
-    const result = updateDomainConfig(baseDir, domain, { budget: configData }, actor);
+    const result = configService.saveDomainConfigChanges(domain, { budget: configData }, actor);
     if (!result.ok) {
       return jsonResult({ ok: false, reason: result.error });
     }
@@ -770,11 +798,13 @@ function handleSetBudget(baseDir: string, params: Record<string, unknown>, actor
       scope: "domain",
       domain,
       budget: configData,
+      warnings: result.warnings,
+      reload_errors: result.reloadErrors,
     });
   }
 
   // Set budget on global config (less common)
-  const result = updateGlobalConfig(baseDir, { budget: configData }, actor);
+  const result = configService.saveGlobalConfigChanges({ budget: configData }, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -788,6 +818,7 @@ function handleSetBudget(baseDir: string, params: Record<string, unknown>, actor
 
 function handleAddPolicy(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: policy is domain-level config
   const authResult = authorizeDomainChange(actor, domain, "add policy to");
@@ -805,7 +836,7 @@ function handleAddPolicy(baseDir: string, params: Record<string, unknown>, actor
     return jsonResult({ ok: false, reason: "Policy must have 'name' and 'type' fields in config_data" });
   }
 
-  const domainConfig = readDomainConfig(baseDir, domain);
+  const domainConfig = configService.readDomainConfig(domain);
   if (!domainConfig) {
     return jsonResult({ ok: false, reason: `Domain "${domain}" does not exist` });
   }
@@ -821,7 +852,7 @@ function handleAddPolicy(baseDir: string, params: Record<string, unknown>, actor
   }
 
   policies.push(configData);
-  const result = updateDomainConfig(baseDir, domain, { policies }, actor);
+  const result = configService.saveDomainConfigChanges(domain, { policies }, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -831,12 +862,15 @@ function handleAddPolicy(baseDir: string, params: Record<string, unknown>, actor
     action: "add_policy",
     domain,
     policy: configData,
+    warnings: result.warnings,
+    reload_errors: result.reloadErrors,
   });
 }
 
 function handleRemovePolicy(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
   const policyName = readStringParam(params, "policy_name", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: policy is domain-level config
   const authResult = authorizeDomainChange(actor, domain, "remove policy from");
@@ -844,7 +878,7 @@ function handleRemovePolicy(baseDir: string, params: Record<string, unknown>, ac
     return jsonResult({ ok: false, reason: authResult.reason });
   }
 
-  const domainConfig = readDomainConfig(baseDir, domain);
+  const domainConfig = configService.readDomainConfig(domain);
   if (!domainConfig) {
     return jsonResult({ ok: false, reason: `Domain "${domain}" does not exist` });
   }
@@ -859,7 +893,7 @@ function handleRemovePolicy(baseDir: string, params: Record<string, unknown>, ac
     return jsonResult({ ok: false, reason: `Policy "${policyName}" not found in domain "${domain}"` });
   }
 
-  const result = updateDomainConfig(baseDir, domain, { policies: filtered }, actor);
+  const result = configService.saveDomainConfigChanges(domain, { policies: filtered }, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -869,12 +903,15 @@ function handleRemovePolicy(baseDir: string, params: Record<string, unknown>, ac
     action: "remove_policy",
     domain,
     policy_name: policyName,
+    warnings: result.warnings,
+    reload_errors: result.reloadErrors,
   });
 }
 
 function handleUpdatePolicy(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
   const policyName = readStringParam(params, "policy_name", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: policy is domain-level config
   const authResult = authorizeDomainChange(actor, domain, "update policy in");
@@ -888,7 +925,7 @@ function handleUpdatePolicy(baseDir: string, params: Record<string, unknown>, ac
     return jsonResult({ ok: false, reason: "config_data (policy update fields) is required for update_policy" });
   }
 
-  const domainConfig = readDomainConfig(baseDir, domain);
+  const domainConfig = configService.readDomainConfig(domain);
   if (!domainConfig) {
     return jsonResult({ ok: false, reason: `Domain "${domain}" does not exist` });
   }
@@ -903,7 +940,7 @@ function handleUpdatePolicy(baseDir: string, params: Record<string, unknown>, ac
   policies[idx] = deepMerge(policies[idx]!, configData);
   policies[idx]!.name = policyName; // name is immutable
 
-  const result = updateDomainConfig(baseDir, domain, { policies }, actor);
+  const result = configService.saveDomainConfigChanges(domain, { policies }, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -914,11 +951,31 @@ function handleUpdatePolicy(baseDir: string, params: Record<string, unknown>, ac
     domain,
     policy_name: policyName,
     policy: policies[idx],
+    warnings: result.warnings,
+    reload_errors: result.reloadErrors,
   });
+}
+
+function readObjectParam(
+  params: Record<string, unknown>,
+  key: string,
+): { present: boolean; value?: Record<string, unknown> | null; error?: string } {
+  if (!Object.prototype.hasOwnProperty.call(params, key)) {
+    return { present: false };
+  }
+  const value = params[key];
+  if (value === null) {
+    return { present: true, value: null };
+  }
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return { present: true, value: value as Record<string, unknown> };
+  }
+  return { present: true, error: `"${key}" must be an object or null.` };
 }
 
 function handleSetSafety(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: safety is domain-level config
   const authResult = authorizeDomainChange(actor, domain, "set safety on");
@@ -950,7 +1007,7 @@ function handleSetSafety(baseDir: string, params: Record<string, unknown>, actor
     });
   }
 
-  const result = updateDomainConfig(baseDir, domain, { safety: configData }, actor);
+  const result = configService.saveDomainConfigChanges(domain, { safety: configData }, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -960,11 +1017,14 @@ function handleSetSafety(baseDir: string, params: Record<string, unknown>, actor
     action: "set_safety",
     domain,
     safety: configData,
+    warnings: result.warnings,
+    reload_errors: result.reloadErrors,
   });
 }
 
 function handleSetProfile(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: profile is domain-level config
   const authResult = authorizeDomainChange(actor, domain, "set profile on");
@@ -982,7 +1042,7 @@ function handleSetProfile(baseDir: string, params: Record<string, unknown>, acto
     });
   }
 
-  const result = updateDomainConfig(baseDir, domain, { operational_profile: profile }, actor);
+  const result = configService.saveDomainConfigChanges(domain, { operational_profile: profile }, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -992,11 +1052,14 @@ function handleSetProfile(baseDir: string, params: Record<string, unknown>, acto
     action: "set_profile",
     domain,
     operational_profile: profile,
+    warnings: result.warnings,
+    reload_errors: result.reloadErrors,
   });
 }
 
 function handleSetDirection(baseDir: string, params: Record<string, unknown>, actor: string, projectId: string | null): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: direction is domain-level config
   const authResult = authorizeDomainChange(actor, domain, "set direction on");
@@ -1012,7 +1075,7 @@ function handleSetDirection(baseDir: string, params: Record<string, unknown>, ac
   const team = readStringParam(params, "context_team") ?? readStringParam(params, "direction_team");
 
   // Read domain config to find or set direction path
-  const domainConfig = readDomainConfig(baseDir, domain);
+  const domainConfig = configService.readDomainConfig(domain);
   if (!domainConfig) {
     return jsonResult({ ok: false, reason: `Domain "${domain}" does not exist` });
   }
@@ -1050,7 +1113,10 @@ function handleSetDirection(baseDir: string, params: Record<string, unknown>, ac
 
   // Update domain config to reference the direction file if not already set (domain-wide only)
   if (!team && !domainConfig.direction) {
-    updateDomainConfig(baseDir, domain, { direction: directionFilename }, actor);
+    const result = configService.saveDomainConfigChanges(domain, { direction: directionFilename }, actor);
+    if (!result.ok) {
+      return jsonResult({ ok: false, reason: result.error });
+    }
   }
 
   return jsonResult({
@@ -1077,6 +1143,7 @@ function handleSetContextFile(
   projectId: string | null,
 ): ToolResult {
   const domain = readStringParam(params, "domain", { required: true })!;
+  const configService = getConfigService(baseDir);
 
   // Authorization: context files are domain-level config
   const authResult = authorizeDomainChange(actor, domain, `set ${fileBaseName.toLowerCase()} on`);
@@ -1091,7 +1158,7 @@ function handleSetContextFile(
   const team = readStringParam(params, "context_team");
 
   // Read domain config
-  const domainConfig = readDomainConfig(baseDir, domain);
+  const domainConfig = configService.readDomainConfig(domain);
   if (!domainConfig) {
     return jsonResult({ ok: false, reason: `Domain "${domain}" does not exist` });
   }
@@ -1145,6 +1212,7 @@ function handleSetSection(baseDir: string, params: Record<string, unknown>, acto
   const domain = readStringParam(params, "domain");
   const section = readStringParam(params, "section", { required: true })!;
   const configData = params.config_data;
+  const configService = getConfigService(baseDir);
 
   if (configData === undefined) {
     return jsonResult({ ok: false, reason: "config_data is required for set_section" });
@@ -1168,7 +1236,7 @@ function handleSetSection(baseDir: string, params: Record<string, unknown>, acto
   }
 
   if (domain) {
-    const result = setDomainSection(baseDir, domain, section, configData, actor);
+    const result = configService.saveDomainConfigSection(domain, section, configData, actor);
     if (!result.ok) {
       return jsonResult({ ok: false, reason: result.error });
     }
@@ -1178,11 +1246,13 @@ function handleSetSection(baseDir: string, params: Record<string, unknown>, acto
       scope: "domain",
       domain,
       section,
+      warnings: result.warnings,
+      reload_errors: result.reloadErrors,
     });
   }
 
   // Set on global config
-  const result = updateGlobalConfig(baseDir, { [section]: configData }, actor);
+  const result = configService.saveGlobalConfigSection(section, configData, actor);
   if (!result.ok) {
     return jsonResult({ ok: false, reason: result.error });
   }
@@ -1199,10 +1269,11 @@ function handleGetConfig(baseDir: string, params: Record<string, unknown>): Tool
   const domain = readStringParam(params, "domain");
   const agentId = readStringParam(params, "agent_id");
   const section = readStringParam(params, "section");
+  const configService = getConfigService(baseDir);
 
   switch (scope) {
     case "global": {
-      const config = loadGlobalConfig(baseDir);
+      const config = configService.readGlobalConfig();
       if (section) {
         return jsonResult({ ok: true, scope: "global", section, data: (config as unknown as Record<string, unknown>)[section] ?? null });
       }
@@ -1213,7 +1284,7 @@ function handleGetConfig(baseDir: string, params: Record<string, unknown>): Tool
       if (!domain) {
         return jsonResult({ ok: false, reason: "domain parameter is required when scope is 'domain'" });
       }
-      const domainConfig = readDomainConfig(baseDir, domain);
+      const domainConfig = configService.readDomainConfig(domain);
       if (!domainConfig) {
         return jsonResult({ ok: false, reason: `Domain "${domain}" does not exist` });
       }
@@ -1227,7 +1298,7 @@ function handleGetConfig(baseDir: string, params: Record<string, unknown>): Tool
       if (!agentId) {
         return jsonResult({ ok: false, reason: "agent_id parameter is required when scope is 'agent'" });
       }
-      const globalConfig = loadGlobalConfig(baseDir);
+      const globalConfig = configService.readGlobalConfig();
       const agentDef = globalConfig.agents[agentId];
       if (!agentDef) {
         return jsonResult({ ok: false, reason: `Agent "${agentId}" not found in global config` });
@@ -1247,7 +1318,7 @@ function handleGetConfig(baseDir: string, params: Record<string, unknown>): Tool
     }
 
     case "full": {
-      const globalConfig = loadGlobalConfig(baseDir);
+      const globalConfig = configService.readGlobalConfig();
       const domains = loadAllDomains(baseDir);
       return jsonResult({
         ok: true,
@@ -1257,7 +1328,9 @@ function handleGetConfig(baseDir: string, params: Record<string, unknown>): Tool
           domain: d.domain,
           agents: d.agents,
           enabled: d.enabled !== false,
-          orchestrator: d.orchestrator,
+          manager_agent_id: typeof (d.manager as Record<string, unknown> | undefined)?.agentId === "string"
+            ? (d.manager as Record<string, unknown>).agentId
+            : null,
           paths: d.paths,
           operational_profile: d.operational_profile,
         })),
@@ -1273,6 +1346,7 @@ function handleGetConfig(baseDir: string, params: Record<string, unknown>): Tool
 
 function handleValidate(baseDir: string, params: Record<string, unknown>): ToolResult {
   const target = readStringParam(params, "target") ?? "full";
+  const configService = getConfigService(baseDir);
 
   switch (target) {
     case "global": {
@@ -1291,7 +1365,7 @@ function handleValidate(baseDir: string, params: Record<string, unknown>): ToolR
       if (!domain) {
         return jsonResult({ ok: false, reason: "domain parameter is required when target is 'domain'" });
       }
-      const domainConfig = readDomainConfig(baseDir, domain);
+      const domainConfig = configService.readDomainConfig(domain);
       if (!domainConfig) {
         return jsonResult({ ok: false, reason: `Domain "${domain}" does not exist` });
       }
@@ -1323,49 +1397,49 @@ function handleValidate(baseDir: string, params: Record<string, unknown>): ToolR
 function handleDiff(baseDir: string, params: Record<string, unknown>): ToolResult {
   const domain = readStringParam(params, "domain");
   const configData = params.config_data as Record<string, unknown> | undefined;
+  const configService = getConfigService(baseDir);
 
   if (!configData || typeof configData !== "object") {
     return jsonResult({ ok: false, reason: "config_data (proposed changes object) is required for diff" });
   }
 
   if (domain) {
-    const preview = previewDomainChange(baseDir, domain, configData);
+    const planned = configService.previewDomainConfigChange(domain, configData);
+    if (!planned.ok) {
+      return jsonResult({ ok: false, reason: planned.error });
+    }
     return jsonResult({
       ok: true,
       scope: "domain",
       domain,
-      valid: preview.valid,
-      errors: preview.errors,
-      before: preview.before,
-      after: preview.after,
+      valid: planned.preview.valid,
+      errors: planned.preview.errors,
+      before: planned.preview.before,
+      after: planned.preview.after,
+      changed_paths: planned.preview.changedPaths,
+      changed_keys: planned.preview.changedKeys,
     });
   }
 
-  const preview = previewGlobalChange(baseDir, configData);
+  const planned = configService.previewGlobalConfigChange(configData);
   return jsonResult({
     ok: true,
     scope: "global",
-    valid: preview.valid,
-    errors: preview.errors,
-    before: preview.before,
-    after: preview.after,
+    valid: planned.valid,
+    errors: planned.errors,
+    before: planned.before,
+    after: planned.after,
+    changed_paths: planned.changedPaths,
+    changed_keys: planned.changedKeys,
   });
 }
 
 function handleReload(baseDir: string): ToolResult {
-  try {
-    const result = initializeAllDomains(baseDir);
-    return jsonResult({
-      ok: true,
-      action: "reload",
-      domains_loaded: result.domains,
-      errors: result.errors,
-      warnings: result.warnings,
-    });
-  } catch (err) {
-    return jsonResult({
-      ok: false,
-      reason: `Reload failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
-  }
+  const result = getConfigService(baseDir).reloadAllDomains();
+  return jsonResult({
+    ok: true,
+    action: "reload",
+    domains_loaded: result.domains,
+    errors: result.errors,
+  });
 }

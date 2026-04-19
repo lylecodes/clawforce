@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 import {
   ensureHistoryTable,
   recordChange,

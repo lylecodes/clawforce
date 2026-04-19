@@ -9,13 +9,13 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import type { ClawforceEvent } from "../types.js";
 import { claimPendingEvents, ingestEvent, markFailed, markHandled, markIgnored } from "./store.js";
 import { enqueue } from "../dispatch/queue.js";
-import { getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
+import { createTask, getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
 import { cascadeUnblock } from "../tasks/deps.js";
 import { gatherFailureAnalysis, recordReplanAttempt } from "../planning/replan.js";
 import { getAgentModel } from "../config/openclaw-reader.js";
@@ -25,12 +25,33 @@ import { getRegisteredAgentIds, getAgentConfig, getExtendedProjectConfig } from 
 import { recordMetric } from "../metrics.js";
 import { executeAction, type ActionResult } from "./actions.js";
 import { writeAuditEntry } from "../audit.js";
-import { getProposal } from "../approval/resolve.js";
+import {
+  getProposal,
+  markProposalExecutionApplied,
+  markProposalExecutionFailed,
+} from "../approval/resolve.js";
 import { getIntentByProposalForProject, resolveIntentForProject } from "../approval/intent-store.js";
 import { addPreApproval } from "../approval/pre-approved.js";
+import { getSimulatedActionByProposal, setSimulatedActionStatus } from "../execution/simulated-actions.js";
+import { replaySimulatedCommand } from "../execution/replay.js";
 import { advanceMeetingTurn, concludeMeeting } from "../channels/meeting.js";
 import { autoAssign } from "../assignment/engine.js";
 import { recordTrustDecision } from "../trust/tracker.js";
+import { getEntityIssue, transitionEntity } from "../entities/ops.js";
+import {
+  closeIssueRemediationTasks,
+  ensureIssueRemediationTask,
+  getResolvedLinkedIssueForTask,
+  maybeRerunIssueChecksForTask,
+} from "../entities/remediation.js";
+import { reconcileEntityReadiness } from "../entities/lifecycle.js";
+import { reconcileEntityStateSignals } from "../entities/state-signals.js";
+import type { WorkflowMutationProposalSnapshot, WorkflowMutationTaskSpec } from "../types.js";
+import {
+  buildWorkflowMutationImplementationDescription,
+  maybeNormalizeWorkflowMutationImplementationTask,
+} from "../workflow-mutation/implementation.js";
+import { getRecurringJobMetadata, markRecurringJobFinished } from "../scheduling/recurring-jobs.js";
 
 export type EventHandlerResult = {
   action: "handled" | "ignored" | "enqueued";
@@ -86,6 +107,11 @@ function initBuiltinHandlers(): void {
   registerBuiltinHandler("proposal_approved", handleProposalApproved);
   registerBuiltinHandler("proposal_created", handleProposalCreated);
   registerBuiltinHandler("proposal_rejected", handleProposalRejected);
+  registerBuiltinHandler("entity_issue_opened", handleEntityIssueChanged);
+  registerBuiltinHandler("entity_issue_updated", handleEntityIssueChanged);
+  registerBuiltinHandler("entity_issue_resolved", handleEntityIssueResolved);
+  registerBuiltinHandler("entity_created", handleEntityChanged);
+  registerBuiltinHandler("entity_updated", handleEntityChanged);
   registerBuiltinHandler("meeting_turn_completed", handleMeetingTurnCompleted);
   registerBuiltinHandler("replan_needed", handleReplanNeeded);
   registerBuiltinHandler("workflow_completed", handleWorkflowCompleted);
@@ -223,7 +249,37 @@ function handleTaskCompleted(event: ClawforceEvent, db: DatabaseSync): EventHand
     } catch (err) { safeLog("event.router.trustSignal", err); }
   }
 
+  try {
+    maybeRerunIssueChecksForTask(event.projectId, taskId, "DONE", "system:entity-remediation", db);
+  } catch (err) {
+    safeLog("event.router.entityIssueRerunDone", err);
+  }
+
   const task = getTask(event.projectId, taskId, db);
+  try {
+    const recurringJob = getRecurringJobMetadata(task);
+    if (recurringJob) {
+      markRecurringJobFinished(
+        event.projectId,
+        recurringJob.agentId,
+        recurringJob.jobName,
+        "completed",
+        Date.now(),
+        taskId,
+        db,
+      );
+    }
+  } catch (err) {
+    safeLog("event.router.recurringJobCompleted", err);
+  }
+  try {
+    const workflowMutationTaskId = maybeHandleWorkflowMutationTaskCompletion(event.projectId, task, db);
+    if (workflowMutationTaskId) {
+      return { action: "handled", taskId: workflowMutationTaskId };
+    }
+  } catch (err) {
+    safeLog("event.router.workflowMutationTaskCompletion", err);
+  }
   if (!task?.workflowId) return { action: "handled", taskId };
 
   // Try to advance the workflow
@@ -251,6 +307,281 @@ function handleTaskCompleted(event: ClawforceEvent, db: DatabaseSync): EventHand
   return { action: "handled", taskId };
 }
 
+function maybeHandleWorkflowMutationTaskCompletion(
+  projectId: string,
+  task: ReturnType<typeof getTask>,
+  db: DatabaseSync,
+): string | null {
+  if (!task || task.state !== "DONE" || task.origin !== "lead_proposal" || !task.originId) {
+    return null;
+  }
+
+  const proposal = getProposal(projectId, task.originId, db);
+  if (!proposal || proposal.origin !== "workflow_mutation") return null;
+
+  const metadata = asObject(task.metadata);
+  const stage = typeof metadata?.workflowMutationStage === "string"
+    ? metadata.workflowMutationStage
+    : "review";
+
+  if (stage === "implementation") {
+    return finalizeWorkflowMutationImplementationTask(projectId, task, metadata ?? {}, db);
+  }
+
+  const snapshot = parseWorkflowMutationSnapshot(proposal.approval_policy_snapshot);
+  if (!snapshot) return null;
+
+  const followUp = ensureWorkflowMutationImplementationTask(projectId, proposal.id, task, snapshot, db);
+  linkSourceTaskToWorkflowMutation(projectId, snapshot.sourceTaskId, {
+    status: "implementation_in_progress",
+    followUpTaskId: followUp.id,
+    reviewTaskId: task.id,
+    proposalId: proposal.id,
+    reasonCode: snapshot.reasonCode,
+    mutationCategory: snapshot.mutationCategory,
+  }, db);
+
+  return followUp.id;
+}
+
+function finalizeWorkflowMutationImplementationTask(
+  projectId: string,
+  task: NonNullable<ReturnType<typeof getTask>>,
+  metadata: Record<string, unknown>,
+  db: DatabaseSync,
+): string | null {
+  const sourceTaskId = typeof metadata.sourceTaskId === "string" ? metadata.sourceTaskId : undefined;
+  if (!sourceTaskId) return task.id;
+
+  const sourceTask = getTask(projectId, sourceTaskId, db);
+  if (!sourceTask) return task.id;
+
+  const proposal = task.originId
+    ? getProposal(projectId, task.originId, db)
+    : null;
+  const snapshot = proposal?.origin === "workflow_mutation"
+    ? parseWorkflowMutationSnapshot(proposal.approval_policy_snapshot)
+    : null;
+  if (task.originId) {
+    linkWorkflowMutationProposalIssues(
+      projectId,
+      task.originId,
+      getWorkflowMutationAffectedIssueIds(snapshot, metadata),
+      db,
+    );
+  }
+
+  clearSourceTaskWorkflowMutation(projectId, sourceTaskId, db);
+
+  const postCondition = asObject(metadata.workflowMutationPostCondition);
+  const postConditionVerified = postCondition?.verifiedAt != null;
+  if (postConditionVerified) {
+    return sourceTaskId;
+  }
+
+  try {
+    maybeRerunIssueChecksForTask(projectId, sourceTaskId, "DONE", "system:workflow-mutation", db);
+  } catch (err) {
+    safeLog("event.router.workflowMutationRerun", err);
+  }
+
+  const refreshedSourceTask = getTask(projectId, sourceTaskId, db);
+  const linkedIssueId = getSourceIssueId(refreshedSourceTask);
+  const issue = linkedIssueId ? getEntityIssue(projectId, linkedIssueId, db) : null;
+  if (refreshedSourceTask && refreshedSourceTask.state === "BLOCKED" && issue?.status === "open") {
+    const resumed = transitionTask({
+      projectId,
+      taskId: refreshedSourceTask.id,
+      toState: "ASSIGNED",
+      actor: "system:workflow-mutation",
+      reason: `Workflow mutation task ${task.id} completed; rerunning source remediation with the updated verification path.`,
+      verificationRequired: false,
+    }, db);
+    if (resumed.ok) {
+      return refreshedSourceTask.id;
+    }
+  }
+
+  return sourceTaskId;
+}
+
+function ensureWorkflowMutationImplementationTask(
+  projectId: string,
+  proposalId: string,
+  reviewTask: NonNullable<ReturnType<typeof getTask>>,
+  snapshot: WorkflowMutationProposalSnapshot,
+  db: DatabaseSync,
+) {
+  const existing = db.prepare(`
+    SELECT id
+    FROM tasks
+    WHERE project_id = ?
+      AND origin = 'lead_proposal'
+      AND origin_id = ?
+      AND json_extract(metadata, '$.workflowMutationStage') = 'implementation'
+      AND state NOT IN ('DONE', 'FAILED', 'CANCELLED')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(projectId, proposalId) as { id?: string } | undefined;
+  if (existing?.id) {
+    const task = getTask(projectId, existing.id, db);
+    if (task) return maybeNormalizeWorkflowMutationImplementationTask(projectId, task, db);
+  }
+
+  const reviewEvidence = getLatestTaskEvidenceContent(projectId, reviewTask.id, db);
+  const subject = snapshot.entityTitle ?? snapshot.sourceTaskTitle;
+  return createTask({
+    projectId,
+    title: `Implement workflow mutation for ${subject}: ${formatWorkflowMutationReason(snapshot.reasonCode)}`,
+    description: buildWorkflowMutationImplementationDescription({
+      subject,
+      sourceTaskId: snapshot.sourceTaskId,
+      sourceTaskTitle: snapshot.sourceTaskTitle,
+      reviewTaskId: reviewTask.id,
+      reviewTaskTitle: reviewTask.title,
+      reviewDescription: reviewTask.description,
+      reviewEvidence,
+      reasonCode: snapshot.reasonCode,
+      mutationCategory: snapshot.mutationCategory,
+    }),
+    priority: "P1",
+    assignedTo: snapshot.stewardAgentId,
+    createdBy: "system:workflow-mutation",
+    tags: [
+      "workflow-mutation",
+      "workflow-mutation-implementation",
+      `review:${snapshot.reasonCode}`,
+      `category:${snapshot.mutationCategory}`,
+    ],
+    kind: "infra",
+    origin: "lead_proposal",
+    originId: proposalId,
+    entityType: snapshot.entityType ?? undefined,
+    entityId: snapshot.entityId ?? undefined,
+    metadata: {
+      workflowMutationStage: "implementation",
+      sourceTaskId: snapshot.sourceTaskId,
+      sourceTaskTitle: snapshot.sourceTaskTitle,
+      sourceIssueId: snapshot.sourceIssueId ?? null,
+      reviewTaskId: reviewTask.id,
+      reasonCode: snapshot.reasonCode,
+      mutationCategory: snapshot.mutationCategory,
+      failureCount: snapshot.failureCount,
+    },
+  }, db);
+}
+
+function formatWorkflowMutationReason(reasonCode: string): string {
+  return reasonCode
+    .split("_")
+    .filter(Boolean)
+    .join(" ");
+}
+
+function parseWorkflowMutationSnapshot(
+  raw: string | null | undefined,
+): WorkflowMutationProposalSnapshot | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as WorkflowMutationProposalSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+function getLatestTaskEvidenceContent(
+  projectId: string,
+  taskId: string,
+  db: DatabaseSync,
+): string | undefined {
+  const evidence = getTaskEvidence(projectId, taskId, db);
+  return evidence
+    .filter((item) => item.type === "output")
+    .at(-1)?.content?.trim()
+    || evidence.at(-1)?.content?.trim();
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    : [];
+}
+
+function getWorkflowMutationAffectedIssueIds(
+  snapshot: WorkflowMutationProposalSnapshot | null | undefined,
+  metadata?: Record<string, unknown> | null,
+): string[] {
+  const stewardTask = asObject(snapshot?.stewardTask);
+  const stewardMetadata = asObject(stewardTask?.metadata);
+  return Array.from(new Set([
+    typeof snapshot?.sourceIssueId === "string" ? snapshot.sourceIssueId : null,
+    typeof metadata?.sourceIssueId === "string" ? metadata.sourceIssueId : null,
+    ...asStringArray(snapshot?.affectedIssueIds),
+    ...asStringArray(stewardMetadata?.affectedIssueIds),
+    ...asStringArray(metadata?.affectedIssueIds),
+  ].filter((issueId): issueId is string => Boolean(issueId))));
+}
+
+function getSourceIssueId(task: ReturnType<typeof getTask>): string | undefined {
+  const metadata = asObject(task?.metadata);
+  const issueMeta = asObject(metadata?.entityIssue);
+  return typeof issueMeta?.issueId === "string" ? issueMeta.issueId : undefined;
+}
+
+function linkSourceTaskToWorkflowMutation(
+  projectId: string,
+  sourceTaskId: string,
+  workflowMutation: Record<string, unknown>,
+  db: DatabaseSync,
+): void {
+  const task = getTask(projectId, sourceTaskId, db);
+  if (!task) return;
+  const metadata = asObject(task.metadata) ?? {};
+  metadata.workflowMutation = workflowMutation;
+  db.prepare("UPDATE tasks SET metadata = ?, updated_at = ? WHERE project_id = ? AND id = ?")
+    .run(JSON.stringify(metadata), Date.now(), projectId, sourceTaskId);
+}
+
+function clearSourceTaskWorkflowMutation(
+  projectId: string,
+  sourceTaskId: string,
+  db: DatabaseSync,
+): void {
+  const task = getTask(projectId, sourceTaskId, db);
+  if (!task) return;
+  const metadata = asObject(task.metadata) ?? {};
+  if (!("workflowMutation" in metadata)) return;
+  delete metadata.workflowMutation;
+  db.prepare("UPDATE tasks SET metadata = ?, updated_at = ? WHERE project_id = ? AND id = ?")
+    .run(JSON.stringify(metadata), Date.now(), projectId, sourceTaskId);
+}
+
+function linkWorkflowMutationProposalIssues(
+  projectId: string,
+  proposalId: string,
+  issueIds: string[],
+  db: DatabaseSync,
+): void {
+  if (issueIds.length === 0) return;
+  const now = Date.now();
+  const stmt = db.prepare(`
+    UPDATE entity_issues
+    SET proposal_id = ?,
+        last_seen_at = ?
+    WHERE project_id = ?
+      AND id = ?
+  `);
+  for (const issueId of issueIds) {
+    stmt.run(proposalId, now, projectId, issueId);
+  }
+}
+
 function handleTaskFailed(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
   const taskId = event.payload.taskId as string | undefined;
 
@@ -258,6 +589,18 @@ function handleTaskFailed(event: ClawforceEvent, db: DatabaseSync): EventHandler
   if (taskId) {
     try {
       const failedTask = getTask(event.projectId, taskId, db);
+      const recurringJob = getRecurringJobMetadata(failedTask);
+      if (recurringJob) {
+        markRecurringJobFinished(
+          event.projectId,
+          recurringJob.agentId,
+          recurringJob.jobName,
+          "failed",
+          Date.now(),
+          taskId,
+          db,
+        );
+      }
       if (failedTask?.assignedTo) {
         recordTrustDecision({
           projectId: event.projectId,
@@ -407,13 +750,24 @@ function handleDispatchFailed(event: ClawforceEvent, db: DatabaseSync): EventHan
   const taskId = event.payload.taskId as string | undefined;
   if (!taskId) return { action: "ignored" };
 
+  const task = getTask(event.projectId, taskId, db);
+  if (task && shouldFinalizeRecurringDispatchFailure(task, event.payload)) {
+    return finalizeRecurringDispatchFailure(
+      event.projectId,
+      task,
+      describeDispatchFailure(event.payload),
+      db,
+    );
+  }
+
   // Do NOT re-enqueue when failure is due to budget exceeded or rate limiting.
   // Re-enqueueing budget-blocked tasks creates a tight retry loop (877+ failed
   // entries and 1,656 dispatch_failed events). These tasks should wait for the
   // next budget window reset rather than spinning.
   const budgetExceeded = event.payload.budgetExceeded === true;
   const rateLimited = event.payload.rateLimited === true;
-  if (budgetExceeded || rateLimited) {
+  const nonRetryable = event.payload.nonRetryable === true;
+  if (budgetExceeded || rateLimited || nonRetryable) {
     return { action: "handled", taskId };
   }
 
@@ -437,36 +791,28 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   const task = getTask(event.projectId, taskId, db);
   if (!task || task.state !== "REVIEW") return { action: "handled", taskId };
 
-  // Look for a verifier: config-driven first, then regex fallback
+  try {
+    maybeRerunIssueChecksForTask(event.projectId, taskId, "REVIEW", "system:entity-remediation", db);
+  } catch (err) {
+    safeLog("event.router.entityIssueRerunReview", err);
+  }
+
+  // Auto-review is opt-in. Only dispatch a verifier when one is explicitly configured.
   const extCfg = getExtendedProjectConfig(event.projectId);
   let verifierAgentId: string | null = null;
   let verifierProjectDir: string | undefined;
 
-  // 1. Try explicit review.verifierAgent config
+  // Try explicit review.verifierAgent config
   if (extCfg?.review?.verifierAgent) {
-    const entry = getAgentConfig(extCfg.review.verifierAgent);
-    if (entry && entry.projectId === event.projectId) {
+    const entry = getAgentConfig(extCfg.review.verifierAgent, event.projectId);
+    if (entry) {
       verifierAgentId = extCfg.review.verifierAgent;
       verifierProjectDir = entry.projectDir;
     }
   }
 
-  // 2. Fallback: regex pattern matching (backward compat)
   if (!verifierAgentId) {
-    const agentIds = getRegisteredAgentIds();
-    for (const agentId of agentIds) {
-      const entry = getAgentConfig(agentId);
-      if (!entry || entry.projectId !== event.projectId) continue;
-      if (/verifier|reviewer/i.test(agentId)) {
-        verifierAgentId = agentId;
-        verifierProjectDir = entry.projectDir;
-        break;
-      }
-    }
-  }
-
-  if (!verifierAgentId) {
-    // No verifier configured — orchestrator handles it manually
+    // No verifier configured — the manager handles it manually.
     return { action: "ignored" };
   }
 
@@ -489,6 +835,7 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
     // skipStateCheck=true: REVIEW tasks are normally blocked from dispatch,
     // but verification dispatches are the intended consumer of REVIEW tasks.
     const result = enqueue(event.projectId, taskId, {
+      agentId: verifierAgentId,
       prompt: verifyPrompt,
       projectDir: verifierProjectDir ?? process.cwd(),
     }, undefined, db, undefined, true);
@@ -503,20 +850,183 @@ function handleTaskReviewReady(event: ClawforceEvent, db: DatabaseSync): EventHa
   return { action: "handled", taskId };
 }
 
+function handleEntityIssueChanged(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const issueId = event.payload.issueId as string | undefined;
+  if (!issueId) return { action: "ignored" };
+
+  const sourceTaskId = shouldDeferImmediateIssueReopen(event, db);
+  let handledTaskId: string | undefined;
+
+  try {
+    if (!sourceTaskId) {
+      const task = ensureIssueRemediationTask(event.projectId, issueId, "system:entity-remediation", db);
+      if (task) {
+        handledTaskId = task.id;
+      }
+    } else {
+      handledTaskId = sourceTaskId;
+    }
+  } catch (err) {
+    safeLog("event.router.entityIssueChanged", err);
+  }
+
+  try {
+    const entityId = event.payload.entityId as string | undefined;
+    if (entityId) {
+      reconcileEntityReadiness(event.projectId, entityId, "system:entity-readiness", db);
+    }
+  } catch (err) {
+    safeLog("event.router.entityIssueChanged.readiness", err);
+  }
+
+  return { action: "handled", taskId: handledTaskId };
+}
+
+function shouldDeferImmediateIssueReopen(
+  event: ClawforceEvent,
+  db: DatabaseSync,
+): string | null {
+  const issueId = typeof event.payload.issueId === "string" ? event.payload.issueId : null;
+  const sourceType = typeof event.payload.sourceType === "string" ? event.payload.sourceType : null;
+  const sourceId = typeof event.payload.sourceId === "string" ? event.payload.sourceId : null;
+  if (!issueId || sourceType !== "task" || !sourceId) {
+    return null;
+  }
+
+  const task = getTask(event.projectId, sourceId, db);
+  if (!task || task.state !== "DONE" || task.origin !== "reactive" || task.originId !== issueId) {
+    return null;
+  }
+
+  return task.id;
+}
+
+function handleEntityIssueResolved(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const issueId = event.payload.issueId as string | undefined;
+  if (!issueId) return { action: "ignored" };
+
+  try {
+    const closed = closeIssueRemediationTasks(event.projectId, issueId, "system:entity-remediation", db);
+    if (closed.length > 0) {
+      return { action: "handled", taskId: closed[0]?.id };
+    }
+  } catch (err) {
+    safeLog("event.router.entityIssueResolved", err);
+  }
+
+  try {
+    const entityId = event.payload.entityId as string | undefined;
+    if (entityId) {
+      reconcileEntityReadiness(event.projectId, entityId, "system:entity-readiness", db);
+    }
+  } catch (err) {
+    safeLog("event.router.entityIssueResolved.readiness", err);
+  }
+
+  return { action: "handled" };
+}
+
+function handleEntityChanged(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
+  const entityId = event.payload.entityId as string | undefined;
+  if (!entityId) return { action: "ignored" };
+
+  try {
+    reconcileEntityStateSignals(event.projectId, entityId, "system:entity-state-signals", db);
+  } catch (err) {
+    safeLog("event.router.entityChanged.stateSignals", err);
+  }
+
+  try {
+    reconcileEntityReadiness(event.projectId, entityId, "system:entity-readiness", db);
+  } catch (err) {
+    safeLog("event.router.entityChanged.readiness", err);
+  }
+
+  return { action: "handled" };
+}
+
 function handleDispatchDeadLetter(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
   const taskId = event.payload.taskId as string | undefined;
   if (!taskId) return { action: "ignored" };
 
-  // Mark task metadata with dead letter flag
   const task = getTask(event.projectId, taskId, db);
   if (task) {
     const metadata = task.metadata ?? {};
+    metadata.dispatch_dead_letter = true;
+    metadata.dispatch_dead_letter_at = Date.now();
+    // Preserve legacy keys for existing readers while the feed/query surfaces
+    // normalize onto the plain metadata shape.
     metadata["$.dispatch_dead_letter"] = true;
-    metadata["$.dispatch_dead_letter_at"] = Date.now();
+    metadata["$.dispatch_dead_letter_at"] = metadata.dispatch_dead_letter_at;
     db.prepare("UPDATE tasks SET metadata = ? WHERE id = ?").run(
       JSON.stringify(metadata),
       taskId,
     );
+
+    const recurringJob = getRecurringJobMetadata(task);
+    if (recurringJob) {
+      try {
+        markRecurringJobFinished(
+          event.projectId,
+          recurringJob.agentId,
+          recurringJob.jobName,
+          "failed",
+          Date.now(),
+          taskId,
+          db,
+        );
+      } catch (err) {
+        safeLog("event.router.recurringJobDeadLetter", err);
+      }
+
+      if (task.state !== "DONE" && task.state !== "FAILED" && task.state !== "CANCELLED") {
+        try {
+          transitionTask({
+            projectId: event.projectId,
+            taskId,
+            toState: "FAILED",
+            actor: "system:router",
+            reason: describeDispatchDeadLetterFailure(event.payload),
+            verificationRequired: false,
+          }, db);
+        } catch (err) {
+          safeLog("event.router.deadLetterFailRecurring", err);
+        }
+      }
+    } else {
+
+      const resolvedIssue = getResolvedLinkedIssueForTask(event.projectId, {
+        ...task,
+        metadata,
+      }, db);
+      if (resolvedIssue && task.state !== "DONE" && task.state !== "FAILED" && task.state !== "CANCELLED") {
+        try {
+          transitionTask({
+            projectId: event.projectId,
+            taskId,
+            toState: "CANCELLED",
+            actor: "system:router",
+            reason: "Linked entity issue already resolved; cancelling dead-lettered remediation task",
+            verificationRequired: false,
+          }, db);
+        } catch (err) {
+          safeLog("event.router.deadLetterCancelResolved", err);
+        }
+      } else if (task.state === "ASSIGNED" || task.state === "IN_PROGRESS") {
+        try {
+          transitionTask({
+            projectId: event.projectId,
+            taskId,
+            toState: "BLOCKED",
+            actor: "system:router",
+            reason: "Dispatch retries exhausted; operator review required",
+            verificationRequired: false,
+          }, db);
+        } catch (err) {
+          safeLog("event.router.deadLetterBlock", err);
+        }
+      }
+    }
   }
 
   try {
@@ -533,12 +1043,85 @@ function handleDispatchDeadLetter(event: ClawforceEvent, db: DatabaseSync): Even
   return { action: "handled", taskId };
 }
 
+function shouldFinalizeRecurringDispatchFailure(
+  task: ReturnType<typeof getTask>,
+  payload: Record<string, unknown>,
+): task is NonNullable<ReturnType<typeof getTask>> {
+  if (!task || !getRecurringJobMetadata(task)) return false;
+  if (payload.nonRetryable === true) return true;
+  if (payload.budgetExceeded === true) return true;
+  if (payload.rateLimited === true) return true;
+  if (payload.riskGated === true) return true;
+  if (payload.phaseGated === true) return true;
+  if (typeof payload.safetyLimit === "string" && payload.safetyLimit.length > 0) return true;
+  const error = typeof payload.error === "string" ? payload.error : "";
+  return error.startsWith("Task not found:")
+    || error.startsWith("Task in non-dispatchable state:");
+}
+
+function finalizeRecurringDispatchFailure(
+  projectId: string,
+  task: NonNullable<ReturnType<typeof getTask>>,
+  reason: string,
+  db: DatabaseSync,
+): EventHandlerResult {
+  const recurringJob = getRecurringJobMetadata(task);
+  if (!recurringJob) return { action: "handled", taskId: task.id };
+
+  try {
+    markRecurringJobFinished(
+      projectId,
+      recurringJob.agentId,
+      recurringJob.jobName,
+      "failed",
+      Date.now(),
+      task.id,
+      db,
+    );
+  } catch (err) {
+    safeLog("event.router.recurringJobDispatchFailed", err);
+  }
+
+  if (task.state !== "DONE" && task.state !== "FAILED" && task.state !== "CANCELLED") {
+    try {
+      transitionTask({
+        projectId,
+        taskId: task.id,
+        toState: "FAILED",
+        actor: "system:router",
+        reason,
+        verificationRequired: false,
+      }, db);
+    } catch (err) {
+      safeLog("event.router.recurringJobDispatchFailedTransition", err);
+    }
+  }
+
+  return { action: "handled", taskId: task.id };
+}
+
+function describeDispatchFailure(payload: Record<string, unknown>): string {
+  const error = typeof payload.error === "string" && payload.error.trim()
+    ? payload.error.trim()
+    : "Dispatch failed before the recurring workflow run could start";
+  return `Recurring workflow dispatch failed: ${error}`;
+}
+
+function describeDispatchDeadLetterFailure(payload: Record<string, unknown>): string {
+  const lastError = typeof payload.lastError === "string" && payload.lastError.trim()
+    ? payload.lastError.trim()
+    : "Dispatch retries exhausted before the recurring workflow run could start";
+  return `Recurring workflow dispatch exhausted retries: ${lastError}`;
+}
+
 function handleProposalApproved(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
   const proposalId = event.payload.proposalId as string | undefined;
   if (!proposalId) return { action: "ignored" };
 
-  const proposal = getProposal(event.projectId, proposalId);
+  const proposal = getProposal(event.projectId, proposalId, db);
   if (!proposal || proposal.status !== "approved") return { action: "handled" };
+  if (proposal.execution_status === "applied") return { action: "handled" };
+  const linkedSimulatedAction = getSimulatedActionByProposal(event.projectId, proposalId, db);
 
   // Record trust decision for the category
   try {
@@ -562,6 +1145,9 @@ function handleProposalApproved(event: ClawforceEvent, db: DatabaseSync): EventH
     if (intent && intent.taskId) {
       // Resolve the intent
       resolveIntentForProject(event.projectId, intent.id, "approved", db);
+      if (linkedSimulatedAction) {
+        setSimulatedActionStatus(event.projectId, linkedSimulatedAction.id, "approved_for_live", db);
+      }
 
       // Add pre-approval so the re-dispatched agent can proceed past the gate
       addPreApproval({
@@ -591,8 +1177,61 @@ function handleProposalApproved(event: ClawforceEvent, db: DatabaseSync): EventH
   if (proposal.approval_policy_snapshot) {
     try {
       const snapshot = JSON.parse(proposal.approval_policy_snapshot) as Record<string, unknown>;
+      const replayType = snapshot.replayType as string | undefined;
+      const simulatedActionId = (snapshot.simulatedActionId as string | undefined) ?? linkedSimulatedAction?.id;
       const taskId = snapshot.taskId as string | undefined;
       const toState = snapshot.toState as string | undefined;
+      const entityId = snapshot.entityId as string | undefined;
+      const toHealth = snapshot.toHealth as string | undefined;
+
+      if (replayType === "command" && simulatedActionId) {
+        const replay = replaySimulatedCommand(event.projectId, simulatedActionId, db);
+        if (!replay.ok) {
+          markProposalExecutionFailed(event.projectId, proposalId, replay.error ?? "command replay failed", db);
+          throw new Error(replay.error ?? "command replay failed");
+        }
+        markProposalExecutionApplied(event.projectId, proposalId, {
+          taskId: replay.simulatedAction.taskId ?? null,
+        }, db);
+        try {
+          emitDiagnosticEvent({
+            type: "proposal.action_executed",
+            projectId: event.projectId,
+            proposalId,
+            simulatedActionId,
+            success: replay.ok,
+            replayMode: "command",
+            error: replay.error,
+          });
+        } catch (e) { safeLog("event.router.proposalDiag", e); }
+        return { action: "handled", taskId: replay.simulatedAction.taskId };
+      }
+
+      if (replayType === "workflow_mutation") {
+        const snapshot = JSON.parse(proposal.approval_policy_snapshot) as WorkflowMutationProposalSnapshot;
+        linkWorkflowMutationProposalIssues(
+          event.projectId,
+          proposalId,
+          getWorkflowMutationAffectedIssueIds(snapshot),
+          db,
+        );
+        const stewardTask = ensureWorkflowMutationTask(event.projectId, proposalId, proposal.proposed_by, snapshot, db);
+        pauseSourceTaskForWorkflowMutation(event.projectId, proposalId, proposal.proposed_by, snapshot, stewardTask.id, db);
+        markProposalExecutionApplied(event.projectId, proposalId, { taskId: stewardTask.id }, db);
+
+        try {
+          emitDiagnosticEvent({
+            type: "proposal.action_executed",
+            projectId: event.projectId,
+            proposalId,
+            taskId: stewardTask.id,
+            success: true,
+            replayMode: "workflow_mutation",
+          });
+        } catch (e) { safeLog("event.router.proposalDiag", e); }
+
+        return { action: "handled", taskId: stewardTask.id };
+      }
 
       if (taskId && toState) {
         const result = transitionTask({
@@ -603,6 +1242,11 @@ function handleProposalApproved(event: ClawforceEvent, db: DatabaseSync): EventH
           reason: `Approved via proposal ${proposalId}`,
           verificationRequired: false,
         }, db);
+        if (!result.ok) {
+          markProposalExecutionFailed(event.projectId, proposalId, result.reason ?? `task transition to ${toState} failed`, db);
+          throw new Error(result.reason ?? `task transition to ${toState} failed`);
+        }
+        markProposalExecutionApplied(event.projectId, proposalId, { taskId }, db);
 
         try {
           emitDiagnosticEvent({
@@ -617,12 +1261,126 @@ function handleProposalApproved(event: ClawforceEvent, db: DatabaseSync): EventH
 
         return { action: "handled", taskId };
       }
+
+      if (entityId && (toState || toHealth)) {
+        const entity = transitionEntity({
+          projectId: event.projectId,
+          entityId,
+          toState,
+          toHealth,
+          actor: (snapshot.actor as string | undefined) ?? proposal.proposed_by,
+          reason: (snapshot.reason as string | undefined) ?? `Approved via proposal ${proposalId}`,
+          metadata: (snapshot.metadata as Record<string, unknown> | undefined),
+        }, db);
+        markProposalExecutionApplied(event.projectId, proposalId, {}, db);
+
+        try {
+          emitDiagnosticEvent({
+            type: "proposal.action_executed",
+            projectId: event.projectId,
+            proposalId,
+            entityId,
+            toState: entity.state,
+            success: true,
+          });
+        } catch (e) { safeLog("event.router.proposalDiag", e); }
+
+        return { action: "handled" };
+      }
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        markProposalExecutionFailed(event.projectId, proposalId, message, db);
+      } catch (markErr) {
+        safeLog("event.router.proposalExecutionFailed", markErr);
+      }
       safeLog("event.router.proposalAction", err);
+      throw err;
     }
   }
 
   return { action: "handled" };
+}
+
+function ensureWorkflowMutationTask(
+  projectId: string,
+  proposalId: string,
+  proposedBy: string,
+  snapshot: WorkflowMutationProposalSnapshot,
+  db: DatabaseSync,
+) {
+  const existing = db.prepare(`
+    SELECT id
+    FROM tasks
+    WHERE project_id = ?
+      AND origin = 'lead_proposal'
+      AND origin_id = ?
+      AND state NOT IN ('DONE', 'FAILED', 'CANCELLED')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(projectId, proposalId) as { id?: string } | undefined;
+  if (existing?.id) {
+    const task = getTask(projectId, existing.id, db);
+    if (task) return task;
+  }
+
+  const taskSpec = snapshot.stewardTask as WorkflowMutationTaskSpec;
+  return createTask({
+    projectId,
+    title: taskSpec.title,
+    description: taskSpec.description,
+    priority: taskSpec.priority,
+    assignedTo: snapshot.stewardAgentId,
+    createdBy: proposedBy,
+    tags: taskSpec.tags,
+    kind: taskSpec.kind,
+    origin: "lead_proposal",
+    originId: proposalId,
+    metadata: taskSpec.metadata,
+    entityType: snapshot.entityType ?? undefined,
+    entityId: snapshot.entityId ?? undefined,
+  }, db);
+}
+
+function clearIssueWorkflowMutationProposalLinks(
+  projectId: string,
+  issueIds: string[],
+  db: DatabaseSync,
+): void {
+  if (issueIds.length === 0) return;
+  const now = Date.now();
+  const stmt = db.prepare(`
+    UPDATE entity_issues
+    SET proposal_id = NULL,
+        last_seen_at = ?
+    WHERE project_id = ?
+      AND id = ?
+  `);
+  for (const issueId of issueIds) {
+    stmt.run(now, projectId, issueId);
+  }
+}
+
+function pauseSourceTaskForWorkflowMutation(
+  projectId: string,
+  proposalId: string,
+  actor: string,
+  snapshot: WorkflowMutationProposalSnapshot,
+  stewardTaskId: string,
+  db: DatabaseSync,
+): void {
+  const sourceTask = getTask(projectId, snapshot.sourceTaskId, db);
+  if (!sourceTask) return;
+  if (!["OPEN", "ASSIGNED", "IN_PROGRESS", "REVIEW"].includes(sourceTask.state)) return;
+
+  transitionTask({
+    projectId,
+    taskId: sourceTask.id,
+    toState: "BLOCKED",
+    actor,
+    reason: `Workflow mutation approved via proposal ${proposalId}; follow task ${stewardTaskId} is now responsible for restructuring the loop.`,
+    verificationRequired: false,
+  }, db);
 }
 
 function handleProposalCreated(_event: ClawforceEvent, _db: DatabaseSync): EventHandlerResult {
@@ -633,6 +1391,11 @@ function handleProposalCreated(_event: ClawforceEvent, _db: DatabaseSync): Event
 function handleProposalRejected(event: ClawforceEvent, db: DatabaseSync): EventHandlerResult {
   const proposalId = event.payload.proposalId as string | undefined;
   if (!proposalId) return { action: "ignored" };
+  const linkedSimulatedAction = getSimulatedActionByProposal(event.projectId, proposalId, db);
+  const proposal = getProposal(event.projectId, proposalId, db);
+  const workflowMutationSnapshot = proposal?.origin === "workflow_mutation"
+    ? parseWorkflowMutationSnapshot(proposal.approval_policy_snapshot)
+    : null;
 
   // Record trust decision + resolve any linked tool call intent
   try {
@@ -651,6 +1414,23 @@ function handleProposalRejected(event: ClawforceEvent, db: DatabaseSync): EventH
     }
   } catch (err) {
     safeLog("event.router.rejectIntent", err);
+  }
+
+  if (linkedSimulatedAction) {
+    try {
+      setSimulatedActionStatus(event.projectId, linkedSimulatedAction.id, "discarded", db);
+    } catch (err) {
+      safeLog("event.router.simulatedActionReject", err);
+    }
+  }
+
+  const workflowMutationIssueIds = getWorkflowMutationAffectedIssueIds(workflowMutationSnapshot);
+  if (workflowMutationIssueIds.length > 0) {
+    try {
+      clearIssueWorkflowMutationProposalLinks(event.projectId, workflowMutationIssueIds, db);
+    } catch (err) {
+      safeLog("event.router.clearWorkflowMutationIssueLink", err);
+    }
   }
 
   return { action: "handled" };

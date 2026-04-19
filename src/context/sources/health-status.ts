@@ -4,7 +4,7 @@
  * Renders SLO compliance, recent alerts, and anomalies as markdown.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../sqlite-driver.js";
 import { getDb } from "../../db.js";
 import { computeHealthTier } from "../../monitoring/health-tier.js";
 

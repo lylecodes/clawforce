@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -25,7 +25,7 @@ const {
   listPendingProposals,
   getProposal,
 } = await import("../../src/approval/resolve.js");
-const { registerEnforcementConfig, resetEnforcementConfigForTest } = await import("../../src/project.js");
+const { registerWorkforceConfig, resetEnforcementConfigForTest } = await import("../../src/project.js");
 
 describe("approval flow", () => {
   let db: DatabaseSync;
@@ -37,7 +37,7 @@ describe("approval flow", () => {
     resetEnforcementConfigForTest();
 
     // Register a project with approval policy
-    registerEnforcementConfig(PROJECT, {
+    registerWorkforceConfig(PROJECT, {
       name: "test",
       approval: {
         policy: "You may auto-approve routine maintenance. Everything else needs approval.",
@@ -45,9 +45,9 @@ describe("approval flow", () => {
       agents: {
         leon: {
           extends: "manager",
-          context_in: [{ source: "instructions" }],
-          required_outputs: [{ tool: "clawforce_task", action: ["propose"], min_calls: 1 }],
-          on_failure: { action: "alert" },
+          briefing: [{ source: "instructions" }],
+          expectations: [{ tool: "clawforce_task", action: ["propose"], min_calls: 1 }],
+          performance_policy: { action: "alert" },
         },
       },
     });

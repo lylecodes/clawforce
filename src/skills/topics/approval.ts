@@ -13,7 +13,7 @@ export function generate(): string {
 
     "## Approval Policy",
     "",
-    "The approval policy is defined at the project level in `project.yaml`:",
+    "The approval policy is defined in the shared `config.yaml`:",
     "",
     "```yaml",
     "approval:",

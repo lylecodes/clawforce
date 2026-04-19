@@ -7,7 +7,7 @@
 
 import crypto from "node:crypto";
 import { deflateSync, inflateSync } from "node:zlib";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { getCostSummary } from "../cost.js";
 import { safeLog } from "../diagnostics.js";
@@ -47,14 +47,120 @@ export type SessionArchive = SessionArchiveParams & {
   createdAt: number;
 };
 
+export type SessionArchiveDiagnostics = {
+  complianceObserved?: boolean;
+  compliant?: boolean;
+  exitCode?: number | null;
+  signal?: string | null;
+  terminatedReason?: string;
+  timeoutMs?: number;
+  logicalCompletion?: boolean;
+  summarySynthetic?: boolean;
+  observedWork?: boolean;
+  resultSource?: string;
+  outputFilePresent?: boolean;
+  outputChars?: number;
+  outputLooksLikeLaunchTranscript?: boolean;
+  stdoutChars?: number;
+  stdoutLooksLikeLaunchTranscript?: boolean;
+  stderrChars?: number;
+  stderrLooksLikeLaunchTranscript?: boolean;
+  promptChars?: number;
+  systemContextChars?: number;
+  finalPromptChars?: number;
+  mcpBridgeDisabled?: boolean;
+  configOverrideCount?: number;
+  binary?: string;
+  cwd?: string | null;
+  stdoutPreview?: string;
+  stderrPreview?: string;
+};
+
 export type SessionArchiveFilters = {
   agentId?: string;
+  taskId?: string;
   since?: number;
   until?: number;
   outcome?: string;
   limit?: number;
   offset?: number;
 };
+
+function asOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function buildPreview(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length > 160 ? `${normalized.slice(0, 159)}…` : normalized;
+}
+
+export function extractSessionArchiveDiagnostics(archive: Pick<SessionArchive, "complianceDetail">): SessionArchiveDiagnostics | null {
+  if (!archive.complianceDetail) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(archive.complianceDetail);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object") return null;
+  const detail = parsed as Record<string, unknown>;
+  const stdout = asOptionalString(detail.stdout);
+  const stderr = asOptionalString(detail.stderr);
+  const stdoutPreview = buildPreview(stdout);
+  const stderrPreview = buildPreview(stderr);
+
+  const diagnostics: SessionArchiveDiagnostics = {
+    complianceObserved: asOptionalBoolean(detail.complianceObserved),
+    compliant: asOptionalBoolean(detail.compliant),
+    exitCode: detail.exitCode === null
+      ? null
+      : asOptionalNumber(detail.exitCode),
+    signal: detail.signal === null
+      ? null
+      : asOptionalString(detail.signal),
+    terminatedReason: asOptionalString(detail.terminatedReason),
+    timeoutMs: asOptionalNumber(detail.timeoutMs),
+    logicalCompletion: asOptionalBoolean(detail.logicalCompletion),
+    summarySynthetic: asOptionalBoolean(detail.summarySynthetic),
+    observedWork: asOptionalBoolean(detail.observedWork),
+    resultSource: asOptionalString(detail.resultSource),
+    outputFilePresent: asOptionalBoolean(detail.outputFilePresent),
+    outputChars: asOptionalNumber(detail.outputChars),
+    outputLooksLikeLaunchTranscript: asOptionalBoolean(detail.outputLooksLikeLaunchTranscript),
+    stdoutChars: asOptionalNumber(detail.stdoutChars) ?? stdout?.length,
+    stdoutLooksLikeLaunchTranscript: asOptionalBoolean(detail.stdoutLooksLikeLaunchTranscript),
+    stderrChars: asOptionalNumber(detail.stderrChars) ?? stderr?.length,
+    stderrLooksLikeLaunchTranscript: asOptionalBoolean(detail.stderrLooksLikeLaunchTranscript),
+    promptChars: asOptionalNumber(detail.promptChars),
+    systemContextChars: asOptionalNumber(detail.systemContextChars),
+    finalPromptChars: asOptionalNumber(detail.finalPromptChars),
+    mcpBridgeDisabled: asOptionalBoolean(detail.mcpBridgeDisabled),
+    configOverrideCount: asOptionalNumber(detail.configOverrideCount),
+    binary: asOptionalString(detail.binary),
+    cwd: detail.cwd === null
+      ? null
+      : asOptionalString(detail.cwd),
+    stdoutPreview,
+    stderrPreview,
+  };
+
+  return Object.values(diagnostics).some((value) => value !== undefined)
+    ? diagnostics
+    : null;
+}
 
 // --- Compression helpers ---
 
@@ -186,6 +292,10 @@ export function listSessionArchives(
     conditions.push("agent_id = ?");
     params.push(filters.agentId);
   }
+  if (filters?.taskId) {
+    conditions.push("task_id = ?");
+    params.push(filters.taskId);
+  }
   if (filters?.since) {
     conditions.push("started_at >= ?");
     params.push(filters.since);
@@ -227,7 +337,7 @@ export function listSessionArchives(
  */
 export function countSessionArchives(
   projectId: string,
-  filters?: Pick<SessionArchiveFilters, "agentId" | "since" | "until" | "outcome">,
+  filters?: Pick<SessionArchiveFilters, "agentId" | "taskId" | "since" | "until" | "outcome">,
   dbOverride?: DatabaseSync,
 ): number {
   const db = dbOverride ?? getDb(projectId);
@@ -237,6 +347,10 @@ export function countSessionArchives(
   if (filters?.agentId) {
     conditions.push("agent_id = ?");
     params.push(filters.agentId);
+  }
+  if (filters?.taskId) {
+    conditions.push("task_id = ?");
+    params.push(filters.taskId);
   }
   if (filters?.since) {
     conditions.push("started_at >= ?");

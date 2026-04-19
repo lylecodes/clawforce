@@ -8,62 +8,44 @@
  * Used on warm paths (cost estimation, capacity), NOT hot paths (dispatch gates use own counters).
  */
 
-type OpenClawAgentEntry = {
-  id: string;
-  model?: { primary?: string };
-  tools?: string[];
-  [key: string]: unknown;
-};
+import {
+  getOpenClawConfigSnapshot,
+  setOpenClawConfigSnapshot,
+} from "../runtime/integrations.js";
+import type { OpenClawConfigSnapshot } from "../runtime/ports.js";
 
-type OpenClawModelEntry = {
-  id: string;
-  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
-  [key: string]: unknown;
-};
-
-type OpenClawProviderEntry = {
-  id: string;
-  models?: OpenClawModelEntry[];
-  rpm?: number;
-  tpm?: number;
-  [key: string]: unknown;
-};
-
-type OpenClawConfigSnapshot = {
-  agents?: {
-    list?: OpenClawAgentEntry[];
-    defaults?: { model?: string; [key: string]: unknown };
-  };
-  models?: {
-    providers?: OpenClawProviderEntry[];
-  };
-  [key: string]: unknown;
-};
-
-let cachedConfig: OpenClawConfigSnapshot | null = null;
+function resolveModelRef(
+  value: string | { primary?: string; fallbacks?: string[] } | null | undefined,
+): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object" && typeof value.primary === "string" && value.primary.trim()) {
+    return value.primary.trim();
+  }
+  return null;
+}
 
 /** Set the cached config (called at gateway_start or on config reload). */
 export function setOpenClawConfig(config: OpenClawConfigSnapshot): void {
-  cachedConfig = config;
+  setOpenClawConfigSnapshot(config);
 }
 
 /** Clear the cache (for testing or forced refresh). */
 export function clearOpenClawConfigCache(): void {
-  cachedConfig = null;
+  setOpenClawConfigSnapshot(null);
 }
 
 /** Get the model for an agent. Falls back to agent defaults. */
 export function getAgentModel(agentId: string): string | null {
+  const cachedConfig = getOpenClawConfigSnapshot();
   if (!cachedConfig?.agents) return null;
 
   const agent = cachedConfig.agents.list?.find((a) => a.id === agentId);
-  if (agent?.model?.primary) return agent.model.primary;
-
-  return cachedConfig.agents.defaults?.model ?? null;
+  return resolveModelRef(agent?.model) ?? resolveModelRef(cachedConfig.agents.defaults?.model);
 }
 
 /** Get the tools list for an agent. */
 export function getAgentTools(agentId: string): string[] | null {
+  const cachedConfig = getOpenClawConfigSnapshot();
   if (!cachedConfig?.agents) return null;
   const agent = cachedConfig.agents.list?.find((a) => a.id === agentId);
   return agent?.tools ?? null;
@@ -73,6 +55,7 @@ export function getAgentTools(agentId: string): string[] | null {
 export function getModelPricing(
   modelId: string,
 ): { inputPer1M: number; outputPer1M: number } | null {
+  const cachedConfig = getOpenClawConfigSnapshot();
   if (!cachedConfig?.models?.providers) return null;
 
   for (const provider of cachedConfig.models.providers) {
@@ -87,4 +70,3 @@ export function getModelPricing(
 
   return null;
 }
-

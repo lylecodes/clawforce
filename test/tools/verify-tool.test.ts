@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -63,6 +63,7 @@ describe("clawforce_verify tool", () => {
       project_id: PROJECT,
       task_id: task.id,
       project_dir: "/tmp",
+      agent_id: "agent:verifier",
     });
 
     const data = parseResult(result);
@@ -73,6 +74,11 @@ describe("clawforce_verify tool", () => {
     // Verify it's actually in the dispatch queue
     const queueStatus = getQueueStatus(PROJECT, db);
     expect(queueStatus.queued).toBeGreaterThanOrEqual(1);
+    const row = db.prepare(
+      "SELECT payload FROM dispatch_queue WHERE project_id = ? AND task_id = ? AND status = 'queued' LIMIT 1",
+    ).get(PROJECT, task.id) as Record<string, unknown> | undefined;
+    const payload = JSON.parse(String(row?.payload ?? "{}")) as Record<string, unknown>;
+    expect(payload.agentId).toBe("agent:verifier");
   });
 
   it("returns error for non-REVIEW task", async () => {
@@ -132,6 +138,7 @@ describe("clawforce_verify tool", () => {
       project_id: PROJECT,
       task_id: task.id,
       passed: "false",
+      reason_code: "verification_environment_blocked",
       reason: "Missing test coverage",
     });
 

@@ -9,7 +9,7 @@
  * defined in sdk/types.ts uses from/to.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import {
   createMessage as internalCreateMessage,
   getMessage as internalGetMessage,

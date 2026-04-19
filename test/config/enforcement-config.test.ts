@@ -31,7 +31,7 @@ describe("enforcement config loading", () => {
   }
 
   it("loads a full enforcement config with agents", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: my-project
 
 approval:
@@ -43,33 +43,33 @@ approval:
 agents:
   leon:
     extends: manager
-    context_in:
+    briefing:
       - source: instructions
       - source: custom
-        content: "You are the project orchestrator."
-    required_outputs:
+        content: "You are the project manager."
+    expectations:
       - tool: clawforce_task
         action: [propose]
         min_calls: 1
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
       channel: telegram
 
   coder:
     extends: employee
-    context_in:
+    briefing:
       - source: instructions
-    required_outputs:
+    expectations:
       - tool: clawforce_task
         action: [transition, fail]
         min_calls: 1
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: retry
       max_retries: 3
       then: alert
@@ -93,7 +93,7 @@ agents:
     expect(leon!.briefing.some((s) => s.source === "escalations")).toBe(true);
     const customSource = leon!.briefing.find((s) => s.source === "custom");
     expect(customSource).toBeDefined();
-    expect(customSource!.content).toBe("You are the project orchestrator.");
+    expect(customSource!.content).toBe("You are the project manager.");
     // Explicit expectations replaces profile defaults
     expect(leon!.expectations).toHaveLength(2);
     expect(leon!.expectations[0]!.tool).toBe("clawforce_task");
@@ -110,19 +110,19 @@ agents:
   });
 
   it("auto-injects instructions source if missing", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   agent1:
     extends: employee
-    context_in:
+    briefing:
       - source: custom
         content: "hello"
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `);
 
@@ -135,18 +135,18 @@ agents:
   });
 
   it("does not duplicate instructions if already present", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   agent1:
     extends: employee
-    context_in:
+    briefing:
       - source: instructions
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `);
 
@@ -157,8 +157,8 @@ agents:
     expect(instructionSources).toHaveLength(1);
   });
 
-  it("returns null for legacy config format (no enforcement agents)", () => {
-    const configPath = writeYaml("project.yaml", `
+  it("throws for legacy config format without canonical workforce agents", () => {
+    const configPath = writeYaml("workforce.yaml", `
 id: test-project
 name: Test
 agents:
@@ -167,26 +167,25 @@ agents:
     - type: claude-code
 `);
 
-    const config = loadWorkforceConfig(configPath);
-    expect(config).toBeNull();
+    expect(() => loadWorkforceConfig(configPath)).toThrow();
   });
 
   it("handles knowledge filter in context sources", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   agent1:
     extends: manager
-    context_in:
+    briefing:
       - source: knowledge
         filter:
           category: [decision, pattern]
           tags: [architecture]
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `);
 
@@ -201,18 +200,18 @@ agents:
   });
 
   it("handles agent with explicit expectations and performance policy", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   outreach:
     extends: employee
-    context_in:
+    briefing:
       - source: instructions
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: outcome
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: retry
       max_retries: 3
       then: alert
@@ -822,17 +821,17 @@ describe("profile defaults via config loading", () => {
     return p;
   }
 
-  it("manager gets profile defaults when no context_in specified", () => {
-    const configPath = writeYaml("project.yaml", `
+  it("manager gets profile defaults when no briefing is specified", () => {
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   orch:
     extends: manager
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `);
 
@@ -850,7 +849,7 @@ agents:
   });
 
   it("employee inherits profile expectations and performance_policy when omitted", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   w1:
@@ -869,7 +868,7 @@ agents:
   });
 
   it("employee inherits briefing from preset", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   worker1:
@@ -893,18 +892,18 @@ agents:
   });
 
   it("does not duplicate when user explicitly includes a baseline source", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   orch:
     extends: manager
-    context_in:
+    briefing:
       - source: task_board
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `);
 
@@ -914,20 +913,20 @@ agents:
     expect(taskBoardSources).toHaveLength(1);
   });
 
-  it("respects exclude_context to remove baseline sources", () => {
-    const configPath = writeYaml("project.yaml", `
+  it("respects exclude_briefing to remove baseline sources", () => {
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   orch:
     extends: manager
-    exclude_context:
+    exclude_briefing:
       - sweep_status
       - proposals
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `);
 
@@ -942,18 +941,18 @@ agents:
   });
 
   it("proposals source is now valid (bug fix)", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test
 agents:
   orch:
     extends: manager
-    context_in:
+    briefing:
       - source: proposals
-    required_outputs:
+    expectations:
       - tool: clawforce_log
         action: write
         min_calls: 1
-    on_failure:
+    performance_policy:
       action: alert
 `);
 

@@ -5,7 +5,7 @@
  * Returns allowed/blocked with reason.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { checkBudget } from "../budget.js";
 import { getDb } from "../db.js";
 import type { PolicyCheckResult, PolicyDefinition } from "../types.js";

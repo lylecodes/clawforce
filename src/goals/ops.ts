@@ -7,9 +7,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
+import { getEntity } from "../entities/ops.js";
 import { ingestEvent } from "../events/store.js";
 import type { Goal, GoalStatus, Task } from "../types.js";
 
@@ -31,6 +32,8 @@ function rowToGoal(row: Record<string, unknown>): Goal {
   if (row.department != null) goal.department = row.department as string;
   if (row.team != null) goal.team = row.team as string;
   if (row.achieved_at != null) goal.achievedAt = row.achieved_at as number;
+  if (row.entity_type != null) goal.entityType = row.entity_type as string;
+  if (row.entity_id != null) goal.entityId = row.entity_id as string;
   if (row.metadata != null) {
     try { goal.metadata = JSON.parse(row.metadata as string); } catch { /* ignore */ }
   }
@@ -54,6 +57,8 @@ export type CreateGoalParams = {
   metadata?: Record<string, unknown>;
   allocation?: number;
   priority?: Goal["priority"];
+  entityType?: string;
+  entityId?: string;
 };
 
 export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync): Goal {
@@ -70,9 +75,20 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
     }
   }
 
+  if (params.entityId) {
+    const entity = getEntity(params.projectId, params.entityId, db);
+    if (!entity) {
+      throw new Error(`Entity not found: ${params.entityId}`);
+    }
+    if (params.entityType && entity.kind !== params.entityType) {
+      throw new Error(`Entity "${params.entityId}" is kind "${entity.kind}", not "${params.entityType}"`);
+    }
+    params.entityType = entity.kind;
+  }
+
   db.prepare(`
-    INSERT INTO goals (id, project_id, title, description, acceptance_criteria, status, parent_goal_id, owner_agent_id, department, team, created_by, created_at, metadata, allocation, priority)
-    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO goals (id, project_id, title, description, acceptance_criteria, status, parent_goal_id, owner_agent_id, department, team, created_by, created_at, metadata, allocation, priority, entity_type, entity_id)
+    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     params.projectId,
@@ -88,6 +104,8 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
     params.metadata ? JSON.stringify(params.metadata) : null,
     params.allocation ?? null,
     params.priority ?? null,
+    params.entityType ?? null,
+    params.entityId ?? null,
   );
 
   const goal: Goal = {
@@ -106,6 +124,8 @@ export function createGoal(params: CreateGoalParams, dbOverride?: DatabaseSync):
     metadata: params.metadata,
     allocation: params.allocation,
     priority: params.priority,
+    entityType: params.entityType,
+    entityId: params.entityId,
   };
 
   safeLog("goals.create", { id, title: params.title, project: params.projectId });
@@ -136,6 +156,8 @@ export type ListGoalsFilters = {
   ownerAgentId?: string;
   department?: string;
   team?: string;
+  entityType?: string;
+  entityId?: string;
   limit?: number;
 };
 
@@ -167,6 +189,14 @@ export function listGoals(projectId: string, filters?: ListGoalsFilters, dbOverr
   if (filters?.team) {
     query += " AND team = ?";
     params.push(filters.team);
+  }
+  if (filters?.entityType) {
+    query += " AND entity_type = ?";
+    params.push(filters.entityType);
+  }
+  if (filters?.entityId) {
+    query += " AND entity_id = ?";
+    params.push(filters.entityId);
   }
 
   query += " ORDER BY created_at ASC";
@@ -213,6 +243,8 @@ export type UpdateGoalParams = {
   metadata?: Record<string, unknown>;
   allocation?: number;
   priority?: Goal["priority"];
+  entityType?: string | null;
+  entityId?: string | null;
 };
 
 export function updateGoal(projectId: string, goalId: string, updates: UpdateGoalParams, dbOverride?: DatabaseSync): Goal {
@@ -232,6 +264,22 @@ export function updateGoal(projectId: string, goalId: string, updates: UpdateGoa
   if (updates.metadata !== undefined) { sets.push("metadata = ?"); params.push(JSON.stringify(updates.metadata)); }
   if (updates.allocation !== undefined) { sets.push("allocation = ?"); params.push(updates.allocation); }
   if (updates.priority !== undefined) { sets.push("priority = ?"); params.push(updates.priority); }
+  if (updates.entityId !== undefined) {
+    if (updates.entityId === null) {
+      sets.push("entity_type = NULL");
+      sets.push("entity_id = NULL");
+    } else {
+      const entity = getEntity(projectId, updates.entityId, db);
+      if (!entity) throw new Error(`Entity not found: ${updates.entityId}`);
+      if (updates.entityType && updates.entityType !== entity.kind) {
+        throw new Error(`Entity "${updates.entityId}" is kind "${entity.kind}", not "${updates.entityType}"`);
+      }
+      sets.push("entity_type = ?");
+      params.push(entity.kind);
+      sets.push("entity_id = ?");
+      params.push(entity.id);
+    }
+  }
 
   if (sets.length === 0) return goal;
 
@@ -334,6 +382,8 @@ function rowToTask(row: Record<string, unknown>): Task {
   if (row.parent_task_id != null) task.parentTaskId = row.parent_task_id as string;
   if (row.department != null) task.department = row.department as string;
   if (row.team != null) task.team = row.team as string;
+  if (row.entity_type != null) task.entityType = row.entity_type as string;
+  if (row.entity_id != null) task.entityId = row.entity_id as string;
   if (row.tags != null) {
     try { task.tags = JSON.parse(row.tags as string); } catch { /* ignore */ }
   }
@@ -348,6 +398,43 @@ export function getGoalTasks(projectId: string, goalId: string, dbOverride?: Dat
   const rows = db.prepare("SELECT * FROM tasks WHERE goal_id = ? AND project_id = ? ORDER BY created_at ASC")
     .all(goalId, projectId) as Record<string, unknown>[];
   return rows.map(rowToTask);
+}
+
+export function linkGoalToEntity(projectId: string, goalId: string, entityId: string, dbOverride?: DatabaseSync): Goal {
+  const db = dbOverride ?? getDb(projectId);
+  const goal = getGoal(projectId, goalId, db);
+  if (!goal) throw new Error(`Goal not found: ${goalId}`);
+  const entity = getEntity(projectId, entityId, db);
+  if (!entity) throw new Error(`Entity not found: ${entityId}`);
+
+  db.prepare(
+    "UPDATE goals SET entity_type = ?, entity_id = ? WHERE id = ? AND project_id = ?",
+  ).run(entity.kind, entity.id, goalId, projectId);
+
+  return getGoal(projectId, goalId, db)!;
+}
+
+export function unlinkGoalFromEntity(projectId: string, goalId: string, dbOverride?: DatabaseSync): Goal {
+  const db = dbOverride ?? getDb(projectId);
+  const goal = getGoal(projectId, goalId, db);
+  if (!goal) throw new Error(`Goal not found: ${goalId}`);
+
+  db.prepare(
+    "UPDATE goals SET entity_type = NULL, entity_id = NULL WHERE id = ? AND project_id = ?",
+  ).run(goalId, projectId);
+
+  return getGoal(projectId, goalId, db)!;
+}
+
+export function getGoalsByEntity(
+  projectId: string,
+  entityId: string,
+  dbOverride?: DatabaseSync,
+): Goal[] {
+  const db = dbOverride ?? getDb(projectId);
+  const rows = db.prepare("SELECT * FROM goals WHERE entity_id = ? AND project_id = ? ORDER BY created_at ASC")
+    .all(entityId, projectId) as Record<string, unknown>[];
+  return rows.map(rowToGoal);
 }
 
 // --- Initiative budget helpers ---

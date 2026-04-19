@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

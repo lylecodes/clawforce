@@ -7,7 +7,7 @@
  * - Releases expired task leases on ASSIGNED tasks
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
 import { transitionTask, releaseTaskLease } from "../tasks/ops.js";

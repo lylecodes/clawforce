@@ -35,7 +35,7 @@ export function hireAgent(projectId: string, spec: HireSpec): HireResult {
     };
   }
 
-  const existing = getAgentConfig(spec.agentId);
+  const existing = getAgentConfig(spec.agentId, projectId);
   if (existing && existing.projectId === projectId) {
     return {
       success: false,

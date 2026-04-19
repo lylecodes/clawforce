@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -25,8 +25,18 @@ vi.mock("../../src/events/store.js", () => ({
 
 const { getMemoryDb } = await import("../../src/db.js");
 const dbModule = await import("../../src/db.js");
-const { approveProposal, rejectProposal, getProposal, listPendingProposals } =
+const {
+  approveProposal,
+  rejectProposal,
+  getProposal,
+  listPendingProposals,
+  markProposalExecutionApplied,
+} =
   await import("../../src/approval/resolve.js");
+const {
+  acquireControllerLease,
+  getControllerLease,
+} = await import("../../src/runtime/controller-leases.js");
 
 describe("approval/resolve", () => {
   let db: DatabaseSync;
@@ -81,6 +91,10 @@ describe("approval/resolve", () => {
     expect(result!.status).toBe("approved");
     expect(result!.user_feedback).toBe("Looks good");
     expect(result!.resolved_at).toBeGreaterThan(0);
+    expect(result!.execution_status).toBe("pending");
+    expect(result!.execution_requested_at).toBeGreaterThan(0);
+    expect(result!.execution_updated_at).toBeGreaterThan(0);
+    expect(result!.execution_required_generation).toMatch(/^gen-/);
   });
 
   it("approveProposal returns null for non-existent proposal", () => {
@@ -124,6 +138,27 @@ describe("approval/resolve", () => {
     expect(call![0]).toBe(PROJECT);
     // Payload should include proposalId
     expect((call![3] as Record<string, unknown>).proposalId).toBe(proposalId);
+    expect((call![3] as Record<string, unknown>).requiredGeneration).toMatch(/^gen-/);
+  });
+
+  it("clears the controller generation floor when execution is applied", () => {
+    const proposalId = insertProposal();
+    const approved = approveProposal(PROJECT, proposalId, "LGTM");
+    expect(approved).not.toBeNull();
+    if (!approved) return;
+
+    acquireControllerLease(PROJECT, {
+      ownerId: "controller:test",
+      ownerLabel: "controller-test",
+      purpose: "sweep",
+      generation: approved.execution_required_generation ?? undefined,
+    }, db);
+
+    markProposalExecutionApplied(PROJECT, proposalId, { taskId: "task-1" }, db);
+
+    const proposal = getProposal(PROJECT, proposalId, db);
+    expect(proposal?.execution_status).toBe("applied");
+    expect(getControllerLease(PROJECT, db)?.requiredGeneration).toBeNull();
   });
 
   it("listPendingProposals returns only pending proposals", () => {

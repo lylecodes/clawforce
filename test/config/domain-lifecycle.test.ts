@@ -49,34 +49,27 @@ describe("domain-based lifecycle", () => {
     expect(db1).toBe(db2);
   });
 
-  it("tracks registered domains", async () => {
-    const { registerDomain, unregisterDomain, getActiveDomainIds } = await import("../../src/lifecycle.js");
+  it("tracks registered projects", async () => {
+    const { registerProject, unregisterProject, getActiveProjectIds } = await import("../../src/lifecycle.js");
 
-    registerDomain("alpha");
-    registerDomain("beta");
-    expect(getActiveDomainIds()).toContain("alpha");
-    expect(getActiveDomainIds()).toContain("beta");
+    registerProject("alpha");
+    registerProject("beta");
+    expect(getActiveProjectIds()).toContain("alpha");
+    expect(getActiveProjectIds()).toContain("beta");
 
-    unregisterDomain("alpha");
-    expect(getActiveDomainIds()).not.toContain("alpha");
-    expect(getActiveDomainIds()).toContain("beta");
+    unregisterProject("alpha");
+    expect(getActiveProjectIds()).not.toContain("alpha");
+    expect(getActiveProjectIds()).toContain("beta");
 
-    // cleanup
-    unregisterDomain("beta");
+    unregisterProject("beta");
   });
 
-  it("domain functions are aliases for project functions", async () => {
-    const { registerDomain, getActiveProjectIds, registerProject, getActiveDomainIds } = await import("../../src/lifecycle.js");
-
-    registerDomain("via-domain");
-    expect(getActiveProjectIds()).toContain("via-domain");
+  it("project registration is deduplicated by project id", async () => {
+    const { registerProject, getActiveProjectIds, unregisterProject } = await import("../../src/lifecycle.js");
 
     registerProject("via-project");
-    expect(getActiveDomainIds()).toContain("via-project");
-
-    // cleanup
-    const { unregisterProject } = await import("../../src/lifecycle.js");
-    unregisterProject("via-domain");
+    registerProject("via-project");
+    expect(getActiveProjectIds().filter((id) => id === "via-project")).toHaveLength(1);
     unregisterProject("via-project");
   });
 });

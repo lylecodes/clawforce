@@ -11,7 +11,7 @@
  *   7. Ingest a "trigger_fired" event for audit
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import type {
   TriggerDefinition,
   TriggerSource,
@@ -24,6 +24,7 @@ import { interpolate, type TemplateContext } from "../events/template.js";
 import { createTask } from "../tasks/ops.js";
 import { ingestEvent } from "../events/store.js";
 import { enqueue } from "../dispatch/queue.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 
 /** Result of a trigger fire attempt. */
 export type TriggerFireResult = {
@@ -38,12 +39,19 @@ export type TriggerFireResult = {
   eventId?: string;
 };
 
-/** In-memory cooldown tracker. Maps "projectId:triggerName" → last fire timestamp. */
-const cooldowns = new Map<string, number>();
+type TriggerRuntimeState = {
+  cooldowns: Map<string, number>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getCooldowns(): TriggerRuntimeState["cooldowns"] {
+  return (runtime.triggers as TriggerRuntimeState).cooldowns;
+}
 
 /** Clear all cooldowns (for testing). */
 export function clearCooldowns(): void {
-  cooldowns.clear();
+  getCooldowns().clear();
 }
 
 /**
@@ -57,7 +65,7 @@ function isCoolingDown(
 ): boolean {
   if (!cooldownMs || cooldownMs <= 0) return false;
   const key = `${projectId}:${triggerName}`;
-  const lastFire = cooldowns.get(key);
+  const lastFire = getCooldowns().get(key);
   if (lastFire === undefined) return false;
   return Date.now() - lastFire < cooldownMs;
 }
@@ -67,7 +75,7 @@ function isCoolingDown(
  */
 function recordCooldown(projectId: string, triggerName: string): void {
   const key = `${projectId}:${triggerName}`;
-  cooldowns.set(key, Date.now());
+  getCooldowns().set(key, Date.now());
 }
 
 /**

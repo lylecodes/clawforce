@@ -6,7 +6,7 @@
  * and adds their response. Manager goes last.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { safeLog } from "../diagnostics.js";
 import { getDb } from "../db.js";
 import { ingestEvent } from "../events/store.js";

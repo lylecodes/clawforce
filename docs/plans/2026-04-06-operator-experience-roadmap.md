@@ -2,6 +2,11 @@
 
 > Last updated: 2026-04-06
 
+See also:
+[2026-04-11-operator-feed-and-decision-inbox.md](/Users/lylejens/workplace/clawforce/docs/plans/2026-04-11-operator-feed-and-decision-inbox.md)
+for the canonical feed, decision inbox, and item taxonomy model that should sit
+under `Today`, notifications, approvals, and operator-facing issue handling.
+
 ## Goal
 
 Define the next product layer after dashboard maturity: turn the dashboard from
@@ -383,4 +388,3 @@ This phase is not:
 - marketplace/install lifecycle work
 
 Those are separate planning tracks.
-

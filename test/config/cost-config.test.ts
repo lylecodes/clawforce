@@ -5,6 +5,8 @@
  * - bootstrap_config / bootstrapConfig (CO-1)
  * - bootstrap_exclude_files / bootstrapExcludeFiles (CO-2)
  * - allowed_tools / allowedTools (CO-3)
+ * - workspace_paths / workspacePaths
+ * - runtime.{bootstrap_config, allowed_tools, workspace_paths}
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -35,7 +37,7 @@ describe("cost optimization config parsing", () => {
   }
 
   it("CO-1: parses bootstrap_config from YAML (snake_case)", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -53,7 +55,7 @@ agents:
   });
 
   it("CO-1: parses bootstrapConfig from YAML (camelCase)", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -71,7 +73,7 @@ agents:
   });
 
   it("CO-1: inherits bootstrap defaults from employee preset when not specified", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -87,7 +89,7 @@ agents:
   });
 
   it("CO-1: explicit config overrides preset defaults", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -103,8 +105,61 @@ agents:
     expect(agent.bootstrapConfig!.totalMaxChars).toBe(40000);
   });
 
+  it("parses nested runtime config and mirrors compatibility aliases", () => {
+    const configPath = writeYaml("workforce.yaml", `
+name: test-project
+agents:
+  worker1:
+    extends: employee
+    runtime:
+      bootstrap_config:
+        max_chars: 9000
+        total_max_chars: 36000
+      bootstrap_exclude_files:
+        - AGENTS.md
+      allowed_tools:
+        - Read
+        - Edit
+      workspace_paths:
+        - packages/core
+        - /tmp/shared
+`);
+    const config = loadWorkforceConfig(configPath);
+    expect(config).not.toBeNull();
+    const agent = config!.agents.worker1!;
+    expect(agent.runtime?.bootstrapConfig?.maxChars).toBe(9000);
+    expect(agent.runtime?.bootstrapExcludeFiles).toEqual(["AGENTS.md"]);
+    expect(agent.runtime?.allowedTools).toEqual(["Read", "Edit"]);
+    expect(agent.runtime?.workspacePaths).toEqual(["packages/core", "/tmp/shared"]);
+    expect(agent.bootstrapConfig?.maxChars).toBe(9000);
+    expect(agent.bootstrapExcludeFiles).toEqual(["AGENTS.md"]);
+    expect(agent.allowedTools).toEqual(["Read", "Edit"]);
+    expect(agent.workspacePaths).toEqual(["packages/core", "/tmp/shared"]);
+  });
+
+  it("prefers nested runtime config over legacy top-level aliases", () => {
+    const configPath = writeYaml("workforce.yaml", `
+name: test-project
+agents:
+  worker1:
+    extends: employee
+    allowed_tools: [Bash]
+    workspace_paths: [legacy/path]
+    runtime:
+      allowed_tools: [Read, Edit]
+      workspace_paths: [runtime/path]
+`);
+    const config = loadWorkforceConfig(configPath);
+    expect(config).not.toBeNull();
+    const agent = config!.agents.worker1!;
+    expect(agent.runtime?.allowedTools).toEqual(["Read", "Edit"]);
+    expect(agent.runtime?.workspacePaths).toEqual(["runtime/path"]);
+    expect(agent.allowedTools).toEqual(["Read", "Edit"]);
+    expect(agent.workspacePaths).toEqual(["runtime/path"]);
+  });
+
   it("CO-1: parses bootstrapDefaults at project level", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 bootstrap_defaults:
   max_chars: 7000
@@ -121,7 +176,7 @@ agents:
   });
 
   it("CO-2: parses bootstrap_exclude_files from YAML", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -138,7 +193,7 @@ agents:
   });
 
   it("CO-2: inherits bootstrapExcludeFiles from employee preset", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -153,7 +208,7 @@ agents:
   });
 
   it("CO-3: parses allowed_tools from YAML", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -170,7 +225,7 @@ agents:
   });
 
   it("CO-3: inherits allowedTools from employee preset", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -188,7 +243,7 @@ agents:
   });
 
   it("CO-3: verifier inherits read-only tools", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   verifier1:
@@ -206,7 +261,7 @@ agents:
   });
 
   it("CO-3: explicit tools override preset defaults", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   worker1:
@@ -222,7 +277,7 @@ agents:
   });
 
   it("CO-3: manager has no allowedTools restriction", () => {
-    const configPath = writeYaml("project.yaml", `
+    const configPath = writeYaml("workforce.yaml", `
 name: test-project
 agents:
   lead:
@@ -232,5 +287,37 @@ agents:
     expect(config).not.toBeNull();
     const agent = config!.agents.lead!;
     expect(agent.allowedTools).toBeUndefined();
+  });
+
+  it("parses workspace_paths from YAML", () => {
+    const configPath = writeYaml("workforce.yaml", `
+name: test-project
+agents:
+  worker1:
+    extends: employee
+    workspace_paths:
+      - packages/core
+      - /tmp/shared
+`);
+    const config = loadWorkforceConfig(configPath);
+    expect(config).not.toBeNull();
+    const agent = config!.agents.worker1!;
+    expect(agent.workspacePaths).toEqual(["packages/core", "/tmp/shared"]);
+  });
+
+  it("parses workspacePaths from YAML", () => {
+    const configPath = writeYaml("workforce.yaml", `
+name: test-project
+agents:
+  worker1:
+    extends: employee
+    workspacePaths:
+      - packages/core
+      - /tmp/shared
+`);
+    const config = loadWorkforceConfig(configPath);
+    expect(config).not.toBeNull();
+    const agent = config!.agents.worker1!;
+    expect(agent.workspacePaths).toEqual(["packages/core", "/tmp/shared"]);
   });
 });

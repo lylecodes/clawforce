@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/diagnostics.js", () => ({
@@ -17,7 +17,7 @@ vi.mock("../../src/identity.js", () => ({
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");
-const { ingestEvent, claimPendingEvents, markHandled, markFailed, markIgnored, listEvents, reclaimStaleEvents } =
+const { ingestEvent, claimPendingEvents, markHandled, markFailed, markIgnored, listEvents, reclaimStaleEvents, requeueEvents } =
   await import("../../src/events/store.js");
 
 describe("events/store", () => {
@@ -64,6 +64,19 @@ describe("events/store", () => {
     expect(events).toHaveLength(2);
   });
 
+  it("lists newer events first when timestamps tie", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1234567890);
+    try {
+      const first = ingestEvent(PROJECT, "ci_failed", "tool", { runId: 1 }, undefined, db);
+      const second = ingestEvent(PROJECT, "pr_opened", "tool", { runId: 2 }, undefined, db);
+
+      const events = listEvents(PROJECT, undefined, db);
+      expect(events.map((event) => event.id)).toEqual([second.id, first.id]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("claims pending events atomically", () => {
     ingestEvent(PROJECT, "ci_failed", "tool", { a: 1 }, undefined, db);
     ingestEvent(PROJECT, "pr_opened", "tool", { b: 2 }, undefined, db);
@@ -77,6 +90,19 @@ describe("events/store", () => {
     // Only 1 remaining pending
     const remaining = listEvents(PROJECT, { status: "pending" }, db);
     expect(remaining).toHaveLength(1);
+  });
+
+  it("claims older events first when timestamps tie", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1234567890);
+    try {
+      const first = ingestEvent(PROJECT, "ci_failed", "tool", { a: 1 }, undefined, db);
+      const second = ingestEvent(PROJECT, "pr_opened", "tool", { b: 2 }, undefined, db);
+
+      const claimed = claimPendingEvents(PROJECT, 2, db);
+      expect(claimed.map((event) => event.id)).toEqual([first.id, second.id]);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("returns empty array when no pending events", () => {
@@ -155,6 +181,24 @@ describe("events/store", () => {
     it("returns 0 when no processing events exist", () => {
       const reclaimed = reclaimStaleEvents(PROJECT, 5 * 60 * 1000, db);
       expect(reclaimed).toBe(0);
+    });
+  });
+
+  describe("requeueEvents", () => {
+    it("moves failed events back to pending and clears handler metadata", () => {
+      const { id } = ingestEvent(PROJECT, "ci_failed", "tool", {}, undefined, db);
+      claimPendingEvents(PROJECT, 1, db);
+      markFailed(id, "test-error", db);
+
+      const requeued = requeueEvents(PROJECT, { status: "failed", limit: 10 }, db);
+      expect(requeued).toHaveLength(1);
+      expect(requeued[0]!.status).toBe("failed");
+
+      const pending = listEvents(PROJECT, { status: "pending" }, db);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]!.id).toBe(id);
+      expect(pending[0]!.error).toBeUndefined();
+      expect(pending[0]!.handledBy).toBeUndefined();
     });
   });
 

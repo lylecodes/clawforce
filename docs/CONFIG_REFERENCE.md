@@ -37,6 +37,11 @@ Definitive reference for every configurable surface in Clawforce. For getting-st
 
 The global config defines agents and optional defaults that apply across the project.
 
+Runtime direction:
+- If you omit `adapter`, ClawForce defaults to `codex`.
+- `openclaw` remains available as an explicit integration choice.
+- `claude-code` remains a legacy compatibility option, not the recommended path for new domains.
+
 ### Schema
 
 | Field | Type | Required | Default | Description |
@@ -99,14 +104,14 @@ Domain configs group agents by business domain, assigning code paths, policies, 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `domain` | `string` | **Yes** | -- | Domain name (e.g., "engineering", "sales"). Must be non-empty. |
-| `orchestrator` | `string` | No | -- | Agent ID responsible for coordinating this domain. |
+| `manager` | `Record<string, unknown>` | No | -- | Domain manager settings, including `agentId` and optional coordination overrides. |
 | `paths` | `string[]` | No | `[]` | Code/project paths associated with this domain. |
 | `agents` | `string[]` | **Yes** | -- | Agent IDs that belong to this domain. Must be an array. |
 | `policies` | `unknown[]` | No | `[]` | Policy definitions scoped to this domain. |
 | `budget` | `Record<string, unknown>` | No | `{}` | Budget configuration for this domain. |
 | `workflows` | `string[]` | No | `[]` | Workflow names available in this domain. |
 | `rules` | `RuleDefinition[]` | No | `[]` | Automation rules triggered by events. |
-| `manager` | `Record<string, unknown>` | No | `{}` | Manager-specific overrides for this domain. |
+| `manager` | `Record<string, unknown>` | No | `{}` | Manager-specific settings for this domain. |
 | `context_sources` | `unknown[]` | No | `[]` | Additional context sources for domain agents. |
 | `expectations` | `unknown[]` | No | `[]` | Domain-level expectations applied to all agents. |
 | `jobs` | `Record<string, unknown>` | No | `{}` | Domain-scoped job definitions. |
@@ -134,7 +139,8 @@ Rules automate recurring decisions within a domain.
 
 ```yaml
 domain: engineering
-orchestrator: eng-lead
+manager:
+  agentId: eng-lead
 paths:
   - src/
   - tests/
@@ -171,7 +177,7 @@ The full `AgentConfig` type covers every aspect of an agent's behavior, identity
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `extends` | `string` | No | -- | Preset to inherit defaults from. Built-in: `"manager"`, `"employee"`, `"assistant"`. Also accepts user-defined presets. The deprecated `"scheduled"` preset aliases to `"employee"`. |
+| `extends` | `string` | No | -- | Preset to inherit defaults from. Built-in: `"manager"`, `"employee"`, `"assistant"`, `"verifier"`, `"dashboard-assistant"`, and `"onboarding"`. Also accepts user-defined presets. |
 | `title` | `string` | No | From preset | Job title (e.g., "VP of Engineering"). |
 | `persona` | `string` | No | From preset | System prompt personality. Keep under 4000 chars. |
 | `tools` | `string[]` | No | -- | Tools this agent is allowed to use. Supports merge operators (`+toolName`, `-toolName`). |
@@ -901,10 +907,6 @@ For personal assistant or clerical/EA agents.
 
 **Action scope:** Similar to employee but without task management tools. Has `clawforce_log`, `clawforce_setup` (explain/status), `clawforce_context`, `clawforce_message`, `clawforce_channel`, `memory_search`, `memory_get`.
 
-#### `scheduled` (Deprecated)
-
-Aliases to `employee`. Use `employee` with a `jobs` section instead.
-
 ### Built-in Job Presets
 
 #### `reflect`
@@ -1428,7 +1430,8 @@ The config validator runs at activation and produces three severity levels:
 
 ### Key Validation Rules
 
-- **Runtime fields rejected:** `model` and `provider` belong in OpenClaw's agent config, not Clawforce. Setting them in Clawforce config produces an error with a migration message.
+- **Runtime fields rejected:** generic top-level runtime fields like `model` and `provider` do not belong in Clawforce agent definitions. Put them under the configured executor/runtime block instead, such as `codex.model`. Setting them at the wrong level produces an error with a migration message.
+- **Runtime-scoped agent envelope:** per-agent execution envelope fields that ClawForce still governs belong under `runtime` (`bootstrapConfig`, `bootstrapExcludeFiles`, `allowedTools`, `workspacePaths`). Legacy top-level aliases are still accepted for compatibility.
 - **Escalation cycles:** `reports_to` chains are walked; cycles produce an error.
 - **Escalation depth:** chains deeper than 5 levels produce a warning.
 - **Empty expectations:** agents extending `manager` or `employee` with empty expectations produce a warning.

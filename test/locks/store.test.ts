@@ -11,7 +11,7 @@ import {
   setOverridePolicy,
   ensureLockTable,
 } from "../../src/locks/store.js";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
 
 describe("locks/store", () => {
   let db: DatabaseSync;

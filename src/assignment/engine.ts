@@ -7,7 +7,7 @@
  * - skill_matched: match task tags to agent tools
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { checkBudget } from "../budget.js";
 import { safeLog } from "../diagnostics.js";
 import { isAgentEffectivelyDisabled } from "../enforcement/disabled-store.js";
@@ -102,11 +102,11 @@ function getEligibleAgents(
   task: Task,
   db: DatabaseSync,
 ): string[] {
-  const allAgentIds = getRegisteredAgentIds();
+  const allAgentIds = getRegisteredAgentIds(projectId);
   const eligible: string[] = [];
 
   for (const agentId of allAgentIds) {
-    const entry = getAgentConfig(agentId);
+    const entry = getAgentConfig(agentId, projectId);
     if (!entry || entry.projectId !== projectId) continue;
 
     // Only employees can be auto-assigned (managers/coordinators are excluded)
@@ -232,7 +232,7 @@ function selectSkillMatched(
   let bestLoad = Infinity;
 
   for (const agentId of eligible) {
-    const entry = getAgentConfig(agentId);
+    const entry = getAgentConfig(agentId, projectId);
     const tools = entry?.config.tools;
     if (!tools || tools.length === 0) continue;
 

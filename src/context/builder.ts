@@ -5,7 +5,7 @@
  * Used by the assembler to build session-start context for any agent role.
  */
 
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "../sqlite-driver.js";
 import type { TaskState } from "../types.js";
 
 export type ContextSnapshot = {

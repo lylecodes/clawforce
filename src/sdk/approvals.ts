@@ -13,7 +13,7 @@
  * default on-disk database. This is intended for testing only.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import {
   listPendingProposals,

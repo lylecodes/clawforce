@@ -6,7 +6,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "../sqlite-driver.js";
 import { writeAuditEntry } from "../audit.js";
 import { emitDiagnosticEvent, safeLog } from "../diagnostics.js";
 import { getDb } from "../db.js";
@@ -18,6 +18,7 @@ import { applyRiskGate } from "../risk/gate.js";
 import { getApprovalNotifier } from "../approval/notify.js";
 import { isTaskInFuturePhase } from "../workflow.js";
 import { validateTransition } from "./state-machine.js";
+import { getEntity } from "../entities/ops.js";
 import type {
   Evidence,
   EvidenceType,
@@ -33,7 +34,13 @@ import { recordMetric, recordTaskCycleTime } from "../metrics.js";
 import { clearWorkerAssignment, registerWorkerAssignment } from "../worker-registry.js";
 import { ingestEvent } from "../events/store.js";
 import { validateEvidence } from "./evidence-schema.js";
-import { completeItem as completeQueueItem, failItem as failQueueItem, cancelItem as cancelQueueItem } from "../dispatch/queue.js";
+import { killPersistedSessionProcess } from "../enforcement/tracker.js";
+import {
+  completeItem as completeQueueItem,
+  failItem as failQueueItem,
+  cancelItem as cancelQueueItem,
+  enqueue,
+} from "../dispatch/queue.js";
 import { getAgentConfig, getRegisteredAgentIds } from "../project.js";
 
 function rowToTask(row: Record<string, unknown>): Task {
@@ -58,6 +65,8 @@ function rowToTask(row: Record<string, unknown>): Task {
     department: (row.department as string) ?? undefined,
     team: (row.team as string) ?? undefined,
     goalId: (row.goal_id as string) ?? undefined,
+    entityType: (row.entity_type as string) ?? undefined,
+    entityId: (row.entity_id as string) ?? undefined,
     kind: (row.kind as TaskKind) ?? undefined,
     origin: (row.origin as import("../types.js").TaskOrigin) ?? undefined,
     originId: (row.origin_id as string) ?? undefined,
@@ -109,6 +118,8 @@ export function createTask(
     department?: string;
     team?: string;
     goalId?: string;
+    entityType?: string;
+    entityId?: string;
     kind?: TaskKind;
     origin?: import("../types.js").TaskOrigin;
     originId?: string;
@@ -117,15 +128,28 @@ export function createTask(
   dbOverride?: DatabaseSync,
 ): Task {
   const db = dbOverride ?? getDb(params.projectId);
+  let parentState: string | undefined;
 
   // Validate parent exists when parentTaskId is provided
   if (params.parentTaskId) {
     const parentRow = db.prepare(
-      "SELECT id FROM tasks WHERE id = ? AND project_id = ?",
+      "SELECT id, state FROM tasks WHERE id = ? AND project_id = ?",
     ).get(params.parentTaskId, params.projectId) as Record<string, unknown> | undefined;
     if (!parentRow) {
       throw new Error(`Parent task "${params.parentTaskId}" not found in project "${params.projectId}"`);
     }
+    parentState = typeof parentRow.state === "string" ? parentRow.state : undefined;
+  }
+
+  if (params.entityId) {
+    const entity = getEntity(params.projectId, params.entityId, db);
+    if (!entity) {
+      throw new Error(`Entity "${params.entityId}" not found in project "${params.projectId}"`);
+    }
+    if (params.entityType && entity.kind !== params.entityType) {
+      throw new Error(`Entity "${params.entityId}" is kind "${entity.kind}", not "${params.entityType}"`);
+    }
+    params.entityType = entity.kind;
   }
 
   const id = crypto.randomUUID();
@@ -142,11 +166,17 @@ export function createTask(
     }
   }
 
+  // Child work should not surface as independently runnable while its parent is
+  // still active. Start it blocked and let the parent completion path unblock it.
+  if (params.parentTaskId && parentState && parentState !== "DONE") {
+    state = "BLOCKED";
+  }
+
   const stmt = db.prepare(`
     INSERT INTO tasks (id, project_id, title, description, state, priority, assigned_to,
       created_by, created_at, updated_at, deadline, retry_count, max_retries, tags,
-      workflow_id, workflow_phase, parent_task_id, department, team, goal_id, kind, origin, origin_id, metadata)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      workflow_id, workflow_phase, parent_task_id, department, team, goal_id, entity_type, entity_id, kind, origin, origin_id, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   // Wrap task INSERT + audit + event in a single transaction for atomicity.
@@ -173,6 +203,8 @@ export function createTask(
       params.department ?? null,
       params.team ?? null,
       params.goalId ?? null,
+      params.entityType ?? null,
+      params.entityId ?? null,
       params.kind ?? null,
       params.origin ?? null,
       params.originId ?? null,
@@ -201,6 +233,8 @@ export function createTask(
       assignedTo,
       department: params.department,
       team: params.team,
+      entityType: params.entityType ?? null,
+      entityId: params.entityId ?? null,
     }, `task-created:${id}`, db);
 
     db.prepare("COMMIT").run();
@@ -226,7 +260,7 @@ export function createTask(
   (task as Task & { duplicateWarning?: string }).duplicateWarning = duplicateWarning;
 
   // Track assignment so bootstrap hook can detect workers (side effect — outside transaction)
-  if (assignedTo) {
+  if (assignedTo && state === "ASSIGNED") {
     registerWorkerAssignment(assignedTo, params.projectId, id);
   }
 
@@ -585,8 +619,6 @@ export function transitionTask(
         `SELECT id FROM dispatch_queue
          WHERE project_id = ? AND task_id = ? AND status = 'queued'`,
       ).all(params.projectId, params.taskId) as Array<Record<string, unknown>>;
-      // eslint-disable-next-line no-console
-      console.debug("[ops] cancelPending", params.toState, pendingItems.length, params.projectId, params.taskId);
       for (const item of pendingItems) {
         cancelQueueItem(String(item["id"]), db);
       }
@@ -601,13 +633,36 @@ export function transitionTask(
     if (activeQueueItem) {
       const queueItemId = activeQueueItem.id as string;
       if (params.toState === "FAILED" || params.toState === "CANCELLED") {
-        failQueueItem(queueItemId, `Task transitioned to ${params.toState}`, db, params.projectId);
+        killPersistedSessionProcess(
+          params.projectId,
+          `dispatch:${queueItemId}`,
+          `Task transitioned to ${params.toState}`,
+          db,
+        );
+        failQueueItem(queueItemId, `Task transitioned to ${params.toState}`, db, params.projectId, {
+          withinTransaction: params.withinTransaction,
+        });
       } else if (params.toState !== "ASSIGNED" && params.toState !== "IN_PROGRESS") {
         // Task advanced past dispatch states (e.g. REVIEW, DONE) — mark completed
-        completeQueueItem(queueItemId, db, params.projectId);
+        completeQueueItem(queueItemId, db, params.projectId, {
+          withinTransaction: params.withinTransaction,
+        });
       }
     }
   } catch (err) { safeLog("transition.queueUpdate", err); }
+
+  if (task.state === "REVIEW" && params.toState === "IN_PROGRESS") {
+    try {
+      const activeQueueItem = db.prepare(
+        `SELECT id FROM dispatch_queue
+         WHERE project_id = ? AND task_id = ? AND status IN ('queued', 'leased', 'dispatched')
+         LIMIT 1`,
+      ).get(params.projectId, params.taskId) as Record<string, unknown> | undefined;
+      if (!activeQueueItem && task.assignedTo) {
+        enqueue(params.projectId, params.taskId, undefined, undefined, db);
+      }
+    } catch (err) { safeLog("transition.reworkEnqueue", err); }
+  }
 
   // Record cycle time metric when task reaches DONE (exclude exercise tasks from KPI metrics)
   if (params.toState === "DONE") {
@@ -726,11 +781,7 @@ export function reassignTask(
 
   // Validate that the target agent exists in the domain config (when agents are registered)
   try {
-    const allAgentIds = getRegisteredAgentIds();
-    const projectAgentIds = allAgentIds.filter((id) => {
-      const entry = getAgentConfig(id);
-      return entry?.projectId === params.projectId;
-    });
+    const projectAgentIds = getRegisteredAgentIds(params.projectId);
     // Only enforce when agents are registered for this project (skip in test/bare setups)
     if (projectAgentIds.length > 0 && !projectAgentIds.includes(params.newAssignee)) {
       return {
@@ -970,6 +1021,9 @@ export type ListTasksFilter = {
   kind?: TaskKind;
   excludeKinds?: TaskKind[];
   origin?: import("../types.js").TaskOrigin;
+  originId?: string;
+  entityType?: string;
+  entityId?: string;
   limit?: number;
 };
 
@@ -1018,6 +1072,18 @@ export function listTasks(
     conditions.push("origin = ?");
     values.push(filter.origin);
   }
+  if (filter?.originId) {
+    conditions.push("origin_id = ?");
+    values.push(filter.originId);
+  }
+  if (filter?.entityType) {
+    conditions.push("entity_type = ?");
+    values.push(filter.entityType);
+  }
+  if (filter?.entityId) {
+    conditions.push("entity_id = ?");
+    values.push(filter.entityId);
+  }
   if (filter?.excludeKinds && filter.excludeKinds.length > 0) {
     const placeholders = filter.excludeKinds.map(() => "?").join(", ");
     conditions.push(`(kind IS NULL OR kind NOT IN (${placeholders}))`);
@@ -1043,11 +1109,46 @@ export function listTasks(
   return tasks;
 }
 
+export function linkTaskToEntity(
+  projectId: string,
+  taskId: string,
+  entityId: string,
+  dbOverride?: DatabaseSync,
+): Task {
+  const db = dbOverride ?? getDb(projectId);
+  const task = getTask(projectId, taskId, db);
+  if (!task) throw new Error(`Task not found: ${taskId}`);
+  const entity = getEntity(projectId, entityId, db);
+  if (!entity) throw new Error(`Entity not found: ${entityId}`);
+
+  db.prepare(
+    "UPDATE tasks SET entity_type = ?, entity_id = ? WHERE id = ? AND project_id = ?",
+  ).run(entity.kind, entity.id, taskId, projectId);
+
+  return getTask(projectId, taskId, db)!;
+}
+
+export function unlinkTaskFromEntity(
+  projectId: string,
+  taskId: string,
+  dbOverride?: DatabaseSync,
+): Task {
+  const db = dbOverride ?? getDb(projectId);
+  const task = getTask(projectId, taskId, db);
+  if (!task) throw new Error(`Task not found: ${taskId}`);
+
+  db.prepare(
+    "UPDATE tasks SET entity_type = NULL, entity_id = NULL WHERE id = ? AND project_id = ?",
+  ).run(taskId, projectId);
+
+  return getTask(projectId, taskId, db)!;
+}
+
 // --- Task Leases ---
 
 /**
- * Acquire a lease on a task. Atomic: succeeds only if no active lease exists
- * or the existing lease has expired.
+ * Acquire a lease on a task. Atomic: succeeds only if no active lease exists,
+ * the existing lease has expired, or the same holder is re-acquiring it.
  * Returns true if the lease was acquired.
  */
 export function acquireTaskLease(
@@ -1065,8 +1166,8 @@ export function acquireTaskLease(
     `UPDATE tasks
      SET lease_holder = ?, lease_acquired_at = ?, lease_expires_at = ?
      WHERE id = ? AND project_id = ?
-       AND (lease_holder IS NULL OR lease_expires_at < ?)`,
-  ).run(holder, now, expiresAt, taskId, projectId, now);
+       AND (lease_holder IS NULL OR lease_expires_at < ? OR lease_holder = ?)`,
+  ).run(holder, now, expiresAt, taskId, projectId, now, holder);
 
   return result.changes > 0;
 }

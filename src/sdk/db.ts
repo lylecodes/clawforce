@@ -1,8 +1,8 @@
 /**
  * Clawforce SDK — DB Namespace
  *
- * Escape hatch providing raw SQLite access via the Node.js built-in
- * `node:sqlite` module. Use this for any query or mutation that the
+ * Escape hatch providing raw SQLite access via ClawForce's internal
+ * SQLite driver. Use this for any query or mutation that the
  * higher-level SDK namespaces don't expose.
  *
  * All methods operate on the domain's database (same instance used
@@ -11,7 +11,7 @@
  */
 
 import { getDb } from "../db.js";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "../sqlite-driver.js";
 
 export class DbNamespace {
   constructor(readonly domain: string) {}

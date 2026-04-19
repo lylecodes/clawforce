@@ -4,7 +4,7 @@
  * Renders active policy constraints for the agent so they understand their boundaries.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../../sqlite-driver.js";
 import { getDb } from "../../db.js";
 import { getPolicies } from "../../policy/registry.js";
 

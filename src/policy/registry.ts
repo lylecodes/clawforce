@@ -6,13 +6,21 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { safeLog } from "../diagnostics.js";
+import { getDefaultRuntimeState } from "../runtime/default-runtime.js";
 import type { PolicyDefinition, PolicyType } from "../types.js";
 
-/** In-memory policy cache: projectId → PolicyDefinition[] */
-const policyCache = new Map<string, PolicyDefinition[]>();
+type PolicyRegistryRuntimeState = {
+  cache: Map<string, PolicyDefinition[]>;
+};
+
+const runtime = getDefaultRuntimeState();
+
+function getPolicyCache(): PolicyRegistryRuntimeState["cache"] {
+  return (runtime.policy as PolicyRegistryRuntimeState).cache;
+}
 
 /**
  * Register policies from project config into the in-memory cache and DB.
@@ -30,6 +38,15 @@ export function registerPolicies(
   const db = dbOverride ?? getDb(projectId);
   const now = Date.now();
   const registered: PolicyDefinition[] = [];
+
+  // Treat config registration as a full replacement for the project's
+  // active policy set so repeated activation/reload does not accumulate
+  // stale or duplicate config policies in SQLite.
+  try {
+    db.prepare("DELETE FROM policies WHERE project_id = ?").run(projectId);
+  } catch (err) {
+    safeLog("policy.register.clear", err);
+  }
 
   for (let i = 0; i < policies.length; i++) {
     const p = policies[i]!;
@@ -58,7 +75,7 @@ export function registerPolicies(
     });
   }
 
-  policyCache.set(projectId, registered);
+  getPolicyCache().set(projectId, registered);
 }
 
 /**
@@ -68,7 +85,7 @@ export function getPolicies(
   projectId: string,
   agentId?: string,
 ): PolicyDefinition[] {
-  const all = policyCache.get(projectId) ?? [];
+  const all = getPolicyCache().get(projectId) ?? [];
   if (!agentId) return all.filter((p) => p.enabled);
 
   return all.filter((p) =>
@@ -76,7 +93,21 @@ export function getPolicies(
   );
 }
 
+export function clearProjectPolicies(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): void {
+  getPolicyCache().delete(projectId);
+
+  try {
+    const db = dbOverride ?? getDb(projectId);
+    db.prepare("DELETE FROM policies WHERE project_id = ?").run(projectId);
+  } catch (err) {
+    safeLog("policy.clear", err);
+  }
+}
+
 /** Clear cache (for testing). */
 export function resetPolicyRegistryForTest(): void {
-  policyCache.clear();
+  getPolicyCache().clear();
 }

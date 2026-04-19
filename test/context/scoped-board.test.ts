@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "../../src/sqlite-driver.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { renderScopedTaskBoard } from "../../src/context/builder.js";
 

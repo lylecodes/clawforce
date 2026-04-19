@@ -5,7 +5,7 @@
  * Used by managers to redistribute resources based on workload.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import { setBudget } from "../budget.js";
 

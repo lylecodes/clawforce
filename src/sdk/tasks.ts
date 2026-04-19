@@ -36,6 +36,8 @@ function toPublicTask(t: InternalTask): Task {
     group: t.department,
     subgroup: t.team,
     goalId: t.goalId,
+    entityId: t.entityId,
+    entityType: t.entityType,
     tags: t.tags ?? [],
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
@@ -72,6 +74,8 @@ export class TasksNamespace {
       department: params.group,
       team: params.subgroup,
       goalId: params.goalId,
+      entityId: params.entityId,
+      entityType: params.entityType,
       metadata: params.metadata,
     });
     return toPublicTask(internal);
@@ -91,6 +95,8 @@ export class TasksNamespace {
     assignedTo?: string;
     group?: string;
     subgroup?: string;
+    entityId?: string;
+    entityType?: string;
     limit?: number;
   }): Task[] {
     const internal = internalListTasks(this.domain, {
@@ -98,6 +104,8 @@ export class TasksNamespace {
       assignedTo: filters?.assignedTo,
       department: filters?.group,
       team: filters?.subgroup,
+      entityId: filters?.entityId,
+      entityType: filters?.entityType,
       limit: filters?.limit,
     });
     return internal.map(toPublicTask);

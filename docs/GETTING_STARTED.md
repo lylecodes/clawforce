@@ -2,13 +2,23 @@
 
 ## What is ClawForce?
 
-ClawForce is a governance SDK for autonomous AI agents. Budget enforcement, task orchestration, trust scoring, approval flows, and coordination -- so you can run multi-agent teams without them burning your wallet or producing unsupervised work. In-process, backed by SQLite. No infrastructure.
+ClawForce is the governance and control plane for agent teams: budgets,
+approvals, trust, audit, and operator control above any runtime.
+
+This guide is written for the solo technical operator who wants to run a real
+team of agents, not just demo one. Budget enforcement, task orchestration, trust
+scoring, approval flows, and coordination all run in-process, backed by SQLite.
+No infrastructure.
+
+ClawForce is not primarily an agent-construction framework. It sits above agent
+execution and governs it.
 
 ## Prerequisites
 
-- **Node.js 22+** (required for `node:sqlite`)
+- **Node.js 22.22+**
 - **npm** or another package manager
-- Optional: [OpenClaw](https://github.com/openclaw/openclaw) for full agent runtime (cron scheduling, channel delivery, automatic cost capture)
+- **Codex CLI authenticated with OpenAI**
+- Optional: [OpenClaw](https://github.com/openclaw/openclaw) as a compatibility bridge when you specifically need its gateway/plugin capabilities
 
 ## Install
 
@@ -23,6 +33,10 @@ Create two config files. A domain is an isolated workspace -- one database, one 
 **`config.yaml`** -- agent definitions:
 
 ```yaml
+adapter: codex
+codex:
+  model: gpt-5.4
+
 agents:
   lead:
     extends: manager
@@ -58,11 +72,14 @@ agents:
 
 ```yaml
 domain: my-team
-orchestrator: lead
+manager:
+  agentId: lead
 agents:
   - lead
   - worker-1
   - worker-2
+execution:
+  mode: dry_run
 
 budget:
   daily: { cents: 5000, tokens: 3_000_000 }
@@ -80,6 +97,10 @@ Key concepts:
 ## Set Your Budget
 
 Budget enforcement is the core safety mechanism. Three dimensions (cents, tokens, requests) across five windows (hourly, daily, monthly, session, task). Any breach blocks dispatch immediately.
+
+If you only remember one thing on first read, remember this: the budget gate is
+the first proof that ClawForce is governing the team rather than just wrapping
+another runtime.
 
 Set via YAML (shown above) or CLI:
 
@@ -102,7 +123,10 @@ budgets:
 
 ## Start It Up
 
-### SDK (standalone)
+### Direct Codex Execution (start here)
+
+If you omit `dispatch.executor`, ClawForce defaults to the direct `codex`
+executor. This is the canonical start path for new setups.
 
 ```typescript
 import { Clawforce } from "clawforce";
@@ -122,9 +146,42 @@ cf.events.on("task_completed", (e) => {
 });
 ```
 
-### With OpenClaw (full runtime)
+Start with the domain in `dry_run`, verify routing and decision surfaces, and
+only then move to `live`.
 
-When used with OpenClaw, ClawForce acts as a plugin. The runner handles dispatch, cron scheduling, and session management automatically. Start the runner for your domain and the agents begin working.
+### Operator Surfaces
+
+Use the dashboard as the primary operator surface for budgets, tasks, approvals,
+and health. Use Codex as the primary conversational surface.
+
+The two should describe the same governed system, not competing products.
+
+### With OpenClaw (optional bridge)
+
+When used with OpenClaw, ClawForce acts as a compatibility bridge. Use this
+path only when you specifically want OpenClaw's gateway, channels, or plugin
+lifecycle on top of the same ClawForce governance model. Prefer `overlay` mode
+unless you are intentionally in a migration state.
+
+### Canonical Use Cases
+
+The two clearest places to start are:
+
+- a governed coding-agent team
+- an onboarding or ops pipeline with staged rollout from `dry_run` to `live`
+
+### Positioning Summary
+
+Use ClawForce when your problem is:
+
+- budget enforcement
+- review and approval gates
+- trust and escalation
+- team coordination over time
+- operator visibility and intervention
+
+Do not expect ClawForce to be the strongest choice for model-native tool
+calling, low-code workflow authoring, or multimodal agent UX by itself.
 
 ## Monitor Your Team
 
@@ -160,6 +217,9 @@ pnpm cf org --domain=my-team          # Live org tree with runtime status
 pnpm cf costs --domain=my-team        # Cost breakdown by agent
 pnpm cf health --domain=my-team       # Comprehensive health check
 ```
+
+When you are ready for operator UI instead of CLI output, open the dashboard and
+use it as the primary control plane.
 
 ## Common Operations
 

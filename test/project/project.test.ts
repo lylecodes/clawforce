@@ -3,11 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  activateWorkforceProject,
   getAgentConfig,
   getRegisteredAgentIds,
   loadWorkforceConfig,
   registerWorkforceConfig,
   resetEnforcementConfigForTest,
+  resolveOpenClawAgentId,
   resolveProjectDir,
 } from "../../src/project.js";
 import { emitDiagnosticEvent } from "../../src/diagnostics.js";
@@ -49,7 +51,7 @@ describe("parseProjectYaml via loadWorkforceConfig", () => {
   });
 
   function writeYaml(content: string): string {
-    const p = path.join(tmpDir, "project.yaml");
+    const p = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(p, content, "utf-8");
     return p;
   }
@@ -74,68 +76,29 @@ agents:
     expect(config!.agents.worker1!.extends).toBe("employee");
   });
 
-  it("returns null for missing agents section", () => {
+  it("throws for missing agents section", () => {
     const configPath = writeYaml(`
 name: test-project
 `);
-    const config = loadWorkforceConfig(configPath);
-    expect(config).toBeNull();
+    expect(() => loadWorkforceConfig(configPath)).toThrow("Config must define an agents object.");
   });
 
-  it("returns null for invalid YAML that produces null", () => {
+  it("throws for empty YAML", () => {
     const configPath = writeYaml("");
-    const config = loadWorkforceConfig(configPath);
-    expect(config).toBeNull();
+    expect(() => loadWorkforceConfig(configPath)).toThrow("Config is empty or not an object.");
   });
 
-  it("emits config_error for deprecated role field", () => {
-    vi.mocked(emitDiagnosticEvent).mockClear();
-
+  it("throws when an agent is missing extends", () => {
     const configPath = writeYaml(`
 name: test
 agents:
   orch:
-    role: orchestrator
+    title: Lead
 `);
-    const config = loadWorkforceConfig(configPath);
-    // Should still parse — role: orchestrator maps to extends: manager
-    expect(config).not.toBeNull();
-    expect(config!.agents.orch!.extends).toBe("manager");
-
-    // Verify diagnostic error was emitted for deprecated role usage
-    expect(emitDiagnosticEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "config_error",
-        message: expect.stringContaining("role: orchestrator"),
-      }),
-    );
-  });
-
-  it("defaults to 'employee' when extends is not set", () => {
-    vi.mocked(emitDiagnosticEvent).mockClear();
-
-    const configPath = writeYaml(`
-name: test
-agents:
-  bad_agent:
-    role: imaginary_role
-`);
-    const config = loadWorkforceConfig(configPath);
-    // role: triggers a config_error but the value is used as extends fallback
-    expect(config!.agents.bad_agent!.extends).toBe("imaginary_role");
-
-    // Verify diagnostic error was emitted for deprecated role
-    expect(emitDiagnosticEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "config_error",
-        message: expect.stringContaining("imaginary_role"),
-      }),
-    );
+    expect(() => loadWorkforceConfig(configPath)).toThrow('Agent "orch" is missing required field "extends".');
   });
 
   it("falls back to 'custom' for unknown context source and emits diagnostic warning", () => {
-    vi.mocked(emitDiagnosticEvent).mockClear();
-
     const configPath = writeYaml(`
 name: test
 agents:
@@ -157,15 +120,48 @@ agents:
       }),
     );
   });
+
+  it("keeps budget_plan as a known context source", () => {
+    const configPath = writeYaml(`
+name: test
+agents:
+  worker:
+    extends: employee
+    briefing:
+      - source: budget_plan
+`);
+    const config = loadWorkforceConfig(configPath);
+    const sources = config!.agents.worker!.briefing.map((entry) => entry.source);
+    expect(sources).toContain("budget_plan");
+    expect(sources).not.toContain("custom");
+  });
 });
 
 describe("registerWorkforceConfig + getAgentConfig", () => {
-  beforeEach(() => {
+  let projectDir: string;
+
+  beforeEach(async () => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawforce-runtime-project-"));
+    const { setProjectsDir } = await import("../../src/db.js");
+    setProjectsDir(projectDir);
     resetEnforcementConfigForTest();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const { closeAllDbs } = await import("../../src/db.js");
+    const { resetManagerConfigForTest } = await import("../../src/manager-config.js");
+    const { resetCustomTopicsForTest } = await import("../../src/skills/registry.js");
+    const { resetPolicyRegistryForTest } = await import("../../src/policy/registry.js");
+    closeAllDbs();
+    try {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
     resetEnforcementConfigForTest();
+    resetManagerConfigForTest();
+    resetCustomTopicsForTest();
+    resetPolicyRegistryForTest();
   });
 
   it("registers and retrieves agent config", () => {
@@ -189,6 +185,179 @@ describe("registerWorkforceConfig + getAgentConfig", () => {
 
   it("returns null for unregistered agent", () => {
     expect(getAgentConfig("nonexistent")).toBeNull();
+  });
+
+  it("keeps colliding agent IDs isolated by domain", () => {
+    registerWorkforceConfig("proj1", {
+      name: "one",
+      agents: {
+        lead: {
+          extends: "manager",
+          briefing: [],
+          expectations: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    registerWorkforceConfig("proj2", {
+      name: "two",
+      agents: {
+        lead: {
+          extends: "employee",
+          briefing: [],
+          expectations: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(getAgentConfig("proj1:lead")?.projectId).toBe("proj1");
+    expect(getAgentConfig("proj1:lead")?.config.extends).toBe("manager");
+    expect(getAgentConfig("proj2:lead")?.projectId).toBe("proj2");
+    expect(getAgentConfig("proj2:lead")?.config.extends).toBe("employee");
+    expect(getAgentConfig("lead")).toBeNull();
+    expect(getRegisteredAgentIds("proj1")).toEqual(["lead"]);
+    expect(getRegisteredAgentIds("proj2")).toEqual(["lead"]);
+    expect(getRegisteredAgentIds()).toContain("proj1:lead");
+    expect(getRegisteredAgentIds()).toContain("proj2:lead");
+  });
+
+  it("keeps legacy colon-delimited bare agent IDs project-scoped", () => {
+    registerWorkforceConfig("proj1", {
+      name: "one",
+      agents: {
+        "agent:verifier": {
+          extends: "employee",
+          briefing: [],
+          expectations: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(getAgentConfig("agent:verifier")?.projectId).toBe("proj1");
+    expect(getAgentConfig("agent:verifier", "proj1")?.projectId).toBe("proj1");
+    expect(getAgentConfig("proj1:agent:verifier", "proj1")?.projectId).toBe("proj1");
+    expect(getRegisteredAgentIds("proj1")).toEqual(["agent:verifier"]);
+  });
+
+  it("resolves runtimeRef aliases back to the governed ClawForce agent", () => {
+    registerWorkforceConfig("proj1", {
+      name: "one",
+      agents: {
+        lead: {
+          extends: "manager",
+          runtimeRef: "openclaw-lead",
+          briefing: [],
+          expectations: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    });
+
+    expect(getAgentConfig("openclaw-lead")?.projectId).toBe("proj1");
+    expect(getAgentConfig("openclaw-lead")?.agentId).toBe("lead");
+    expect(getAgentConfig("openclaw-lead", "proj1")?.agentId).toBe("lead");
+    expect(resolveOpenClawAgentId("lead", "proj1")).toBe("openclaw-lead");
+  });
+
+  it("replaces project-scoped runtime config on reload", async () => {
+    const { getApprovalPolicy, getExtendedProjectConfig } = await import("../../src/project.js");
+    const { getManagerForAgent } = await import("../../src/manager-config.js");
+    const { getCustomTopics } = await import("../../src/skills/registry.js");
+    const { getDb } = await import("../../src/db.js");
+
+    fs.writeFileSync(path.join(projectDir, "review.md"), "# Review\n", "utf-8");
+
+    registerWorkforceConfig("proj1", {
+      name: "one",
+      approval: { required: true, threshold: "always" },
+      dispatch: { mode: "event-driven" },
+      budgets: {
+        project: { daily: { cents: 1000 } },
+        agents: {
+          lead: { daily: { cents: 250 } },
+        },
+      },
+      skills: {
+        review_playbook: {
+          title: "Review Playbook",
+          description: "Review workflow",
+          path: "review.md",
+        },
+      },
+      manager: {
+        enabled: true,
+        agentId: "lead",
+        directives: [],
+      },
+      agents: {
+        lead: {
+          extends: "manager",
+          briefing: [],
+          expectations: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    }, projectDir);
+
+    expect(getApprovalPolicy("proj1")).not.toBeNull();
+    expect(getExtendedProjectConfig("proj1")?.dispatch?.mode).toBe("event-driven");
+    expect(getManagerForAgent("lead")?.projectId).toBe("proj1");
+    expect(getCustomTopics("proj1")).toHaveLength(1);
+
+    registerWorkforceConfig("proj1", {
+      name: "two",
+      agents: {
+        lead: {
+          extends: "manager",
+          briefing: [],
+          expectations: [],
+          performance_policy: { action: "alert" },
+        },
+      },
+    }, projectDir);
+
+    expect(getApprovalPolicy("proj1")).toBeNull();
+    expect(getExtendedProjectConfig("proj1")).toMatchObject({
+      projectDir,
+      storageDir: undefined,
+      dispatch: undefined,
+    });
+    expect(getManagerForAgent("lead")).toBeNull();
+    expect(getCustomTopics("proj1")).toHaveLength(0);
+
+    const budgetRows = getDb("proj1")
+      .prepare("SELECT COUNT(*) AS count FROM budgets WHERE project_id = ?")
+      .get("proj1") as { count: number };
+    expect(budgetRows.count).toBe(0);
+  });
+
+  it("rolls back agent registration when activation fails", async () => {
+    const dbModule = await import("../../src/db.js");
+    const getDbSpy = vi.spyOn(dbModule, "getDb").mockImplementation(() => {
+      throw new Error("sqlite unavailable");
+    });
+
+    expect(() =>
+      activateWorkforceProject("broken-proj", {
+        name: "broken",
+        agents: {
+          worker1: {
+            extends: "employee",
+            briefing: [],
+            expectations: [],
+            performance_policy: { action: "alert" },
+          },
+        },
+      }),
+    ).toThrow("sqlite unavailable");
+
+    expect(getAgentConfig("worker1", "broken-proj")).toBeNull();
+    expect(getRegisteredAgentIds("broken-proj")).toEqual([]);
+
+    getDbSpy.mockRestore();
   });
 });
 

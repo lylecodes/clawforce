@@ -1,12 +1,21 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { getMemoryDb } from "../../src/db.js";
+import type { DatabaseSync } from "../../src/sqlite-driver.js";
+
+vi.mock("../../src/diagnostics.js", () => ({
+  safeLog: vi.fn(),
+}));
 import {
   endSession,
   getActiveSessions,
+  getSessionHeartbeatStatus,
   getSession,
+  killPersistedSessionProcess,
   recordToolCall,
   resetTrackerForTest,
   startTracking,
 } from "../../src/enforcement/tracker.js";
+const { safeLog } = await import("../../src/diagnostics.js");
 import type { AgentConfig } from "../../src/types.js";
 
 const workerConfig: AgentConfig = {
@@ -20,8 +29,48 @@ const workerConfig: AgentConfig = {
 };
 
 describe("compliance tracker", () => {
+  let db: DatabaseSync;
+
+  afterEach(() => {
+    try { db?.close(); } catch { /* ignore */ }
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
   afterEach(() => {
     resetTrackerForTest();
+  });
+
+  it("logs persisted kill failures with the reason and error detail", () => {
+    db = getMemoryDb();
+    db.prepare(`
+      INSERT INTO tracked_sessions (
+        session_key, agent_id, project_id, started_at, requirements, satisfied,
+        tool_call_count, last_persisted_at, dispatch_context, process_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "sess1",
+      "coder",
+      "proj1",
+      Date.now(),
+      "[]",
+      "{}",
+      0,
+      Date.now(),
+      null,
+      999999,
+    );
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw new Error("EPERM");
+    });
+
+    expect(killPersistedSessionProcess("proj1", "sess1", "stuck session", db)).toBe(false);
+    expect(killSpy).toHaveBeenCalledWith(999999, "SIGTERM");
+    expect(vi.mocked(safeLog)).toHaveBeenCalledWith(
+      "tracker.killPersisted",
+      expect.stringContaining("Failed to kill persisted session (stuck session): EPERM"),
+    );
   });
 
   it("tracks a session", () => {
@@ -134,5 +183,11 @@ describe("compliance tracker", () => {
     startTracking("sess2", "agent2", "proj1", workerConfig);
 
     expect(getActiveSessions()).toHaveLength(2);
+  });
+
+  it("classifies session heartbeats by recency", () => {
+    expect(getSessionHeartbeatStatus(Date.now() - 5_000).state).toBe("live");
+    expect(getSessionHeartbeatStatus(Date.now() - 40_000).state).toBe("quiet");
+    expect(getSessionHeartbeatStatus(Date.now() - 120_000).state).toBe("stale");
   });
 });

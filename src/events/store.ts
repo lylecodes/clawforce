@@ -6,7 +6,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import type { ClawforceEvent, EventSource, EventStatus } from "../types.js";
 
@@ -84,7 +84,7 @@ export function claimPendingEvents(
   if (!withinTransaction) db.prepare("BEGIN IMMEDIATE").run();
   try {
     const pending = db.prepare(
-      "SELECT id FROM events WHERE project_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?",
+      "SELECT id FROM events WHERE project_id = ? AND status = 'pending' ORDER BY created_at ASC, rowid ASC LIMIT ?",
     ).all(projectId, limit) as Record<string, unknown>[];
 
     if (pending.length === 0) {
@@ -100,7 +100,7 @@ export function claimPendingEvents(
     ).run(now, ...ids);
 
     const rows = db.prepare(
-      `SELECT * FROM events WHERE id IN (${placeholders})`,
+      `SELECT * FROM events WHERE id IN (${placeholders}) ORDER BY created_at ASC, rowid ASC`,
     ).all(...ids) as Record<string, unknown>[];
 
     if (!withinTransaction) db.prepare("COMMIT").run();
@@ -196,10 +196,63 @@ export function listEvents(
 
   const limit = filter?.limit ?? 50;
   const offset = filter?.offset ?? 0;
-  const sql = `SELECT * FROM events WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const sql = `SELECT * FROM events WHERE ${where} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`;
   values.push(limit, offset);
 
   const rows = db.prepare(sql).all(...values) as Record<string, unknown>[];
+  return rows.map(rowToEvent);
+}
+
+export function requeueEvents(
+  projectId: string,
+  filter?: {
+    ids?: string[];
+    status?: EventStatus | EventStatus[];
+    type?: string;
+    limit?: number;
+  },
+  dbOverride?: DatabaseSync,
+): ClawforceEvent[] {
+  const db = dbOverride ?? getDb(projectId);
+  const clauses = ["project_id = ?"];
+  const values: Array<string | number> = [projectId];
+
+  if (filter?.ids && filter.ids.length > 0) {
+    clauses.push(`id IN (${filter.ids.map(() => "?").join(", ")})`);
+    values.push(...filter.ids);
+  }
+
+  const statuses = filter?.status
+    ? (Array.isArray(filter.status) ? filter.status : [filter.status])
+    : [];
+  if (statuses.length > 0) {
+    clauses.push(`status IN (${statuses.map(() => "?").join(", ")})`);
+    values.push(...statuses);
+  }
+
+  if (filter?.type) {
+    clauses.push("type = ?");
+    values.push(filter.type);
+  }
+
+  const limit = Math.min(filter?.limit ?? 50, 200);
+  const rows = db.prepare(`
+    SELECT *
+    FROM events
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY created_at DESC, rowid DESC
+    LIMIT ?
+  `).all(...values, limit) as Record<string, unknown>[];
+
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((row) => row.id as string);
+  db.prepare(`
+    UPDATE events
+    SET status = 'pending', error = NULL, handled_by = NULL, processed_at = NULL
+    WHERE project_id = ? AND id IN (${ids.map(() => "?").join(", ")})
+  `).run(projectId, ...ids);
+
   return rows.map(rowToEvent);
 }
 

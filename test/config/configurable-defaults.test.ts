@@ -32,7 +32,7 @@ describe("configurable defaults normalization", () => {
   });
 
   function writeConfig(content: string): string {
-    const configPath = path.join(tmpDir, "project.yaml");
+    const configPath = path.join(tmpDir, "workforce.yaml");
     fs.writeFileSync(configPath, content);
     return configPath;
   }

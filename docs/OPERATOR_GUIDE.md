@@ -8,21 +8,11 @@ A practical reference for humans operating ClawForce through the dashboard.
 
 ClawForce is a governance layer for autonomous AI agent teams. It enforces budgets, manages task lifecycles, routes approvals, tracks trust, and gives operators visibility into what every agent is doing and spending — without requiring agents to know ClawForce exists.
 
-The dashboard is the primary operator interface. It surfaces live state from the ClawForce SQLite database and lets you take action without touching the CLI or config files.
+The dashboard is the primary operator interface. It surfaces live state from the ClawForce SQLite database and lets you take action without touching the CLI or config files. Codex remains the primary conversational surface; both should reflect the same control plane.
 
 ---
 
 ## Accessing the Dashboard
-
-### Embedded mode (default)
-
-When ClawForce runs as an OpenClaw plugin, the dashboard is served at:
-
-```
-http://localhost:<openclaw-port>/clawforce/
-```
-
-OpenClaw handles authentication. If you can access OpenClaw, you can access the dashboard. No additional configuration needed.
 
 ### Standalone mode
 
@@ -35,6 +25,16 @@ serveDashboard(cf, { port: 3117 });
 ```
 
 The dashboard is then at `http://localhost:3117/clawforce/`. Set `CLAWFORCE_DASHBOARD_TOKEN` to require bearer token authentication. Without a token, the server accepts connections from localhost only and refuses remote connections.
+
+### Embedded mode (when using OpenClaw)
+
+When ClawForce runs as an OpenClaw plugin, the dashboard is served at:
+
+```
+http://localhost:<openclaw-port>/clawforce/
+```
+
+OpenClaw handles authentication. If you can access OpenClaw, you can access the dashboard. No additional configuration needed.
 
 ---
 
@@ -183,6 +183,13 @@ Click a task to see its detail view. From there you can:
 - Add evidence (notes, links, artifacts)
 - View the full audit trail
 
+For CLI-driven review work, use the explicit verdict command rather than generic state mutation:
+
+```bash
+cf verdict <task-id> --pass --reason="Evidence is sufficient" --domain=my-team
+cf verdict <task-id> --fail --reason="Needs rework" --domain=my-team
+```
+
 ### Creating a task
 
 Tasks are typically created by agents. Operators can create tasks via CLI:
@@ -227,19 +234,64 @@ cf reject <proposal-id> --feedback="Scope too broad" --domain=my-team
 
 ### Messaging agents
 
-The Comms view shows agent messages, threads, and your inbox. You can send a message to any agent from the message composer. Messages are delivered to the agent in their next briefing.
+The Comms view should be treated as operator messaging inside the governance
+plane, not as a separate general-purpose chat app.
 
-You can also address messages using the dashboard assistant: type `@agent-id message content` in the assistant input field to send to a specific agent.
+The current backend supports:
+
+- operator chat routed to the dashboard assistant target or domain lead
+- explicit `@agent-id message` routing for direct intervention
+- raw direct-message history to and from the `user` pseudo-agent
+- live-vs-stored acknowledgement semantics for operator delivery
+
+Plain operator chat should default to the configured assistant target or root
+lead. Explicit `@agent-id` messages should bypass that default route.
+
+### Operator chat routes
+
+The backend now exposes a dedicated operator-comms contract:
+
+- `GET /clawforce/api/:domain/assistant`
+- `GET /clawforce/api/:domain/operator-comms`
+- `POST /clawforce/api/:domain/messages/operator`
+
+Use `POST /clawforce/api/:domain/messages/operator` for JSON clients that want
+operator-chat behavior without SSE framing.
 
 ### Dashboard assistant
 
 The dashboard assistant (`/clawforce/api/:domain/agents/clawforce-assistant/message`) routes messages to the domain lead or a configured target. If a live session is available, the message is injected directly. If not, it's stored for delivery at next briefing.
+
+That route remains the SSE-friendly assistant/widget path. It coexists with the
+JSON operator-chat route instead of replacing it.
+
+### Decision separation
+
+Normal operator chat should not become the approval queue. Human-required
+decisions belong in the Decision Inbox, even when a proposal or task is linked
+from a chat thread.
+
+### Codex users
+
+Codex should remain the primary conversational surface for users who operate the
+system from chat. The dashboard should act as the cockpit:
+
+- approvals
+- org and queue visibility
+- budget and trust state
+- operator thread history
+- delivery visibility for live vs stored operator messages
+
+Both surfaces should use the same backend message paths so the operator can send
+work from Codex and inspect the result in the UI without diverging state.
 
 ### Via CLI
 
 ```bash
 cf message lead "Prioritize the auth feature" --domain=my-team
 ```
+
+See [docs/OPERATOR_COMMS.md](/Users/lylejens/workplace/clawforce/docs/OPERATOR_COMMS.md:1) for the current operator-comms contract.
 
 ---
 

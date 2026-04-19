@@ -3,11 +3,11 @@
  *
  * When a tracked worker session ends (cron run or subagent completion),
  * automatically attaches whatever error/outcome context is available as
- * evidence and transitions the task to FAILED — so the orchestrator always
+ * evidence and transitions the task to FAILED — so the manager always
  * gets "last words" even if the worker never called the task tool.
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "../sqlite-driver.js";
 import { attachEvidence, transitionTask } from "./ops.js";
 import { getTask } from "./ops.js";
 import type { EvidenceType } from "../types.js";
