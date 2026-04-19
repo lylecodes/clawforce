@@ -415,18 +415,35 @@ function positionFor(currentPhase: number, phaseIndex: number): "upcoming" | "cu
   return phaseIndex > currentPhase ? "upcoming" : "past";
 }
 
-function resolveInspectorPhaseIndex(
+/**
+ * Resolve a `stageKey` to an in-bounds phase index for the given workflow.
+ *
+ * This is the single source of truth for what counts as a valid stage scope.
+ * Both the stage inspector and the scoped feed use it, so a key that 404s
+ * the inspector cannot still produce feed items for a scope that does not
+ * exist.
+ *
+ * Returns `null` when the stageKey cannot be mapped to a real stage:
+ * - malformed key (not `workflowId:phase:N`, not a bare phase-index string)
+ * - parsed workflowId belongs to a different workflow
+ * - phase index is out of range for this workflow
+ */
+function resolveStagePhaseIndex(
   workflow: Workflow,
   stageKey: string,
 ): number | null {
   const parsed = parseStageKey(stageKey);
+  let candidate: number;
   if (parsed) {
     if (parsed.workflowId !== workflow.id) return null;
-    return parsed.phaseIndex;
+    candidate = parsed.phaseIndex;
+  } else {
+    const direct = Number.parseInt(stageKey, 10);
+    if (!Number.isFinite(direct) || direct < 0) return null;
+    candidate = direct;
   }
-  const direct = Number.parseInt(stageKey, 10);
-  if (!Number.isFinite(direct) || direct < 0) return null;
-  return direct;
+  if (candidate >= workflow.phases.length) return null;
+  return candidate;
 }
 
 /**
@@ -447,10 +464,9 @@ export function queryWorkflowStageInspector(
   const workflow = getWorkflow(domainId, workflowId, db);
   if (!workflow || workflow.projectId !== domainId) return null;
 
-  const phaseIndex = resolveInspectorPhaseIndex(workflow, stageKey);
+  const phaseIndex = resolveStagePhaseIndex(workflow, stageKey);
   if (phaseIndex === null) return null;
-  const phase = workflow.phases[phaseIndex];
-  if (!phase) return null;
+  const phase = workflow.phases[phaseIndex]!;
 
   const gateStatus = getPhaseStatus(domainId, workflowId, phaseIndex, db);
   const phaseTasks = gateStatus?.tasks ?? [];
@@ -608,15 +624,23 @@ export function queryScopedWorkspaceFeed(
   );
   const taskLinkage = lookupTaskLinkage(db, domainId, referencedTaskIds);
 
+  // Stage scope is only valid when the key resolves to a real phase of this
+  // workflow. If it doesn't, the scope is a lie — the same input that 404s
+  // `queryWorkflowStageInspector()` — so we refuse to emit cross-scope items
+  // into a scope that has no bounds.
   let stagePhaseIndex: number | null = null;
   if (params.kind === "stage") {
-    const parsed = parseStageKey(params.stageKey);
-    if (parsed && parsed.workflowId === workflow.id) {
-      stagePhaseIndex = parsed.phaseIndex;
-    } else {
-      const direct = Number.parseInt(params.stageKey, 10);
-      if (Number.isFinite(direct) && direct >= 0) stagePhaseIndex = direct;
+    const resolved = resolveStagePhaseIndex(workflow, params.stageKey);
+    if (resolved === null) {
+      return {
+        scope,
+        items: [],
+        counts: { actionNeeded: 0, watching: 0, fyi: 0 },
+        crossScopeCount: 0,
+        generatedAt: summary.generatedAt,
+      };
     }
+    stagePhaseIndex = resolved;
   }
 
   const scopedItems: ScopedFeedItem[] = [];
@@ -630,12 +654,9 @@ export function queryScopedWorkspaceFeed(
       continue;
     }
 
-    // stage scope
-    if (stagePhaseIndex == null) {
-      if (isCrossScopeCritical(item)) scopedItems.push({ ...item, crossScope: true });
-      continue;
-    }
-    if (itemMatchesStage(item, workflow.id, stagePhaseIndex, taskLinkage)) {
+    // stage scope — stagePhaseIndex is guaranteed non-null here because the
+    // invalid-key branch above returned early.
+    if (itemMatchesStage(item, workflow.id, stagePhaseIndex!, taskLinkage)) {
       scopedItems.push(item);
     } else if (isCrossScopeCritical(item)) {
       scopedItems.push({ ...item, crossScope: true });

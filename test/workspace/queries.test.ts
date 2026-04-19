@@ -606,3 +606,139 @@ describe("workspace summaries scale past 1000 tasks without silent truncation", 
     expect(workspace.operator.openTaskCount).toBe(5);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase A fix-pass: invalid stage scope must not leak cross-scope items
+// ---------------------------------------------------------------------------
+//
+// `queryWorkflowStageInspector()` returns null (and the router 404s) when a
+// stageKey is malformed, references a different workflow, or points past the
+// end of `workflow.phases`. The scoped feed must mirror that — an invalid
+// stage scope is not a real scope, so it must not still emit
+// budget/health/compliance `crossScope: true` items as though it were.
+// See `resolveStagePhaseIndex` in src/workspace/queries.ts.
+
+describe("queryScopedWorkspaceFeed — invalid stage scope", () => {
+  let db: DatabaseSync;
+
+  beforeEach(() => {
+    db = getMemoryDb();
+    buildAttentionSummaryMock.mockClear();
+    // Seed the attention summary with items that would qualify as
+    // cross-scope-critical (budget/health/compliance action-needed). Under
+    // a valid-but-unmatched stage they surface as crossScope; under an
+    // invalid scope they must not appear at all.
+    mockSummary = {
+      projectId: DOMAIN,
+      items: [
+        {
+          id: "budget-crit",
+          projectId: DOMAIN,
+          urgency: "action-needed",
+          actionability: "action-needed",
+          kind: "alert",
+          severity: "critical",
+          automationState: "needs_human",
+          category: "budget",
+          title: "Budget critical",
+          summary: "",
+          destination: "/",
+          detectedAt: 7000,
+          updatedAt: 7000,
+        },
+        {
+          id: "health-crit",
+          projectId: DOMAIN,
+          urgency: "action-needed",
+          actionability: "action-needed",
+          kind: "alert",
+          severity: "critical",
+          automationState: "needs_human",
+          category: "health",
+          title: "Health critical",
+          summary: "",
+          destination: "/",
+          detectedAt: 7000,
+          updatedAt: 7000,
+        },
+      ],
+      counts: { actionNeeded: 2, watching: 0, fyi: 0 },
+      generatedAt: 7000,
+    };
+  });
+  afterEach(() => { try { db.close(); } catch { /* already closed */ } });
+
+  function assertEmptyInvalidFeed(feed: ReturnType<typeof queryScopedWorkspaceFeed>) {
+    expect(feed.items).toEqual([]);
+    expect(feed.counts).toEqual({ actionNeeded: 0, watching: 0, fyi: 0 });
+    expect(feed.crossScopeCount).toBe(0);
+  }
+
+  it("returns an empty feed when the stageKey has a malformed format", () => {
+    const wf = createWorkflow({ projectId: DOMAIN, name: "WF", phases: [{ name: "A" }, { name: "B" }], createdBy: "agent:pm" }, db);
+    const feed = queryScopedWorkspaceFeed({
+      kind: "stage",
+      domainId: DOMAIN,
+      workflowId: wf.id,
+      stageKey: "not-a-stage",
+    }, db);
+    expect(feed.scope).toEqual({ kind: "stage", domainId: DOMAIN, workflowId: wf.id, stageKey: "not-a-stage" });
+    assertEmptyInvalidFeed(feed);
+    // Parallel with the inspector contract.
+    expect(queryWorkflowStageInspector(DOMAIN, wf.id, "not-a-stage", db)).toBeNull();
+  });
+
+  it("returns an empty feed when the stageKey belongs to a different workflow", () => {
+    const wfA = createWorkflow({ projectId: DOMAIN, name: "A", phases: [{ name: "X" }], createdBy: "agent:pm" }, db);
+    const wfB = createWorkflow({ projectId: DOMAIN, name: "B", phases: [{ name: "Y" }], createdBy: "agent:pm" }, db);
+    const stageKeyForB = deriveStageKey(wfB.id, 0);
+    const feed = queryScopedWorkspaceFeed({
+      kind: "stage",
+      domainId: DOMAIN,
+      workflowId: wfA.id,
+      stageKey: stageKeyForB,
+    }, db);
+    expect(feed.scope).toEqual({ kind: "stage", domainId: DOMAIN, workflowId: wfA.id, stageKey: stageKeyForB });
+    assertEmptyInvalidFeed(feed);
+    expect(queryWorkflowStageInspector(DOMAIN, wfA.id, stageKeyForB, db)).toBeNull();
+  });
+
+  it("returns an empty feed when the phase index is past the end of the workflow", () => {
+    const wf = createWorkflow({ projectId: DOMAIN, name: "WF", phases: [{ name: "A" }, { name: "B" }], createdBy: "agent:pm" }, db);
+    // Numeric, out-of-range.
+    const outOfRangeBare = "99";
+    const feedBare = queryScopedWorkspaceFeed({
+      kind: "stage",
+      domainId: DOMAIN,
+      workflowId: wf.id,
+      stageKey: outOfRangeBare,
+    }, db);
+    assertEmptyInvalidFeed(feedBare);
+    expect(queryWorkflowStageInspector(DOMAIN, wf.id, outOfRangeBare, db)).toBeNull();
+
+    // Structured `workflowId:phase:N` form, out-of-range.
+    const outOfRangeStructured = deriveStageKey(wf.id, 99);
+    const feedStructured = queryScopedWorkspaceFeed({
+      kind: "stage",
+      domainId: DOMAIN,
+      workflowId: wf.id,
+      stageKey: outOfRangeStructured,
+    }, db);
+    assertEmptyInvalidFeed(feedStructured);
+    expect(queryWorkflowStageInspector(DOMAIN, wf.id, outOfRangeStructured, db)).toBeNull();
+  });
+
+  it("a valid-but-unmatched stage still surfaces cross-scope critical items (sanity: the short-circuit only triggers for invalid scopes)", () => {
+    const wf = createWorkflow({ projectId: DOMAIN, name: "WF", phases: [{ name: "A" }], createdBy: "agent:pm" }, db);
+    const stageKey = deriveStageKey(wf.id, 0);
+    const feed = queryScopedWorkspaceFeed({
+      kind: "stage",
+      domainId: DOMAIN,
+      workflowId: wf.id,
+      stageKey,
+    }, db);
+    expect(feed.items.map((i) => i.id).sort()).toEqual(["budget-crit", "health-crit"]);
+    expect(feed.items.every((i) => i.crossScope === true)).toBe(true);
+    expect(feed.crossScopeCount).toBe(2);
+  });
+});
