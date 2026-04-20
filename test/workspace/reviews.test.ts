@@ -104,13 +104,15 @@ describe("createWorkflowReviewFromDraft", () => {
     expect(all).toHaveLength(1);
   });
 
-  it("returns null for a missing draft session", () => {
+  it("returns draft_not_found for a missing draft session", () => {
     const result = createWorkflowReviewFromDraft({
       projectId: DOMAIN,
       draftSessionId: "no-such-draft",
       confirmedBy: "user",
     }, db);
-    expect(result).toBeNull();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.reason).toBe("draft_not_found");
   });
 
   it("allows confirming a new review after a previous one was resolved", () => {
@@ -130,6 +132,59 @@ describe("createWorkflowReviewFromDraft", () => {
     }, db)!;
     expect(again.created).toBe(true);
     expect(again.record.id).not.toBe(first.record.id);
+  });
+
+  // -------------------------------------------------------------------------
+  // Terminal-applied governance guard
+  // -------------------------------------------------------------------------
+  //
+  // Once a draft has been ratified (approve → draft.status === "applied"),
+  // the Phase C review lifecycle is terminal. Reconfirming must fail with
+  // `draft_terminal` rather than creating a second pending review or
+  // regressing the draft back to `review_pending`.
+
+  it("rejects reconfirm of an already-applied draft without creating a new review or regressing state", () => {
+    const { draft } = seedDraft(db);
+    const first = createWorkflowReviewFromDraft({
+      projectId: DOMAIN,
+      draftSessionId: draft.id,
+      confirmedBy: "user",
+    }, db)!;
+    approveWorkflowReview({ projectId: DOMAIN, reviewId: first.record.id, actor: "reviewer" }, db);
+
+    // Draft is now applied (ratified).
+    const draftBefore = getWorkflowDraftSessionRecord(DOMAIN, draft.id, db);
+    expect(draftBefore?.status).toBe("applied");
+
+    const retry = createWorkflowReviewFromDraft({
+      projectId: DOMAIN,
+      draftSessionId: draft.id,
+      confirmedBy: "user",
+    }, db);
+    expect(retry.ok).toBe(false);
+    if (retry.ok) throw new Error("unreachable");
+    expect(retry.reason).toBe("draft_terminal");
+    expect(retry.currentStatus).toBe("applied");
+
+    // No second review row was created.
+    const allReviews = listWorkflowReviewRecords(
+      DOMAIN,
+      { draftSessionId: draft.id, includeStatuses: ["pending", "approved", "rejected"] },
+      db,
+    );
+    expect(allReviews).toHaveLength(1);
+    expect(allReviews[0]!.id).toBe(first.record.id);
+    expect(allReviews[0]!.status).toBe("approved");
+
+    // Draft did not regress from applied back to review_pending.
+    const draftAfter = getWorkflowDraftSessionRecord(DOMAIN, draft.id, db);
+    expect(draftAfter?.status).toBe("applied");
+
+    // No extra `workflow_review.confirm` audit entries were written.
+    const confirmAuditRows = db.prepare(
+      "SELECT COUNT(*) AS cnt FROM audit_log WHERE project_id = ? AND action = ?",
+    ).get(DOMAIN, "workflow_review.confirm") as { cnt: number };
+    expect(confirmAuditRows.cnt).toBe(1);
   });
 });
 

@@ -533,6 +533,7 @@ describe("handleAction", () => {
 
   it("confirms a draft into a pending review", () => {
     (createWorkflowReviewFromDraft as any).mockReturnValue({
+      ok: true,
       created: true,
       record: {
         id: "rev-1",
@@ -564,9 +565,29 @@ describe("handleAction", () => {
   });
 
   it("returns 404 when confirming a missing draft", () => {
-    (createWorkflowReviewFromDraft as any).mockReturnValue(null);
+    (createWorkflowReviewFromDraft as any).mockReturnValue({
+      ok: false,
+      reason: "draft_not_found",
+    });
     const result = handleAction("test-project", "workspace/drafts/missing/confirm", { actor: "user" });
     expect(result.status).toBe(404);
+  });
+
+  it("returns 409 when confirming a terminal (applied) draft", () => {
+    (createWorkflowReviewFromDraft as any).mockReturnValue({
+      ok: false,
+      reason: "draft_terminal",
+      currentStatus: "applied",
+    });
+    const result = handleAction("test-project", "workspace/drafts/applied-draft/confirm", { actor: "user" });
+    expect(result.status).toBe(409);
+    expect((result.body as { currentStatus: string }).currentStatus).toBe("applied");
+    // Must not broadcast a workspace:review event for a rejected confirm.
+    expect(emitSSE).not.toHaveBeenCalledWith(
+      "test-project",
+      "workspace:review",
+      expect.anything(),
+    );
   });
 
   it("approves a workflow review and emits workspace:review SSE", () => {

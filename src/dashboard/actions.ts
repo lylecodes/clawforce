@@ -206,8 +206,19 @@ function handleDraftConfirm(
     title,
     summary,
   });
-  if (!result) {
-    return notFound("Workflow draft session not found");
+  if (!result.ok) {
+    if (result.reason === "draft_not_found") {
+      return notFound("Workflow draft session not found");
+    }
+    // Terminal draft — approved/applied drafts cannot be reopened into
+    // a new review. Surface as 409 so the UI can sync its state.
+    return {
+      status: 409,
+      body: {
+        error: "Draft session is terminal — it has already been ratified and cannot be reconfirmed",
+        currentStatus: result.currentStatus,
+      },
+    };
   }
 
   emitSSE(projectId, "workspace:review", {

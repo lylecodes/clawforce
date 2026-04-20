@@ -27,6 +27,7 @@ import {
 } from "./drafts.js";
 import type {
   WorkflowDraftChangeSummary,
+  WorkflowDraftSessionStatus,
   WorkflowDraftStageOverlay,
   WorkflowReview,
   WorkflowReviewStatus,
@@ -85,11 +86,14 @@ export type ConfirmDraftIntoReviewParams = {
   summary?: string;
 };
 
-export type ConfirmDraftResult = {
-  record: WorkflowReviewRecord;
-  /** True when this call created the review row; false when an existing pending review was returned. */
-  created: boolean;
-};
+export type ConfirmDraftResult =
+  | { ok: true; created: boolean; record: WorkflowReviewRecord }
+  | { ok: false; reason: "draft_not_found" }
+  | {
+      ok: false;
+      reason: "draft_terminal";
+      currentStatus: WorkflowDraftSessionStatus;
+    };
 
 /**
  * Confirm a draft session into a review.
@@ -99,15 +103,31 @@ export type ConfirmDraftResult = {
  * of creating a second row or erroring. This matches the operator reality
  * where the "confirm" button may be clicked twice under network latency.
  *
- * Returns `null` when the referenced draft session does not exist.
+ * Terminal guard: once a draft has been ratified (`status === "applied"`),
+ * it is terminal for the review lifecycle. Confirming an applied draft
+ * returns `{ ok: false, reason: "draft_terminal" }` — creating a second
+ * review would reopen ratified governance state and regress the draft from
+ * `applied` back to `review_pending`, which the Phase C model disallows.
+ *
+ * Discarded drafts are intentionally *not* terminal here: an operator who
+ * rejected a draft may want to reconsider the same change set by running
+ * the review loop again. That behavior is covered by existing tests and
+ * is preserved.
+ *
+ * Returns `{ ok: false, reason: "draft_not_found" }` when the referenced
+ * draft session does not exist.
  */
 export function createWorkflowReviewFromDraft(
   params: ConfirmDraftIntoReviewParams,
   dbOverride?: DatabaseSync,
-): ConfirmDraftResult | null {
+): ConfirmDraftResult {
   const db = dbOverride ?? getDb(params.projectId);
   const draft = getWorkflowDraftSessionRecord(params.projectId, params.draftSessionId, db);
-  if (!draft) return null;
+  if (!draft) return { ok: false, reason: "draft_not_found" };
+
+  if (draft.status === "applied") {
+    return { ok: false, reason: "draft_terminal", currentStatus: draft.status };
+  }
 
   // Idempotency: if a pending review already exists for this draft, return it.
   const existingPending = db.prepare(`
@@ -117,7 +137,7 @@ export function createWorkflowReviewFromDraft(
      LIMIT 1
   `).get(params.projectId, params.draftSessionId) as WorkflowReviewRow | undefined;
   if (existingPending) {
-    return { record: rowToRecord(existingPending), created: false };
+    return { ok: true, created: false, record: rowToRecord(existingPending) };
   }
 
   const overlays = diffDraftWorkflow(draft);
@@ -171,7 +191,7 @@ export function createWorkflowReviewFromDraft(
   const row = db.prepare(
     "SELECT * FROM workflow_reviews WHERE id = ? AND project_id = ?",
   ).get(id, params.projectId) as WorkflowReviewRow;
-  return { record: rowToRecord(row), created: true };
+  return { ok: true, created: true, record: rowToRecord(row) };
 }
 
 // ---------------------------------------------------------------------------
