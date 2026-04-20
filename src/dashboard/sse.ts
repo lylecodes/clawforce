@@ -26,7 +26,8 @@ export type SSEEventType =
   | "config:changed"
   | "action_status"
   | "locks:changed"
-  | "workspace:draft";
+  | "workspace:draft"
+  | "workspace:review";
 
 type Client = {
   id: string;

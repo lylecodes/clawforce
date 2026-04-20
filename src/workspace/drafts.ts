@@ -129,6 +129,39 @@ export function createWorkflowDraftSession(
   return created;
 }
 
+/**
+ * Update the status of a draft session. Returns the updated record, or null
+ * when the session does not exist. Callers must still decide whether the
+ * transition is legal — this helper only performs the SQL update and audit.
+ */
+export function setWorkflowDraftSessionStatus(
+  projectId: string,
+  draftSessionId: string,
+  status: WorkflowDraftSessionStatus,
+  actor: string,
+  dbOverride?: DatabaseSync,
+): WorkflowDraftSessionRecord | null {
+  const db = dbOverride ?? getDb(projectId);
+  const now = Date.now();
+  const result = db.prepare(`
+    UPDATE workflow_draft_sessions
+       SET status = ?, updated_at = ?
+     WHERE id = ? AND project_id = ?
+  `).run(status, now, draftSessionId, projectId) as { changes: number };
+  if (result.changes === 0) return null;
+
+  writeAuditEntry({
+    projectId,
+    actor,
+    action: "workflow_draft.set_status",
+    targetType: "workflow_draft_session",
+    targetId: draftSessionId,
+    detail: status,
+  }, db);
+
+  return getWorkflowDraftSessionRecord(projectId, draftSessionId, db);
+}
+
 export function setWorkflowDraftSessionVisibility(
   projectId: string,
   draftSessionId: string,

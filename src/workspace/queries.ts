@@ -23,6 +23,12 @@ import {
   diffDraftWorkflow,
 } from "./drafts.js";
 import {
+  getWorkflowReviewRecord,
+  listWorkflowReviewRecords,
+  toWorkflowReviewDetail,
+  toWorkflowReviewSummary,
+} from "./reviews.js";
+import {
   deriveStageKey,
   parseStageKey,
   type ProjectOperatorSummary,
@@ -35,6 +41,9 @@ import {
   type WorkflowDraftSession,
   type WorkflowDraftSessionSummary,
   type WorkflowDraftStageOverlay,
+  type WorkflowReview,
+  type WorkflowReviewStatus,
+  type WorkflowReviewSummary,
   type WorkflowStageEdge,
   type WorkflowStageInspector,
   type WorkflowStageInspectorTask,
@@ -338,10 +347,12 @@ export function queryProjectWorkspace(
       operator: emptyOperatorSummary(emergencyStop, healthTier),
       workflows: [],
       draftSessions: [],
+      reviews: [],
     };
   }
 
   const workflows = listWorkflows(domainId, db);
+  const workflowNameById = new Map(workflows.map((wf) => [wf.id, wf.name]));
   const draftSessions = listWorkflowDraftSessionRecords(domainId, {}, db)
     .map((record) => toWorkflowDraftSessionSummary(domainId, record));
   const visibleDraftWorkflows = new Set(
@@ -353,6 +364,9 @@ export function queryProjectWorkspace(
     ...buildMiniTopologyInternal(domainId, wf, db),
     hasDraftOverlays: visibleDraftWorkflows.has(wf.id),
   }));
+
+  const reviews = listWorkflowReviewRecords(domainId, { includeStatuses: ["pending"] }, db)
+    .map((record) => toWorkflowReviewSummary(domainId, record, workflowNameById.get(record.workflowId) ?? record.workflowId));
 
   let openTaskCount = 0;
   try {
@@ -381,6 +395,7 @@ export function queryProjectWorkspace(
     operator,
     workflows: miniTopologies,
     draftSessions,
+    reviews,
   };
 }
 
@@ -410,6 +425,8 @@ export function queryWorkflowTopology(
   const draftOverlays = draftSessionRecords
     .filter((record) => record.overlayVisibility === "visible")
     .flatMap((record) => diffDraftWorkflow(record));
+  const reviews = listWorkflowReviewRecords(domainId, { workflowId, includeStatuses: ["pending"] }, db)
+    .map((record) => toWorkflowReviewSummary(domainId, record, workflow.name));
   return {
     ...mini,
     hasDraftOverlays: draftOverlays.length > 0,
@@ -417,6 +434,7 @@ export function queryWorkflowTopology(
     createdBy: workflow.createdBy,
     draftSessions,
     draftOverlays,
+    reviews,
   };
 }
 
@@ -445,6 +463,52 @@ export function queryWorkflowDraftSession(
   const record = getWorkflowDraftSessionRecord(domainId, draftSessionId, db);
   if (!record) return null;
   return toWorkflowDraftSessionDetail(domainId, record);
+}
+
+// ---------------------------------------------------------------------------
+// queryWorkflowReviews / queryWorkflowReview (Phase C)
+// ---------------------------------------------------------------------------
+
+export type WorkflowReviewListFilter = {
+  workflowId?: string;
+  includeStatuses?: WorkflowReviewStatus[];
+};
+
+export function queryWorkflowReviews(
+  domainId: string,
+  filter: WorkflowReviewListFilter = {},
+  dbOverride?: DatabaseSync,
+): WorkflowReviewSummary[] {
+  const db = resolveDb(domainId, dbOverride);
+  if (!db) return [];
+  const records = listWorkflowReviewRecords(domainId, filter, db);
+  if (records.length === 0) return [];
+
+  // Fetch workflow names cheaply — records may reference workflows that have
+  // since been deleted; fall back to the stored id in that case.
+  const workflowNameById = new Map<string, string>();
+  for (const record of records) {
+    if (workflowNameById.has(record.workflowId)) continue;
+    const workflow = getWorkflow(domainId, record.workflowId, db);
+    workflowNameById.set(record.workflowId, workflow?.name ?? record.workflowId);
+  }
+  return records.map((record) =>
+    toWorkflowReviewSummary(domainId, record, workflowNameById.get(record.workflowId) ?? record.workflowId),
+  );
+}
+
+export function queryWorkflowReview(
+  domainId: string,
+  reviewId: string,
+  dbOverride?: DatabaseSync,
+): WorkflowReview | null {
+  const db = resolveDb(domainId, dbOverride);
+  if (!db) return null;
+  const record = getWorkflowReviewRecord(domainId, reviewId, db);
+  if (!record) return null;
+  const draft = getWorkflowDraftSessionRecord(domainId, record.draftSessionId, db);
+  if (!draft) return null;
+  return toWorkflowReviewDetail(domainId, record, draft);
 }
 
 // ---------------------------------------------------------------------------

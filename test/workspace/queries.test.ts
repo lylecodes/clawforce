@@ -937,3 +937,138 @@ describe("queryScopedWorkspaceFeed — invalid stage scope", () => {
     expect(feed.crossScopeCount).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase C: reviews surfaced in workspace / topology / review queries
+// ---------------------------------------------------------------------------
+
+const { createWorkflowReviewFromDraft, approveWorkflowReview } = await import("../../src/workspace/reviews.js");
+const { queryWorkflowReview, queryWorkflowReviews } = await import("../../src/workspace/queries.js");
+
+describe("Phase C — reviews in workspace queries", () => {
+  let db: DatabaseSync;
+
+  beforeEach(() => {
+    db = getMemoryDb();
+    mockSummary = {
+      projectId: DOMAIN,
+      items: [],
+      counts: { actionNeeded: 0, watching: 0, fyi: 0 },
+      generatedAt: 1000,
+    };
+  });
+  afterEach(() => { try { db.close(); } catch { /* already */ } });
+
+  function seedDraftWithReview(opts: { approve?: boolean } = {}) {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Pipeline",
+      phases: [{ name: "Build" }, { name: "Ship" }],
+      createdBy: "agent:pm",
+    }, db);
+    const draft = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Insert verify",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        name: wf.name,
+        phases: [
+          { name: "Build", taskIds: [], gateCondition: "all_done" },
+          { name: "Verify", taskIds: [], gateCondition: "all_done" },
+          { name: "Ship", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+    }, db);
+    const reviewResult = createWorkflowReviewFromDraft({
+      projectId: DOMAIN,
+      draftSessionId: draft.id,
+      confirmedBy: "user",
+    }, db)!;
+    if (opts.approve) {
+      approveWorkflowReview({ projectId: DOMAIN, reviewId: reviewResult.record.id, actor: "reviewer" }, db);
+    }
+    return { wf, draft, review: reviewResult.record };
+  }
+
+  it("queryProjectWorkspace includes pending reviews across the domain", () => {
+    const a = seedDraftWithReview();
+    const b = seedDraftWithReview({ approve: true }); // approved — should not appear
+
+    const result = queryProjectWorkspace(DOMAIN, db);
+    expect(result.reviews.map((r) => r.id)).toEqual([a.review.id]);
+    expect(result.reviews.map((r) => r.id)).not.toContain(b.review.id);
+    expect(result.reviews[0]!.workflowName).toBe("Pipeline");
+    expect(result.reviews[0]!.status).toBe("pending");
+    expect(result.reviews[0]!.scope).toEqual({
+      kind: "review",
+      domainId: DOMAIN,
+      workflowId: a.wf.id,
+      reviewId: a.review.id,
+    });
+  });
+
+  it("queryWorkflowTopology includes only pending reviews for that workflow", () => {
+    const a = seedDraftWithReview();
+    // separate workflow
+    const otherWf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Other",
+      phases: [{ name: "X" }],
+      createdBy: "agent:pm",
+    }, db);
+    const otherDraft = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: otherWf.id,
+      title: "Other draft",
+      createdBy: "agent:pm",
+      draftWorkflow: { name: otherWf.name, phases: [{ name: "X", taskIds: [], gateCondition: "all_done" }, { name: "Y", taskIds: [], gateCondition: "all_done" }] },
+    }, db);
+    const otherReview = createWorkflowReviewFromDraft({
+      projectId: DOMAIN,
+      draftSessionId: otherDraft.id,
+      confirmedBy: "user",
+    }, db)!;
+
+    const topology = queryWorkflowTopology(DOMAIN, a.wf.id, db)!;
+    expect(topology.reviews.map((r) => r.id)).toEqual([a.review.id]);
+    expect(topology.reviews.map((r) => r.id)).not.toContain(otherReview.record.id);
+  });
+
+  it("queryWorkflowReviews filters by workflowId and status", () => {
+    const a = seedDraftWithReview();
+    const approved = seedDraftWithReview({ approve: true });
+
+    const pendingOnly = queryWorkflowReviews(DOMAIN, { includeStatuses: ["pending"] }, db);
+    expect(pendingOnly.map((r) => r.id)).toEqual([a.review.id]);
+
+    const all = queryWorkflowReviews(DOMAIN, { includeStatuses: ["pending", "approved", "rejected"] }, db);
+    const ids = all.map((r) => r.id).sort();
+    expect(ids).toEqual([a.review.id, approved.review.id].sort());
+
+    const scoped = queryWorkflowReviews(
+      DOMAIN,
+      { workflowId: a.wf.id, includeStatuses: ["pending", "approved", "rejected"] },
+      db,
+    );
+    expect(scoped.map((r) => r.id)).toEqual([a.review.id]);
+  });
+
+  it("queryWorkflowReview returns detail with overlays and draft snapshot", () => {
+    const a = seedDraftWithReview();
+    const detail = queryWorkflowReview(DOMAIN, a.review.id, db);
+    expect(detail).not.toBeNull();
+    expect(detail!.overlays.length).toBeGreaterThan(0);
+    expect(detail!.draftSession.id).toBe(a.draft.id);
+    expect(detail!.scope).toEqual({
+      kind: "review",
+      domainId: DOMAIN,
+      workflowId: a.wf.id,
+      reviewId: a.review.id,
+    });
+  });
+
+  it("queryWorkflowReview returns null for a missing id", () => {
+    expect(queryWorkflowReview(DOMAIN, "no-such", db)).toBeNull();
+  });
+});

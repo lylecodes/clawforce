@@ -14,6 +14,7 @@ import { listTasks } from "../tasks/ops.js";
 import { listRecentChanges } from "../history/store.js";
 import { getEntity, listEntityIssues } from "../entities/ops.js";
 import { listSimulatedActions } from "../execution/simulated-actions.js";
+import { listWorkflowReviewRecords } from "../workspace/reviews.js";
 import type { EntityIssue } from "../types.js";
 import type {
   AttentionAutomationState,
@@ -615,6 +616,67 @@ function detectApprovals(projectId: string, db: DatabaseSync, items: AttentionIt
       ));
     }
   } catch { /* DB may not exist */ }
+}
+
+/**
+ * Surface pending workflow reviews (Phase C) as operator attention items.
+ *
+ * Reuses the canonical `approval` category and `approval` kind so reviews
+ * land in the same decision inbox as proposals — the workspace feed, the
+ * decision inbox, and downstream rollups all treat them consistently without
+ * a separate event system.
+ */
+function detectWorkflowReviews(
+  projectId: string,
+  db: DatabaseSync,
+  items: AttentionItem[],
+): void {
+  try {
+    const reviews = listWorkflowReviewRecords(
+      projectId,
+      { includeStatuses: ["pending"] },
+      db,
+    );
+    for (const r of reviews) {
+      const changeParts: string[] = [];
+      if (r.changeSummary.addedStages) changeParts.push(`${r.changeSummary.addedStages} added`);
+      if (r.changeSummary.removedStages) changeParts.push(`${r.changeSummary.removedStages} removed`);
+      if (r.changeSummary.modifiedStages) changeParts.push(`${r.changeSummary.modifiedStages} modified`);
+      if (r.changeSummary.movedStages) changeParts.push(`${r.changeSummary.movedStages} moved`);
+      const changeSummary = changeParts.length
+        ? `Stages: ${changeParts.join(", ")}.`
+        : "No structural stage changes.";
+
+      items.push(item(
+        projectId,
+        "action-needed",
+        "approval",
+        `Workflow review: ${r.title}`,
+        r.summary?.trim() ? r.summary : changeSummary,
+        `/workspaces/${projectId}/workflows/${r.workflowId}`,
+        { reviewId: r.id, workflowId: r.workflowId, draftSessionId: r.draftSessionId },
+        {
+          reviewId: r.id,
+          draftSessionId: r.draftSessionId,
+          workflowId: r.workflowId,
+          confirmedBy: r.confirmedBy,
+          affectedStageCount: r.affectedStageCount,
+          changeSummary: r.changeSummary,
+          requiresDecision: true,
+        },
+        {
+          kind: "approval",
+          severity: r.changeSummary.totalChanges > 0 ? "high" : "normal",
+          automationState: "needs_human",
+          sourceType: "workflow_review",
+          sourceId: r.id,
+          updatedAt: r.createdAt,
+          detectedAt: r.createdAt,
+          recommendedAction: "Approve or reject this workflow review",
+        },
+      ));
+    }
+  } catch { /* DB may not exist or schema not migrated */ }
 }
 
 function detectApprovedPendingExecution(projectId: string, db: DatabaseSync, items: AttentionItem[]): void {
@@ -1606,6 +1668,7 @@ export function buildAttentionSummary(projectId: string, dbOverride?: DatabaseSy
 
   // --- Action-needed ---
   detectApprovals(projectId, db, items);
+  detectWorkflowReviews(projectId, db, items);
   detectApprovedPendingExecution(projectId, db, items);
   detectReviewTasks(projectId, db, items);
   detectBudget(projectId, db, items);

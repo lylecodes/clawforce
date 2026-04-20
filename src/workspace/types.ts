@@ -27,7 +27,8 @@ export type WorkspaceScope =
   | { kind: "project"; domainId: string }
   | { kind: "workflow"; domainId: string; workflowId: string }
   | { kind: "stage"; domainId: string; workflowId: string; stageKey: string }
-  | { kind: "draft"; domainId: string; workflowId: string; draftSessionId: string };
+  | { kind: "draft"; domainId: string; workflowId: string; draftSessionId: string }
+  | { kind: "review"; domainId: string; workflowId: string; reviewId: string };
 
 export type WorkspaceScopeKind = WorkspaceScope["kind"];
 
@@ -36,6 +37,7 @@ export const WORKSPACE_SCOPE_KINDS: readonly WorkspaceScopeKind[] = [
   "workflow",
   "stage",
   "draft",
+  "review",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -226,6 +228,57 @@ export type WorkflowDraftSession = WorkflowDraftSessionSummary & {
   draftStages: WorkflowDraftStage[];
 };
 
+// ---------------------------------------------------------------------------
+// Workflow reviews (Phase C)
+// ---------------------------------------------------------------------------
+
+/**
+ * State machine for a workflow review:
+ *
+ *   pending   → approved  (ratified; linked draft goes to "applied")
+ *   pending   → rejected  (declined; linked draft goes to "discarded")
+ *
+ * Approved reviews do NOT materialize the draft onto the live workflow in
+ * Phase C — that step is deferred. "applied" on the draft means
+ * "review-ratified", not "live-rewritten". The site that would perform the
+ * rewrite carries an explicit in-code TODO so later phases can pick it up.
+ */
+export type WorkflowReviewStatus = "pending" | "approved" | "rejected";
+
+export const WORKFLOW_REVIEW_STATUSES: readonly WorkflowReviewStatus[] = [
+  "pending",
+  "approved",
+  "rejected",
+] as const;
+
+export type WorkflowReviewSummary = {
+  scope: Extract<WorkspaceScope, { kind: "review" }>;
+  id: string;
+  workflowId: string;
+  workflowName: string;
+  draftSessionId: string;
+  title: string;
+  summary?: string;
+  status: WorkflowReviewStatus;
+  changeSummary: WorkflowDraftChangeSummary;
+  affectedStageCount: number;
+  confirmedBy: string;
+  resolvedBy?: string;
+  decisionNotes?: string;
+  createdAt: number;
+  resolvedAt?: number;
+};
+
+/**
+ * Full review detail. Carries the overlay snapshot captured at confirm time
+ * so a reviewer sees the exact change set that was up for decision, even if
+ * the live workflow or the draft session has moved on since.
+ */
+export type WorkflowReview = WorkflowReviewSummary & {
+  overlays: WorkflowDraftStageOverlay[];
+  draftSession: WorkflowDraftSessionSummary;
+};
+
 /**
  * Full workflow topology for the focused workflow canvas. Today it is a
  * superset of `WorkflowMiniTopology`; the split exists so we can enrich the
@@ -238,6 +291,8 @@ export type WorkflowTopology = WorkflowMiniTopology & {
   draftSessions: WorkflowDraftSessionSummary[];
   /** Visible draft overlays that apply on top of the live workflow. */
   draftOverlays: WorkflowDraftStageOverlay[];
+  /** Pending workflow reviews for this workflow. Empty once all are resolved. */
+  reviews: WorkflowReviewSummary[];
 };
 
 // ---------------------------------------------------------------------------
@@ -263,6 +318,8 @@ export type ProjectWorkspace = {
   operator: ProjectOperatorSummary;
   workflows: WorkflowMiniTopology[];
   draftSessions: WorkflowDraftSessionSummary[];
+  /** Pending workflow reviews across the whole domain. */
+  reviews: WorkflowReviewSummary[];
 };
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,12 @@ vi.mock("../../src/workspace/drafts.js", () => ({
   setWorkflowDraftSessionVisibility: vi.fn(),
 }));
 
+vi.mock("../../src/workspace/reviews.js", () => ({
+  createWorkflowReviewFromDraft: vi.fn(),
+  approveWorkflowReview: vi.fn(),
+  rejectWorkflowReview: vi.fn(),
+}));
+
 vi.mock("../../src/enforcement/disabled-store.js", () => ({
   disableAgent: vi.fn(),
   enableAgent: vi.fn(),
@@ -199,6 +205,7 @@ const {
 const { approveProposal, rejectProposal } = await import("../../src/approval/resolve.js");
 const { createTask, reassignTask, transitionTask } = await import("../../src/tasks/ops.js");
 const { setWorkflowDraftSessionVisibility } = await import("../../src/workspace/drafts.js");
+const { approveWorkflowReview, createWorkflowReviewFromDraft, rejectWorkflowReview } = await import("../../src/workspace/reviews.js");
 const {
   disableAgent,
   enableAgent,
@@ -519,6 +526,127 @@ describe("handleAction", () => {
     const result = handleAction("test-project", "workspace/drafts/missing/visibility", {
       overlayVisibility: "visible",
     });
+    expect(result.status).toBe(404);
+  });
+
+  // --- Phase C: draft confirm + workflow review approve/reject ---
+
+  it("confirms a draft into a pending review", () => {
+    (createWorkflowReviewFromDraft as any).mockReturnValue({
+      created: true,
+      record: {
+        id: "rev-1",
+        workflowId: "wf-1",
+        draftSessionId: "draft-1",
+        status: "pending",
+      },
+    });
+
+    const result = handleAction("test-project", "workspace/drafts/draft-1/confirm", {
+      actor: "user",
+      title: "Insert verify",
+    });
+    expect(result.status).toBe(200);
+    expect(createWorkflowReviewFromDraft).toHaveBeenCalledWith({
+      projectId: "test-project",
+      draftSessionId: "draft-1",
+      confirmedBy: "user",
+      title: "Insert verify",
+      summary: undefined,
+    });
+    expect(emitSSE).toHaveBeenCalledWith("test-project", "workspace:review", {
+      reviewId: "rev-1",
+      workflowId: "wf-1",
+      draftSessionId: "draft-1",
+      status: "pending",
+      created: true,
+    });
+  });
+
+  it("returns 404 when confirming a missing draft", () => {
+    (createWorkflowReviewFromDraft as any).mockReturnValue(null);
+    const result = handleAction("test-project", "workspace/drafts/missing/confirm", { actor: "user" });
+    expect(result.status).toBe(404);
+  });
+
+  it("approves a workflow review and emits workspace:review SSE", () => {
+    (approveWorkflowReview as any).mockReturnValue({
+      ok: true,
+      record: {
+        id: "rev-1",
+        workflowId: "wf-1",
+        draftSessionId: "draft-1",
+        status: "approved",
+        resolvedBy: "reviewer",
+        decisionNotes: "LGTM",
+        resolvedAt: 2000,
+      },
+    });
+
+    const result = handleAction("test-project", "workflow-reviews/rev-1/approve", {
+      actor: "reviewer",
+      decisionNotes: "LGTM",
+    });
+    expect(result.status).toBe(200);
+    expect(approveWorkflowReview).toHaveBeenCalledWith({
+      projectId: "test-project",
+      reviewId: "rev-1",
+      actor: "reviewer",
+      decisionNotes: "LGTM",
+    });
+    expect(emitSSE).toHaveBeenCalledWith("test-project", "workspace:review", expect.objectContaining({
+      reviewId: "rev-1",
+      workflowId: "wf-1",
+      status: "approved",
+    }));
+  });
+
+  it("rejects a workflow review with feedback (fallback body key)", () => {
+    (rejectWorkflowReview as any).mockReturnValue({
+      ok: true,
+      record: {
+        id: "rev-1",
+        workflowId: "wf-1",
+        draftSessionId: "draft-1",
+        status: "rejected",
+        resolvedBy: "reviewer",
+        decisionNotes: "too risky",
+        resolvedAt: 2000,
+      },
+    });
+
+    const result = handleAction("test-project", "workflow-reviews/rev-1/reject", {
+      actor: "reviewer",
+      feedback: "too risky",
+    });
+    expect(result.status).toBe(200);
+    expect(rejectWorkflowReview).toHaveBeenCalledWith({
+      projectId: "test-project",
+      reviewId: "rev-1",
+      actor: "reviewer",
+      decisionNotes: "too risky",
+    });
+  });
+
+  it("returns 404 when approving a missing review", () => {
+    (approveWorkflowReview as any).mockReturnValue({ ok: false, reason: "not_found" });
+    const result = handleAction("test-project", "workflow-reviews/missing/approve", { actor: "x" });
+    expect(result.status).toBe(404);
+  });
+
+  it("returns 409 when approving an already-resolved review", () => {
+    (approveWorkflowReview as any).mockReturnValue({
+      ok: false,
+      reason: "not_pending",
+      currentStatus: "approved",
+    });
+    const result = handleAction("test-project", "workflow-reviews/rev-1/approve", { actor: "x" });
+    expect(result.status).toBe(409);
+    expect((result.body as { currentStatus: string }).currentStatus).toBe("approved");
+  });
+
+  it("404s an unknown workflow-review action", () => {
+    const result = handleAction("test-project", "workflow-reviews/rev-1/bogus", {});
     expect(result.status).toBe(404);
   });
 

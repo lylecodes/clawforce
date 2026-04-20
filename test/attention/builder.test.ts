@@ -1866,4 +1866,77 @@ describe("buildAttentionSummary — destinations and focusContext", () => {
     const hi = summary.items.find((i) => i.category === "health" && i.urgency === "action-needed");
     expect(hi?.destination).toBe("/ops");
   });
+
+  // -------------------------------------------------------------------------
+  // Phase C: pending workflow reviews surface through the canonical feed
+  // -------------------------------------------------------------------------
+
+  it("pending workflow reviews surface as action-needed approval items", async () => {
+    const { createWorkflow } = await import("../../src/workflow.js");
+    const { createWorkflowDraftSession } = await import("../../src/workspace/drafts.js");
+    const { createWorkflowReviewFromDraft, approveWorkflowReview } = await import("../../src/workspace/reviews.js");
+
+    const db = freshDb();
+    const wf = createWorkflow({
+      projectId: PROJECT_ID,
+      name: "Pipeline",
+      phases: [{ name: "Build" }, { name: "Ship" }],
+      createdBy: "agent:pm",
+    }, db);
+    const draftPending = createWorkflowDraftSession({
+      projectId: PROJECT_ID,
+      workflowId: wf.id,
+      title: "Insert verify",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        name: wf.name,
+        phases: [
+          { name: "Build", taskIds: [], gateCondition: "all_done" },
+          { name: "Verify", taskIds: [], gateCondition: "all_done" },
+          { name: "Ship", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+    }, db);
+    const pending = createWorkflowReviewFromDraft({
+      projectId: PROJECT_ID,
+      draftSessionId: draftPending.id,
+      confirmedBy: "user",
+    }, db)!;
+
+    // Second review that we'll approve — should not show up in pending items.
+    const draftResolved = createWorkflowDraftSession({
+      projectId: PROJECT_ID,
+      workflowId: wf.id,
+      title: "Remove ship",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        name: wf.name,
+        phases: [{ name: "Build", taskIds: [], gateCondition: "all_done" }],
+      },
+    }, db);
+    const approved = createWorkflowReviewFromDraft({
+      projectId: PROJECT_ID,
+      draftSessionId: draftResolved.id,
+      confirmedBy: "user",
+    }, db)!;
+    approveWorkflowReview({ projectId: PROJECT_ID, reviewId: approved.record.id, actor: "reviewer" }, db);
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+
+    const reviewItems = summary.items.filter(
+      (i) => i.sourceType === "workflow_review",
+    );
+    expect(reviewItems).toHaveLength(1);
+    const reviewItem = reviewItems[0]!;
+    expect(reviewItem.sourceId).toBe(pending.record.id);
+    expect(reviewItem.category).toBe("approval");
+    expect(reviewItem.kind).toBe("approval");
+    expect(reviewItem.urgency).toBe("action-needed");
+    expect(reviewItem.title).toContain("Workflow review:");
+    expect(reviewItem.metadata?.reviewId).toBe(pending.record.id);
+    expect(reviewItem.metadata?.draftSessionId).toBe(draftPending.id);
+    expect(reviewItem.metadata?.workflowId).toBe(wf.id);
+    expect(reviewItem.metadata?.requiresDecision).toBe(true);
+    expect(reviewItem.destination).toBe(`/workspaces/${PROJECT_ID}/workflows/${wf.id}`);
+  });
 });

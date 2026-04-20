@@ -88,10 +88,13 @@ import {
   queryWorkflowDraftSession,
   queryWorkflowDraftSessions,
   queryScopedWorkspaceFeed,
+  queryWorkflowReview,
+  queryWorkflowReviews,
   queryWorkflowStageInspector,
   queryWorkflowTopology,
   type ScopedFeedParams,
 } from "../../workspace/queries.js";
+import { WORKFLOW_REVIEW_STATUSES, type WorkflowReviewStatus } from "../../workspace/types.js";
 import { getDb } from "../../db.js";
 import { getActionRecord } from "../../dashboard/action-status.js";
 import { getExtendedProjectConfig } from "../../project.js";
@@ -870,6 +873,26 @@ export function routeGatewayDomainRead(
         return inspector ? ok(inspector) : notFound("Workflow stage not found");
       }
       return notFound(`Unknown workflow resource: ${kind}`);
+    }
+
+    case "workflow-reviews": {
+      const reviewId = segments[1];
+      if (reviewId) {
+        const detail = queryWorkflowReview(domain, decodeURIComponent(reviewId));
+        return detail ? ok(detail) : notFound("Workflow review not found");
+      }
+      const statusParam = params.status;
+      const includeStatuses = statusParam
+        ? statusParam
+          .split(",")
+          .filter((s): s is WorkflowReviewStatus =>
+            (WORKFLOW_REVIEW_STATUSES as readonly string[]).includes(s),
+          )
+        : undefined;
+      return ok(queryWorkflowReviews(domain, {
+        workflowId: params.workflowId,
+        includeStatuses,
+      }));
     }
 
     default:

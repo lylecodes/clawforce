@@ -65,6 +65,11 @@ import {
   runTransitionTaskCommand,
 } from "../app/commands/task-controls.js";
 import { setWorkflowDraftSessionVisibility } from "../workspace/drafts.js";
+import {
+  approveWorkflowReview,
+  createWorkflowReviewFromDraft,
+  rejectWorkflowReview,
+} from "../workspace/reviews.js";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -114,6 +119,8 @@ export function handleAction(
       return handleSetupAction(projectId, segments, body);
     case "workspace":
       return handleWorkspaceAction(projectId, segments, body);
+    case "workflow-reviews":
+      return handleWorkflowReviewAction(projectId, segments, body);
     default:
       return notFound(`Unknown action resource: ${resource}`);
   }
@@ -134,10 +141,20 @@ function handleWorkspaceAction(
     return notFound("draftSessionId and action required");
   }
 
-  if (action !== "visibility") {
-    return notFound(`Unknown workspace draft action: ${action}`);
+  if (action === "visibility") {
+    return handleDraftVisibility(projectId, draftSessionId, body);
   }
+  if (action === "confirm") {
+    return handleDraftConfirm(projectId, draftSessionId, body);
+  }
+  return notFound(`Unknown workspace draft action: ${action}`);
+}
 
+function handleDraftVisibility(
+  projectId: string,
+  draftSessionId: string,
+  body: Record<string, unknown>,
+): RouteResult {
   const overlayVisibility = body.overlayVisibility;
   if (overlayVisibility !== "visible" && overlayVisibility !== "hidden") {
     return badRequest("overlayVisibility must be 'visible' or 'hidden'");
@@ -165,6 +182,112 @@ function handleWorkspaceAction(
     draftSessionId,
     workflowId: draftSession.workflowId,
     overlayVisibility: draftSession.overlayVisibility,
+  });
+}
+
+/**
+ * Confirm a draft session into a pending workflow review. Idempotent: if a
+ * pending review already exists for this draft, the same review is returned
+ * with `created: false` instead of creating a second one.
+ */
+function handleDraftConfirm(
+  projectId: string,
+  draftSessionId: string,
+  body: Record<string, unknown>,
+): RouteResult {
+  const actor = (body.actor as string) ?? "dashboard";
+  const title = typeof body.title === "string" ? body.title : undefined;
+  const summary = typeof body.summary === "string" ? body.summary : undefined;
+
+  const result = createWorkflowReviewFromDraft({
+    projectId,
+    draftSessionId,
+    confirmedBy: actor,
+    title,
+    summary,
+  });
+  if (!result) {
+    return notFound("Workflow draft session not found");
+  }
+
+  emitSSE(projectId, "workspace:review", {
+    reviewId: result.record.id,
+    workflowId: result.record.workflowId,
+    draftSessionId: result.record.draftSessionId,
+    status: result.record.status,
+    created: result.created,
+  });
+
+  return ok({
+    ok: true,
+    created: result.created,
+    reviewId: result.record.id,
+    workflowId: result.record.workflowId,
+    draftSessionId: result.record.draftSessionId,
+    status: result.record.status,
+  });
+}
+
+/**
+ * Resolve a workflow review via approve / reject. Returns 404 for a missing
+ * review, 409 when the review is not in a pending state (already resolved).
+ */
+function handleWorkflowReviewAction(
+  projectId: string,
+  segments: string[],
+  body: Record<string, unknown>,
+): RouteResult {
+  const reviewId = segments[1];
+  const action = segments[2];
+  if (!reviewId || !action) {
+    return notFound("reviewId and action required");
+  }
+  if (action !== "approve" && action !== "reject") {
+    return notFound(`Unknown workflow-review action: ${action}`);
+  }
+
+  const actor = (body.actor as string) ?? "dashboard";
+  const decisionNotes = typeof body.decisionNotes === "string"
+    ? body.decisionNotes
+    : typeof body.feedback === "string"
+      ? body.feedback
+      : undefined;
+
+  const result = action === "approve"
+    ? approveWorkflowReview({ projectId, reviewId, actor, decisionNotes })
+    : rejectWorkflowReview({ projectId, reviewId, actor, decisionNotes });
+
+  if (!result.ok) {
+    if (result.reason === "not_found") {
+      return notFound("Workflow review not found");
+    }
+    // not_pending → already resolved; surface as 409 so the UI can sync state.
+    return {
+      status: 409,
+      body: {
+        error: "Workflow review is not pending",
+        currentStatus: result.currentStatus,
+      },
+    };
+  }
+
+  emitSSE(projectId, "workspace:review", {
+    reviewId: result.record.id,
+    workflowId: result.record.workflowId,
+    draftSessionId: result.record.draftSessionId,
+    status: result.record.status,
+    resolvedBy: result.record.resolvedBy,
+  });
+
+  return ok({
+    ok: true,
+    reviewId: result.record.id,
+    workflowId: result.record.workflowId,
+    draftSessionId: result.record.draftSessionId,
+    status: result.record.status,
+    resolvedBy: result.record.resolvedBy,
+    decisionNotes: result.record.decisionNotes,
+    resolvedAt: result.record.resolvedAt,
   });
 }
 

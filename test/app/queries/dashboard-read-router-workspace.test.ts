@@ -15,6 +15,8 @@ const queryWorkflowDraftSessionsMock = vi.fn();
 const queryWorkflowTopologyMock = vi.fn();
 const queryWorkflowStageInspectorMock = vi.fn();
 const queryScopedWorkspaceFeedMock = vi.fn();
+const queryWorkflowReviewMock = vi.fn();
+const queryWorkflowReviewsMock = vi.fn();
 
 vi.mock("../../../src/workspace/queries.js", () => ({
   queryProjectWorkspace: queryProjectWorkspaceMock,
@@ -23,6 +25,8 @@ vi.mock("../../../src/workspace/queries.js", () => ({
   queryWorkflowTopology: queryWorkflowTopologyMock,
   queryWorkflowStageInspector: queryWorkflowStageInspectorMock,
   queryScopedWorkspaceFeed: queryScopedWorkspaceFeedMock,
+  queryWorkflowReview: queryWorkflowReviewMock,
+  queryWorkflowReviews: queryWorkflowReviewsMock,
 }));
 
 const { routeGatewayDomainRead } = await import("../../../src/app/queries/dashboard-read-router.js");
@@ -36,6 +40,8 @@ beforeEach(() => {
   queryWorkflowTopologyMock.mockReset();
   queryWorkflowStageInspectorMock.mockReset();
   queryScopedWorkspaceFeedMock.mockReset();
+  queryWorkflowReviewMock.mockReset();
+  queryWorkflowReviewsMock.mockReset();
 });
 
 describe("routeGatewayDomainRead — workspace resource", () => {
@@ -197,6 +203,57 @@ describe("routeGatewayDomainRead — workflows/:id/stages/:stageKey", () => {
 
   it("404s an unknown workflow sub-resource", () => {
     const result = routeGatewayDomainRead(DOMAIN, "workflows/wf-1/bogus", {});
+    expect(result.status).toBe(404);
+  });
+});
+
+describe("routeGatewayDomainRead — workflow-reviews (Phase C)", () => {
+  it("lists reviews (default pending)", () => {
+    const payload = [{ id: "r1" }];
+    queryWorkflowReviewsMock.mockReturnValue(payload);
+    const result = routeGatewayDomainRead(DOMAIN, "workflow-reviews", {});
+    expect(result.status).toBe(200);
+    expect(result.body).toBe(payload);
+    expect(queryWorkflowReviewsMock).toHaveBeenCalledWith(DOMAIN, {
+      workflowId: undefined,
+      includeStatuses: undefined,
+    });
+  });
+
+  it("lists reviews with status + workflow filters", () => {
+    queryWorkflowReviewsMock.mockReturnValue([]);
+    const result = routeGatewayDomainRead(DOMAIN, "workflow-reviews", {
+      status: "approved,rejected",
+      workflowId: "wf-1",
+    });
+    expect(result.status).toBe(200);
+    expect(queryWorkflowReviewsMock).toHaveBeenCalledWith(DOMAIN, {
+      workflowId: "wf-1",
+      includeStatuses: ["approved", "rejected"],
+    });
+  });
+
+  it("rejects unknown statuses silently (defaults to pending)", () => {
+    queryWorkflowReviewsMock.mockReturnValue([]);
+    routeGatewayDomainRead(DOMAIN, "workflow-reviews", { status: "bogus" });
+    expect(queryWorkflowReviewsMock).toHaveBeenCalledWith(DOMAIN, {
+      workflowId: undefined,
+      includeStatuses: [], // filtered to empty — list treats empty as "no status filter constraint"
+    });
+  });
+
+  it("GET /workflow-reviews/:id routes to queryWorkflowReview", () => {
+    const detail = { id: "r1", status: "pending" };
+    queryWorkflowReviewMock.mockReturnValue(detail);
+    const result = routeGatewayDomainRead(DOMAIN, "workflow-reviews/r1", {});
+    expect(result.status).toBe(200);
+    expect(result.body).toBe(detail);
+    expect(queryWorkflowReviewMock).toHaveBeenCalledWith(DOMAIN, "r1");
+  });
+
+  it("404s when the review does not exist", () => {
+    queryWorkflowReviewMock.mockReturnValue(null);
+    const result = routeGatewayDomainRead(DOMAIN, "workflow-reviews/missing", {});
     expect(result.status).toBe(404);
   });
 });
