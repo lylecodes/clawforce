@@ -26,7 +26,8 @@ import type { TaskPriority, TaskState } from "../types.js";
 export type WorkspaceScope =
   | { kind: "project"; domainId: string }
   | { kind: "workflow"; domainId: string; workflowId: string }
-  | { kind: "stage"; domainId: string; workflowId: string; stageKey: string };
+  | { kind: "stage"; domainId: string; workflowId: string; stageKey: string }
+  | { kind: "draft"; domainId: string; workflowId: string; draftSessionId: string };
 
 export type WorkspaceScopeKind = WorkspaceScope["kind"];
 
@@ -34,6 +35,7 @@ export const WORKSPACE_SCOPE_KINDS: readonly WorkspaceScopeKind[] = [
   "project",
   "workflow",
   "stage",
+  "draft",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -64,6 +66,11 @@ export function parseStageKey(stageKey: string): ParsedStageKey | null {
   const phaseIndex = Number.parseInt(match[2]!, 10);
   if (!Number.isFinite(phaseIndex) || phaseIndex < 0) return null;
   return { workflowId: match[1]!, phaseIndex };
+}
+
+/** Draft-stage identity is separate from live stage identity on purpose. */
+export function deriveDraftStageKey(draftSessionId: string, phaseIndex: number): string {
+  return `${draftSessionId}:draft-phase:${phaseIndex}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +165,67 @@ export type WorkflowMiniTopology = {
   updatedAt: number;
 };
 
+// ---------------------------------------------------------------------------
+// Draft sessions / overlays
+// ---------------------------------------------------------------------------
+
+export type WorkflowDraftSessionStatus = "draft" | "review_pending" | "applied" | "discarded";
+
+export type WorkflowDraftOverlayVisibility = "visible" | "hidden";
+
+export type WorkflowDraftChangeSummary = {
+  addedStages: number;
+  removedStages: number;
+  modifiedStages: number;
+  movedStages: number;
+  totalChanges: number;
+};
+
+export type WorkflowDraftStageOverlayKind = "added" | "removed" | "modified" | "moved";
+
+export type WorkflowDraftStageOverlay = {
+  draftSessionId: string;
+  workflowId: string;
+  kind: WorkflowDraftStageOverlayKind;
+  liveStageKey?: string;
+  draftStageKey?: string;
+  livePhaseIndex?: number;
+  draftPhaseIndex?: number;
+  label: string;
+  description?: string;
+};
+
+export type WorkflowDraftStage = {
+  draftStageKey: string;
+  phaseIndex: number;
+  label: string;
+  description?: string;
+  gateCondition: "all_done" | "any_done" | "all_resolved" | "any_resolved";
+};
+
+export type WorkflowDraftSessionSummary = {
+  scope: Extract<WorkspaceScope, { kind: "draft" }>;
+  id: string;
+  workflowId: string;
+  workflowName: string;
+  title: string;
+  description?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  status: WorkflowDraftSessionStatus;
+  overlayVisibility: WorkflowDraftOverlayVisibility;
+  changeSummary: WorkflowDraftChangeSummary;
+  affectedStageCount: number;
+};
+
+export type WorkflowDraftSession = WorkflowDraftSessionSummary & {
+  overlays: WorkflowDraftStageOverlay[];
+  baseStageCount: number;
+  draftStageCount: number;
+  draftStages: WorkflowDraftStage[];
+};
+
 /**
  * Full workflow topology for the focused workflow canvas. Today it is a
  * superset of `WorkflowMiniTopology`; the split exists so we can enrich the
@@ -166,11 +234,10 @@ export type WorkflowMiniTopology = {
 export type WorkflowTopology = WorkflowMiniTopology & {
   description?: string;
   createdBy: string;
-  /**
-   * Active draft overlays for this workflow. Empty in Phase A — Phase B
-   * populates this from the draft-session model and it is widened then.
-   */
-  draftOverlays: never[];
+  /** Draft sessions that affect this workflow. */
+  draftSessions: WorkflowDraftSessionSummary[];
+  /** Visible draft overlays that apply on top of the live workflow. */
+  draftOverlays: WorkflowDraftStageOverlay[];
 };
 
 // ---------------------------------------------------------------------------
@@ -190,21 +257,12 @@ export type ProjectOperatorSummary = {
   generatedAt: number;
 };
 
-/**
- * Placeholder inventory slot for Phase B. Always `[]` in Phase A.
- *
- * Typed as `never[]` rather than `WorkflowDraftSession[]` on purpose: the
- * dashboard shouldn't be tempted to render fake draft rows. Phase B will
- * widen this type and add real entries.
- */
-export type WorkflowDraftSessionStub = never;
-
 export type ProjectWorkspace = {
   scope: Extract<WorkspaceScope, { kind: "project" }>;
   domainId: string;
   operator: ProjectOperatorSummary;
   workflows: WorkflowMiniTopology[];
-  draftSessions: WorkflowDraftSessionStub[];
+  draftSessions: WorkflowDraftSessionSummary[];
 };
 
 // ---------------------------------------------------------------------------

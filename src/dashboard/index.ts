@@ -50,6 +50,8 @@ export {
 } from "./queries.js";
 export {
   queryProjectWorkspace,
+  queryWorkflowDraftSession,
+  queryWorkflowDraftSessions,
   queryWorkflowTopology,
   queryWorkflowStageInspector,
   queryScopedWorkspaceFeed,
@@ -61,6 +63,13 @@ export type {
   ProjectOperatorSummary,
   WorkflowMiniTopology,
   WorkflowTopology,
+  WorkflowDraftSession,
+  WorkflowDraftSessionSummary,
+  WorkflowDraftStage,
+  WorkflowDraftStageOverlay,
+  WorkflowDraftChangeSummary,
+  WorkflowDraftSessionStatus,
+  WorkflowDraftOverlayVisibility,
   WorkflowStageSummary,
   WorkflowStageEdge,
   WorkflowStageInspector,
@@ -70,7 +79,7 @@ export type {
   StageLiveState,
   WorkflowLiveState,
 } from "../workspace/types.js";
-export { deriveStageKey, parseStageKey, WORKSPACE_SCOPE_KINDS } from "../workspace/types.js";
+export { deriveStageKey, parseStageKey, deriveDraftStageKey, WORKSPACE_SCOPE_KINDS } from "../workspace/types.js";
 export { SSEManager, getSSEManager, emitSSE } from "./sse.js";
 export type { SSEEventType } from "./sse.js";
 export { handleAction } from "./actions.js";

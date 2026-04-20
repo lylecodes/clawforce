@@ -9,7 +9,7 @@
 import type { DatabaseSync } from "./sqlite-driver.js";
 
 /** Current schema version. Increment when adding new migrations. */
-export const SCHEMA_VERSION = 54;
+export const SCHEMA_VERSION = 55;
 
 type Migration = (db: DatabaseSync) => void;
 
@@ -68,6 +68,7 @@ const migrations: Record<number, Migration> = {
   52: migrateV52,
   53: migrateV53,
   54: migrateV54,
+  55: migrateV55,
 };
 
 export function runMigrations(db: DatabaseSync): void {
@@ -1602,6 +1603,34 @@ function migrateV54(db: DatabaseSync): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_controller_leases_applied_config
       ON controller_leases(project_id, applied_config_applied_at DESC);
+  `);
+}
+
+// --- Migration V55: Workflow draft sessions for workspace Phase B ---
+
+function migrateV55(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_draft_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      created_by TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      overlay_visibility TEXT NOT NULL DEFAULT 'visible',
+      base_workflow_snapshot TEXT NOT NULL,
+      draft_workflow_snapshot TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workflow_draft_sessions_project
+      ON workflow_draft_sessions(project_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_workflow_draft_sessions_workflow
+      ON workflow_draft_sessions(project_id, workflow_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_workflow_draft_sessions_status
+      ON workflow_draft_sessions(project_id, status, updated_at DESC);
   `);
 }
 

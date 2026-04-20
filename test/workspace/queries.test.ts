@@ -47,14 +47,17 @@ vi.mock("../../src/attention/builder.js", () => ({
 
 const { getMemoryDb } = await import("../../src/db.js");
 const { createWorkflow, addTaskToPhase } = await import("../../src/workflow.js");
+const { createWorkflowDraftSession, setWorkflowDraftSessionVisibility } = await import("../../src/workspace/drafts.js");
 const { createTask, transitionTask, attachEvidence } = await import("../../src/tasks/ops.js");
 const {
   queryProjectWorkspace,
+  queryWorkflowDraftSession,
+  queryWorkflowDraftSessions,
   queryWorkflowTopology,
   queryWorkflowStageInspector,
   queryScopedWorkspaceFeed,
 } = await import("../../src/workspace/queries.js");
-const { deriveStageKey } = await import("../../src/workspace/types.js");
+const { deriveStageKey, deriveDraftStageKey } = await import("../../src/workspace/types.js");
 
 const DOMAIN = "ws-test";
 
@@ -207,6 +210,7 @@ describe("queryWorkflowTopology", () => {
     expect(topology!.liveState).toBe("active");
     expect(topology!.currentPhase).toBe(0);
     expect(topology!.hasDraftOverlays).toBe(false);
+    expect(topology!.draftSessions).toEqual([]);
     expect(topology!.draftOverlays).toEqual([]);
     expect(topology!.stages.map((s) => s.label)).toEqual(["Build", "Test", "Ship"]);
     expect(topology!.stages[1]!.gateCondition).toBe("any_done");
@@ -237,6 +241,197 @@ describe("queryWorkflowTopology", () => {
     expect(topology.stages[0]!.primaryAgent).toEqual({ agentId: "agent-dev", label: "agent-dev" });
     expect(topology.stages[1]!.taskCount).toBe(0);
     expect(topology.stages[1]!.liveState).toBe("upcoming");
+  });
+});
+
+describe("workflow draft sessions — Phase B core reads", () => {
+  let db: DatabaseSync;
+
+  beforeEach(() => {
+    db = getMemoryDb();
+    mockSummary = {
+      projectId: DOMAIN,
+      items: [],
+      counts: { actionNeeded: 0, watching: 0, fyi: 0 },
+      generatedAt: 1500,
+    };
+  });
+  afterEach(() => { try { db.close(); } catch { /* already closed */ } });
+
+  it("queryProjectWorkspace surfaces real draft-session inventory", () => {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Alpha",
+      phases: [{ name: "Build" }, { name: "Ship" }],
+      createdBy: "agent:pm",
+    }, db);
+
+    createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Insert verify stage",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        phases: [
+          { name: "Build", taskIds: [], gateCondition: "all_done" },
+          { name: "Verify", taskIds: [], gateCondition: "all_resolved" },
+          { name: "Ship", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+    }, db);
+
+    const workspace = queryProjectWorkspace(DOMAIN, db);
+    expect(workspace.draftSessions).toHaveLength(1);
+    expect(workspace.draftSessions[0]!.scope.kind).toBe("draft");
+    expect(workspace.draftSessions[0]!.workflowId).toBe(wf.id);
+    expect(workspace.draftSessions[0]!.overlayVisibility).toBe("visible");
+    expect(workspace.draftSessions[0]!.changeSummary.addedStages).toBe(1);
+    expect(workspace.draftSessions[0]!.changeSummary.movedStages).toBe(1);
+    expect(workspace.draftSessions[0]!.affectedStageCount).toBe(2);
+    expect(workspace.workflows[0]!.hasDraftOverlays).toBe(true);
+  });
+
+  it("queryWorkflowTopology surfaces workflow draft inventory and visible overlays", () => {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Pipeline",
+      phases: [{ name: "Build" }, { name: "Ship" }],
+      createdBy: "agent:pm",
+    }, db);
+
+    const visible = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Insert verify stage",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        phases: [
+          { name: "Build", taskIds: [], gateCondition: "all_done" },
+          { name: "Verify", taskIds: [], gateCondition: "all_resolved" },
+          { name: "Ship", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "visible",
+    }, db);
+
+    createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Rename ship stage",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        phases: [
+          { name: "Build", taskIds: [], gateCondition: "all_done" },
+          { name: "Release", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "hidden",
+    }, db);
+
+    const topology = queryWorkflowTopology(DOMAIN, wf.id, db)!;
+    expect(topology.draftSessions).toHaveLength(2);
+    expect(topology.hasDraftOverlays).toBe(true);
+    expect(topology.draftOverlays).toHaveLength(2);
+    expect(topology.draftOverlays[0]).toEqual({
+      draftSessionId: visible.id,
+      workflowId: wf.id,
+      kind: "added",
+      draftStageKey: deriveDraftStageKey(visible.id, 1),
+      draftPhaseIndex: 1,
+      label: "Verify",
+      description: undefined,
+    });
+    expect(topology.draftOverlays[1]).toEqual({
+      draftSessionId: visible.id,
+      workflowId: wf.id,
+      kind: "moved",
+      liveStageKey: deriveStageKey(wf.id, 1),
+      draftStageKey: deriveDraftStageKey(visible.id, 2),
+      livePhaseIndex: 1,
+      draftPhaseIndex: 2,
+      label: "Ship",
+      description: undefined,
+    });
+  });
+
+  it("queryWorkflowDraftSessions can filter inventory by workflow", () => {
+    const wfA = createWorkflow({ projectId: DOMAIN, name: "A", phases: [{ name: "Build" }], createdBy: "agent:pm" }, db);
+    const wfB = createWorkflow({ projectId: DOMAIN, name: "B", phases: [{ name: "Plan" }], createdBy: "agent:pm" }, db);
+
+    createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wfA.id,
+      title: "A draft",
+      createdBy: "agent:pm",
+      draftWorkflow: { phases: [{ name: "Build+", taskIds: [], gateCondition: "all_done" }] },
+    }, db);
+    createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wfB.id,
+      title: "B draft",
+      createdBy: "agent:pm",
+      draftWorkflow: { phases: [{ name: "Plan+" , taskIds: [], gateCondition: "all_done" }] },
+    }, db);
+
+    expect(queryWorkflowDraftSessions(DOMAIN, undefined, db)).toHaveLength(2);
+    const filtered = queryWorkflowDraftSessions(DOMAIN, wfA.id, db);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]!.workflowId).toBe(wfA.id);
+  });
+
+  it("queryWorkflowDraftSession returns explicit draft scope and detail payload", () => {
+    const wf = createWorkflow({ projectId: DOMAIN, name: "WF", phases: [{ name: "Build" }, { name: "Ship" }], createdBy: "agent:pm" }, db);
+    const session = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Reshape workflow",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        phases: [
+          { name: "Build", taskIds: [], gateCondition: "all_done" },
+          { name: "Verify", taskIds: [], gateCondition: "all_resolved" },
+          { name: "Ship", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+    }, db);
+
+    const detail = queryWorkflowDraftSession(DOMAIN, session.id, db)!;
+    expect(detail.scope).toEqual({
+      kind: "draft",
+      domainId: DOMAIN,
+      workflowId: wf.id,
+      draftSessionId: session.id,
+    });
+    expect(detail.baseStageCount).toBe(2);
+    expect(detail.draftStageCount).toBe(3);
+    expect(detail.draftStages.map((stage) => stage.label)).toEqual(["Build", "Verify", "Ship"]);
+    expect(detail.overlays[0]!.draftStageKey).toBe(deriveDraftStageKey(session.id, 1));
+  });
+
+  it("visibility toggles change whether overlays are surfaced in workflow topology", () => {
+    const wf = createWorkflow({ projectId: DOMAIN, name: "WF", phases: [{ name: "Build" }, { name: "Ship" }], createdBy: "agent:pm" }, db);
+    const session = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Hideable draft",
+      createdBy: "agent:pm",
+      draftWorkflow: {
+        phases: [
+          { name: "Build", taskIds: [], gateCondition: "all_done" },
+          { name: "QA", taskIds: [], gateCondition: "all_resolved" },
+          { name: "Ship", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "hidden",
+    }, db);
+
+    expect(queryWorkflowTopology(DOMAIN, wf.id, db)!.draftOverlays).toEqual([]);
+
+    setWorkflowDraftSessionVisibility(DOMAIN, session.id, "visible", "dashboard", db);
+
+    const topology = queryWorkflowTopology(DOMAIN, wf.id, db)!;
+    expect(topology.hasDraftOverlays).toBe(true);
+    expect(topology.draftOverlays.map((overlay) => overlay.kind)).toEqual(["added", "moved"]);
   });
 });
 

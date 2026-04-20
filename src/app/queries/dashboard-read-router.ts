@@ -85,6 +85,8 @@ import { queryDashboardAssistantStatus } from "./dashboard-assistant.js";
 import { queryDomainCapabilities } from "./dashboard-meta.js";
 import {
   queryProjectWorkspace,
+  queryWorkflowDraftSession,
+  queryWorkflowDraftSessions,
   queryScopedWorkspaceFeed,
   queryWorkflowStageInspector,
   queryWorkflowTopology,
@@ -830,6 +832,14 @@ export function routeGatewayDomainRead(
       const sub = segments[1] ?? "";
       if (sub === "" || sub === "overview") {
         return ok(queryProjectWorkspace(domain));
+      }
+      if (sub === "drafts") {
+        const draftSessionId = segments[2];
+        if (draftSessionId) {
+          const detail = queryWorkflowDraftSession(domain, decodeURIComponent(draftSessionId));
+          return detail ? ok(detail) : notFound("Workflow draft session not found");
+        }
+        return ok(queryWorkflowDraftSessions(domain, params.workflowId));
       }
       if (sub === "feed") {
         const feedParams = parseScopedFeedParams(domain, params);

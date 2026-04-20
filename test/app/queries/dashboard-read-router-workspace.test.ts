@@ -10,12 +10,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryProjectWorkspaceMock = vi.fn();
+const queryWorkflowDraftSessionMock = vi.fn();
+const queryWorkflowDraftSessionsMock = vi.fn();
 const queryWorkflowTopologyMock = vi.fn();
 const queryWorkflowStageInspectorMock = vi.fn();
 const queryScopedWorkspaceFeedMock = vi.fn();
 
 vi.mock("../../../src/workspace/queries.js", () => ({
   queryProjectWorkspace: queryProjectWorkspaceMock,
+  queryWorkflowDraftSession: queryWorkflowDraftSessionMock,
+  queryWorkflowDraftSessions: queryWorkflowDraftSessionsMock,
   queryWorkflowTopology: queryWorkflowTopologyMock,
   queryWorkflowStageInspector: queryWorkflowStageInspectorMock,
   queryScopedWorkspaceFeed: queryScopedWorkspaceFeedMock,
@@ -27,6 +31,8 @@ const DOMAIN = "ws-test";
 
 beforeEach(() => {
   queryProjectWorkspaceMock.mockReset();
+  queryWorkflowDraftSessionMock.mockReset();
+  queryWorkflowDraftSessionsMock.mockReset();
   queryWorkflowTopologyMock.mockReset();
   queryWorkflowStageInspectorMock.mockReset();
   queryScopedWorkspaceFeedMock.mockReset();
@@ -103,6 +109,41 @@ describe("routeGatewayDomainRead — workspace/feed", () => {
     const result = routeGatewayDomainRead(DOMAIN, "workspace/feed", { scope: "workflow" });
     expect(result.status).toBe(400);
     expect(queryScopedWorkspaceFeedMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("routeGatewayDomainRead — workspace/drafts", () => {
+  it("routes GET /workspace/drafts to queryWorkflowDraftSessions", () => {
+    const payload = [{ scope: { kind: "draft", domainId: DOMAIN, workflowId: "wf-1", draftSessionId: "ds-1" } }];
+    queryWorkflowDraftSessionsMock.mockReturnValue(payload);
+
+    const result = routeGatewayDomainRead(DOMAIN, "workspace/drafts", {});
+    expect(result.status).toBe(200);
+    expect(result.body).toBe(payload);
+    expect(queryWorkflowDraftSessionsMock).toHaveBeenCalledWith(DOMAIN, undefined);
+  });
+
+  it("passes through workflowId filtering for draft inventory", () => {
+    queryWorkflowDraftSessionsMock.mockReturnValue([]);
+    const result = routeGatewayDomainRead(DOMAIN, "workspace/drafts", { workflowId: "wf-1" });
+    expect(result.status).toBe(200);
+    expect(queryWorkflowDraftSessionsMock).toHaveBeenCalledWith(DOMAIN, "wf-1");
+  });
+
+  it("routes GET /workspace/drafts/:id to queryWorkflowDraftSession", () => {
+    const payload = { scope: { kind: "draft", domainId: DOMAIN, workflowId: "wf-1", draftSessionId: "ds-1" } };
+    queryWorkflowDraftSessionMock.mockReturnValue(payload);
+
+    const result = routeGatewayDomainRead(DOMAIN, "workspace/drafts/ds-1", {});
+    expect(result.status).toBe(200);
+    expect(result.body).toBe(payload);
+    expect(queryWorkflowDraftSessionMock).toHaveBeenCalledWith(DOMAIN, "ds-1");
+  });
+
+  it("404s when the draft-session detail query returns null", () => {
+    queryWorkflowDraftSessionMock.mockReturnValue(null);
+    const result = routeGatewayDomainRead(DOMAIN, "workspace/drafts/missing", {});
+    expect(result.status).toBe(404);
   });
 });
 
