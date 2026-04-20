@@ -1,262 +1,353 @@
 # ClawForce Maturity Roadmap
 
-> Purpose: move ClawForce from "capable and ambitious" to "boring, trusted, and product-grade."
+> Last updated: 2026-04-19
+> Purpose: show the actual milestone path from current state to "complete enough to trust" and then to broad product maturity.
 
 This roadmap is not a feature wishlist.
-It defines the work required to make ClawForce structurally mature, operationally reliable, and proven on real workloads.
+It is the milestone map for finishing the core product.
 
-Use this alongside [ARCHITECTURE.md](/Users/lylejens/workplace/clawforce/ARCHITECTURE.md).
-When the first rollout is ready, use [dogfood-rollout.md](/Users/lylejens/workplace/clawforce/docs/guides/dogfood-rollout.md),
-[dogfood-contract.md](/Users/lylejens/workplace/clawforce/templates/dogfood-contract.md), and
-[dogfood-scorecard.md](/Users/lylejens/workplace/clawforce/templates/dogfood-scorecard.md).
+Use this with:
 
-## Success Definition
+- [docs/plans/2026-04-18-foundation-execution-board.md](/Users/lylejens/workplace/clawforce/docs/plans/2026-04-18-foundation-execution-board.md)
+- [docs/plans/2026-04-19-dashboard-v2-implementation-brief.md](/Users/lylejens/workplace/clawforce/docs/plans/2026-04-19-dashboard-v2-implementation-brief.md)
+- [ARCHITECTURE.md](/Users/lylejens/workplace/clawforce/ARCHITECTURE.md)
 
-ClawForce is in a mature state when all of the following are true:
+## Completion Bar
 
-1. Architecture is stable.
-   Core semantics do not live in transports or in the OpenClaw adapter.
+ClawForce is "complete enough to trust" when all of these are true:
 
-2. Operations are predictable.
-   Config changes, reloads, task flows, approvals, and failure recovery behave consistently.
+1. An operator can live out of the dashboard/feed/comms surfaces without repeatedly checking internals.
+2. Config changes have honest, legible runtime consequences.
+3. Setup can predict what ClawForce will do before `live`.
+4. Approvals, verification, budgets, and audit are real governance boundaries.
+5. One real app runs through ClawForce end to end without special-casing core.
 
-3. One real app is governed through ClawForce end to end.
-   Not observed. Not partially integrated. Governed.
+That is the bar for trust.
+Not "every idea shipped."
+Not "every workflow modeled."
 
-4. Public surfaces are intentional.
-   Builders know what is stable, what is advanced, and what is internal.
+## Status Snapshot
 
-5. Release confidence is credible.
-   Tests, docs, setup, and packaging make the system usable by someone other than the author.
+### Completed enough to lock
 
-## Current Assessment
+- Product direction is locked around ClawForce as the governance/control plane.
+- Runtime honesty and setup-truth work has materially improved.
+- The dashboard shell direction is locked around the workspace-v2 model.
+- Workspace Phase A is done:
+  - core read-side contracts exist
+  - dashboard Phase A shell exists
+  - project -> workflow -> stage scope now works through one coherent shell
 
-ClawForce is already technically serious:
-- strong test coverage
-- broad SDK surface
-- meaningful governance primitives
-- OpenClaw-native integration
-- working dashboard/operator surface
+### Not complete yet
 
-But it is not yet at mature-state quality because:
-- some transport and adapter paths still own behavior they should not own
-- config semantics are improved but not fully lossless or fully canonical
-- public packaging tiers are only partly formalized
-- OpenClaw is the primary runtime today, but that relationship is not fully clarified as product strategy
-- there is not yet a real dogfood proof that ClawForce works as the authoritative control plane for a live app
+- real draft session model
+- real workflow review loop
+- helper-led workflow authoring
+- predictive setup / preflight
+- full config/apply consolidation
+- authoritative real-app dogfood
+- public productization for outside builders
 
-## Strategy
+## Milestone Map
 
-Run two tracks in parallel:
+This is the complete milestone sequence.
+Work these in order.
 
-- Track A: structural maturity
-- Track B: dogfood proof
+### Milestone 0: Foundation Truth Locked
 
-Do not let Track A continue indefinitely without Track B.
-Do not start Track B so early that obvious architecture debt distorts the lessons.
+Status: done
 
-## Phase 1: Finish Structural Consolidation
+Meaning:
+
+- framework-first product boundary is locked
+- dashboard is a UI over framework truth
+- no fake controls
+- no second source of truth
+
+This milestone matters because it prevents churn disguised as feature work.
+
+### Milestone 1: Workspace Phase A
+
+Status: done
+
+Meaning:
+
+- core read-side workspace contracts exist
+- dashboard renders the new workspace shell against real core data
+- project scope works
+- workflow scope works
+- stage scope works
+- right rail behaves as one adaptive surface
+
+Exit proof:
+
+- `/workspaces/:domain`
+- `/workspaces/:domain/workflows/:id`
+- `/workspaces/:domain/workflows/:id/stages/:stageKey`
+
+This is the first milestone where the dashboard feels like the product we intend to build.
+
+### Milestone 2: Workspace Phase B
+
+Status: next
 
 Objective:
-Remove the remaining architecture debt that would contaminate dogfooding.
+Make workflow mutation real instead of implied.
 
-### Work
+Build:
 
-- Finish moving transport-owned behavior into app commands and queries.
-- Finish shrinking `gateway-routes.ts`, `routes.ts`, and similar transport shells.
-- Finish moving remaining meaningful mutable singleton state behind the runtime container.
-- Tighten OpenClaw boundaries so the adapter is integration code, not a second architecture center.
-- Complete the config semantic model far enough that file edits, dashboard edits, and API edits share one meaning.
-- Freeze explicit package tiers:
-  - `clawforce`
-  - `clawforce/advanced`
-  - `clawforce/internal`
+- real `WorkflowDraftSession` framework object
+- draft session inventory query
+- draft overlay query data for workflows/stages
+- toggle draft visibility
+- dashboard left-rail draft inventory
+- canvas overlay rendering for draft state
 
-### Exit Criteria
+Complete when:
 
-- New dashboard or HTTP work does not require adding core logic to transport files.
-- New runtime state has an obvious home in runtime/container code.
-- OpenClaw-specific logic is clearly adapter logic, not core logic.
-- Config save, preview, validation, and reload all go through one canonical model.
-- Public exports are deliberate rather than inherited from broad barrels.
+- a workflow can have one or more real draft sessions
+- the dashboard can toggle draft visibility without inventing local state
+- live vs draft is explicit on the canvas
+- no part of draft handling depends on fake UI-only semantics
 
-### Non-Goals
+### Milestone 3: Workspace Phase C
 
-- no architecture astronautics
-- no microservices
-- no storage rewrite for its own sake
-- no large feature expansion during this phase
-
-## Phase 2: Define the Dogfood Target
+Status: pending
 
 Objective:
-Pick one real app and make the dogfood plan explicit.
+Turn draft mutation into governed review.
 
-### Selection Criteria
+Build:
 
-Choose an app that has:
-- recurring work
-- more than one meaningful role or agent
-- enough cost/risk that budgets and approvals matter
-- moderate business importance, not maximum business importance
-- manageable blast radius if ClawForce is rough for a week
+- grouped workflow review object
+- review detail query
+- approve / reject actions
+- review items in the canonical feed
+- right-rail review state over real contracts
 
-Avoid:
-- the most fragile app
-- a toy app with no real operational stakes
-- an app where agents can easily bypass ClawForce and still "work"
+Complete when:
 
-### Required Dogfood Contract
+- confirmed drafts move into a real review state
+- review happens through the canonical operator loop
+- workflow mutation approval is legible and auditable
 
-The dogfood app must use ClawForce as the authoritative layer for:
-- task creation and transition
+### Milestone 4: Workspace Phase D
+
+Status: pending
+
+Objective:
+Make helper-led workflow creation real.
+
+Build:
+
+- helper session contract
+- helper conversation actions
+- helper-proposed draft workflow structure
+- left-rail create-workflow entry into helper scope
+- right-rail helper state
+
+Complete when:
+
+- an operator can start a new workflow from the workspace
+- the helper asks one question at a time
+- proposed workflow structure appears directly on the canvas
+- the result becomes a real draft session, not decorative chat
+
+### Milestone 5: Predictive Setup
+
+Status: pending
+
+Objective:
+Make setup predictive instead of reactive.
+
+Build:
+
+- preflight / simulation surface
+- explainability for:
+  - why item exists
+  - why blocked
+  - why this agent
+  - what config caused it
+
+Complete when:
+
+- a new domain can be evaluated before `live`
+- an operator can explain expected task/feed/decision behavior from setup output alone
+- setup no longer depends on folklore
+
+### Milestone 6: Config And Mutation Consolidation
+
+Status: pending
+
+Objective:
+Finish the canonical contract layer before authoritative dogfood.
+
+Build:
+
+- one preview path
+- one save path
+- one apply story
+- one audit trail
+- transport-owned mutation cleanup
+- stable / advanced / internal boundary cleanup
+
+Complete when:
+
+- meaningful mutations do not depend on transport-specific logic
+- config meaning is consistent across file edits, dashboard edits, and API edits
+- public product boundaries are explicit enough for serious dogfood
+
+### Milestone 7: Operator-Led UI Dogfood
+
+Status: partially done, must continue
+
+Objective:
+Use the product directly until the shell is boring and trustworthy.
+
+Use:
+
+- dashboard
+- setup
+- feed
+- decisions
+- config
+- comms
+
+Complete when:
+
+- normal operator journeys do not require DB peeking
+- empty states explain themselves
+- setup, feed, and workspace do not contradict each other
+- failures classify cleanly as `clawforce`, `onboarding`, or `app`
+
+### Milestone 8: Setup-Surface Proof Lane
+
+Status: pending
+
+Objective:
+Keep one narrow `dry_run` lane proving setup, runtime honesty, and surfaced decisions end to end.
+
+Current stance:
+
+- RentRight source onboarding may still be useful here
+- it is not automatically the authoritative long-term dogfood app
+
+Complete when:
+
+- the proof lane exercises real setup, feed, and governance behavior
+- ClawForce does not absorb app-specific semantics just to make that lane work
+
+### Milestone 9: First Authoritative Real-App Dogfood
+
+Status: pending
+
+Objective:
+Run one real app through ClawForce governance end to end.
+
+Complete when the app genuinely uses ClawForce for:
+
+- task creation and transitions
 - dispatch path
 - budget enforcement
 - approvals where relevant
-- audit/event history
-- operator review through the dashboard or equivalent control surface
+- audit history
+- operator review through the actual product surfaces
 
-If the app can bypass ClawForce during normal operation, the dogfood exercise is invalid.
+Failure rule:
 
-### Deliverables
+If the team can routinely bypass ClawForce and still succeed, the dogfood is invalid.
 
-- selected dogfood app
-- integration owner
-- rollout scope
-- rollback plan
-- success metrics
+### Milestone 10: Hardening From Dogfood
 
-## Phase 3: Run Authoritative Dogfood
-
-Objective:
-Use ClawForce in production-like reality long enough to expose real operational weaknesses.
-
-### Minimum Trial
-
-- run for at least 1-2 weeks
-- process real tasks
-- incur real costs
-- hit at least a few abnormal cases:
-  - blocked approval
-  - budget gate
-  - task reassignment
-  - retry/recovery
-  - operator intervention
-
-### What To Observe
-
-- Did operators trust the dashboard and audit trail?
-- Did task state remain the source of truth?
-- Were approvals too noisy or too weak?
-- Were config edits understandable and safe?
-- Did budget and trust rules help, or did they merely annoy?
-- Did any workflows bypass ClawForce because it was easier?
-
-### Failure Rule
-
-If the dogfood team repeatedly bypasses ClawForce, assume the product is not mature enough yet.
-Do not rationalize around it.
-
-## Phase 4: Harden From Dogfood
+Status: pending
 
 Objective:
 Convert real pain into product hardening.
 
-### Priorities
-
-- fix operator pain before adding more features
-- simplify config before enriching config
-- reduce bypass incentives
-- improve failure recovery and observability
-- update docs to match actual operational reality
-
-### Typical Issues Expected
+Focus:
 
 - approval friction
 - config confusion
-- task lifecycle edge cases
-- unclear routing between OpenClaw and ClawForce responsibilities
-- poor operator ergonomics
-- reload behavior that is correct but too surprising
+- retry/recovery visibility
+- operator ergonomics
+- reload/apply surprises
+- bypass incentives
 
-### Exit Criteria
+Complete when:
 
-- the dogfood app can run without habitual manual poking
 - operators use ClawForce by default, not reluctantly
 - incidents are diagnosable from ClawForce state and logs
 - config changes feel understandable and recoverable
 
-## Phase 5: Productize for Others
+### Milestone 11: Productization For Others
+
+Status: later
 
 Objective:
-Make the system legible and safe for external builders.
+Make ClawForce legible and safe for outside builders.
 
-### Work
+Build:
 
-- publish clean setup and runtime guidance
-- document stable vs advanced vs internal APIs
-- provide migration notes for any breaking boundary changes
-- add one or two canonical example integrations
-- tighten packaging and release flow
-- revisit the `node:sqlite` dependency decision before claiming a fully mature release
+- clean setup guidance
+- stable / advanced / internal API docs
+- example integrations
+- tightened packaging and release flow
+- public-facing product surface documentation
 
-### Exit Criteria
+Complete when:
 
-- a builder can install and understand the product without reading the whole source tree
-- the supported integration story is explicit
-- release notes and docs are more trustworthy than tribal knowledge
+- a builder can install and understand the product without reading the entire repo
+- supported integration stories are explicit
+- release docs are more trustworthy than tribal knowledge
 
-## Recommended Sequence
+## What "Done" Looks Like At Each Layer
 
-1. Finish structural consolidation.
-2. Run operator-led UI dogfood on a throwaway or controlled domain.
-3. Pick the dogfood app.
-4. Ship the authoritative dogfood integration.
-5. Run it long enough to gather real pain.
-6. Harden around the pain.
-7. Freeze and document the public product surface.
+### Dashboard workspace done
 
-## Immediate Next Steps
+- project / workflow / stage scopes are real
+- draft / review / helper scopes are real
+- no second truth exists in the UI
 
-These are the next practical steps from the current codebase state:
+### Core governance done
 
-1. Finish the remaining transport-owned mutation paths.
-2. Finish the config semantic model enough to trust real dogfood edits.
-3. Formalize `clawforce/advanced`.
-4. Choose the first dogfood app.
-5. Write a short dogfood contract for that app:
-   - what must go through ClawForce
-   - what success looks like
-   - what rollback looks like
-   Use [dogfood-contract.md](/Users/lylejens/workplace/clawforce/templates/dogfood-contract.md).
+- approvals, verification, budgets, and audit are unavoidable where they matter
+- config/apply behavior is legible and consistent
 
-## First Dogfood Scorecard
+### Dogfood done
 
-Use this to judge the first app rollout.
+- one real app runs through ClawForce without routine bypasses
+- the product learns from reality instead of from internal speculation
 
-### Governance
+### Productization done
 
-- budgets actually block work when they should
-- approvals actually gate risky actions
-- task state matches reality
-- audit history explains what happened
+- another builder can use ClawForce intentionally, not accidentally
 
-### Operator Experience
+## Immediate Next Milestones
 
-- the dashboard is the default place to look
-- config edits are understandable
-- interventions are fast
-- there is no frequent need to inspect internals directly
+The next practical sequence is:
 
-### Reliability
+1. Finish Workspace Phase B in `clawforce`.
+2. Wire Workspace Phase B in `clawforce-dashboard`.
+3. Finish Workspace Phase C.
+4. Finish Workspace Phase D.
+5. Build predictive setup.
+6. Finish config/mutation consolidation.
+7. Run continued operator-led UI dogfood.
+8. Run the setup-surface proof lane.
+9. Choose and execute the first authoritative real-app dogfood.
 
-- retries and recovery are visible
-- reloads do not surprise operators
-- no hidden state causes inconsistent behavior
+## Explicit Deferrals
 
-### Product Proof
+Do not let these steal the milestone sequence:
 
-- the app team prefers running with ClawForce over running without it
+- generalized workflow studio UX
+- repo cartography onboarding
+- broad workflow discovery
+- extension ecosystem expansion
+- speculative local-model swarms
+- visual sprawl for its own sake
+
+Those are later only if the trust milestones are already boring.
 
 ## Decision Rule
 

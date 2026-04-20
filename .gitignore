@@ -22,6 +22,9 @@ content-agency/
 research/
 memory/
 
+# Generated recurring-run artifacts
+notes/recurring-runs/*.md
+
 # Agent workspace files
 AGENTS.md
 HEARTBEAT.md
