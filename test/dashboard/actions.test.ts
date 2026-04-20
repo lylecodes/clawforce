@@ -12,6 +12,10 @@ vi.mock("../../src/tasks/ops.js", () => ({
   transitionTask: vi.fn(),
 }));
 
+vi.mock("../../src/workspace/drafts.js", () => ({
+  setWorkflowDraftSessionVisibility: vi.fn(),
+}));
+
 vi.mock("../../src/enforcement/disabled-store.js", () => ({
   disableAgent: vi.fn(),
   enableAgent: vi.fn(),
@@ -194,6 +198,7 @@ const {
 } = await import("../../src/dashboard/actions.js");
 const { approveProposal, rejectProposal } = await import("../../src/approval/resolve.js");
 const { createTask, reassignTask, transitionTask } = await import("../../src/tasks/ops.js");
+const { setWorkflowDraftSessionVisibility } = await import("../../src/workspace/drafts.js");
 const {
   disableAgent,
   enableAgent,
@@ -474,6 +479,47 @@ describe("handleAction", () => {
 
     const result = handleAction("test-project", "tasks/t1/transition", { toState: "IN_PROGRESS" });
     expect(result.status).toBe(200);
+  });
+
+  it("updates workflow draft visibility", () => {
+    (setWorkflowDraftSessionVisibility as any).mockReturnValue({
+      id: "draft-1",
+      workflowId: "wf-1",
+      overlayVisibility: "hidden",
+    });
+
+    const result = handleAction("test-project", "workspace/drafts/draft-1/visibility", {
+      overlayVisibility: "hidden",
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(setWorkflowDraftSessionVisibility).toHaveBeenCalledWith(
+      "test-project",
+      "draft-1",
+      "hidden",
+      "user",
+    );
+    expect(emitSSE).toHaveBeenCalledWith("test-project", "workspace:draft", {
+      draftSessionId: "draft-1",
+      workflowId: "wf-1",
+      overlayVisibility: "hidden",
+    });
+  });
+
+  it("returns 400 for invalid workflow draft visibility values", () => {
+    const result = handleAction("test-project", "workspace/drafts/draft-1/visibility", {
+      overlayVisibility: "nope",
+    });
+    expect(result.status).toBe(400);
+    expect(setWorkflowDraftSessionVisibility).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when the workflow draft session does not exist", () => {
+    (setWorkflowDraftSessionVisibility as any).mockReturnValue(null);
+    const result = handleAction("test-project", "workspace/drafts/missing/visibility", {
+      overlayVisibility: "visible",
+    });
+    expect(result.status).toBe(404);
   });
 
   // --- Agents ---

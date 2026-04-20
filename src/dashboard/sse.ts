@@ -25,7 +25,8 @@ export type SSEEventType =
   | "meeting:ended"
   | "config:changed"
   | "action_status"
-  | "locks:changed";
+  | "locks:changed"
+  | "workspace:draft";
 
 type Client = {
   id: string;

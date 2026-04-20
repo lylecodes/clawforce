@@ -64,6 +64,7 @@ import {
   runReassignTaskCommand,
   runTransitionTaskCommand,
 } from "../app/commands/task-controls.js";
+import { setWorkflowDraftSessionVisibility } from "../workspace/drafts.js";
 
 /**
  * Route a POST action request. `actionPath` is the path after `/clawforce/api/:domain/`.
@@ -111,9 +112,60 @@ export function handleAction(
       return handleHistoryAction(projectId, segments, body);
     case "setup":
       return handleSetupAction(projectId, segments, body);
+    case "workspace":
+      return handleWorkspaceAction(projectId, segments, body);
     default:
       return notFound(`Unknown action resource: ${resource}`);
   }
+}
+
+function handleWorkspaceAction(
+  projectId: string,
+  segments: string[],
+  body: Record<string, unknown>,
+): RouteResult {
+  if (segments[1] !== "drafts") {
+    return notFound(`Unknown workspace action: ${segments.slice(1).join("/")}`);
+  }
+
+  const draftSessionId = segments[2];
+  const action = segments[3];
+  if (!draftSessionId || !action) {
+    return notFound("draftSessionId and action required");
+  }
+
+  if (action !== "visibility") {
+    return notFound(`Unknown workspace draft action: ${action}`);
+  }
+
+  const overlayVisibility = body.overlayVisibility;
+  if (overlayVisibility !== "visible" && overlayVisibility !== "hidden") {
+    return badRequest("overlayVisibility must be 'visible' or 'hidden'");
+  }
+
+  const actor = (body.actor as string) ?? "dashboard";
+  const draftSession = setWorkflowDraftSessionVisibility(
+    projectId,
+    draftSessionId,
+    overlayVisibility,
+    actor,
+  );
+  if (!draftSession) {
+    return notFound("Workflow draft session not found");
+  }
+
+  emitSSE(projectId, "workspace:draft", {
+    draftSessionId,
+    workflowId: draftSession.workflowId,
+    overlayVisibility: draftSession.overlayVisibility,
+  });
+
+  return ok({
+    ok: true,
+    draftSessionId,
+    workflowId: draftSession.workflowId,
+    overlayVisibility: draftSession.overlayVisibility,
+  });
 }
 
 function handleDomainAction(
