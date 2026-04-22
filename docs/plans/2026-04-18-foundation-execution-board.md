@@ -132,17 +132,20 @@ Stop rules:
 
 ### Phase 4: Consolidate Before Dogfood
 
-Status: next major phase
+Status: done
 
 Objective:
 Finish the remaining canonical contract work before a real app is allowed to prove or distort the product.
 
-Major items:
+Completed items:
 
 - finish remaining transport-owned mutation paths
 - finish config semantic consolidation across file edits, dashboard edits, and API edits
 - one preview path, one save path, one apply story, one audit trail
 - formalize stable vs advanced vs internal package boundaries
+- make special sections (`agents`, `budget`, `jobs`) preview/save/history semantics match the dashboard's logical editing model
+- route dashboard preview through the canonical section-aware preview path
+- show recent config changes across the domain instead of querying a nonexistent config resource keyed by the domain id
 
 Exit criteria:
 
@@ -154,6 +157,11 @@ Stop rules:
 
 - do not pick the authoritative dogfood app before this phase is credible
 - do not use dogfood pressure to justify leaking app logic into transport or adapter layers
+
+Result:
+
+- this phase is now credible enough to start operator-led dogfood
+- the next active work is using the real workspace, setup, feed, decisions, and config surfaces until operator contradictions fall out of the product
 
 ## Dedicated Dogfood Phases
 

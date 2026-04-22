@@ -189,12 +189,12 @@ Complete when:
 
 ### Milestone 6: Config And Mutation Consolidation
 
-Status: pending
+Status: done
 
 Objective:
 Finish the canonical contract layer before authoritative dogfood.
 
-Build:
+Built:
 
 - one preview path
 - one save path
@@ -202,6 +202,9 @@ Build:
 - one audit trail
 - transport-owned mutation cleanup
 - stable / advanced / internal boundary cleanup
+- logical config semantics for aliased and special sections such as `profile`, `initiatives`, `budget`, `agents`, and `jobs`
+- section-aware config preview in the dashboard instead of generic diff fallback
+- recent config-change history across the domain instead of a broken per-domain `resourceId`
 
 Complete when:
 
@@ -211,7 +214,7 @@ Complete when:
 
 ### Milestone 7: Operator-Led UI Dogfood
 
-Status: partially done, must continue
+Status: next active milestone
 
 Objective:
 Use the product directly until the shell is boring and trustworthy.
