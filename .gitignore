@@ -21,9 +21,15 @@ writer-state.md
 content-agency/
 research/
 memory/
+MEMORY.md
+reports/
+tmp/
 
 # Generated recurring-run artifacts
 notes/recurring-runs/*.md
+notes/recurring-runs/**/*.json
+notes/recurring-runs/**/*.txt
+notes/recurring-runs/**/*.log
 
 # Agent workspace files
 AGENTS.md
