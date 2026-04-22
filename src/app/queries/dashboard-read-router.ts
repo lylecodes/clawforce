@@ -85,6 +85,7 @@ import { queryDashboardAssistantStatus } from "./dashboard-assistant.js";
 import { queryDomainCapabilities } from "./dashboard-meta.js";
 import {
   queryProjectWorkspace,
+  queryWorkflowHelperSession,
   queryWorkflowDraftSession,
   queryWorkflowDraftSessions,
   queryScopedWorkspaceFeed,
@@ -835,6 +836,14 @@ export function routeGatewayDomainRead(
       const sub = segments[1] ?? "";
       if (sub === "" || sub === "overview") {
         return ok(queryProjectWorkspace(domain));
+      }
+      if (sub === "helpers") {
+        const helperSessionId = segments[2];
+        if (!helperSessionId) {
+          return notFound("helperSessionId required");
+        }
+        const detail = queryWorkflowHelperSession(domain, decodeURIComponent(helperSessionId));
+        return detail ? ok(detail) : notFound("Workflow helper session not found");
       }
       if (sub === "drafts") {
         const draftSessionId = segments[2];

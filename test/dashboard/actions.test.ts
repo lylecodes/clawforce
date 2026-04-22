@@ -16,6 +16,12 @@ vi.mock("../../src/workspace/drafts.js", () => ({
   setWorkflowDraftSessionVisibility: vi.fn(),
 }));
 
+vi.mock("../../src/workspace/helpers.js", () => ({
+  startWorkflowHelperSession: vi.fn(),
+  sendWorkflowHelperMessage: vi.fn(),
+  acceptWorkflowHelperProposal: vi.fn(),
+}));
+
 vi.mock("../../src/workspace/reviews.js", () => ({
   createWorkflowReviewFromDraft: vi.fn(),
   approveWorkflowReview: vi.fn(),
@@ -205,6 +211,11 @@ const {
 const { approveProposal, rejectProposal } = await import("../../src/approval/resolve.js");
 const { createTask, reassignTask, transitionTask } = await import("../../src/tasks/ops.js");
 const { setWorkflowDraftSessionVisibility } = await import("../../src/workspace/drafts.js");
+const {
+  acceptWorkflowHelperProposal,
+  sendWorkflowHelperMessage,
+  startWorkflowHelperSession,
+} = await import("../../src/workspace/helpers.js");
 const { approveWorkflowReview, createWorkflowReviewFromDraft, rejectWorkflowReview } = await import("../../src/workspace/reviews.js");
 const {
   disableAgent,
@@ -527,6 +538,131 @@ describe("handleAction", () => {
       overlayVisibility: "visible",
     });
     expect(result.status).toBe(404);
+  });
+
+  // --- Phase D: helper sessions ---
+
+  it("starts a workflow helper session and emits workspace:helper SSE", () => {
+    (startWorkflowHelperSession as any).mockReturnValue({
+      id: "helper-1",
+      status: "asking",
+      currentStep: "goal",
+    });
+
+    const result = handleAction("test-project", "workspace/helpers/start", {
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(startWorkflowHelperSession).toHaveBeenCalledWith({
+      projectId: "test-project",
+      actor: "user",
+    });
+    expect(emitSSE).toHaveBeenCalledWith("test-project", "workspace:helper", {
+      helperSessionId: "helper-1",
+      status: "asking",
+      currentStep: "goal",
+      created: true,
+    });
+  });
+
+  it("sends a helper message and emits workspace:helper SSE", () => {
+    (sendWorkflowHelperMessage as any).mockReturnValue({
+      ok: true,
+      session: {
+        id: "helper-1",
+        status: "proposing",
+        currentStep: "review",
+        proposal: { workflowName: "Pipeline" },
+      },
+    });
+
+    const result = handleAction("test-project", "workspace/helpers/helper-1/messages", {
+      actor: "user",
+      content: "intake, execute, review",
+    });
+    expect(result.status).toBe(200);
+    expect(sendWorkflowHelperMessage).toHaveBeenCalledWith({
+      projectId: "test-project",
+      helperSessionId: "helper-1",
+      actor: "user",
+      content: "intake, execute, review",
+    });
+    expect(emitSSE).toHaveBeenCalledWith("test-project", "workspace:helper", {
+      helperSessionId: "helper-1",
+      status: "proposing",
+      currentStep: "review",
+      proposalReady: true,
+    });
+  });
+
+  it("returns 400 when sending an empty helper message", () => {
+    const result = handleAction("test-project", "workspace/helpers/helper-1/messages", {
+      content: "   ",
+    });
+    expect(result.status).toBe(400);
+    expect(sendWorkflowHelperMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 when sending to a terminal helper session", () => {
+    (sendWorkflowHelperMessage as any).mockReturnValue({
+      ok: false,
+      reason: "terminal",
+      currentStatus: "accepted",
+    });
+    const result = handleAction("test-project", "workspace/helpers/helper-1/messages", {
+      actor: "user",
+      content: "anything",
+    });
+    expect(result.status).toBe(409);
+    expect((result.body as { currentStatus: string }).currentStatus).toBe("accepted");
+  });
+
+  it("accepts a helper proposal, creates a draft-backed workflow, and emits helper + draft SSE", () => {
+    (acceptWorkflowHelperProposal as any).mockReturnValue({
+      ok: true,
+      created: true,
+      workflowId: "wf-new",
+      draftSessionId: "draft-new",
+      session: {
+        id: "helper-1",
+        status: "accepted",
+        currentStep: "accepted",
+      },
+    });
+
+    const result = handleAction("test-project", "workspace/helpers/helper-1/accept", {
+      actor: "user",
+    });
+    expect(result.status).toBe(200);
+    expect(acceptWorkflowHelperProposal).toHaveBeenCalledWith({
+      projectId: "test-project",
+      helperSessionId: "helper-1",
+      actor: "user",
+    });
+    expect(emitSSE).toHaveBeenNthCalledWith(1, "test-project", "workspace:helper", {
+      helperSessionId: "helper-1",
+      status: "accepted",
+      currentStep: "accepted",
+      workflowId: "wf-new",
+      draftSessionId: "draft-new",
+      created: true,
+    });
+    expect(emitSSE).toHaveBeenNthCalledWith(2, "test-project", "workspace:draft", {
+      draftSessionId: "draft-new",
+      workflowId: "wf-new",
+      overlayVisibility: "visible",
+    });
+  });
+
+  it("returns 409 when accepting a helper session without a ready proposal", () => {
+    (acceptWorkflowHelperProposal as any).mockReturnValue({
+      ok: false,
+      reason: "proposal_missing",
+      currentStatus: "asking",
+    });
+    const result = handleAction("test-project", "workspace/helpers/helper-1/accept", { actor: "user" });
+    expect(result.status).toBe(409);
+    expect((result.body as { currentStatus: string }).currentStatus).toBe("asking");
   });
 
   // --- Phase C: draft confirm + workflow review approve/reject ---

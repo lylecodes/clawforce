@@ -50,6 +50,7 @@ export {
 } from "./queries.js";
 export {
   queryProjectWorkspace,
+  queryWorkflowHelperSession,
   queryWorkflowDraftSession,
   queryWorkflowDraftSessions,
   queryWorkflowTopology,
@@ -70,6 +71,14 @@ export type {
   WorkflowDraftChangeSummary,
   WorkflowDraftSessionStatus,
   WorkflowDraftOverlayVisibility,
+  WorkflowHelperSession,
+  WorkflowHelperSessionMode,
+  WorkflowHelperSessionStatus,
+  WorkflowHelperConversationStep,
+  WorkflowHelperMessage,
+  WorkflowHelperGatheredAnswers,
+  WorkflowHelperProposal,
+  WorkflowHelperProposalStage,
   WorkflowStageSummary,
   WorkflowStageEdge,
   WorkflowStageInspector,

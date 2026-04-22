@@ -10,6 +10,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryProjectWorkspaceMock = vi.fn();
+const queryWorkflowHelperSessionMock = vi.fn();
 const queryWorkflowDraftSessionMock = vi.fn();
 const queryWorkflowDraftSessionsMock = vi.fn();
 const queryWorkflowTopologyMock = vi.fn();
@@ -20,6 +21,7 @@ const queryWorkflowReviewsMock = vi.fn();
 
 vi.mock("../../../src/workspace/queries.js", () => ({
   queryProjectWorkspace: queryProjectWorkspaceMock,
+  queryWorkflowHelperSession: queryWorkflowHelperSessionMock,
   queryWorkflowDraftSession: queryWorkflowDraftSessionMock,
   queryWorkflowDraftSessions: queryWorkflowDraftSessionsMock,
   queryWorkflowTopology: queryWorkflowTopologyMock,
@@ -35,6 +37,7 @@ const DOMAIN = "ws-test";
 
 beforeEach(() => {
   queryProjectWorkspaceMock.mockReset();
+  queryWorkflowHelperSessionMock.mockReset();
   queryWorkflowDraftSessionMock.mockReset();
   queryWorkflowDraftSessionsMock.mockReset();
   queryWorkflowTopologyMock.mockReset();
@@ -67,6 +70,26 @@ describe("routeGatewayDomainRead — workspace resource", () => {
     const result = routeGatewayDomainRead(DOMAIN, "workspace/bogus", {});
     expect(result.status).toBe(404);
     expect(queryProjectWorkspaceMock).not.toHaveBeenCalled();
+  });
+
+  it("routes GET /workspace/helpers/:id to queryWorkflowHelperSession", () => {
+    const payload = {
+      scope: { kind: "helper", domainId: DOMAIN, helperSessionId: "helper-1" },
+      id: "helper-1",
+      status: "asking",
+    };
+    queryWorkflowHelperSessionMock.mockReturnValue(payload);
+
+    const result = routeGatewayDomainRead(DOMAIN, "workspace/helpers/helper-1", {});
+    expect(result.status).toBe(200);
+    expect(result.body).toBe(payload);
+    expect(queryWorkflowHelperSessionMock).toHaveBeenCalledWith(DOMAIN, "helper-1");
+  });
+
+  it("404s when the helper-session detail query returns null", () => {
+    queryWorkflowHelperSessionMock.mockReturnValue(null);
+    const result = routeGatewayDomainRead(DOMAIN, "workspace/helpers/missing", {});
+    expect(result.status).toBe(404);
   });
 });
 

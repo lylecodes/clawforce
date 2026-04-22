@@ -23,6 +23,10 @@ import {
   diffDraftWorkflow,
 } from "./drafts.js";
 import {
+  getWorkflowHelperSessionRecord,
+  toWorkflowHelperSessionDetail,
+} from "./helpers.js";
+import {
   getWorkflowReviewRecord,
   listWorkflowReviewRecords,
   toWorkflowReviewDetail,
@@ -41,6 +45,7 @@ import {
   type WorkflowDraftSession,
   type WorkflowDraftSessionSummary,
   type WorkflowDraftStageOverlay,
+  type WorkflowHelperSession,
   type WorkflowReview,
   type WorkflowReviewStatus,
   type WorkflowReviewSummary,
@@ -463,6 +468,22 @@ export function queryWorkflowDraftSession(
   const record = getWorkflowDraftSessionRecord(domainId, draftSessionId, db);
   if (!record) return null;
   return toWorkflowDraftSessionDetail(domainId, record);
+}
+
+// ---------------------------------------------------------------------------
+// queryWorkflowHelperSession (Phase D)
+// ---------------------------------------------------------------------------
+
+export function queryWorkflowHelperSession(
+  domainId: string,
+  helperSessionId: string,
+  dbOverride?: DatabaseSync,
+): WorkflowHelperSession | null {
+  const db = resolveDb(domainId, dbOverride);
+  if (!db) return null;
+  const record = getWorkflowHelperSessionRecord(domainId, helperSessionId, db);
+  if (!record) return null;
+  return toWorkflowHelperSessionDetail(domainId, record);
 }
 
 // ---------------------------------------------------------------------------

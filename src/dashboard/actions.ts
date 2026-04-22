@@ -66,6 +66,11 @@ import {
 } from "../app/commands/task-controls.js";
 import { setWorkflowDraftSessionVisibility } from "../workspace/drafts.js";
 import {
+  acceptWorkflowHelperProposal,
+  sendWorkflowHelperMessage,
+  startWorkflowHelperSession,
+} from "../workspace/helpers.js";
+import {
   approveWorkflowReview,
   createWorkflowReviewFromDraft,
   rejectWorkflowReview,
@@ -131,6 +136,10 @@ function handleWorkspaceAction(
   segments: string[],
   body: Record<string, unknown>,
 ): RouteResult {
+  if (segments[1] === "helpers") {
+    return handleWorkspaceHelperAction(projectId, segments, body);
+  }
+
   if (segments[1] !== "drafts") {
     return notFound(`Unknown workspace action: ${segments.slice(1).join("/")}`);
   }
@@ -148,6 +157,119 @@ function handleWorkspaceAction(
     return handleDraftConfirm(projectId, draftSessionId, body);
   }
   return notFound(`Unknown workspace draft action: ${action}`);
+}
+
+function handleWorkspaceHelperAction(
+  projectId: string,
+  segments: string[],
+  body: Record<string, unknown>,
+): RouteResult {
+  const actor = (body.actor as string) ?? "dashboard";
+  const helperSessionId = segments[2];
+  const action = segments[3];
+
+  if (helperSessionId === "start") {
+    const session = startWorkflowHelperSession({ projectId, actor });
+    emitSSE(projectId, "workspace:helper", {
+      helperSessionId: session.id,
+      status: session.status,
+      currentStep: session.currentStep,
+      created: true,
+    });
+    return ok({
+      ok: true,
+      helperSessionId: session.id,
+      status: session.status,
+      currentStep: session.currentStep,
+    });
+  }
+
+  if (!helperSessionId || !action) {
+    return notFound("helperSessionId and action required");
+  }
+
+  if (action === "messages") {
+    const content = typeof body.content === "string" ? body.content.trim() : "";
+    if (!content) {
+      return badRequest("content is required");
+    }
+    const result = sendWorkflowHelperMessage({
+      projectId,
+      helperSessionId,
+      actor,
+      content,
+    });
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        return notFound("Workflow helper session not found");
+      }
+      return {
+        status: 409,
+        body: {
+          error: "Workflow helper session is terminal",
+          currentStatus: result.currentStatus,
+        },
+      };
+    }
+
+    emitSSE(projectId, "workspace:helper", {
+      helperSessionId: result.session.id,
+      status: result.session.status,
+      currentStep: result.session.currentStep,
+      proposalReady: !!result.session.proposal,
+    });
+    return ok({
+      ok: true,
+      helperSessionId: result.session.id,
+      status: result.session.status,
+      currentStep: result.session.currentStep,
+      proposalReady: !!result.session.proposal,
+    });
+  }
+
+  if (action === "accept") {
+    const result = acceptWorkflowHelperProposal({
+      projectId,
+      helperSessionId,
+      actor,
+    });
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        return notFound("Workflow helper session not found");
+      }
+      return {
+        status: 409,
+        body: {
+          error: "Workflow helper proposal is not ready to accept",
+          currentStatus: result.currentStatus,
+        },
+      };
+    }
+
+    emitSSE(projectId, "workspace:helper", {
+      helperSessionId: result.session.id,
+      status: result.session.status,
+      currentStep: result.session.currentStep,
+      workflowId: result.workflowId,
+      draftSessionId: result.draftSessionId,
+      created: result.created,
+    });
+    emitSSE(projectId, "workspace:draft", {
+      draftSessionId: result.draftSessionId,
+      workflowId: result.workflowId,
+      overlayVisibility: "visible",
+    });
+    return ok({
+      ok: true,
+      created: result.created,
+      helperSessionId: result.session.id,
+      workflowId: result.workflowId,
+      draftSessionId: result.draftSessionId,
+      status: result.session.status,
+    });
+  }
+
+  return notFound(`Unknown workspace helper action: ${action}`);
 }
 
 function handleDraftVisibility(

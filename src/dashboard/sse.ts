@@ -26,6 +26,7 @@ export type SSEEventType =
   | "config:changed"
   | "action_status"
   | "locks:changed"
+  | "workspace:helper"
   | "workspace:draft"
   | "workspace:review";
 

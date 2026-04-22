@@ -27,6 +27,7 @@ export type WorkspaceScope =
   | { kind: "project"; domainId: string }
   | { kind: "workflow"; domainId: string; workflowId: string }
   | { kind: "stage"; domainId: string; workflowId: string; stageKey: string }
+  | { kind: "helper"; domainId: string; helperSessionId: string }
   | { kind: "draft"; domainId: string; workflowId: string; draftSessionId: string }
   | { kind: "review"; domainId: string; workflowId: string; reviewId: string };
 
@@ -36,6 +37,7 @@ export const WORKSPACE_SCOPE_KINDS: readonly WorkspaceScopeKind[] = [
   "project",
   "workflow",
   "stage",
+  "helper",
   "draft",
   "review",
 ] as const;
@@ -277,6 +279,62 @@ export type WorkflowReviewSummary = {
 export type WorkflowReview = WorkflowReviewSummary & {
   overlays: WorkflowDraftStageOverlay[];
   draftSession: WorkflowDraftSessionSummary;
+};
+
+// ---------------------------------------------------------------------------
+// Helper sessions (Phase D)
+// ---------------------------------------------------------------------------
+
+export type WorkflowHelperSessionMode = "create_workflow";
+
+export type WorkflowHelperSessionStatus = "asking" | "proposing" | "accepted";
+
+export type WorkflowHelperConversationStep = "goal" | "trigger" | "stages" | "review" | "accepted";
+
+export type WorkflowHelperMessageRole = "helper" | "operator";
+
+export type WorkflowHelperMessage = {
+  id: string;
+  role: WorkflowHelperMessageRole;
+  content: string;
+  createdAt: number;
+};
+
+export type WorkflowHelperGatheredAnswers = {
+  goal?: string;
+  trigger?: string;
+  stagesText?: string;
+};
+
+export type WorkflowHelperProposalStage = {
+  helperStageKey: string;
+  phaseIndex: number;
+  label: string;
+  description?: string;
+  gateCondition: "all_done" | "any_done" | "all_resolved" | "any_resolved";
+};
+
+export type WorkflowHelperProposal = {
+  workflowName: string;
+  summary: string;
+  stages: WorkflowHelperProposalStage[];
+};
+
+export type WorkflowHelperSession = {
+  scope: Extract<WorkspaceScope, { kind: "helper" }>;
+  id: string;
+  mode: WorkflowHelperSessionMode;
+  status: WorkflowHelperSessionStatus;
+  currentStep: WorkflowHelperConversationStep;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: WorkflowHelperMessage[];
+  gatheredAnswers: WorkflowHelperGatheredAnswers;
+  proposal?: WorkflowHelperProposal;
+  linkedWorkflowId?: string;
+  linkedDraftSessionId?: string;
+  acceptedAt?: number;
 };
 
 /**
