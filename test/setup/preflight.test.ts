@@ -141,6 +141,15 @@ describe("setup/preflight", () => {
     expect(preflight.summary).toContain("modeled behavior");
 
     const workflowScenario = preflight.scenarios.find((entry) => entry.id === "workflow:data-source-onboarding:intake-triage");
+    expect(workflowScenario?.explainability).toMatchObject({
+      whyThisExists: expect.stringContaining('workflow "data-source-onboarding"'),
+      whyThisAgent: expect.stringContaining('alpha-manager.intake-triage'),
+      configDrivers: expect.arrayContaining([
+        "workflows[data-source-onboarding]",
+        "jobs[alpha-manager:intake-triage]",
+        "agents[alpha-manager]",
+      ]),
+    });
     expect(workflowScenario?.predictedArtifacts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: "feed",
@@ -153,6 +162,13 @@ describe("setup/preflight", () => {
     ]));
 
     const issueScenario = preflight.scenarios.find((entry) => entry.id === "state-signal:jurisdiction:proposed-onboarding-request");
+    expect(issueScenario?.explainability).toMatchObject({
+      whyThisExists: expect.stringContaining("entities.jurisdiction.issues.stateSignals"),
+      configDrivers: expect.arrayContaining([
+        "entities.jurisdiction.issues.stateSignals",
+        "entities.jurisdiction.issues.types.onboarding_request",
+      ]),
+    });
     expect(issueScenario?.predictedArtifacts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: "issue",
@@ -165,6 +181,10 @@ describe("setup/preflight", () => {
     ]));
 
     const approvalScenario = preflight.scenarios.find((entry) => entry.id === "transition:jurisdiction:shadow:active");
+    expect(approvalScenario?.explainability).toMatchObject({
+      whyBlocked: "The transition stays blocked until open blocking issues are cleared.",
+      configDrivers: ["entities.jurisdiction.transitions"],
+    });
     expect(approvalScenario?.predictedArtifacts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: "proposal",
@@ -177,6 +197,10 @@ describe("setup/preflight", () => {
     ]));
 
     const executionScenario = preflight.scenarios.find((entry) => entry.id === "execution:default-mutation-policy");
+    expect(executionScenario?.explainability).toMatchObject({
+      whyBlocked: "The default mutation policy simulates the side effect instead of executing it live.",
+      configDrivers: ["execution"],
+    });
     expect(executionScenario?.predictedArtifacts).toEqual([
       expect.objectContaining({
         kind: "simulated_action",
@@ -185,6 +209,13 @@ describe("setup/preflight", () => {
     ]);
 
     const mutationScenario = preflight.scenarios.find((entry) => entry.id === "mutation:workflow-steward");
+    expect(mutationScenario?.explainability).toMatchObject({
+      whyThisAgent: "workflow-steward is the configured workflow steward for governed mutation follow-up.",
+      configDrivers: expect.arrayContaining([
+        "review.workflowSteward",
+        "agents[workflow-steward]",
+      ]),
+    });
     expect(mutationScenario?.predictedArtifacts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: "proposal",
@@ -208,6 +239,10 @@ describe("setup/preflight", () => {
     expect(scenario).toMatchObject({
       status: "attention",
       automationState: "blocked_for_agent",
+      explainability: {
+        whyBlocked: "No workflow steward is configured yet, so repeated review failures can only stay visible in the feed.",
+        configDrivers: ["review.workflowSteward"],
+      },
     });
     expect(scenario?.statusDetail).toContain("workflow-steward");
     expect(scenario?.predictedArtifacts).toEqual([

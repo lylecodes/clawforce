@@ -1,6 +1,6 @@
 # ClawForce Maturity Roadmap
 
-> Last updated: 2026-04-19
+> Last updated: 2026-04-21
 > Purpose: show the actual milestone path from current state to "complete enough to trust" and then to broad product maturity.
 
 This roadmap is not a feature wishlist.
@@ -37,13 +37,25 @@ Not "every workflow modeled."
   - core read-side contracts exist
   - dashboard Phase A shell exists
   - project -> workflow -> stage scope now works through one coherent shell
+- Workspace Phase B is done:
+  - real draft sessions exist in core
+  - draft overlays are framework-owned
+  - the dashboard can toggle draft visibility without inventing local state
+- Workspace Phase C is done:
+  - confirmed drafts move into real workflow reviews
+  - approve / reject uses framework-backed review objects and canonical feed items
+  - the workspace can inspect and resolve pending reviews without a second review system
+- Workspace Phase D is done:
+  - helper sessions are real framework objects
+  - helper-led workflow creation lands in the workspace shell
+  - accepted helper proposals materialize into real workflow and draft state
+- Predictive setup is done:
+  - setup exposes modeled preflight scenarios before `live`
+  - predicted operator-visible artifacts are explicit
+  - explainability is first-class for why a path exists, why blocked, why this agent, and what config causes it
 
 ### Not complete yet
 
-- real draft session model
-- real workflow review loop
-- helper-led workflow authoring
-- predictive setup / preflight
 - full config/apply consolidation
 - authoritative real-app dogfood
 - public productization for outside builders
@@ -89,7 +101,7 @@ This is the first milestone where the dashboard feels like the product we intend
 
 ### Milestone 2: Workspace Phase B
 
-Status: next
+Status: done
 
 Objective:
 Make workflow mutation real instead of implied.
@@ -112,7 +124,7 @@ Complete when:
 
 ### Milestone 3: Workspace Phase C
 
-Status: pending
+Status: done
 
 Objective:
 Turn draft mutation into governed review.
@@ -133,7 +145,7 @@ Complete when:
 
 ### Milestone 4: Workspace Phase D
 
-Status: pending
+Status: done
 
 Objective:
 Make helper-led workflow creation real.
@@ -155,7 +167,7 @@ Complete when:
 
 ### Milestone 5: Predictive Setup
 
-Status: pending
+Status: done
 
 Objective:
 Make setup predictive instead of reactive.

@@ -39,6 +39,13 @@ export type SetupPreflightArtifact = {
   surface: string;
 };
 
+export type SetupPreflightExplainability = {
+  whyThisExists: string;
+  whyBlocked?: string;
+  whyThisAgent?: string;
+  configDrivers: string[];
+};
+
 export type SetupPreflightScenario = {
   id: string;
   category: SetupPreflightScenarioCategory;
@@ -55,9 +62,11 @@ export type SetupPreflightScenario = {
   jobId?: string;
   entityKind?: string;
   signalId?: string;
+  issueType?: string;
   fromState?: string;
   toState?: string;
   predictedArtifacts: SetupPreflightArtifact[];
+  explainability: SetupPreflightExplainability;
 };
 
 export type SetupPreflight = {
@@ -106,6 +115,18 @@ function createPredictedArtifact(
     detail,
     surface,
   };
+}
+
+function dedupeStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const value of values) {
+    if (!value) continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    deduped.push(value);
+  }
+  return deduped;
 }
 
 function buildIssueSignalArtifacts(args: {
@@ -300,6 +321,112 @@ function buildWorkflowMutationArtifacts(args: {
       "Tasks",
     ),
   ];
+}
+
+function buildWorkflowExplainability(args: {
+  workflowId: string;
+  status: SetupPreflightScenarioStatus;
+  statusDetail: string;
+  agentId?: string;
+  jobId?: string;
+}): SetupPreflightExplainability {
+  return {
+    whyThisExists: args.jobId && args.agentId
+      ? `This scenario exists because workflow "${args.workflowId}" includes the recurring job "${args.agentId}.${args.jobId}" for this operator-visible path.`
+      : `This scenario exists because workflow "${args.workflowId}" is enabled for the domain.`,
+    whyBlocked: args.status === "ready" ? undefined : args.statusDetail,
+    whyThisAgent: args.agentId
+      ? args.jobId
+        ? `${args.agentId} owns this path because recurring job "${args.agentId}.${args.jobId}" is the configured executor for it.`
+        : `${args.agentId} is the configured agent for this workflow path.`
+      : undefined,
+    configDrivers: dedupeStrings([
+      `workflows[${args.workflowId}]`,
+      args.agentId && args.jobId ? `jobs[${args.agentId}:${args.jobId}]` : null,
+      args.agentId ? `agents[${args.agentId}]` : null,
+    ]),
+  };
+}
+
+function buildIssueExplainability(args: {
+  kind: string;
+  issueType: string;
+  trigger: string;
+  approvalRequired: boolean;
+  domainLoaded: boolean;
+  issueTypeConfigured: boolean;
+}): SetupPreflightExplainability {
+  return {
+    whyThisExists: `This scenario exists because entities.${args.kind}.issues.stateSignals opens the "${args.issueType}" issue when ${args.trigger.toLowerCase()}.`,
+    whyBlocked: !args.domainLoaded
+      ? "The domain is not loaded yet, so this path is predicted from config rather than verified against a live controller."
+      : args.approvalRequired
+        ? "The resulting issue path includes a human approval boundary before live handling can continue."
+        : undefined,
+    configDrivers: dedupeStrings([
+      `entities.${args.kind}.issues.stateSignals`,
+      args.issueTypeConfigured ? `entities.${args.kind}.issues.types.${args.issueType}` : null,
+    ]),
+  };
+}
+
+function buildApprovalExplainability(args: {
+  kind: string;
+  fromState: string;
+  toState: string;
+  approvalRequired: boolean;
+  blockedByOpenIssues: boolean;
+  domainLoaded: boolean;
+}): SetupPreflightExplainability {
+  return {
+    whyThisExists: `This scenario exists because entities.${args.kind}.transitions adds governance on the ${args.fromState} -> ${args.toState} move.`,
+    whyBlocked: !args.domainLoaded
+      ? "The domain is not loaded yet, so this approval path is predicted from config rather than verified against a live controller."
+      : args.blockedByOpenIssues
+        ? "The transition stays blocked until open blocking issues are cleared."
+        : args.approvalRequired
+          ? "This transition cannot move live until a human approves it."
+          : undefined,
+    configDrivers: [`entities.${args.kind}.transitions`],
+  };
+}
+
+function buildExecutionExplainability(args: {
+  mutationEffect: DomainExecutionEffect;
+  explicitPolicyCount: number;
+}): SetupPreflightExplainability {
+  return {
+    whyThisExists: "This scenario exists because execution policy governs sensitive mutations before they reach the live runtime.",
+    whyBlocked: args.mutationEffect === "simulate"
+      ? "The default mutation policy simulates the side effect instead of executing it live."
+      : args.mutationEffect === "require_approval"
+        ? "The default mutation policy intercepts the side effect until a human approves replay."
+        : args.mutationEffect === "block"
+          ? "The default mutation policy blocks the side effect outright."
+          : undefined,
+    configDrivers: dedupeStrings([
+      "execution",
+      args.explicitPolicyCount > 0 ? "execution.policies" : null,
+    ]),
+  };
+}
+
+function buildWorkflowMutationExplainability(
+  steward: WorkflowStewardResolution | null,
+): SetupPreflightExplainability {
+  return {
+    whyThisExists: "This scenario exists so repeated rejected review loops become governed workflow mutation instead of endless manual operator steering.",
+    whyBlocked: steward
+      ? undefined
+      : 'No workflow steward is configured yet, so repeated review failures can only stay visible in the feed.',
+    whyThisAgent: steward
+      ? `${steward.agentId} is the configured workflow steward for governed mutation follow-up.`
+      : undefined,
+    configDrivers: dedupeStrings([
+      "review.workflowSteward",
+      steward ? `agents[${steward.agentId}]` : null,
+    ]),
+  };
 }
 
 function humanize(value: string): string {
@@ -527,6 +654,13 @@ export function buildSetupPreflight(args: BuildSetupPreflightArgs): SetupPreflig
           artifact.detail,
           artifact.surface,
         )),
+        explainability: buildWorkflowExplainability({
+          workflowId,
+          status: coverage.status,
+          statusDetail: coverage.detail,
+          agentId: coverage.agentId,
+          jobId: scenario.jobId,
+        }),
       });
     }
   }
@@ -561,6 +695,7 @@ export function buildSetupPreflight(args: BuildSetupPreflightArgs): SetupPreflig
           : `Configured in entities.${kind}.issues.stateSignals.`,
         entityKind: kind,
         signalId: signal.id ?? signal.issueType,
+        issueType: signal.issueType,
         predictedArtifacts: buildIssueSignalArtifacts({
           scenarioId: `state-signal:${kind}:${signal.id ?? signal.issueType}`,
           kind,
@@ -568,6 +703,14 @@ export function buildSetupPreflight(args: BuildSetupPreflightArgs): SetupPreflig
           taskEnabled,
           approvalRequired,
           signal,
+        }),
+        explainability: buildIssueExplainability({
+          kind,
+          issueType: signal.issueType,
+          trigger: describeSignalTrigger(kind, signal),
+          approvalRequired,
+          domainLoaded: Boolean(args.domainSummary?.loaded),
+          issueTypeConfigured: Boolean(issueTypeConfig),
         }),
       });
     }
@@ -603,6 +746,14 @@ export function buildSetupPreflight(args: BuildSetupPreflightArgs): SetupPreflig
           toState: transition.to,
           approvalRequired,
           blockedByOpenIssues: Boolean(transition.blockedByOpenIssues),
+        }),
+        explainability: buildApprovalExplainability({
+          kind,
+          fromState: transition.from,
+          toState: transition.to,
+          approvalRequired,
+          blockedByOpenIssues: Boolean(transition.blockedByOpenIssues),
+          domainLoaded: Boolean(args.domainSummary?.loaded),
         }),
       });
     }
@@ -646,6 +797,10 @@ export function buildSetupPreflight(args: BuildSetupPreflightArgs): SetupPreflig
       scenarioId: "execution:default-mutation-policy",
       mutationEffect,
     }),
+    explainability: buildExecutionExplainability({
+      mutationEffect,
+      explicitPolicyCount,
+    }),
   });
 
   const steward = resolveWorkflowSteward(args.review, args.configuredAgentIds ?? []);
@@ -670,6 +825,7 @@ export function buildSetupPreflight(args: BuildSetupPreflightArgs): SetupPreflig
       scenarioId: "mutation:workflow-steward",
       steward,
     }),
+    explainability: buildWorkflowMutationExplainability(steward),
   });
 
   const counts = {

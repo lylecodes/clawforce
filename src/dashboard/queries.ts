@@ -1594,14 +1594,26 @@ function buildSetupPreflightContextReferences(args: {
   }
 
   if (scenario.category === "issue" && scenario.entityKind) {
-    return [buildConfigSetupReference({
-      id: `config:${domainId}:entities:${scenario.entityKind}:state-signals`,
-      label: `${scenario.entityKind}.issues.stateSignals`,
-      domainId,
-      filePath,
-      configSection: "entities",
-      configPath: `entities.${scenario.entityKind}.issues.stateSignals`,
-    })];
+    return dedupeSetupContextReferences([
+      buildConfigSetupReference({
+        id: `config:${domainId}:entities:${scenario.entityKind}:state-signals`,
+        label: `${scenario.entityKind}.issues.stateSignals`,
+        domainId,
+        filePath,
+        configSection: "entities",
+        configPath: `entities.${scenario.entityKind}.issues.stateSignals`,
+      }),
+      ...(scenario.issueType
+        ? [buildConfigSetupReference({
+          id: `config:${domainId}:entities:${scenario.entityKind}:issue-type:${scenario.issueType}`,
+          label: `${scenario.entityKind}.issues.types.${scenario.issueType}`,
+          domainId,
+          filePath,
+          configSection: "entities",
+          configPath: `entities.${scenario.entityKind}.issues.types.${scenario.issueType}`,
+        })]
+        : []),
+    ]);
   }
 
   if (scenario.category === "approval" && scenario.entityKind) {

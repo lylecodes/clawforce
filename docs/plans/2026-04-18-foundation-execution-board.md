@@ -1,6 +1,6 @@
 # ClawForce Foundation Execution Board
 
-> Last updated: 2026-04-18
+> Last updated: 2026-04-21
 > Purpose: define the strict execution order from current state to "complete enough to trust" without letting ClawForce drift into app-shaped implementations or feature churn.
 
 ## Completion Bar
@@ -44,6 +44,8 @@ Do not treat later phases as parallel unless an item is explicitly marked as a p
 
 ### Phase 1: Now
 
+Status: materially done
+
 Objective:
 Make the operator surface canonical and truthful.
 
@@ -68,6 +70,8 @@ Stop rules:
 - do not widen into broad dashboard polish while feed semantics are still unstable
 
 ### Phase 2: Next
+
+Status: done
 
 Objective:
 Make setup predictive instead of reactive.
@@ -97,6 +101,8 @@ Stop rules:
 
 ### Phase 3: After That
 
+Status: partially done, still open
+
 Objective:
 Turn repeated pain into governed workflow evolution.
 
@@ -125,6 +131,8 @@ Stop rules:
 - do not introduce app-specific mutation logic into core
 
 ### Phase 4: Consolidate Before Dogfood
+
+Status: next major phase
 
 Objective:
 Finish the remaining canonical contract work before a real app is allowed to prove or distort the product.

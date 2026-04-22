@@ -91,6 +91,46 @@ vi.mock("../../src/project.js", () => {
         safety: {},
         monitoring: {},
         policies: [],
+        entities: {
+          jurisdiction: {
+            runtimeCreate: true,
+            states: {
+              proposed: { initial: true },
+              shadow: {},
+              active: {},
+            },
+            transitions: [
+              {
+                from: "shadow",
+                to: "active",
+                approvalRequired: true,
+                blockedByOpenIssues: true,
+              },
+            ],
+            issues: {
+              types: {
+                onboarding_request: {
+                  defaultSeverity: "medium",
+                  task: { enabled: true },
+                },
+              },
+              stateSignals: [
+                {
+                  id: "proposed-onboarding-request",
+                  whenStates: ["proposed"],
+                  ownerPresence: "missing",
+                  issueType: "onboarding_request",
+                  recommendedAction: "Create or update governed onboarding work for this proposed jurisdiction.",
+                },
+              ],
+            },
+          },
+        },
+        review: {
+          workflowSteward: {
+            agentId: "workflow-steward",
+          },
+        },
       };
       return null;
     }),
@@ -635,6 +675,11 @@ describe("querySetupExperience", () => {
     expect(result.topology.workflows).toEqual(["data-source-onboarding"]);
     expect(result.preflight.summary).toContain("modeled behavior");
     expect(result.preflight.scenarios.some((scenario) => scenario.category === "execution")).toBe(true);
+    const executionScenario = result.preflight.scenarios.find((scenario) => scenario.id === "execution:default-mutation-policy");
+    expect(executionScenario?.explainability).toEqual(expect.objectContaining({
+      whyThisExists: expect.stringContaining("execution policy"),
+      configDrivers: expect.arrayContaining(["execution"]),
+    }));
     expect(result.feed).toHaveProperty("counts");
     expect(result.decisionInbox).toHaveProperty("counts");
     expect(result.runtime).toHaveProperty("queue");
@@ -671,6 +716,20 @@ describe("querySetupExperience", () => {
         }),
       ]),
     );
+    expect(result.context.preflight["state-signal:jurisdiction:proposed-onboarding-request"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          configPath: "entities.jurisdiction.issues.stateSignals",
+        }),
+        expect.objectContaining({
+          configPath: "entities.jurisdiction.issues.types.onboarding_request",
+        }),
+      ]),
+    );
+    const mutationScenario = result.preflight.scenarios.find((scenario) => scenario.id === "mutation:workflow-steward");
+    expect(mutationScenario?.explainability).toEqual(expect.objectContaining({
+      configDrivers: expect.arrayContaining(["review.workflowSteward"]),
+    }));
     expect(result.actions.immediateActions["domain:proj1:controller-config"]).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
