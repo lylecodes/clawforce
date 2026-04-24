@@ -1920,7 +1920,7 @@ const clawforcePlugin = {
         logMessage: "Clawforce: cron service wired for dispatch",
       });
 
-      respond(true);
+      respond(true, { ok: true });
     });
 
     // --- Bootstrap gateway method ---
@@ -1934,7 +1934,7 @@ const clawforcePlugin = {
           onlyIfMissing: true,
           logMessage: "Clawforce: cron service bootstrapped",
         });
-        respond(true);
+        respond(true, { ok: true });
       } catch (err) {
         api.logger.warn(`Clawforce bootstrap error: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
         respond(false, undefined, { code: "BOOTSTRAP_ERROR", message: String(err) });

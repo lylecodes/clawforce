@@ -247,6 +247,18 @@ describe("clawforce plugin", () => {
       expect(api._gatewayMethods.has("clawforce.kill")).toBe(true);
     });
 
+    it("returns explicit payloads from init and bootstrap gateway methods", async () => {
+      const cron = { add: vi.fn() };
+      for (const method of ["clawforce.init", "clawforce.bootstrap"]) {
+        const respond = vi.fn();
+        await api._gatewayMethods.get(method)!({
+          context: { chatAbortControllers: new Map(), cron },
+          respond,
+        });
+        expect(respond).toHaveBeenCalledWith(true, { ok: true });
+      }
+    });
+
     it("does nothing when config.enabled is false", () => {
       const disabledApi = createMockApi({ enabled: false });
       clawforcePlugin.register(disabledApi as any);
