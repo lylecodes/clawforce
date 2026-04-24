@@ -18,7 +18,6 @@ import { enqueue } from "../dispatch/queue.js";
 import { createTask, getTask, getTaskEvidence, transitionTask } from "../tasks/ops.js";
 import { cascadeUnblock } from "../tasks/deps.js";
 import { gatherFailureAnalysis, recordReplanAttempt } from "../planning/replan.js";
-import { getAgentModel } from "../config/openclaw-reader.js";
 import { handleWorkflowCompletion, handleGoalAchieved } from "../planning/completion.js";
 import { advanceWorkflow, getWorkflow } from "../workflow.js";
 import { getRegisteredAgentIds, getAgentConfig, getExtendedProjectConfig } from "../project.js";
@@ -52,6 +51,7 @@ import {
   maybeNormalizeWorkflowMutationImplementationTask,
 } from "../workflow-mutation/implementation.js";
 import { getRecurringJobMetadata, markRecurringJobFinished } from "../scheduling/recurring-jobs.js";
+import { resolveEffectiveConfig } from "../jobs.js";
 
 export type EventHandlerResult = {
   action: "handled" | "ignored" | "enqueued";
@@ -1451,7 +1451,7 @@ function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandl
 
   // Build dispatch payload from agent config
   const payload: Record<string, unknown> = {};
-  const agentModel = task.assignedTo ? getAgentModel(task.assignedTo) : null;
+  const agentModel = resolveTaskAssignedModel(event.projectId, task.assignedTo, task.metadata);
   if (agentModel) payload.model = agentModel;
 
   try {
@@ -1460,6 +1460,34 @@ function handleTaskAssigned(event: ClawforceEvent, db: DatabaseSync): EventHandl
   } catch (err) { safeLog("event.router.autoDispatch", err); }
 
   return { action: "handled", taskId };
+}
+
+function resolveTaskAssignedModel(
+  projectId: string,
+  assignedTo: string | undefined,
+  metadata: Record<string, unknown> | undefined,
+): string | null {
+  if (!assignedTo) return null;
+
+  const recurringJob = metadata
+    && typeof metadata.recurringJob === "object"
+    && metadata.recurringJob !== null
+    && !Array.isArray(metadata.recurringJob)
+    ? metadata.recurringJob as Record<string, unknown>
+    : null;
+  const jobName = typeof recurringJob?.jobName === "string"
+    ? recurringJob.jobName.trim()
+    : "";
+
+  const agentEntry = getAgentConfig(assignedTo, projectId);
+  const effectiveConfig = jobName && agentEntry?.config
+    ? resolveEffectiveConfig(agentEntry.config, jobName) ?? agentEntry.config
+    : agentEntry?.config;
+  const configuredModel = typeof effectiveConfig?.model === "string"
+    ? effectiveConfig.model.trim()
+    : "";
+
+  return configuredModel || null;
 }
 
 /**

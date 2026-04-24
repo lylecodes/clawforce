@@ -73,6 +73,7 @@ import { getDb as getProjectDb, setProjectsDir } from "./db.js";
 import { extractAgentIdFromReference, parseAgentSessionKey } from "./session-keys.js";
 import {
   initClawforce,
+  getActiveProjectIds,
   isClawforceInitialized,
   registerProject,
   shutdownClawforce,
@@ -87,6 +88,7 @@ import { sweep as runSweep } from "./sweep/actions.js";
 import { releaseActiveItem, retryFailedItem } from "./dispatch/queue.js";
 import { submitVerdict } from "./tasks/verify.js";
 import { queryTaskDetail } from "./dashboard/queries.js";
+import { createDashboardServer } from "./dashboard/server.js";
 import { approveProposal, rejectProposal } from "./approval/resolve.js";
 import {
   collectEntityManifestStatus,
@@ -742,6 +744,104 @@ export async function cmdController(
     stopConfigWatcher(configRoot);
     releaseControllerLease(projectId);
     unregisterProject(projectId);
+    if (!runtimeWasInitialized) {
+      await shutdownClawforce();
+    }
+  }
+}
+
+export async function cmdServe(
+  options?: {
+    intervalMs?: number;
+    port?: number;
+    host?: string;
+    token?: string;
+    dashboardDir?: string;
+    json?: boolean;
+    signal?: AbortSignal;
+    onStarted?: (info: { host: string; port: number; root: string; intervalMs: number }) => void;
+  },
+): Promise<void> {
+  const intervalMs = options?.intervalMs ?? 5000;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error(`Invalid serve interval: ${intervalMs}`);
+  }
+
+  const configRoot = getClawforceHome();
+  const host = options?.host ?? process.env.CLAWFORCE_DASHBOARD_HOST ?? "127.0.0.1";
+  const runtimeWasInitialized = isClawforceInitialized();
+
+  if (!runtimeWasInitialized) {
+    initClawforce({
+      enabled: true,
+      projectsDir: configRoot,
+      sweepIntervalMs: intervalMs,
+      defaultMaxRetries: 3,
+      verificationRequired: false,
+      autoInitialize: true,
+    });
+  } else {
+    initializeAllDomains(configRoot);
+  }
+
+  const dashboardServer = createDashboardServer({
+    port: options?.port,
+    host,
+    token: options?.token,
+    dashboardDir: options?.dashboardDir,
+  });
+
+  startConfigWatcher(configRoot, () => {
+    const result = initializeAllDomains(configRoot);
+    if (!options?.json) {
+      console.log(
+        `Config reload: scope=global domains=${result.domains.length} errors=${result.errors.length} warnings=${result.warnings.length}`,
+      );
+    }
+  });
+
+  const keepAlive = setInterval(() => {}, 60_000);
+  const abortFromCaller = () => {};
+  options?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  try {
+    await dashboardServer.start();
+    const addr = dashboardServer.server.address();
+    const boundPort = typeof addr === "object" && addr ? addr.port : (options?.port ?? 3117);
+
+    if (options?.json) {
+      console.log(JSON.stringify({
+        ok: true,
+        mode: "standalone",
+        root: configRoot,
+        host,
+        port: boundPort,
+        intervalMs,
+        domains: getActiveProjectIds(),
+      }, null, 2));
+    } else {
+      console.log("## Standalone Runtime\n");
+      console.log(`Root: ${configRoot}`);
+      console.log(`Dashboard: http://${host}:${boundPort}/`);
+      console.log(`Sweep interval: ${intervalMs}ms`);
+      console.log(`Domains: ${getActiveProjectIds().length}`);
+      console.log("Mode: standalone");
+      console.log("Stop with Ctrl-C");
+    }
+
+    options?.onStarted?.({
+      host,
+      port: boundPort,
+      root: configRoot,
+      intervalMs,
+    });
+
+    await waitForControllerStop(options?.signal);
+  } finally {
+    options?.signal?.removeEventListener("abort", abortFromCaller);
+    clearInterval(keepAlive);
+    stopConfigWatcher(configRoot);
+    await dashboardServer.stop();
     if (!runtimeWasInitialized) {
       await shutdownClawforce();
     }
@@ -4599,6 +4699,21 @@ Examples:
   cf controller --domain=rentright-data --interval-ms=3000
   cf controller --no-initial-sweep
 `,
+  serve: `
+serve — Run the standalone ClawForce runtime without OpenClaw gateway hosting
+
+Usage: cf serve [--port=N] [--host=HOST] [--interval-ms=N] [--json]
+
+Options:
+  --port=N             Dashboard/API listen port (default: 3117)
+  --host=HOST          Bind host (default: 127.0.0.1)
+  --interval-ms=N      Sweep interval in milliseconds (default: 5000)
+
+Examples:
+  cf serve
+  cf serve --port=4200
+  cf serve --host=0.0.0.0 --port=3117
+`,
   feed: `
 feed — Canonical operator feed
 
@@ -4935,6 +5050,7 @@ Runtime Control:
   kill [--reason=MSG]       Emergency stop: disable + cancel queue + block ALL tool calls
   kill --resume             Clear emergency stop and re-enable domain
   controller                Run a persistent local controller for one domain
+  serve                     Run the standalone dashboard/API runtime without OpenClaw gateway
   host [roots|bind|unbind]  Manage hosted ClawForce roots in OpenClaw
 
 Config:
@@ -5022,6 +5138,26 @@ if (command === "controller") {
     intervalMs,
     json: jsonMode,
     initialSweep: !args.includes("--no-initial-sweep"),
+  });
+  process.exit(0);
+}
+
+if (command === "serve") {
+  if (args.includes("--help")) {
+    showCommandHelp("serve");
+    process.exit(0);
+  }
+  const intervalArg = args.find(a => a.startsWith("--interval-ms="));
+  const portArg = args.find(a => a.startsWith("--port="));
+  const hostArg = args.find(a => a.startsWith("--host="));
+  const intervalMs = intervalArg ? Number(intervalArg.split("=").slice(1).join("=")) : undefined;
+  const port = portArg ? Number(portArg.split("=").slice(1).join("=")) : undefined;
+  const host = hostArg ? hostArg.split("=").slice(1).join("=") : undefined;
+  await cmdServe({
+    intervalMs,
+    port,
+    host,
+    json: jsonMode,
   });
   process.exit(0);
 }
@@ -5129,6 +5265,7 @@ const KNOWN_FLAGS: Record<string, string[]> = {
   review: ["--json"],
   verdict: ["--pass", "--fail", "--reason", "--reason-code", "--actor", "--json"],
   controller: ["--interval-ms", "--no-initial-sweep", "--json"],
+  serve: ["--interval-ms", "--port", "--host", "--json"],
   sweep: ["--local", "--gateway"],
   message: [],
   replay: [],

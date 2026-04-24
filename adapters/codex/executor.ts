@@ -154,7 +154,7 @@ export async function dispatchViaCodexExecutor(
     config: {
       ...((projectConfig?.codex as Record<string, unknown> | undefined) ?? {}),
       ...(agentCodexConfig ?? {}),
-      model: request.model ?? undefined,
+      ...(request.model ? { model: request.model } : {}),
       workdir: projectDir,
       approvalPolicy: "never",
       fullAuto: false,

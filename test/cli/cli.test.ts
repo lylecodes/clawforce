@@ -39,6 +39,18 @@ vi.mock("../../src/config/watcher.js", () => ({
   stopConfigWatcher: vi.fn(),
 }));
 
+const mockDashboardServer = {
+  start: vi.fn(async () => {}),
+  stop: vi.fn(async () => {}),
+  server: {
+    address: vi.fn(() => ({ port: 3117 })),
+  },
+};
+
+vi.mock("../../src/dashboard/server.js", () => ({
+  createDashboardServer: vi.fn(() => mockDashboardServer),
+}));
+
 vi.mock("../../src/identity.js", () => ({
   signAction: vi.fn(() => "mock-sig"),
   verifyAction: vi.fn(() => true),
@@ -52,6 +64,7 @@ import { runMigrations } from "../../src/migrations.js";
 const cli = await import("../../src/cli.js");
 const configInit = await import("../../src/config/init.js");
 const configWatcher = await import("../../src/config/watcher.js");
+const dashboardServer = await import("../../src/dashboard/server.js");
 const dbModule = await import("../../src/db.js");
 const projectModule = await import("../../src/project.js");
 const { createTask } = await import("../../src/tasks/ops.js");
@@ -1679,6 +1692,59 @@ describe("CLI commands", () => {
       })).rejects.toThrow(/live-controller/);
 
       expect(configWatcher.startConfigWatcher).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("cmdServe", () => {
+    beforeEach(() => {
+      vi.mocked(configWatcher.startConfigWatcher).mockClear();
+      vi.mocked(configWatcher.stopConfigWatcher).mockClear();
+      vi.mocked(dashboardServer.createDashboardServer).mockClear();
+      mockDashboardServer.start.mockClear();
+      mockDashboardServer.stop.mockClear();
+      mockDashboardServer.server.address.mockReturnValue({ port: 3117 });
+    });
+
+    it("starts and stops the standalone runtime cleanly on abort", async () => {
+      const abortController = new AbortController();
+
+      const runPromise = cli.cmdServe({
+        intervalMs: 25,
+        signal: abortController.signal,
+        onStarted: () => {
+          expect(lifecycle.isClawforceInitialized()).toBe(true);
+          abortController.abort();
+        },
+      });
+
+      await expect(runPromise).resolves.toBeUndefined();
+
+      const output = getLogOutput();
+      expect(output).toContain("## Standalone Runtime");
+      expect(output).toContain("Mode: standalone");
+      expect(mockDashboardServer.start).toHaveBeenCalledTimes(1);
+      expect(mockDashboardServer.stop).toHaveBeenCalledTimes(1);
+      expect(configWatcher.startConfigWatcher).toHaveBeenCalledTimes(1);
+      expect(configWatcher.stopConfigWatcher).toHaveBeenCalledTimes(1);
+      expect(lifecycle.isClawforceInitialized()).toBe(false);
+    });
+
+    it("emits JSON startup output", async () => {
+      const abortController = new AbortController();
+
+      await cli.cmdServe({
+        intervalMs: 25,
+        json: true,
+        signal: abortController.signal,
+        onStarted: () => abortController.abort(),
+      });
+
+      const json = getJsonOutput() as Record<string, unknown>;
+      expect(json.ok).toBe(true);
+      expect(json.mode).toBe("standalone");
+      expect(json.port).toBe(3117);
+      expect(json.intervalMs).toBe(25);
+      expect(json.domains).toEqual(expect.any(Array));
     });
   });
 

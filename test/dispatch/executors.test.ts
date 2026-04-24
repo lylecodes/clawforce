@@ -84,7 +84,7 @@ describe("dispatch executors", () => {
     expect(resolveDispatchExecutorName("explicit-executor")).toBe("openclaw");
   });
 
-  it("auto-routes strict tool-filtered agents to OpenClaw when no executor is explicitly pinned", () => {
+  it("keeps strict tool-filtered agents on the configured direct executor by default", () => {
     registerWorkforceConfig("strict-routing", {
       name: "strict-routing",
       adapter: "codex",
@@ -93,7 +93,7 @@ describe("dispatch executors", () => {
       },
     });
 
-    expect(resolveDispatchExecutorName("strict-routing", "worker")).toBe("openclaw");
+    expect(resolveDispatchExecutorName("strict-routing", "worker")).toBe("codex");
   });
 
   it("keeps an explicit codex executor even when the agent requests strict tool filtering", () => {
@@ -168,7 +168,7 @@ describe("dispatch executors", () => {
     }));
   });
 
-  it("routes strict employee dispatches through OpenClaw by default", async () => {
+  it("routes strict employee dispatches through Codex by default", async () => {
     registerWorkforceConfig("strict-project", {
       name: "strict-project",
       adapter: "codex",
@@ -185,12 +185,12 @@ describe("dispatch executors", () => {
       agentId: "worker",
     });
 
-    expect(result.executor).toBe("openclaw");
-    expect(dispatchViaInject).toHaveBeenCalledWith(expect.objectContaining({
+    expect(result.executor).toBe("codex");
+    expect(dispatchViaCodexExecutor).toHaveBeenCalledWith(expect.objectContaining({
       queueItemId: "q-strict",
       taskId: "t-strict",
       projectId: "strict-project",
-      agentId: "strict-project:worker",
+      agentId: "worker",
     }));
   });
 

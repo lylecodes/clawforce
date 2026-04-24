@@ -23,6 +23,34 @@ export type AgentRuntimeScopeAssessmentOptions = {
   explicitExecutorConfigured?: boolean;
 };
 
+const DIRECT_EXECUTOR_DEFAULT_ALLOWED_TOOLS: Partial<Record<DispatchExecutorName, readonly string[]>> = {
+  codex: ["Bash", "Read", "Edit", "Write", "WebSearch"],
+  "claude-code": ["Bash", "Read", "Edit", "Write", "WebSearch"],
+};
+
+function normalizeToolNames(values: string[] | undefined): string[] {
+  if (!values) return [];
+  return [...new Set(values
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function usesNativeToolEnvelope(
+  executor: DispatchExecutorName,
+  allowedTools: string[] | undefined,
+): boolean {
+  const normalizedAllowedTools = normalizeToolNames(allowedTools);
+  const nativeTools = DIRECT_EXECUTOR_DEFAULT_ALLOWED_TOOLS[executor];
+  if (!nativeTools || normalizedAllowedTools.length === 0) {
+    return false;
+  }
+
+  const normalizedNativeTools = normalizeToolNames([...nativeTools]);
+  return normalizedAllowedTools.length === normalizedNativeTools.length
+    && normalizedAllowedTools.every((tool, index) => tool === normalizedNativeTools[index]);
+}
+
 export function resolveConfiguredDispatchExecutorName(projectId: string): DispatchExecutorName {
   const config = getExtendedProjectConfig(projectId);
   const configured = config?.dispatch?.executor;
@@ -54,17 +82,13 @@ export function assessAgentRuntimeScope(
   const allowedTools = getAgentAllowedTools(config);
   const workspacePaths = getAgentWorkspacePaths(config);
 
-  const toolFilteringRequested = Boolean(allowedTools?.length);
+  const toolFilteringRequested = Boolean(allowedTools?.length)
+    && !usesNativeToolEnvelope(configuredExecutor, allowedTools);
   const pathAllowlistRequested = Boolean(workspacePaths?.length);
   const bashExcluded = toolFilteringRequested && !allowedTools!.includes("Bash");
   const writeRestricted = toolFilteringRequested
     && !(allowedTools!.includes("Edit") || allowedTools!.includes("Write"));
-
-  const executor = !explicitExecutorConfigured
-    && configuredExecutor === "codex"
-    && toolFilteringRequested
-    ? "openclaw"
-    : configuredExecutor;
+  const executor = configuredExecutor;
 
   const enforcementGrade = resolveEnforcementGrade({
     executor,
@@ -78,17 +102,20 @@ export function assessAgentRuntimeScope(
   });
 
   const notes: string[] = [];
-  if (executor !== configuredExecutor) {
-    notes.push(`Auto-routed from ${configuredExecutor} to ${executor} because this agent requests explicit tool filtering.`);
-  }
   if (executor === "openclaw" && toolFilteringRequested) {
     notes.push("OpenClaw enforces allowedTools at runtime for external tools via before_tool_call.");
   }
   if (executor === "codex" && toolFilteringRequested) {
     notes.push("Direct Codex still cannot fully hard-disable Bash or exactly match an allowedTools envelope.");
   }
+  if (executor === "claude-code" && toolFilteringRequested) {
+    notes.push("Direct Claude Code still cannot fully hard-disable Bash or exactly match an allowedTools envelope.");
+  }
   if (pathAllowlistRequested && executor === "codex") {
     notes.push("Direct Codex is scoped to explicit workspace roots and companion roots only.");
+  }
+  if (pathAllowlistRequested && executor === "claude-code") {
+    notes.push("Direct Claude Code is scoped to the configured workdir, but companion roots are not enforced as tightly as direct Codex.");
   }
   if (writeRestricted && executor === "codex") {
     notes.push("Direct Codex runs this agent in read-only mode because Edit/Write are not allowed.");

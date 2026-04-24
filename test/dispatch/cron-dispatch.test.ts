@@ -21,28 +21,6 @@ vi.mock("../../src/manager-cron.js", () => ({
   toCronJobCreate: vi.fn((job: Record<string, unknown>) => ({ ...job })),
 }));
 
-// ── Child-process mock ─────────────────────────────────────────────────────
-// promisify(execFile) wraps the 4-arg callback form. We track calls here.
-const execCalls: string[][] = [];
-let execImpl: (
-  cmd: string,
-  args: string[],
-  opts: Record<string, unknown>,
-  cb: (err: Error | null, stdout?: string, stderr?: string) => void,
-) => void = (_cmd, _args, _opts, cb) => cb(null, "", "");
-
-vi.mock("node:child_process", () => ({
-  execFile: (
-    cmd: string,
-    args: string[],
-    opts: Record<string, unknown>,
-    cb: (err: Error | null, stdout?: string, stderr?: string) => void,
-  ) => {
-    execCalls.push([cmd, ...args]);
-    execImpl(cmd, args, opts, cb);
-  },
-}));
-
 // ── Tests ─────────────────────────────────────────────────────────────────
 describe("dispatchViaInject", () => {
   it("generates correct session key and tagged prompt", async () => {
@@ -59,20 +37,10 @@ describe("dispatchViaInject", () => {
 
 describe("dispatchViaCron", () => {
   beforeEach(() => {
-    execCalls.length = 0;
     mockCronState.service = null;
-    execImpl = (_cmd, _args, _opts, cb) => cb(null, "", "");
   });
 
-  it("returns error when cron service unavailable and bootstrap fails", async () => {
-    execImpl = (_cmd, args, _opts, cb) => {
-      if (args.includes("clawforce.dispatch_queue_item")) {
-        cb(new Error("gateway dispatch unavailable"));
-        return;
-      }
-      cb(null, "", "");
-    };
-
+  it("returns an explicit error when no runtime cron service is wired", async () => {
     const { dispatchViaCron } = await import("../../src/dispatch/cron-dispatch.js");
     const result = await dispatchViaCron({
       queueItemId: "q1",
@@ -83,23 +51,8 @@ describe("dispatchViaCron", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/gateway dispatch unavailable/);
-  });
-
-  it("calls openclaw gateway bootstrap when cron service is null", async () => {
-    mockCronState.service = null;
-
-    const { dispatchViaCron } = await import("../../src/dispatch/cron-dispatch.js");
-    await dispatchViaCron({
-      queueItemId: "q3",
-      taskId: "t3",
-      projectId: "p3",
-      prompt: "bootstrap test",
-      agentId: "agent:worker",
-    });
-
-    // Should have called `openclaw gateway call clawforce.bootstrap --json --params {}`
-    expect(execCalls).toContainEqual(["openclaw", "gateway", "call", "clawforce.bootstrap", "--json", "--params", "{}"]);
+    expect(result.error).toMatch(/Cron service unavailable/);
+    expect(result.cronJobName).toBe("dispatch:p1:q1");
   });
 
   it("dispatches via cron when service is available", async () => {
@@ -120,15 +73,7 @@ describe("dispatchViaCron", () => {
     expect(mockAdd).toHaveBeenCalledOnce();
   });
 
-  it("falls back to gateway dispatch when cron service is unavailable locally", async () => {
-    execImpl = (_cmd, args, _opts, cb) => {
-      if (args.includes("clawforce.dispatch_queue_item")) {
-        cb(null, '{\n  "ok": true,\n  "jobName": "dispatch:rentright-data:q5",\n  "handledRemotely": true\n}', "");
-        return;
-      }
-      cb(null, "", "");
-    };
-
+  it("does not attempt a hidden gateway fallback when cron service is unavailable locally", async () => {
     const { dispatchViaCron } = await import("../../src/dispatch/cron-dispatch.js");
     const result = await dispatchViaCron({
       queueItemId: "q5",
@@ -138,15 +83,13 @@ describe("dispatchViaCron", () => {
       agentId: "los-angeles-owner",
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(result.cronJobName).toBe("dispatch:rentright-data:q5");
-    expect(result.handledRemotely).toBe(true);
-    const gatewayDispatchCall = execCalls.find((call) => call.includes("clawforce.dispatch_queue_item"));
-    expect(gatewayDispatchCall).toBeTruthy();
-    expect(gatewayDispatchCall?.[0]).toBe("openclaw");
+    expect(result.handledRemotely).toBeUndefined();
+    expect(result.error).toMatch(/Cron service unavailable/);
   });
 
-  it("skips bootstrap call when cron service is already available", async () => {
+  it("uses the available cron service directly with no bootstrap step", async () => {
     const mockAdd = vi.fn().mockResolvedValue(undefined);
     mockCronState.service = { add: mockAdd };
 
@@ -159,8 +102,6 @@ describe("dispatchViaCron", () => {
       agentId: "agent:worker",
     });
 
-    // Bootstrap CLI should NOT be called when cron service is already available
-    expect(execCalls).not.toContainEqual(["openclaw", "gateway", "call", "clawforce.bootstrap", "--json", "--params", "{}"]);
     expect(mockAdd).toHaveBeenCalledOnce();
   });
 });

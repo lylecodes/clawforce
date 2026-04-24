@@ -647,8 +647,8 @@ describe("querySetupExperience", () => {
     expect(result.report.targetDomainId).toBe("proj1");
     expect(result.explanation.summary).toContain("Setup");
     expect(result.topology.manager?.id).toBe("agent-mgr");
-    expect(result.topology.manager?.executor).toBe("openclaw");
-    expect(result.topology.manager?.enforcementGrade).toBe("hard-scoped");
+    expect(result.topology.manager?.executor).toBe("codex");
+    expect(result.topology.manager?.enforcementGrade).toBe("partially-scoped");
     expect(result.topology.manager?.runtime).toEqual({
       allowedTools: ["Read", "Write"],
       workspacePaths: ["/repo/core", "/repo/shared"],
@@ -662,7 +662,7 @@ describe("querySetupExperience", () => {
         role: "specialist",
         jobCount: 1,
         activeSessionCount: 1,
-        executor: "openclaw",
+        executor: "codex",
         enforcementGrade: "hard-scoped",
         runtime: {
           allowedTools: ["Bash", "Read", "Edit", "Write", "WebSearch"],

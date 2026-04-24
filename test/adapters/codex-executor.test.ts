@@ -94,4 +94,27 @@ describe("dispatchViaCodexExecutor", () => {
       }),
     }));
   });
+
+  it("preserves the project-level codex model when the request does not override it", async () => {
+    await dispatchViaCodexExecutor({
+      queueItemId: "q-3",
+      taskId: "t-3",
+      projectId: "proj-1",
+      prompt: "do work",
+      agentId: "worker-3",
+      projectDir: "/repo",
+      agentConfig: {
+        extends: "employee",
+        briefing: [{ source: "instructions" }],
+        expectations: [],
+        performance_policy: { action: "alert" },
+      },
+    });
+
+    expect(dispatchViaCodex).toHaveBeenCalledWith(expect.objectContaining({
+      config: expect.objectContaining({
+        model: "gpt-5.4-mini",
+      }),
+    }));
+  });
 });

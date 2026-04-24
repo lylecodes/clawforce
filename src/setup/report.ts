@@ -407,7 +407,7 @@ function buildDomainChecks(
         ? hardScopedAgents.map((assessment) => `${assessment.agentId} -> ${assessment.executor}`).join(", ")
         : "No agent in this domain currently requests explicit runtime scoping via allowedTools or workspacePaths.",
     fix: partialAgents.length > 0
-      ? `Use OpenClaw for agents that require strict tool filtering, or remove explicit codex executor pinning so ClawForce can auto-route them safely.`
+      ? `Either switch the domain to an executor that can enforce stricter tool filtering, or relax the allowedTools envelope so the direct executor remains truthful.`
       : undefined,
   });
 

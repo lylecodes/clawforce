@@ -28,7 +28,6 @@ const { queryMetrics } = await import("../../src/metrics.js");
 const { queryAuditLog } = await import("../../src/audit.js");
 const { getAllCategoryStats } = await import("../../src/trust/tracker.js");
 const { markRecurringJobScheduled, readRecurringJobRuntime } = await import("../../src/scheduling/recurring-jobs.js");
-const { setOpenClawConfig, clearOpenClawConfigCache } = await import("../../src/config/openclaw-reader.js");
 
 describe("events/router", () => {
   let db: DatabaseSync;
@@ -40,7 +39,6 @@ describe("events/router", () => {
 
   afterEach(() => {
     resetEnforcementConfigForTest();
-    clearOpenClawConfigCache();
     try { db.close(); } catch { /* already closed */ }
   });
 
@@ -431,30 +429,19 @@ describe("events/router", () => {
     expect(updated?.metadata?.["$.dispatch_dead_letter_at"]).toBeTypeOf("number");
   });
 
-  it("enqueues a string model when OpenClaw defaults expose a model object", () => {
+  it("enqueues an agent-config model without consulting OpenClaw runtime cache", () => {
     registerWorkforceConfig(PROJECT, {
       name: "Test Project",
       agents: {
         "agent:worker": {
           extends: "employee",
+          model: "openai-codex/gpt-5.4",
           briefing: [],
           expectations: [],
           performance_policy: { action: "alert" },
         },
       },
     }, "/tmp/project");
-
-    setOpenClawConfig({
-      agents: {
-        list: [{ id: "agent:worker" }],
-        defaults: {
-          model: {
-            primary: "openai-codex/gpt-5.4",
-            fallbacks: ["openai-codex/gpt-4.1"],
-          },
-        },
-      },
-    });
 
     const task = createTask({
       projectId: PROJECT,

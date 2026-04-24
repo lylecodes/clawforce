@@ -74,7 +74,7 @@ export async function dispatchViaClaudeExecutor(
       config: {
         ...((projectConfig?.claudeCode as Record<string, unknown> | undefined) ?? {}),
         ...(agentClaudeConfig ?? {}),
-        model: request.model ?? undefined,
+        ...(request.model ? { model: request.model } : {}),
         workdir: agentEntry?.projectDir ?? projectConfig?.projectDir ?? undefined,
         mcpConfigPath,
       },

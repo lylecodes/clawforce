@@ -208,11 +208,16 @@ describe("setup/report", () => {
     expect(report.checks.some((check) => check.id === "domain:test:paths" && check.status === "warn")).toBe(true);
   });
 
-  it("marks strict tool-filtered agents as hard-scoped when they auto-route to OpenClaw", () => {
+  it("warns when direct codex agents request a stricter tool envelope than the native runtime supports", () => {
     writeGlobal({
       adapter: "codex",
       agents: {
-        worker: { extends: "employee" },
+        worker: {
+          extends: "employee",
+          runtime: {
+            allowed_tools: ["Read"],
+          },
+        },
         "workflow-steward": { extends: "manager" },
       },
     });
@@ -224,15 +229,21 @@ describe("setup/report", () => {
     const report = buildSetupReport(tmpDir, "test");
     const scopeCheck = report.checks.find((check) => check.id === "domain:test:runtime-scope");
 
-    expect(scopeCheck?.status).toBe("ok");
-    expect(scopeCheck?.detail).toContain("worker -> openclaw");
+    expect(scopeCheck?.status).toBe("warn");
+    expect(scopeCheck?.detail).toContain("worker -> codex");
+    expect(scopeCheck?.fix).toContain("stricter tool filtering");
   });
 
-  it("warns when a domain pins codex for strict tool-filtered agents", () => {
+  it("keeps the same warning when a domain explicitly pins codex for strict tool-filtered agents", () => {
     writeGlobal({
       adapter: "codex",
       agents: {
-        worker: { extends: "employee" },
+        worker: {
+          extends: "employee",
+          runtime: {
+            allowed_tools: ["Read"],
+          },
+        },
         "workflow-steward": { extends: "manager" },
       },
     });
@@ -249,7 +260,7 @@ describe("setup/report", () => {
 
     expect(scopeCheck?.status).toBe("warn");
     expect(scopeCheck?.detail).toContain("worker -> codex");
-    expect(scopeCheck?.fix).toContain("OpenClaw");
+    expect(scopeCheck?.fix).toContain("stricter tool filtering");
   });
 
   it("applies nested manager override runtime scope without requiring legacy aliases", () => {
@@ -276,8 +287,8 @@ describe("setup/report", () => {
     const report = buildSetupReport(tmpDir, "test");
     const scopeCheck = report.checks.find((check) => check.id === "domain:test:runtime-scope");
 
-    expect(scopeCheck?.status).toBe("ok");
-    expect(scopeCheck?.detail).toContain("lead -> openclaw");
+    expect(scopeCheck?.status).toBe("warn");
+    expect(scopeCheck?.detail).toContain("lead -> codex");
   });
 
   it("still honors top-level manager override runtime aliases via the runtime normalizer", () => {
@@ -302,8 +313,8 @@ describe("setup/report", () => {
     const report = buildSetupReport(tmpDir, "test");
     const scopeCheck = report.checks.find((check) => check.id === "domain:test:runtime-scope");
 
-    expect(scopeCheck?.status).toBe("ok");
-    expect(scopeCheck?.detail).toContain("lead -> openclaw");
+    expect(scopeCheck?.status).toBe("warn");
+    expect(scopeCheck?.detail).toContain("lead -> codex");
   });
 
   it("treats disabled manager routing as no manager in setup reports", () => {
