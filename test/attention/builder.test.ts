@@ -1412,6 +1412,51 @@ describe("buildAttentionSummary — recent failed tasks", () => {
     expect(failedItem!.destination).toBe("/tasks");
   });
 
+  it("aggregates repeated recurring workflow failures into one operator item", () => {
+    const db = freshDb();
+    const recentlyFailed = Date.now() - 3_600_000;
+    const recurringMetadata = (agentId: string, jobName: string) => ({
+      recurringJob: {
+        agentId,
+        jobName,
+        schedule: "*/5 * * * *",
+        reason: "cron due",
+      },
+      dispatch_dead_letter: true,
+    });
+    insertTask(db, {
+      id: "r1",
+      state: "FAILED",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentlyFailed,
+      metadata: recurringMetadata("source", "onboarding"),
+    });
+    insertTask(db, {
+      id: "r2",
+      state: "FAILED",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentlyFailed + 1,
+      metadata: recurringMetadata("source", "onboarding"),
+    });
+    insertTask(db, {
+      id: "r3",
+      state: "FAILED",
+      title: "Run recurring workflow integrity.sweep",
+      updatedAt: recentlyFailed + 2,
+      metadata: recurringMetadata("integrity", "sweep"),
+    });
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+    const recurringItem = summary.items.find((i) => i.sourceType === "recurring_job_failures");
+
+    expect(recurringItem).toBeDefined();
+    expect(recurringItem!.title).toBe("Recurring workflows failed recently: 2 jobs, 3 runs");
+    expect(recurringItem!.destination).toBe("/ops");
+    expect(recurringItem!.metadata?.affectedJobCount).toBe(2);
+    expect(recurringItem!.metadata?.failedRunCount).toBe(3);
+    expect(summary.items.some((i) => i.title === "Task failed recently: Run recurring workflow source.onboarding")).toBe(false);
+  });
+
   it("recently cancelled tasks do not create failure items", () => {
     const db = freshDb();
     const recentlyCancelled = Date.now() - 3_600_000; // 1 hour ago

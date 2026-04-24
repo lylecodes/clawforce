@@ -80,6 +80,30 @@ function buildPreview(value: string, limit = 180): string {
   return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
 }
 
+function parseObjectJson(value: string | null | undefined): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getNestedRecord(value: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  const nested = value?.[key];
+  return nested && typeof nested === "object" && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : undefined;
+}
+
+function getStringValue(value: Record<string, unknown> | undefined, key: string): string | undefined {
+  const raw = value?.[key];
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
 function summarizeWorkflowMutationQueueError(value: string | undefined): string | undefined {
   if (!value?.trim()) return undefined;
 
@@ -1136,12 +1160,103 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
   try {
     const since = Date.now() - 24 * 3_600_000;
     const rows = db.prepare(
-      `SELECT id, title, updated_at FROM tasks
+      `SELECT id, title, updated_at, metadata FROM tasks
        WHERE project_id = ? AND state = 'FAILED' AND updated_at >= ?
        ORDER BY updated_at DESC`,
-    ).all(projectId, since) as Array<{ id: string; title: string | null; updated_at: number }>;
+    ).all(projectId, since) as Array<{ id: string; title: string | null; updated_at: number; metadata: string | null }>;
+
+    const recurringFailures = new Map<string, {
+      agentId: string;
+      jobName: string;
+      schedule?: string;
+      count: number;
+      latestTaskId: string;
+      latestTitle: string;
+      latestFailedAt: number;
+    }>();
+    const ordinaryFailures: typeof rows = [];
 
     for (const t of rows) {
+      const metadata = parseObjectJson(t.metadata);
+      const recurringJob = getNestedRecord(metadata, "recurringJob");
+      const agentId = getStringValue(recurringJob, "agentId");
+      const jobName = getStringValue(recurringJob, "jobName");
+      if (!agentId || !jobName) {
+        ordinaryFailures.push(t);
+        continue;
+      }
+
+      const key = `${agentId}:${jobName}`;
+      const existing = recurringFailures.get(key);
+      if (!existing) {
+        recurringFailures.set(key, {
+          agentId,
+          jobName,
+          schedule: getStringValue(recurringJob, "schedule"),
+          count: 1,
+          latestTaskId: t.id,
+          latestTitle: t.title ?? t.id,
+          latestFailedAt: t.updated_at,
+        });
+        continue;
+      }
+
+      existing.count += 1;
+      if (t.updated_at > existing.latestFailedAt) {
+        existing.latestTaskId = t.id;
+        existing.latestTitle = t.title ?? t.id;
+        existing.latestFailedAt = t.updated_at;
+        existing.schedule = getStringValue(recurringJob, "schedule") ?? existing.schedule;
+      }
+    }
+
+    if (recurringFailures.size > 0) {
+      const groups = [...recurringFailures.values()]
+        .sort((a, b) => b.latestFailedAt - a.latestFailedAt);
+      const totalRuns = groups.reduce((acc, group) => acc + group.count, 0);
+      const latest = groups[0]!;
+      const affectedJobs = groups.map((group) => ({
+        agentId: group.agentId,
+        jobName: group.jobName,
+        failedRuns: group.count,
+        schedule: group.schedule,
+        latestTaskId: group.latestTaskId,
+        latestFailedAt: group.latestFailedAt,
+      }));
+
+      items.push(item(
+        projectId,
+        "watching",
+        "task",
+        `Recurring workflows failed recently: ${groups.length} job${groups.length === 1 ? "" : "s"}, ${totalRuns} run${totalRuns === 1 ? "" : "s"}`,
+        groups.length === 1
+          ? `${latest.agentId}.${latest.jobName} failed ${latest.count} time${latest.count === 1 ? "" : "s"} in the last 24 hours.`
+          : `${groups.length} recurring jobs failed ${totalRuns} total times in the last 24 hours.`,
+        "/ops",
+        { taskId: latest.latestTaskId },
+        {
+          recurringFailureGroup: true,
+          failedRunCount: totalRuns,
+          affectedJobCount: groups.length,
+          latestTaskId: latest.latestTaskId,
+          latestFailedAt: latest.latestFailedAt,
+          affectedJobs,
+        },
+        {
+          kind: "issue",
+          severity: "normal",
+          automationState: "blocked_for_agent",
+          taskId: latest.latestTaskId,
+          sourceType: "recurring_job_failures",
+          sourceId: `${projectId}:recurring-job-failures`,
+          updatedAt: latest.latestFailedAt,
+          detectedAt: latest.latestFailedAt,
+          recommendedAction: "Inspect recurring workflow reliability once; avoid treating repeated failures from the same scheduled lanes as separate operator work.",
+        },
+      ));
+    }
+
+    for (const t of ordinaryFailures) {
       items.push(item(
         projectId,
         "watching",
