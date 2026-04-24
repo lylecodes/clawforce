@@ -1236,6 +1236,10 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
         { taskId: latest.latestTaskId },
         {
           recurringFailureGroup: true,
+          automationBoundary: "clawforce_safe_recovery",
+          operatorInterventionRequired: false,
+          operatorInterventionReason: "ClawForce can release, retry, or replay known recurring dispatch failures. Operator intervention is only needed if bounded recovery is exhausted or a policy, budget, or configuration decision is required.",
+          manualRecoveryAvailable: true,
           failedRunCount: totalRuns,
           affectedJobCount: groups.length,
           latestTaskId: latest.latestTaskId,
@@ -1245,13 +1249,13 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
         {
           kind: "issue",
           severity: "normal",
-          automationState: "blocked_for_agent",
+          automationState: "auto_handling",
           taskId: latest.latestTaskId,
           sourceType: "recurring_job_failures",
           sourceId: `${projectId}:recurring-job-failures`,
           updatedAt: latest.latestFailedAt,
           detectedAt: latest.latestFailedAt,
-          recommendedAction: "Inspect recurring workflow reliability once; avoid treating repeated failures from the same scheduled lanes as separate operator work.",
+          recommendedAction: "Let ClawForce recover safe recurring dispatch failures automatically; intervene only if the same lane keeps failing after recovery or needs a policy, budget, or configuration decision.",
         },
       ));
     }

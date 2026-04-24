@@ -1452,8 +1452,11 @@ describe("buildAttentionSummary — recent failed tasks", () => {
     expect(recurringItem).toBeDefined();
     expect(recurringItem!.title).toBe("Recurring workflows failed recently: 2 jobs, 3 runs");
     expect(recurringItem!.destination).toBe("/ops");
+    expect(recurringItem!.automationState).toBe("auto_handling");
     expect(recurringItem!.metadata?.affectedJobCount).toBe(2);
     expect(recurringItem!.metadata?.failedRunCount).toBe(3);
+    expect(recurringItem!.metadata?.operatorInterventionRequired).toBe(false);
+    expect(recurringItem!.metadata?.automationBoundary).toBe("clawforce_safe_recovery");
     expect(summary.items.some((i) => i.title === "Task failed recently: Run recurring workflow source.onboarding")).toBe(false);
   });
 
