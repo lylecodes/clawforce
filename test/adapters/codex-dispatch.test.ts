@@ -131,18 +131,18 @@ describe("buildCliArgs", () => {
     expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 
-  it("uses explicit approval policy and sandbox when configured", () => {
+  it("ignores approval policy for non-interactive exec and preserves sandbox", () => {
     const args = buildCliArgs("test", {
       ...defaultConfig,
       fullAuto: false,
       approvalPolicy: "never" as const,
       sandbox: "read-only" as const,
     }, "/tmp/out.txt");
-    expect(args).toContain("-a");
-    expect(args).toContain("never");
     expect(args).toContain("--sandbox");
     expect(args).toContain("read-only");
     expect(args).not.toContain("--full-auto");
+    expect(args).not.toContain("-a");
+    expect(args).not.toContain("--ask-for-approval");
   });
 
   it("adds extra workspace roots when configured", () => {
@@ -183,6 +183,26 @@ describe("dispatchViaCodex", () => {
     expect(spawnCalls[0]!.args).toContain("exec");
     expect(spawnCalls[0]!.args).toContain("--model");
     expect(spawnCalls[0]!.args).toContain("gpt-5.4-mini");
+  });
+
+  it("does not pass unsupported approval flags to codex exec", async () => {
+    const result = await dispatchViaCodex({
+      agentId: "worker",
+      projectId: "demo",
+      prompt: "do the work",
+      config: {
+        fullAuto: false,
+        approvalPolicy: "never",
+        sandbox: "read-only",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.args).not.toContain("-a");
+    expect(spawnCalls[0]!.args).not.toContain("--ask-for-approval");
+    expect(spawnCalls[0]!.args).toContain("--sandbox");
+    expect(spawnCalls[0]!.args).toContain("read-only");
   });
 
   it("normalizes provider-scoped OpenAI Codex model ids before spawning", async () => {

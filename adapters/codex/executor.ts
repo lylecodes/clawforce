@@ -43,6 +43,23 @@ function toTomlInlineStringTable(values: Record<string, string>): string {
   return `{${entries.join(",")}}`;
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function uniqueResolvedPaths(values: string[], fallbackProjectDir?: string): string[] {
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = resolveWorkspacePath(value, fallbackProjectDir);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    resolved.push(normalized);
+  }
+  return resolved;
+}
+
 function resolveWorkspaceRoots(
   workspacePaths: string[] | undefined,
   fallbackProjectDir?: string,
@@ -50,17 +67,7 @@ function resolveWorkspaceRoots(
   const candidates = workspacePaths && workspacePaths.length > 0
     ? workspacePaths
     : (fallbackProjectDir ? [fallbackProjectDir] : []);
-  const resolved: string[] = [];
-  const seen = new Set<string>();
-
-  for (const candidate of candidates) {
-    const normalized = resolveWorkspacePath(candidate, fallbackProjectDir);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    resolved.push(normalized);
-  }
-
-  return resolved;
+  return uniqueResolvedPaths(candidates, fallbackProjectDir);
 }
 
 function resolveWorkspacePath(candidate: string, fallbackProjectDir?: string): string | null {
@@ -115,6 +122,7 @@ export async function dispatchViaCodexExecutor(
 ): Promise<DispatchExecutionResultPort> {
   ensureCodexKillBridge();
   const projectsDir = getClawforceHome();
+  const projectDataDir = path.join(projectsDir, request.projectId);
   const projectConfig = getExtendedProjectConfig(request.projectId);
   const sessionKey = `dispatch:${request.queueItemId}`;
   const fallbackAgentEntry = request.agentConfig
@@ -138,6 +146,16 @@ export async function dispatchViaCodexExecutor(
     && isRecord((agentConfig as Record<string, unknown>).codex)
     ? (agentConfig as Record<string, unknown>).codex as Record<string, unknown>
     : undefined;
+  const projectCodexConfig = (projectConfig?.codex as Record<string, unknown> | undefined) ?? {};
+  const configuredAddDirs = uniqueResolvedPaths([
+    ...asStringArray(projectCodexConfig.addDirs),
+    ...asStringArray(agentCodexConfig?.addDirs),
+  ], configuredProjectDir);
+  const addDirs = uniqueResolvedPaths([
+    ...configuredAddDirs,
+    ...writableRoots,
+    ...(request.disableMcpBridge === true ? [] : [projectDataDir]),
+  ], configuredProjectDir);
 
   const result = await dispatchViaCodex({
     agentId: request.agentId,
@@ -152,7 +170,7 @@ export async function dispatchViaCodexExecutor(
     agentConfig,
     mcpBridgeDisabled: request.disableMcpBridge === true,
     config: {
-      ...((projectConfig?.codex as Record<string, unknown> | undefined) ?? {}),
+      ...projectCodexConfig,
       ...(agentCodexConfig ?? {}),
       ...(request.model ? { model: request.model } : {}),
       workdir: projectDir,
@@ -160,7 +178,7 @@ export async function dispatchViaCodexExecutor(
       fullAuto: false,
       dangerouslyBypassApprovalsAndSandbox: false,
       sandbox: agentAllowsWrites(agentConfig) ? undefined : "read-only",
-      addDirs: writableRoots,
+      addDirs,
       configOverrides: request.disableMcpBridge === true
         ? undefined
         : createDispatchMcpConfigOverrides(request, projectsDir),

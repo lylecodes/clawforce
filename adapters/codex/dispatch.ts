@@ -141,11 +141,10 @@ export function buildCliArgs(
   if (config.dangerouslyBypassApprovalsAndSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
   } else {
-    if (config.approvalPolicy) {
-      args.push("-a", config.approvalPolicy);
-    }
-
-    if (config.fullAuto && !config.approvalPolicy) {
+    // `codex exec` is non-interactive and no longer accepts approval flags.
+    // Keep honoring sandbox/full-auto, but never emit a prompt-driven approval
+    // mode here or recurring dispatches will fail before a session starts.
+    if (config.fullAuto) {
       args.push("--full-auto");
     } else if (config.sandbox) {
       args.push("--sandbox", config.sandbox);

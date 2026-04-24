@@ -61,7 +61,7 @@ describe("dispatchViaCodexExecutor", () => {
       config: expect.objectContaining({
         workdir: "/repo/packages/core",
         sandbox: "read-only",
-        addDirs: [],
+        addDirs: ["/clawforce-home/proj-1"],
       }),
     }));
   });
@@ -90,7 +90,7 @@ describe("dispatchViaCodexExecutor", () => {
       config: expect.objectContaining({
         workdir: "/repo/packages/api",
         sandbox: undefined,
-        addDirs: ["/tmp/shared"],
+        addDirs: ["/tmp/shared", "/clawforce-home/proj-1"],
       }),
     }));
   });
@@ -114,6 +114,32 @@ describe("dispatchViaCodexExecutor", () => {
     expect(dispatchViaCodex).toHaveBeenCalledWith(expect.objectContaining({
       config: expect.objectContaining({
         model: "gpt-5.4-mini",
+      }),
+    }));
+  });
+
+  it("preserves configured Codex addDirs before adding the project data root", async () => {
+    await dispatchViaCodexExecutor({
+      queueItemId: "q-4",
+      taskId: "t-4",
+      projectId: "proj-1",
+      prompt: "do work",
+      agentId: "worker-4",
+      projectDir: "/repo",
+      agentConfig: {
+        extends: "employee",
+        briefing: [{ source: "instructions" }],
+        expectations: [],
+        performance_policy: { action: "alert" },
+        codex: {
+          addDirs: ["./notes", "/repo/notes"],
+        },
+      },
+    });
+
+    expect(dispatchViaCodex).toHaveBeenCalledWith(expect.objectContaining({
+      config: expect.objectContaining({
+        addDirs: ["/repo/notes", "/clawforce-home/proj-1"],
       }),
     }));
   });
