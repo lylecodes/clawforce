@@ -3233,8 +3233,8 @@ export type { ChangeProvenance };
 // --- Notification queries ---
 
 import {
-  listNotifications,
-  getUnreadCount,
+  listOperatorNotifications,
+  getOperatorUnreadCount,
   type ListNotificationsOptions,
 } from "../notifications/store.js";
 import type { NotificationRecord } from "../notifications/types.js";
@@ -3247,8 +3247,8 @@ export function queryNotifications(
   opts?: ListNotificationsOptions,
 ): { notifications: NotificationRecord[]; count: number; unreadCount: number } {
   try {
-    const notifications = listNotifications(projectId, opts);
-    const unreadCount = getUnreadCount(projectId);
+    const notifications = listOperatorNotifications(projectId, opts);
+    const unreadCount = getOperatorUnreadCount(projectId);
     return { notifications, count: notifications.length, unreadCount };
   } catch {
     return { notifications: [], count: 0, unreadCount: 0 };
@@ -3260,7 +3260,7 @@ export function queryNotifications(
  */
 export function queryUnreadCount(projectId: string): { unreadCount: number } {
   try {
-    return { unreadCount: getUnreadCount(projectId) };
+    return { unreadCount: getOperatorUnreadCount(projectId) };
   } catch {
     return { unreadCount: 0 };
   }

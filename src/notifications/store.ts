@@ -6,7 +6,7 @@
  */
 
 import crypto from "node:crypto";
-import type { DatabaseSync } from "../sqlite-driver.js";
+import type { DatabaseSync, SQLInputValue } from "../sqlite-driver.js";
 import { getDb } from "../db.js";
 import type {
   NotificationCategory,
@@ -15,6 +15,8 @@ import type {
   NotificationSeverity,
   NotificationActionability,
 } from "./types.js";
+
+export const RECURRING_WORKFLOW_FAILURE_NOTIFICATION_ID = "recurring-workflow-failures";
 
 // --- Table setup ---
 
@@ -200,19 +202,14 @@ export type ListNotificationsOptions = {
   offset?: number;
 };
 
-/**
- * List notifications for a project with optional filters.
- */
-export function listNotifications(
+function selectNotificationRows(
+  db: DatabaseSync,
   projectId: string,
   opts: ListNotificationsOptions = {},
-  dbOverride?: DatabaseSync,
-): NotificationRecord[] {
-  const db = dbOverride ?? getDb(projectId);
-  ensureNotificationTable(db);
-
+  paginated: boolean,
+): Record<string, unknown>[] {
   const conditions: string[] = ["project_id = ?"];
-  const values: unknown[] = [projectId];
+  const values: SQLInputValue[] = [projectId];
 
   if (opts.category !== undefined) {
     conditions.push("category = ?");
@@ -232,14 +229,201 @@ export function listNotifications(
   }
 
   const where = conditions.join(" AND ");
+  if (!paginated) {
+    return db
+      .prepare(`SELECT * FROM notifications WHERE ${where} ORDER BY created_at DESC`)
+      .all(...values) as Record<string, unknown>[];
+  }
+
   const limit = opts.limit ?? 50;
   const offset = opts.offset ?? 0;
-
-  const rows = db
+  return db
     .prepare(`SELECT * FROM notifications WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
-    .all(...(values as Array<string | number | null>), limit, offset) as Record<string, unknown>[];
+    .all(...values, limit, offset) as Record<string, unknown>[];
+}
 
+type RecurringTaskFailureInfo = {
+  taskId: string;
+  agentId: string;
+  jobName: string;
+  schedule?: string;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function taskIdForNotification(notification: NotificationRecord): string | null {
+  if (notification.category !== "task") return null;
+  if (!notification.title.startsWith("Task failed:")) return null;
+  const taskId = notification.focusContext?.taskId;
+  return typeof taskId === "string" && taskId.length > 0 ? taskId : null;
+}
+
+function loadRecurringTaskFailureInfo(
+  projectId: string,
+  notifications: NotificationRecord[],
+  db: DatabaseSync,
+): Map<string, RecurringTaskFailureInfo> {
+  const taskIds = [...new Set(notifications.map(taskIdForNotification).filter(Boolean) as string[])];
+  const infoByTaskId = new Map<string, RecurringTaskFailureInfo>();
+  if (taskIds.length === 0) return infoByTaskId;
+
+  try {
+    for (let i = 0; i < taskIds.length; i += 500) {
+      const chunk = taskIds.slice(i, i + 500);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = db
+        .prepare(
+          `SELECT id, metadata FROM tasks WHERE project_id = ? AND id IN (${placeholders})`,
+        )
+        .all(projectId, ...chunk) as Array<Record<string, unknown>>;
+
+      for (const row of rows) {
+        const taskId = row.id as string;
+        const metadata = parseJsonRecord(row.metadata);
+        const recurringJob = asRecord(metadata?.recurringJob);
+        if (!recurringJob) continue;
+        const agentId = recurringJob?.agentId;
+        const jobName = recurringJob?.jobName;
+        if (typeof agentId !== "string" || typeof jobName !== "string") continue;
+        const schedule = recurringJob.schedule;
+        infoByTaskId.set(taskId, {
+          taskId,
+          agentId,
+          jobName,
+          schedule: typeof schedule === "string" ? schedule : undefined,
+        });
+      }
+    }
+  } catch {
+    // Older or partial databases may not have the tasks table yet. In that
+    // case the inbox remains a raw event list rather than failing the query.
+  }
+
+  return infoByTaskId;
+}
+
+function aggregateRecurringWorkflowFailures(
+  projectId: string,
+  notifications: NotificationRecord[],
+  db: DatabaseSync,
+): NotificationRecord[] {
+  const recurringInfoByTaskId = loadRecurringTaskFailureInfo(projectId, notifications, db);
+  if (recurringInfoByTaskId.size === 0) return notifications;
+
+  const recurring: Array<{ notification: NotificationRecord; info: RecurringTaskFailureInfo }> = [];
+  const rest: NotificationRecord[] = [];
+
+  for (const notification of notifications) {
+    const taskId = taskIdForNotification(notification);
+    const info = taskId ? recurringInfoByTaskId.get(taskId) : undefined;
+    if (info) {
+      recurring.push({ notification, info });
+    } else {
+      rest.push(notification);
+    }
+  }
+
+  if (recurring.length === 0) return notifications;
+
+  const jobCounts = new Map<string, { info: RecurringTaskFailureInfo; count: number }>();
+  for (const item of recurring) {
+    const key = `${item.info.agentId}:${item.info.jobName}`;
+    const current = jobCounts.get(key);
+    if (current) {
+      current.count += 1;
+    } else {
+      jobCounts.set(key, { info: item.info, count: 1 });
+    }
+  }
+
+  const latest = recurring.reduce((winner, item) =>
+    item.notification.createdAt > winner.notification.createdAt ? item : winner,
+  );
+  const affectedJobs = [...jobCounts.values()];
+  const jobSummary = affectedJobs
+    .slice(0, 3)
+    .map(({ info, count }) => `${info.jobName} (${count})`)
+    .join(", ");
+  const hiddenJobCount = Math.max(0, affectedJobs.length - 3);
+  const hiddenSuffix = hiddenJobCount > 0 ? `, +${hiddenJobCount} more` : "";
+  const read = recurring.every((item) => item.notification.read);
+  const dismissed = recurring.every((item) => item.notification.dismissed);
+
+  const aggregate: NotificationRecord = {
+    id: RECURRING_WORKFLOW_FAILURE_NOTIFICATION_ID,
+    projectId,
+    category: "task",
+    severity: "warning",
+    actionability: "dismissible",
+    title: `Recurring workflows failed recently: ${affectedJobs.length} jobs, ${recurring.length} runs`,
+    body: `Recurring workflow failures are grouped to keep the operator inbox usable. Latest failed job: ${latest.info.jobName}. Affected jobs: ${jobSummary}${hiddenSuffix}.`,
+    destination: "/clawforce/ops",
+    focusContext: {
+      notificationGroup: RECURRING_WORKFLOW_FAILURE_NOTIFICATION_ID,
+      failedRunCount: String(recurring.length),
+      affectedJobCount: String(affectedJobs.length),
+      latestTaskId: latest.info.taskId,
+    },
+    deliveryStatus: "skipped",
+    read,
+    dismissed,
+    createdAt: latest.notification.createdAt,
+    readAt: read
+      ? Math.max(...recurring.map((item) => item.notification.readAt ?? 0))
+      : undefined,
+    dismissedAt: dismissed
+      ? Math.max(...recurring.map((item) => item.notification.dismissedAt ?? 0))
+      : undefined,
+  };
+
+  return [aggregate, ...rest].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/**
+ * List notifications for a project with optional filters.
+ */
+export function listNotifications(
+  projectId: string,
+  opts: ListNotificationsOptions = {},
+  dbOverride?: DatabaseSync,
+): NotificationRecord[] {
+  const db = dbOverride ?? getDb(projectId);
+  ensureNotificationTable(db);
+
+  const rows = selectNotificationRows(db, projectId, opts, true);
   return rows.map(rowToRecord);
+}
+
+/**
+ * List the operator inbox. This preserves the durable event-level notification
+ * records while grouping recurring workflow failures for the UI surface.
+ */
+export function listOperatorNotifications(
+  projectId: string,
+  opts: ListNotificationsOptions = {},
+  dbOverride?: DatabaseSync,
+): NotificationRecord[] {
+  const db = dbOverride ?? getDb(projectId);
+  ensureNotificationTable(db);
+
+  const rows = selectNotificationRows(db, projectId, opts, false);
+  const aggregated = aggregateRecurringWorkflowFailures(projectId, rows.map(rowToRecord), db);
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  return aggregated.slice(offset, offset + limit);
 }
 
 /**
@@ -315,6 +499,76 @@ export function getUnreadCount(
     .get(projectId) as { count: number };
 
   return row.count;
+}
+
+/**
+ * Count unread operator-inbox items after UI-level aggregation.
+ */
+export function getOperatorUnreadCount(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): number {
+  const db = dbOverride ?? getDb(projectId);
+  ensureNotificationTable(db);
+  const rows = selectNotificationRows(db, projectId, { read: false, dismissed: false }, false);
+  return aggregateRecurringWorkflowFailures(projectId, rows.map(rowToRecord), db).length;
+}
+
+export function isRecurringWorkflowFailureNotificationId(notificationId: string): boolean {
+  return notificationId === RECURRING_WORKFLOW_FAILURE_NOTIFICATION_ID;
+}
+
+function recurringWorkflowFailureNotificationIds(
+  projectId: string,
+  db: DatabaseSync,
+  opts: Pick<ListNotificationsOptions, "read" | "dismissed">,
+): string[] {
+  const rows = selectNotificationRows(db, projectId, {
+    category: "task",
+    ...opts,
+  }, false);
+  const notifications = rows.map(rowToRecord);
+  const recurringInfoByTaskId = loadRecurringTaskFailureInfo(projectId, notifications, db);
+  return notifications
+    .filter((notification) => {
+      const taskId = taskIdForNotification(notification);
+      return taskId ? recurringInfoByTaskId.has(taskId) : false;
+    })
+    .map((notification) => notification.id);
+}
+
+export function markRecurringWorkflowFailureNotificationsRead(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): number {
+  const db = dbOverride ?? getDb(projectId);
+  ensureNotificationTable(db);
+  const ids = recurringWorkflowFailureNotificationIds(projectId, db, { read: false, dismissed: false });
+  if (ids.length === 0) return 0;
+  const now = Date.now();
+  const update = db.prepare("UPDATE notifications SET read = 1, read_at = ? WHERE id = ? AND read = 0");
+  let changed = 0;
+  for (const id of ids) {
+    changed += (update.run(now, id) as { changes: number }).changes;
+  }
+  return changed;
+}
+
+export function dismissRecurringWorkflowFailureNotifications(
+  projectId: string,
+  dbOverride?: DatabaseSync,
+): number {
+  const db = dbOverride ?? getDb(projectId);
+  ensureNotificationTable(db);
+  const ids = recurringWorkflowFailureNotificationIds(projectId, db, { dismissed: false });
+  if (ids.length === 0) return 0;
+  const now = Date.now();
+  const update = db.prepare("UPDATE notifications SET dismissed = 1, dismissed_at = ? WHERE id = ? AND dismissed = 0");
+  let changed = 0;
+  for (const id of ids) {
+    changed += (update.run(now, id) as { changes: number }).changes;
+  }
+  return changed;
 }
 
 /**

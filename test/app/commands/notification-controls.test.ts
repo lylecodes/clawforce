@@ -5,10 +5,13 @@ vi.mock("../../../src/db.js", () => ({
 }));
 
 vi.mock("../../../src/notifications/store.js", () => ({
+  dismissRecurringWorkflowFailureNotifications: vi.fn(() => 4),
   getNotificationByProject: vi.fn(() => ({ id: "notif-1" })),
+  isRecurringWorkflowFailureNotificationId: vi.fn((id: string) => id === "recurring-workflow-failures"),
   markAllRead: vi.fn(() => 3),
   markDismissed: vi.fn(() => true),
   markRead: vi.fn(() => true),
+  markRecurringWorkflowFailureNotificationsRead: vi.fn(() => 4),
 }));
 
 const {
@@ -18,10 +21,13 @@ const {
 } = await import("../../../src/app/commands/notification-controls.js");
 const { getDb } = await import("../../../src/db.js");
 const {
+  dismissRecurringWorkflowFailureNotifications,
   getNotificationByProject,
+  isRecurringWorkflowFailureNotificationId,
   markAllRead,
   markDismissed,
   markRead,
+  markRecurringWorkflowFailureNotificationsRead,
 } = await import("../../../src/notifications/store.js");
 
 describe("notification-controls", () => {
@@ -51,6 +57,18 @@ describe("notification-controls", () => {
     });
   });
 
+  it("marks the recurring workflow failure group as read", () => {
+    const result = runMarkNotificationReadCommand("domain-1", "recurring-workflow-failures");
+
+    expect(isRecurringWorkflowFailureNotificationId).toHaveBeenCalledWith("recurring-workflow-failures");
+    expect(getNotificationByProject).not.toHaveBeenCalled();
+    expect(markRecurringWorkflowFailureNotificationsRead).toHaveBeenCalledWith("domain-1", expect.anything());
+    expect(result).toEqual({
+      status: 200,
+      body: { ok: true, marked: 4 },
+    });
+  });
+
   it("returns 404 when marking read for a missing notification", () => {
     vi.mocked(getNotificationByProject).mockReturnValueOnce(null);
 
@@ -71,6 +89,17 @@ describe("notification-controls", () => {
     expect(result).toEqual({
       status: 200,
       body: { ok: true },
+    });
+  });
+
+  it("dismisses the recurring workflow failure group", () => {
+    const result = runDismissNotificationCommand("domain-1", "recurring-workflow-failures");
+
+    expect(getNotificationByProject).not.toHaveBeenCalled();
+    expect(dismissRecurringWorkflowFailureNotifications).toHaveBeenCalledWith("domain-1", expect.anything());
+    expect(result).toEqual({
+      status: 200,
+      body: { ok: true, dismissed: 4 },
     });
   });
 
