@@ -14,7 +14,7 @@ vi.mock("../../src/diagnostics.js", () => ({
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");
-const { createWorkflow } = await import("../../src/workflow.js");
+const { createWorkflow, getWorkflow } = await import("../../src/workflow.js");
 const {
   createWorkflowDraftSession,
   getWorkflowDraftSessionRecord,
@@ -194,8 +194,8 @@ describe("approveWorkflowReview", () => {
   beforeEach(() => { db = getMemoryDb(); });
   afterEach(() => { try { db.close(); } catch { /* already */ } });
 
-  it("transitions review -> approved, draft -> applied, writes audit", () => {
-    const { draft } = seedDraft(db);
+  it("transitions review -> approved, materializes the draft onto the live workflow, and writes audit", () => {
+    const { workflow, draft } = seedDraft(db);
     const review = createWorkflowReviewFromDraft({
       projectId: DOMAIN,
       draftSessionId: draft.id,
@@ -217,12 +217,20 @@ describe("approveWorkflowReview", () => {
 
     const draftAfter = getWorkflowDraftSessionRecord(DOMAIN, draft.id, db);
     expect(draftAfter?.status).toBe("applied");
+    const workflowAfter = getWorkflow(DOMAIN, workflow.id, db);
+    expect(workflowAfter?.name).toBe("Pipeline");
+    expect(workflowAfter?.phases.map((phase) => phase.name)).toEqual([
+      "Build",
+      "Verify",
+      "Ship",
+    ]);
 
     const auditRows = db.prepare(
-      "SELECT action FROM audit_log WHERE project_id = ? AND target_id = ? ORDER BY created_at",
-    ).all(DOMAIN, review.record.id) as Array<{ action: string }>;
+      "SELECT action, target_id FROM audit_log WHERE project_id = ? ORDER BY created_at",
+    ).all(DOMAIN) as Array<{ action: string; target_id: string }>;
     expect(auditRows.map((r) => r.action)).toContain("workflow_review.confirm");
     expect(auditRows.map((r) => r.action)).toContain("workflow_review.approve");
+    expect(auditRows.some((row) => row.action === "workflow_review.apply" && row.target_id === workflow.id)).toBe(true);
   });
 
   it("returns not_pending when the review is already resolved", () => {

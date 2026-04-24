@@ -39,6 +39,12 @@ describe("paradigm standards", () => {
     expect(result).toContain("No lifecycle management");
   });
 
+  it("execution standards allow clawforce_log write when explicitly required", () => {
+    const result = getExecutionStandards();
+    expect(result).toContain("You may still use `clawforce_log write`");
+    expect(result).not.toContain("or logging tools");
+  });
+
   it("review standards mention evidence checking", () => {
     const result = getReviewStandards();
     expect(result).toContain("evidence");

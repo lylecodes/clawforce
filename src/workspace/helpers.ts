@@ -413,8 +413,8 @@ function buildProposal(
   }));
 
   const summaryParts: string[] = [];
-  if (gathered.goal) summaryParts.push(`Goal: ${gathered.goal.trim()}.`);
-  if (gathered.trigger) summaryParts.push(`Trigger: ${gathered.trigger.trim()}.`);
+  if (gathered.goal) summaryParts.push(`Goal: ${normalizeSentence(gathered.goal)}.`);
+  if (gathered.trigger) summaryParts.push(`Trigger: ${normalizeSentence(gathered.trigger)}.`);
   summaryParts.push(`Stages: ${proposalStages.map((stage) => stage.label).join(" → ")}.`);
 
   return {
@@ -427,8 +427,14 @@ function buildProposal(
 function deriveWorkflowName(goal: string | undefined): string {
   const trimmed = goal?.trim();
   if (!trimmed) return "New workflow";
-  const compact = trimmed.replace(/\s+/g, " ");
-  return compact.length > 72 ? `${compact.slice(0, 71)}…` : compact;
+  return normalizeSentence(trimmed);
+}
+
+function normalizeSentence(input: string): string {
+  return input
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "");
 }
 
 function parseStageLabels(input: string): string[] {

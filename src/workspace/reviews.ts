@@ -4,22 +4,21 @@
  * A workflow review is the framework-backed, auditable ratification step for
  * a Phase B draft session. Confirming a draft creates exactly one review row
  * and transitions the draft to `review_pending`. Approving the review
- * transitions the draft to `applied` (i.e. ratified); rejecting transitions
- * it to `discarded`. Reviews flow into the canonical operator feed via the
- * existing `approval` category — no second event system.
- *
- * Approve does NOT materialize the draft onto the live workflow today.
- * That step is deferred; the only write that would do it is marked with an
- * explicit in-code TODO so a later phase can find it.
+ * transitions the draft to `applied` and materializes the approved draft
+ * snapshot onto the live workflow; rejecting transitions it to `discarded`.
+ * Reviews flow into the canonical operator feed via the existing `approval`
+ * category — no second event system.
  */
 
 import crypto from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "../sqlite-driver.js";
 import { writeAuditEntry } from "../audit.js";
 import { getDb } from "../db.js";
+import { getWorkflow } from "../workflow.js";
 import {
   diffDraftWorkflow,
   getWorkflowDraftSessionRecord,
+  listWorkflowDraftSessionRecords,
   setWorkflowDraftSessionStatus,
   summarizeOverlays,
   toWorkflowDraftSessionSummary,
@@ -258,12 +257,11 @@ function resolveReviewInternal(
     detail: params.decisionNotes,
   }, db);
 
+  if (decision === "approved") {
+    applyDraftWorkflowToLive(params.projectId, current.draftSessionId, params.actor, db);
+  }
+
   // Move the linked draft session into its resolved terminal state.
-  // NOTE: on "approved" we mark the draft as `applied` meaning ratified, not
-  // materialized. The actual rewrite of the live workflow from the draft
-  // snapshot is deferred — a later phase should hook into the approve path
-  // here and perform the materialization under its own audit/lock rules.
-  // TODO(Phase D/E): apply approved draft onto the live workflow.
   const draftTargetStatus = decision === "approved" ? "applied" : "discarded";
   setWorkflowDraftSessionStatus(
     params.projectId,
@@ -276,6 +274,91 @@ function resolveReviewInternal(
   const updated = getWorkflowReviewRecord(params.projectId, params.reviewId, db);
   if (!updated) return { ok: false, reason: "not_found" };
   return { ok: true, record: updated };
+}
+
+function applyDraftWorkflowToLive(
+  projectId: string,
+  draftSessionId: string,
+  actor: string,
+  db: DatabaseSync,
+  options: {
+    auditAction?: string;
+    detail?: string;
+  } = {},
+): void {
+  const draft = getWorkflowDraftSessionRecord(projectId, draftSessionId, db);
+  if (!draft) {
+    throw new Error(`Draft session "${draftSessionId}" not found in project "${projectId}"`);
+  }
+  const workflow = getWorkflow(projectId, draft.workflowId, db);
+  if (!workflow) {
+    throw new Error(`Workflow "${draft.workflowId}" not found in project "${projectId}"`);
+  }
+
+  const phases = draft.draftWorkflow.phases;
+  const nextCurrentPhase = phases.length === 0
+    ? 0
+    : Math.min(workflow.currentPhase, phases.length - 1);
+  const now = Date.now();
+
+  db.prepare(`
+    UPDATE workflows
+       SET name = ?, phases = ?, current_phase = ?, updated_at = ?
+     WHERE id = ? AND project_id = ?
+  `).run(
+    draft.draftWorkflow.name,
+    JSON.stringify(phases),
+    nextCurrentPhase,
+    now,
+    draft.workflowId,
+    projectId,
+  );
+
+  writeAuditEntry({
+    projectId,
+    actor,
+    action: options.auditAction ?? "workflow_review.apply",
+    targetType: "workflow",
+    targetId: draft.workflowId,
+    detail: options.detail ?? draft.title,
+  }, db);
+}
+
+/**
+ * Repair path for legacy Phase C workflows approved before live materialization
+ * existed. If the workflow is still empty but has an applied draft snapshot,
+ * promote that snapshot onto the live workflow now so the workspace shell
+ * does not strand operators with an unrecoverable empty topology.
+ */
+export function reconcileAppliedWorkflowDraftIfNeeded(
+  projectId: string,
+  workflowId: string,
+  dbOverride?: DatabaseSync,
+): ReturnType<typeof getWorkflow> {
+  const db = dbOverride ?? getDb(projectId);
+  const workflow = getWorkflow(projectId, workflowId, db);
+  if (!workflow || workflow.projectId !== projectId) return workflow;
+  if (workflow.phases.length > 0) return workflow;
+
+  const latestAppliedDraft = listWorkflowDraftSessionRecords(
+    projectId,
+    { workflowId, includeStatuses: ["applied"] },
+    db,
+  )[0];
+  if (!latestAppliedDraft) return workflow;
+  if (latestAppliedDraft.draftWorkflow.phases.length === 0) return workflow;
+
+  applyDraftWorkflowToLive(
+    projectId,
+    latestAppliedDraft.id,
+    "system:workspace-repair",
+    db,
+    {
+      auditAction: "workflow_review.reconcile_apply",
+      detail: `Recovered applied draft ${latestAppliedDraft.id}`,
+    },
+  );
+  return getWorkflow(projectId, workflowId, db);
 }
 
 // ---------------------------------------------------------------------------

@@ -132,6 +132,21 @@ export type WorkflowStageSummary = {
   isCurrent: boolean;
 };
 
+/**
+ * Lightweight stage preview used when the operator needs to understand a
+ * workflow's shape before it has live stages. Today this is primarily for
+ * helper-created workflows whose first visible topology exists as a draft
+ * session before review/apply.
+ */
+export type WorkflowPreviewStage = {
+  stageKey: string;
+  phaseIndex: number;
+  label: string;
+  description?: string;
+  kind: "live" | "draft";
+  liveState?: StageLiveState;
+};
+
 /** Directed edge between two stages. Linear today; branching slots reserved. */
 export type WorkflowStageEdge = {
   /** Upstream stage — `null` indicates the virtual `Start` node. */
@@ -161,6 +176,8 @@ export type WorkflowMiniTopology = {
   liveState: WorkflowLiveState;
   currentPhase: number;
   stages: WorkflowStageSummary[];
+  /** Operator-facing stage preview. Falls back to draft-authored stages when live stages are still empty. */
+  previewStages: WorkflowPreviewStage[];
   /** Ordered adjacency list including virtual Start and End. */
   edges: WorkflowStageEdge[];
   /** True when at least one draft overlay would apply. Always `false` in Phase A. */
@@ -237,13 +254,8 @@ export type WorkflowDraftSession = WorkflowDraftSessionSummary & {
 /**
  * State machine for a workflow review:
  *
- *   pending   → approved  (ratified; linked draft goes to "applied")
+ *   pending   → approved  (materialized; linked draft goes to "applied")
  *   pending   → rejected  (declined; linked draft goes to "discarded")
- *
- * Approved reviews do NOT materialize the draft onto the live workflow in
- * Phase C — that step is deferred. "applied" on the draft means
- * "review-ratified", not "live-rewritten". The site that would perform the
- * rewrite carries an explicit in-code TODO so later phases can pick it up.
  */
 export type WorkflowReviewStatus = "pending" | "approved" | "rejected";
 

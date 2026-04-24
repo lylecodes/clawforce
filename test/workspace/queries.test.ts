@@ -46,8 +46,9 @@ vi.mock("../../src/attention/builder.js", () => ({
 }));
 
 const { getMemoryDb } = await import("../../src/db.js");
-const { createWorkflow, addTaskToPhase } = await import("../../src/workflow.js");
+const { createWorkflow, addTaskToPhase, getWorkflow } = await import("../../src/workflow.js");
 const { createWorkflowDraftSession, setWorkflowDraftSessionVisibility } = await import("../../src/workspace/drafts.js");
+const { createWorkflowReviewFromDraft, approveWorkflowReview } = await import("../../src/workspace/reviews.js");
 const { createTask, transitionTask, attachEvidence } = await import("../../src/tasks/ops.js");
 const {
   queryProjectWorkspace,
@@ -352,6 +353,237 @@ describe("workflow draft sessions — Phase B core reads", () => {
       label: "Ship",
       description: undefined,
     });
+  });
+
+  it("queryProjectWorkspace uses visible draft stages as the preview when a workflow has no live stages yet", () => {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Draft-born workflow",
+      phases: [],
+      createdBy: "dashboard",
+    }, db);
+
+    createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Create workflow draft",
+      createdBy: "dashboard",
+      draftWorkflow: {
+        name: "Draft-born workflow",
+        phases: [
+          { name: "Intake triage", taskIds: [], gateCondition: "all_done" },
+          { name: "Source research", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "visible",
+    }, db);
+
+    const workspace = queryProjectWorkspace(DOMAIN, db);
+    expect(workspace.workflows[0]!.stages).toEqual([]);
+    expect(workspace.workflows[0]!.previewStages).toEqual([
+      {
+        stageKey: expect.stringContaining(":draft-phase:0"),
+        phaseIndex: 0,
+        label: "Intake triage",
+        description: undefined,
+        kind: "draft",
+      },
+      {
+        stageKey: expect.stringContaining(":draft-phase:1"),
+        phaseIndex: 1,
+        label: "Source research",
+        description: undefined,
+        kind: "draft",
+      },
+    ]);
+  });
+
+  it("queryWorkflowTopology uses visible draft stages as the focused preview when live stages are empty", () => {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Draft-only focus",
+      phases: [],
+      createdBy: "dashboard",
+    }, db);
+
+    createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Create workflow draft",
+      createdBy: "dashboard",
+      draftWorkflow: {
+        name: "Draft-only focus",
+        phases: [
+          { name: "Intake triage", taskIds: [], gateCondition: "all_done" },
+          { name: "Production watch", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "visible",
+    }, db);
+
+    const topology = queryWorkflowTopology(DOMAIN, wf.id, db)!;
+    expect(topology.stages).toEqual([]);
+    expect(topology.previewStages.map((stage) => stage.label)).toEqual([
+      "Intake triage",
+      "Production watch",
+    ]);
+    expect(topology.previewStages.every((stage) => stage.kind === "draft")).toBe(true);
+  });
+
+  it("queryWorkflowTopology returns live stages after an approved review materializes the draft", () => {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Review-applied workflow",
+      phases: [],
+      createdBy: "dashboard",
+    }, db);
+
+    const draft = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Create workflow draft",
+      createdBy: "dashboard",
+      draftWorkflow: {
+        name: "Review-applied workflow",
+        phases: [
+          { name: "Intake triage", taskIds: [], gateCondition: "all_done" },
+          { name: "Production watch", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "visible",
+    }, db);
+    const review = createWorkflowReviewFromDraft({
+      projectId: DOMAIN,
+      draftSessionId: draft.id,
+      confirmedBy: "dashboard",
+    }, db);
+    if (!review.ok) throw new Error("expected review creation");
+    const approved = approveWorkflowReview({
+      projectId: DOMAIN,
+      reviewId: review.record.id,
+      actor: "dashboard",
+    }, db);
+    if (!approved.ok) throw new Error("expected review approval");
+
+    const topology = queryWorkflowTopology(DOMAIN, wf.id, db)!;
+    expect(topology.stages.map((stage) => stage.label)).toEqual([
+      "Intake triage",
+      "Production watch",
+    ]);
+    expect(topology.previewStages.every((stage) => stage.kind === "live")).toBe(true);
+    expect(topology.draftSessions).toEqual([]);
+    expect(topology.reviews).toEqual([]);
+  });
+
+  it("queryProjectWorkspace repairs legacy applied-draft workflows that were left with empty live phases", () => {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Legacy applied workflow",
+      phases: [],
+      createdBy: "dashboard",
+    }, db);
+
+    const draft = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Create workflow draft",
+      createdBy: "dashboard",
+      draftWorkflow: {
+        name: "Legacy applied workflow",
+        phases: [
+          { name: "Intake triage", taskIds: [], gateCondition: "all_done" },
+          { name: "Verification", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "visible",
+    }, db);
+    const review = createWorkflowReviewFromDraft({
+      projectId: DOMAIN,
+      draftSessionId: draft.id,
+      confirmedBy: "dashboard",
+    }, db);
+    if (!review.ok) throw new Error("expected review creation");
+    const approved = approveWorkflowReview({
+      projectId: DOMAIN,
+      reviewId: review.record.id,
+      actor: "dashboard",
+    }, db);
+    if (!approved.ok) throw new Error("expected review approval");
+
+    // Simulate the legacy pre-fix bug: approved review exists, draft is
+    // terminal/applied, but the live workflow phases were never materialized.
+    db.prepare(`
+      UPDATE workflows
+         SET phases = '[]', updated_at = ?
+       WHERE id = ? AND project_id = ?
+    `).run(Date.now(), wf.id, DOMAIN);
+
+    const workspace = queryProjectWorkspace(DOMAIN, db);
+    const repaired = workspace.workflows.find((entry) => entry.workflowId === wf.id);
+    expect(repaired?.stages.map((stage) => stage.label)).toEqual([
+      "Intake triage",
+      "Verification",
+    ]);
+    expect(repaired?.previewStages.every((stage) => stage.kind === "live")).toBe(true);
+
+    const persisted = getWorkflow(DOMAIN, wf.id, db);
+    expect(persisted?.phases.map((phase) => phase.name)).toEqual([
+      "Intake triage",
+      "Verification",
+    ]);
+  });
+
+  it("queryWorkflowTopology repairs legacy applied-draft workflows on focused load", () => {
+    const wf = createWorkflow({
+      projectId: DOMAIN,
+      name: "Legacy focus workflow",
+      phases: [],
+      createdBy: "dashboard",
+    }, db);
+
+    const draft = createWorkflowDraftSession({
+      projectId: DOMAIN,
+      workflowId: wf.id,
+      title: "Create workflow draft",
+      createdBy: "dashboard",
+      draftWorkflow: {
+        name: "Legacy focus workflow",
+        phases: [
+          { name: "Intake triage", taskIds: [], gateCondition: "all_done" },
+          { name: "Rollout", taskIds: [], gateCondition: "all_done" },
+        ],
+      },
+      overlayVisibility: "visible",
+    }, db);
+    const review = createWorkflowReviewFromDraft({
+      projectId: DOMAIN,
+      draftSessionId: draft.id,
+      confirmedBy: "dashboard",
+    }, db);
+    if (!review.ok) throw new Error("expected review creation");
+    const approved = approveWorkflowReview({
+      projectId: DOMAIN,
+      reviewId: review.record.id,
+      actor: "dashboard",
+    }, db);
+    if (!approved.ok) throw new Error("expected review approval");
+
+    db.prepare(`
+      UPDATE workflows
+         SET phases = '[]', updated_at = ?
+       WHERE id = ? AND project_id = ?
+    `).run(Date.now(), wf.id, DOMAIN);
+
+    const topology = queryWorkflowTopology(DOMAIN, wf.id, db)!;
+    expect(topology.stages.map((stage) => stage.label)).toEqual([
+      "Intake triage",
+      "Rollout",
+    ]);
+    expect(topology.previewStages.every((stage) => stage.kind === "live")).toBe(true);
+    expect(getWorkflow(DOMAIN, wf.id, db)?.phases.map((phase) => phase.name)).toEqual([
+      "Intake triage",
+      "Rollout",
+    ]);
   });
 
   it("queryWorkflowDraftSessions can filter inventory by workflow", () => {
@@ -942,7 +1174,6 @@ describe("queryScopedWorkspaceFeed — invalid stage scope", () => {
 // Phase C: reviews surfaced in workspace / topology / review queries
 // ---------------------------------------------------------------------------
 
-const { createWorkflowReviewFromDraft, approveWorkflowReview } = await import("../../src/workspace/reviews.js");
 const { queryWorkflowReview, queryWorkflowReviews } = await import("../../src/workspace/queries.js");
 
 describe("Phase C — reviews in workspace queries", () => {

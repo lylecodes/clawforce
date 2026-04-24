@@ -62,11 +62,19 @@ export function isNamespacedAgentId(id: string): boolean {
 }
 
 /** Minimal shape of an OpenClaw agent entry (config.agents.list[]). */
+export type OpenClawToolPolicy = {
+  profile?: string;
+  allow?: string[];
+  alsoAllow?: string[];
+  deny?: string[];
+  [key: string]: unknown;
+};
+
 export type OpenClawAgentEntry = {
   id: string;
   name?: string;
   workspace?: string;
-  tools?: string[];
+  tools?: OpenClawToolPolicy;
   model?: string | { primary?: string; fallbacks?: string[] };
   identity?: { name?: string; theme?: string; emoji?: string; avatar?: string };
   subagents?: { allowAgents?: string[]; model?: string | { primary?: string; fallbacks?: string[] } };
@@ -121,6 +129,13 @@ type SyncParams = {
 
 const CLAWFORCE_PLUGIN_ID = "clawforce";
 const MANAGED_AGENT_IDS_KEY = "managedAgentIds";
+const CLAWFORCE_TO_OPENCLAW_TOOL_IDS: Record<string, readonly string[]> = {
+  bash: ["exec", "process"],
+  read: ["read"],
+  edit: ["edit", "apply_patch"],
+  write: ["write", "apply_patch"],
+  websearch: ["web_search", "web_fetch"],
+};
 
 function getManagedAgentIds(config: OpenClawConfigSubset): Set<string> {
   const raw =
@@ -152,6 +167,31 @@ function sameIdSet(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
+function normalizeToolKey(toolName: string): string {
+  return toolName.trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+export function buildOpenClawToolPolicy(
+  allowedTools: string[] | undefined,
+): OpenClawToolPolicy | undefined {
+  if (!allowedTools || allowedTools.length === 0) return undefined;
+  const allow: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rawToolName of allowedTools) {
+    const trimmed = rawToolName.trim();
+    if (!trimmed) continue;
+    const mappedToolIds = CLAWFORCE_TO_OPENCLAW_TOOL_IDS[normalizeToolKey(trimmed)] ?? [trimmed];
+    for (const toolId of mappedToolIds) {
+      if (seen.has(toolId)) continue;
+      seen.add(toolId);
+      allow.push(toolId);
+    }
+  }
+
+  return allow.length > 0 ? { allow } : undefined;
+}
+
 /**
  * Map a clawforce agent config to an OpenClaw agent entry.
  *
@@ -181,8 +221,9 @@ export function buildOpenClawAgentEntry(
   }
 
   const allowedTools = getAgentAllowedTools(config);
-  if (allowedTools && allowedTools.length > 0) {
-    entry.tools = [...allowedTools];
+  const toolPolicy = buildOpenClawToolPolicy(allowedTools);
+  if (toolPolicy) {
+    entry.tools = toolPolicy;
   }
 
   if (config.extends === "manager" || config.coordination?.enabled) {

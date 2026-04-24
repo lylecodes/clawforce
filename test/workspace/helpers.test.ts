@@ -152,6 +152,52 @@ describe("workflow helper sessions", () => {
     expect(helperAfter?.linkedDraftSessionId).toBe(accepted.draftSessionId);
   });
 
+  it("keeps the full workflow name and normalizes helper punctuation", () => {
+    const session = startWorkflowHelperSession({ projectId: DOMAIN, actor: "user" }, db);
+    sendWorkflowHelperMessage({
+      projectId: DOMAIN,
+      helperSessionId: session.id,
+      actor: "user",
+      content: "Triage and coordinate new data source requests for RentRight from intake through onboarding and verification.",
+    }, db);
+    sendWorkflowHelperMessage({
+      projectId: DOMAIN,
+      helperSessionId: session.id,
+      actor: "user",
+      content: "When a new source request is proposed or an onboarding lead wants a new jurisdiction or source brought into the system.",
+    }, db);
+    const proposal = sendWorkflowHelperMessage({
+      projectId: DOMAIN,
+      helperSessionId: session.id,
+      actor: "user",
+      content: "intake triage, source research, onboarding plan, integrity verification, production watch",
+    }, db);
+
+    expect(proposal.ok).toBe(true);
+    if (!proposal.ok) throw new Error("unreachable");
+    expect(proposal.session.proposal?.workflowName).toBe(
+      "Triage and coordinate new data source requests for RentRight from intake through onboarding and verification",
+    );
+    expect(proposal.session.proposal?.summary).toContain(
+      "Goal: Triage and coordinate new data source requests for RentRight from intake through onboarding and verification.",
+    );
+    expect(proposal.session.proposal?.summary).not.toContain("verification..");
+    expect(proposal.session.proposal?.summary).not.toContain("system..");
+
+    const accepted = acceptWorkflowHelperProposal({
+      projectId: DOMAIN,
+      helperSessionId: session.id,
+      actor: "user",
+    }, db);
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) throw new Error("unreachable");
+
+    const workflow = getWorkflow(DOMAIN, accepted.workflowId, db);
+    expect(workflow?.name).toBe(
+      "Triage and coordinate new data source requests for RentRight from intake through onboarding and verification",
+    );
+  });
+
   it("refuses new helper messages after acceptance", () => {
     const session = startWorkflowHelperSession({ projectId: DOMAIN, actor: "user" }, db);
     sendWorkflowHelperMessage({

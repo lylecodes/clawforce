@@ -29,10 +29,12 @@ import {
 import {
   getWorkflowReviewRecord,
   listWorkflowReviewRecords,
+  reconcileAppliedWorkflowDraftIfNeeded,
   toWorkflowReviewDetail,
   toWorkflowReviewSummary,
 } from "./reviews.js";
 import {
+  deriveDraftStageKey,
   deriveStageKey,
   parseStageKey,
   type ProjectOperatorSummary,
@@ -42,6 +44,7 @@ import {
   type StageLiveState,
   type WorkflowLiveState,
   type WorkflowMiniTopology,
+  type WorkflowPreviewStage,
   type WorkflowDraftSession,
   type WorkflowDraftSessionSummary,
   type WorkflowDraftStageOverlay,
@@ -69,6 +72,19 @@ function resolveDb(projectId: string, dbOverride?: DatabaseSync): DatabaseSync |
   } catch {
     return null;
   }
+}
+
+function getWorkspaceWorkflow(
+  projectId: string,
+  workflowId: string,
+  db: DatabaseSync,
+): Workflow | null {
+  const workflow = getWorkflow(projectId, workflowId, db);
+  if (!workflow || workflow.projectId !== projectId) return null;
+  if (workflow.phases.length > 0) return workflow;
+  const repaired = reconcileAppliedWorkflowDraftIfNeeded(projectId, workflowId, db);
+  if (!repaired || repaired.projectId !== projectId) return workflow;
+  return repaired;
 }
 
 /**
@@ -151,6 +167,48 @@ function buildStageSummary(
   };
 }
 
+function toLivePreviewStages(stages: WorkflowStageSummary[]): WorkflowPreviewStage[] {
+  return stages.map((stage) => ({
+    stageKey: stage.stageKey,
+    phaseIndex: stage.phaseIndex,
+    label: stage.label,
+    description: stage.description,
+    kind: "live",
+    liveState: stage.liveState,
+  }));
+}
+
+function buildDraftPreviewStages(record?: { id: string; draftWorkflow: { phases: WorkflowPhase[] } } | null): WorkflowPreviewStage[] {
+  if (!record) return [];
+  return record.draftWorkflow.phases.map((phase, phaseIndex) => ({
+    stageKey: deriveDraftStageKey(record.id, phaseIndex),
+    phaseIndex,
+    label: phase.name,
+    description: phase.description,
+    kind: "draft",
+  }));
+}
+
+function latestVisibleDraftSessionRecordByWorkflow(
+  records: Array<{
+    id: string;
+    workflowId: string;
+    overlayVisibility: "visible" | "hidden";
+    updatedAt: number;
+    draftWorkflow: { phases: WorkflowPhase[] };
+  }>,
+): Map<string, (typeof records)[number]> {
+  const out = new Map<string, (typeof records)[number]>();
+  for (const record of records) {
+    if (record.overlayVisibility !== "visible") continue;
+    const existing = out.get(record.workflowId);
+    if (!existing || record.updatedAt > existing.updatedAt) {
+      out.set(record.workflowId, record);
+    }
+  }
+  return out;
+}
+
 function buildEdges(workflow: Workflow): WorkflowStageEdge[] {
   const stageKeys = workflow.phases.map((_, i) => deriveStageKey(workflow.id, i));
   const edges: WorkflowStageEdge[] = [];
@@ -202,6 +260,7 @@ function buildMiniTopologyInternal(
     liveState: workflowLiveState(workflow.state),
     currentPhase: workflow.currentPhase,
     stages,
+    previewStages: toLivePreviewStages(stages),
     edges: buildEdges(workflow),
     hasDraftOverlays: false,
     createdAt: workflow.createdAt,
@@ -356,19 +415,29 @@ export function queryProjectWorkspace(
     };
   }
 
-  const workflows = listWorkflows(domainId, db);
+  const workflows = listWorkflows(domainId, db)
+    .map((wf) => getWorkspaceWorkflow(domainId, wf.id, db) ?? wf);
   const workflowNameById = new Map(workflows.map((wf) => [wf.id, wf.name]));
-  const draftSessions = listWorkflowDraftSessionRecords(domainId, {}, db)
+  const draftSessionRecords = listWorkflowDraftSessionRecords(domainId, {}, db);
+  const draftSessions = draftSessionRecords
     .map((record) => toWorkflowDraftSessionSummary(domainId, record));
+  const latestVisibleDraftByWorkflow = latestVisibleDraftSessionRecordByWorkflow(draftSessionRecords);
   const visibleDraftWorkflows = new Set(
     draftSessions
       .filter((session) => session.overlayVisibility === "visible")
       .map((session) => session.workflowId),
   );
-  const miniTopologies = workflows.map((wf) => ({
-    ...buildMiniTopologyInternal(domainId, wf, db),
-    hasDraftOverlays: visibleDraftWorkflows.has(wf.id),
-  }));
+  const miniTopologies = workflows.map((wf) => {
+    const mini = buildMiniTopologyInternal(domainId, wf, db);
+    const draftPreviewStages = mini.stages.length === 0
+      ? buildDraftPreviewStages(latestVisibleDraftByWorkflow.get(wf.id))
+      : mini.previewStages;
+    return {
+      ...mini,
+      previewStages: draftPreviewStages,
+      hasDraftOverlays: visibleDraftWorkflows.has(wf.id),
+    };
+  });
 
   const reviews = listWorkflowReviewRecords(domainId, { includeStatuses: ["pending"] }, db)
     .map((record) => toWorkflowReviewSummary(domainId, record, workflowNameById.get(record.workflowId) ?? record.workflowId));
@@ -419,21 +488,25 @@ export function queryWorkflowTopology(
 ): WorkflowTopology | null {
   const db = resolveDb(domainId, dbOverride);
   if (!db) return null;
-  const workflow = getWorkflow(domainId, workflowId, db);
-  if (!workflow) return null;
-  if (workflow.projectId !== domainId) return null;
+  const workflow = getWorkspaceWorkflow(domainId, workflowId, db);
+  if (!workflow || workflow.projectId !== domainId) return null;
 
   const mini = buildMiniTopologyInternal(domainId, workflow, db);
   const draftSessionRecords = listWorkflowDraftSessionRecords(domainId, { workflowId }, db);
   const draftSessions = draftSessionRecords
     .map((record) => toWorkflowDraftSessionSummary(domainId, record));
+  const latestVisibleDraft = latestVisibleDraftSessionRecordByWorkflow(draftSessionRecords).get(workflowId);
   const draftOverlays = draftSessionRecords
     .filter((record) => record.overlayVisibility === "visible")
     .flatMap((record) => diffDraftWorkflow(record));
   const reviews = listWorkflowReviewRecords(domainId, { workflowId, includeStatuses: ["pending"] }, db)
     .map((record) => toWorkflowReviewSummary(domainId, record, workflow.name));
+  const previewStages = mini.stages.length === 0
+    ? buildDraftPreviewStages(latestVisibleDraft)
+    : mini.previewStages;
   return {
     ...mini,
+    previewStages,
     hasDraftOverlays: draftOverlays.length > 0,
     description: workflow.phases[0]?.description,
     createdBy: workflow.createdBy,
@@ -601,7 +674,7 @@ export function queryWorkflowStageInspector(
   const db = resolveDb(domainId, dbOverride);
   if (!db) return null;
 
-  const workflow = getWorkflow(domainId, workflowId, db);
+  const workflow = getWorkspaceWorkflow(domainId, workflowId, db);
   if (!workflow || workflow.projectId !== domainId) return null;
 
   const phaseIndex = resolveStagePhaseIndex(workflow, stageKey);
@@ -745,7 +818,7 @@ export function queryScopedWorkspaceFeed(
   }
 
   // workflow / stage scope — narrow via task→workflow linkage + metadata hints.
-  const workflow = getWorkflow(domainId, params.workflowId, db);
+  const workflow = getWorkspaceWorkflow(domainId, params.workflowId, db);
   if (!workflow || workflow.projectId !== domainId) {
     return {
       scope,

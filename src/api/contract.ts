@@ -541,6 +541,7 @@ export type {
   ProjectWorkspace,
   ProjectOperatorSummary,
   WorkflowMiniTopology,
+  WorkflowPreviewStage,
   WorkflowTopology,
   WorkflowDraftSession,
   WorkflowDraftSessionSummary,

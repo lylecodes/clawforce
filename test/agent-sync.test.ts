@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildOpenClawAgentEntry,
+  buildOpenClawToolPolicy,
   mergeAgentEntry,
   syncAgentsToOpenClaw,
   toNamespacedAgentId,
@@ -63,7 +64,7 @@ describe("buildOpenClawAgentEntry", () => {
       "/home/user/project",
     );
     expect(entry.workspace).toBe("/home/user/project/packages/core");
-    expect(entry.tools).toEqual(["Read", "Edit"]);
+    expect(entry.tools).toEqual({ allow: ["read", "edit", "apply_patch"] });
   });
 
   it("sets subagents.allowAgents for manager role", () => {
@@ -111,14 +112,14 @@ describe("mergeAgentEntry", () => {
       name: "Custom Name",
       model: "my-custom-model",
       workspace: "/custom/path",
-      tools: ["Read"],
+      tools: { allow: ["read"] },
     };
     const incoming: OpenClawAgentEntry = {
       id: "agent1",
       name: "Auto Name",
       model: { primary: "claude-opus-4-6" },
       workspace: "/auto/path",
-      tools: ["Read", "Edit"],
+      tools: { allow: ["read", "edit", "apply_patch"] },
       identity: { name: "Auto Name" },
     };
     const merged = mergeAgentEntry(existing, incoming);
@@ -126,7 +127,7 @@ describe("mergeAgentEntry", () => {
     expect(merged.name).toBe("Custom Name");
     expect(merged.model).toEqual({ primary: "claude-opus-4-6" });
     expect(merged.workspace).toBe("/auto/path");
-    expect(merged.tools).toEqual(["Read", "Edit"]);
+    expect(merged.tools).toEqual({ allow: ["read", "edit", "apply_patch"] });
     expect(merged.identity).toEqual({ name: "Auto Name" });
   });
 
@@ -221,14 +222,39 @@ describe("CLAWFORCE_WINS fields", () => {
   it("tools always override existing OpenClaw value", () => {
     const existing: OpenClawAgentEntry = {
       id: "bot1",
-      tools: ["Read"],
+      tools: { allow: ["read"] },
     };
     const incoming: OpenClawAgentEntry = {
       id: "bot1",
-      tools: ["Read", "Edit"],
+      tools: { allow: ["read", "edit", "apply_patch"] },
     };
     const merged = mergeAgentEntry(existing, incoming);
-    expect(merged.tools).toEqual(["Read", "Edit"]);
+    expect(merged.tools).toEqual({ allow: ["read", "edit", "apply_patch"] });
+  });
+});
+
+describe("buildOpenClawToolPolicy", () => {
+  it("maps Clawforce coding tools to the current OpenClaw tool ids", () => {
+    expect(buildOpenClawToolPolicy(["Bash", "Read", "Edit", "Write", "WebSearch"])).toEqual({
+      allow: ["exec", "process", "read", "edit", "apply_patch", "write", "web_search", "web_fetch"],
+    });
+  });
+
+  it("preserves already-normalized OpenClaw tool ids that do not need alias expansion", () => {
+    expect(buildOpenClawToolPolicy(["read", "sessions_list"])).toEqual({
+      allow: ["read", "sessions_list"],
+    });
+  });
+
+  it("deduplicates mapped tool ids", () => {
+    expect(buildOpenClawToolPolicy(["Edit", "Write", "apply_patch"])).toEqual({
+      allow: ["edit", "apply_patch", "write"],
+    });
+  });
+
+  it("returns undefined for empty tool lists", () => {
+    expect(buildOpenClawToolPolicy([])).toBeUndefined();
+    expect(buildOpenClawToolPolicy(undefined)).toBeUndefined();
   });
 });
 

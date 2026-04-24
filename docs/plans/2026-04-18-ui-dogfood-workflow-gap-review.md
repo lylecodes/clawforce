@@ -295,3 +295,34 @@ Conclusion from this run:
 - No new onboarding follow-up work was needed because there are still `0` live `proposed` or `bootstrapping` jurisdictions, `0` open onboarding-request issues, and no missing owner coverage to route.
 - No generated data was patched by hand.
 - The actionable gap remains the already-documented controller/session-loss failure mode, not missing onboarding backlog governance.
+
+## Follow-up Review: 2026-04-23 01:16 UTC
+
+This scheduled `workflow-gap-review` run still found the same structural operator-UX gap, and the evidence still supports the existing mutation proposal instead of a second proposal.
+
+- `src/setup/workflows.ts`
+  - `workflow-gap-review` is still wired with the same nudge: review repeated resets, blocked operator paths, and noisy workflow pain, and propose workflow mutations only when supported levers are insufficient
+- `./bin/cf setup status --json --domain=ui-dogfood-2026-04-18`
+  - current steward task `d3c6b268-1ce6-4f24-a7f9-ae3a4fbf4980` is `ASSIGNED` with `activeQueueStatus=dispatched` and `activeSessionState=none`
+  - controller still reports `state=none`, `activeSessionCount=0`, `activeDispatchCount=2`
+  - the same blocked operator paths remain visible as stranded recurring jobs with no live session: `standup`, `session_reset`, `memory_review`, `coordination`, and `intake-triage`
+- `./bin/cf running --domain=ui-dogfood-2026-04-18`
+  - still reports `Active Sessions: 0`, queue `dispatched=2`, `failed=830`, `cancelled=3`
+- `./bin/cf feed --json --domain=ui-dogfood-2026-04-18`
+  - the feed is still dominated by repeated per-task `watching` failures across `workflow-gap-review`, `onboarding-backlog-sweep`, `integrity-sweep`, and `production-watch`
+  - the operator still does not get one aggregate outage item for the shared no-session failure class
+- `./bin/cf decisions --json --domain=ui-dogfood-2026-04-18`
+  - still returns no items, so the decision inbox remains empty during the same recurring failure storm
+- `sqlite3 ~/.clawforce/ui-dogfood-2026-04-18/clawforce.db`
+  - governed data surfaces remain empty: `entities=0`, `entity_issues=0`, `entity_check_runs=0`, `manager_reviews=0`
+  - current `workflow-gap-review` dispatch row `ef7888d2-b0fc-4af8-9ab5-b1d9edd0094d` is still `dispatched` at `dispatch_attempts=1/3`
+  - prior steward runs show the same structural failure signatures: `Recovered missed dispatch cron job after 953s with no active session; exhausted dispatch retries` and `Recovered stale dispatch cron job after 16m with no active session; exhausted dispatch retries`
+- `./bin/cf review 8a70f01e-6b37-4a0c-988c-64b29befe34e --domain=ui-dogfood-2026-04-18 --json`
+  - confirms the existing P1 infra task is still `OPEN` and already owns the root-cause remediation for recurring jobs that lose their active session
+- `./bin/cf errors --hours=24 --domain=ui-dogfood-2026-04-18`
+  - failures remain dominated by `Stale dispatched item: no active session after 10m/11m` and `Recovered missed dispatch cron job after 117s-120s with no active session; exhausted dispatch retries`, plus neighboring source-onboarding rate-limit noise
+
+Conclusion from this run:
+- No new workflow mutation was proposed because the existing proposal still targets the real missing lever: aggregate repeated no-session recurring failures into one actionable operator item.
+- No new follow-up task was created because task `8a70f01e-6b37-4a0c-988c-64b29befe34e` still owns the underlying dispatch/session-loss defect.
+- Follow-up is still needed on the existing operator-UX mutation, because the canonical feed and decision inbox still present one structural outage as duplicate low-signal task failures.
