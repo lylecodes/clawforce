@@ -199,6 +199,9 @@ export function checkRateLimit(
 
   const state = getDashboardAuthState();
   const ip = getRemoteIp(req);
+  if (isLocalhost(ip)) {
+    return true;
+  }
   const now = Date.now();
   let entry = state.rateLimitMap.get(ip);
 

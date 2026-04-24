@@ -324,6 +324,16 @@ describe("checkRateLimit", () => {
     }
   });
 
+  it("does not rate limit localhost dashboard traffic", () => {
+    for (let i = 0; i < 250; i++) {
+      const req = createMockReq({ remoteAddress: "127.0.0.1" });
+      const res = createMockRes();
+      expect(checkRateLimit(req, res)).toBe(true);
+      expect(res.statusCode).not.toBe(429);
+    }
+    expect(getRateLimitMap().has("127.0.0.1")).toBe(false);
+  });
+
   it("rejects the 101st request with 429", () => {
     for (let i = 0; i < 100; i++) {
       const req = createMockReq({ remoteAddress: "10.0.0.3" });
