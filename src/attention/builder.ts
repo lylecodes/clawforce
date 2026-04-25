@@ -165,6 +165,145 @@ function formatRecurringWorkflowLane(
   return `${compactAgentId}.${identity.jobName}`;
 }
 
+type RecurringFailureQueueInfo = {
+  id: string;
+  status: string;
+  lastError?: string;
+  createdAt: number;
+  completedAt?: number;
+  dispatchAttempts: number;
+  maxDispatchAttempts: number;
+};
+
+type RecurringFailureGroup = {
+  agentId: string;
+  jobName: string;
+  schedule?: string;
+  count: number;
+  latestTaskId: string;
+  latestTitle: string;
+  latestFailedAt: number;
+  latestSignalAt: number;
+  latestQueueItemId?: string;
+  latestQueueStatus?: string;
+  latestQueueError?: string;
+  latestQueueErrorSummary?: string;
+  dispatchAttempts?: number;
+  maxDispatchAttempts?: number;
+};
+
+type RecurringFailureClassification = {
+  urgency: AttentionUrgency;
+  severity: AttentionSeverity;
+  automationState: AttentionAutomationState;
+  automationBoundary: string;
+  recoveryStatus: string;
+  operatorInterventionRequired: boolean;
+  operatorInterventionReason: string;
+  manualRecoveryAvailable: boolean;
+  recommendedAction: string;
+  summarySuffix?: string;
+  blockedReason?: string;
+  blockingQueueItemId?: string;
+  blockingQueueErrorSummary?: string;
+};
+
+const RECURRING_FAILURE_TOTAL_RUN_ESCALATION_THRESHOLD = 10;
+const RECURRING_FAILURE_SINGLE_JOB_ESCALATION_THRESHOLD = 4;
+
+function summarizeQueueError(value: string | undefined): string | undefined {
+  return value?.trim() ? buildPreview(value, 220) : undefined;
+}
+
+function getLatestQueueFailureForTask(
+  projectId: string,
+  taskId: string,
+  db: DatabaseSync,
+): RecurringFailureQueueInfo | undefined {
+  try {
+    const row = db.prepare(`
+      SELECT id, status, last_error, created_at, completed_at, dispatch_attempts, max_dispatch_attempts
+      FROM dispatch_queue
+      WHERE project_id = ?
+        AND task_id = ?
+        AND status = 'failed'
+      ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+      LIMIT 1
+    `).get(projectId, taskId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      id: String(row.id),
+      status: String(row.status),
+      lastError: typeof row.last_error === "string" && row.last_error.trim() ? row.last_error : undefined,
+      createdAt: typeof row.created_at === "number" ? row.created_at : 0,
+      completedAt: typeof row.completed_at === "number" ? row.completed_at : undefined,
+      dispatchAttempts: typeof row.dispatch_attempts === "number" ? row.dispatch_attempts : 0,
+      maxDispatchAttempts: typeof row.max_dispatch_attempts === "number" ? row.max_dispatch_attempts : 0,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isLocalAgentRuntimeBlocker(error: string | undefined): boolean {
+  if (!error) return false;
+  return /cannot access session files|permission denied|operation not permitted|readonly database|failed to open state db|fix ownership/i.test(error)
+    && /\.codex|session|state_.*sqlite|sqlite|ownership|chown/i.test(error);
+}
+
+function classifyRecurringFailureGroup(
+  groups: RecurringFailureGroup[],
+  totalRuns: number,
+): RecurringFailureClassification {
+  const environmentBlocker = groups.find((group) => isLocalAgentRuntimeBlocker(group.latestQueueError));
+  if (environmentBlocker) {
+    return {
+      urgency: "action-needed",
+      severity: "high",
+      automationState: "needs_human",
+      automationBoundary: "operator_environment_fix",
+      recoveryStatus: "blocked_by_environment",
+      operatorInterventionRequired: true,
+      operatorInterventionReason: "Local agent runtime storage is not writable, so ClawForce cannot safely recover recurring runs until the operator fixes filesystem permissions.",
+      manualRecoveryAvailable: false,
+      recommendedAction: "Fix the local Codex/OpenClaw runtime storage permissions, then rerun recurring recovery from Ops. Do not keep replaying these jobs while the runtime storage is blocked.",
+      summarySuffix: "Recovery is blocked by local runtime storage permissions.",
+      blockedReason: "local_runtime_storage_not_writable",
+      blockingQueueItemId: environmentBlocker.latestQueueItemId,
+      blockingQueueErrorSummary: environmentBlocker.latestQueueErrorSummary,
+    };
+  }
+
+  const maxJobFailures = Math.max(...groups.map((group) => group.count));
+  if (totalRuns >= RECURRING_FAILURE_TOTAL_RUN_ESCALATION_THRESHOLD || maxJobFailures >= RECURRING_FAILURE_SINGLE_JOB_ESCALATION_THRESHOLD) {
+    return {
+      urgency: "action-needed",
+      severity: "high",
+      automationState: "needs_human",
+      automationBoundary: "bounded_recovery_exhausted",
+      recoveryStatus: "needs_operator_review",
+      operatorInterventionRequired: true,
+      operatorInterventionReason: "The same recurring lanes keep failing after bounded recovery. ClawForce needs an operator to inspect the runtime pattern before more replays are safe.",
+      manualRecoveryAvailable: true,
+      recommendedAction: "Open Ops, inspect the affected recurring lanes, then run manual recovery only after confirming the failure is transient or the root cause has been fixed.",
+      summarySuffix: "Bounded automatic recovery has not converged.",
+      blockedReason: "bounded_recovery_exhausted",
+    };
+  }
+
+  return {
+    urgency: "watching",
+    severity: "normal",
+    automationState: "auto_handling",
+    automationBoundary: "clawforce_safe_recovery",
+    recoveryStatus: "auto_handling",
+    operatorInterventionRequired: false,
+    operatorInterventionReason: "ClawForce can release, retry, or replay known recurring dispatch failures. Operator intervention is only needed if bounded recovery is exhausted or a policy, budget, configuration, or local-runtime decision is required.",
+    manualRecoveryAvailable: true,
+    recommendedAction: "Let ClawForce recover safe recurring dispatch failures automatically; intervene only if the same lane keeps failing after recovery or needs a policy, budget, configuration, or local-runtime decision.",
+  };
+}
+
 function summarizeWorkflowMutationQueueError(value: string | undefined): string | undefined {
   if (!value?.trim()) return undefined;
 
@@ -1226,53 +1365,138 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
        ORDER BY updated_at DESC`,
     ).all(projectId, since) as Array<{ id: string; title: string | null; updated_at: number; metadata: string | null }>;
 
-    const recurringFailures = new Map<string, {
-      agentId: string;
-      jobName: string;
-      schedule?: string;
-      count: number;
-      latestTaskId: string;
-      latestTitle: string;
-      latestFailedAt: number;
-    }>();
+    const recurringFailures = new Map<string, RecurringFailureGroup>();
     const ordinaryFailures: typeof rows = [];
+    const failedTaskIds = new Set<string>();
 
-    for (const t of rows) {
-      const recurringJob = getRecurringWorkflowIdentity(t.metadata, t.title);
+    function addRecurringFailureSignal(input: {
+      taskId: string;
+      title: string | null;
+      metadata: string | null;
+      failedAt: number;
+      queueFailure?: RecurringFailureQueueInfo;
+    }): boolean {
+      const recurringJob = getRecurringWorkflowIdentity(input.metadata, input.title);
       if (!recurringJob) {
-        ordinaryFailures.push(t);
-        continue;
+        return false;
       }
 
       const key = `${recurringJob.agentId}:${recurringJob.jobName}`;
       const existing = recurringFailures.get(key);
+      const queueFailure = input.queueFailure ?? getLatestQueueFailureForTask(projectId, input.taskId, db);
+      const queueSignalAt = queueFailure?.completedAt ?? queueFailure?.createdAt ?? 0;
+      const latestSignalAt = Math.max(input.failedAt, queueSignalAt);
       if (!existing) {
         recurringFailures.set(key, {
           agentId: recurringJob.agentId,
           jobName: recurringJob.jobName,
           schedule: recurringJob.schedule,
           count: 1,
-          latestTaskId: t.id,
-          latestTitle: t.title ?? t.id,
-          latestFailedAt: t.updated_at,
+          latestTaskId: input.taskId,
+          latestTitle: input.title ?? input.taskId,
+          latestFailedAt: input.failedAt,
+          latestSignalAt,
+          latestQueueItemId: queueFailure?.id,
+          latestQueueStatus: queueFailure?.status,
+          latestQueueError: queueFailure?.lastError,
+          latestQueueErrorSummary: summarizeQueueError(queueFailure?.lastError),
+          dispatchAttempts: queueFailure?.dispatchAttempts,
+          maxDispatchAttempts: queueFailure?.maxDispatchAttempts,
         });
-        continue;
+        return true;
       }
 
       existing.count += 1;
-      if (t.updated_at > existing.latestFailedAt) {
-        existing.latestTaskId = t.id;
-        existing.latestTitle = t.title ?? t.id;
-        existing.latestFailedAt = t.updated_at;
+      if (latestSignalAt > existing.latestSignalAt) {
+        existing.latestTaskId = input.taskId;
+        existing.latestTitle = input.title ?? input.taskId;
+        existing.latestFailedAt = input.failedAt;
+        existing.latestSignalAt = latestSignalAt;
         existing.schedule = recurringJob.schedule ?? existing.schedule;
+        existing.latestQueueItemId = queueFailure?.id;
+        existing.latestQueueStatus = queueFailure?.status;
+        existing.latestQueueError = queueFailure?.lastError;
+        existing.latestQueueErrorSummary = summarizeQueueError(queueFailure?.lastError);
+        existing.dispatchAttempts = queueFailure?.dispatchAttempts;
+        existing.maxDispatchAttempts = queueFailure?.maxDispatchAttempts;
       }
+      return true;
+    }
+
+    for (const t of rows) {
+      failedTaskIds.add(t.id);
+      const added = addRecurringFailureSignal({
+        taskId: t.id,
+        title: t.title,
+        metadata: t.metadata,
+        failedAt: t.updated_at,
+      });
+      if (!added) {
+        ordinaryFailures.push(t);
+      }
+    }
+
+    const queueRows = db.prepare(`
+      SELECT
+        dq.id AS queue_id,
+        dq.task_id,
+        dq.status,
+        dq.last_error,
+        dq.created_at,
+        dq.completed_at,
+        dq.dispatch_attempts,
+        dq.max_dispatch_attempts,
+        t.title,
+        t.metadata
+      FROM dispatch_queue dq
+      LEFT JOIN tasks t
+        ON t.project_id = dq.project_id
+       AND t.id = dq.task_id
+      WHERE dq.project_id = ?
+        AND dq.status = 'failed'
+        AND COALESCE(dq.completed_at, dq.created_at) >= ?
+      ORDER BY COALESCE(dq.completed_at, dq.created_at) DESC, dq.created_at DESC
+    `).all(projectId, since) as Array<{
+      queue_id: string;
+      task_id: string;
+      status: string;
+      last_error: string | null;
+      created_at: number;
+      completed_at: number | null;
+      dispatch_attempts: number;
+      max_dispatch_attempts: number;
+      title: string | null;
+      metadata: string | null;
+    }>;
+
+    for (const row of queueRows) {
+      if (failedTaskIds.has(row.task_id)) continue;
+      addRecurringFailureSignal({
+        taskId: row.task_id,
+        title: row.title,
+        metadata: row.metadata,
+        failedAt: row.completed_at ?? row.created_at,
+        queueFailure: {
+          id: row.queue_id,
+          status: row.status,
+          lastError: row.last_error ?? undefined,
+          createdAt: row.created_at,
+          completedAt: row.completed_at ?? undefined,
+          dispatchAttempts: row.dispatch_attempts,
+          maxDispatchAttempts: row.max_dispatch_attempts,
+        },
+      });
     }
 
     if (recurringFailures.size > 0) {
       const groups = [...recurringFailures.values()]
-        .sort((a, b) => b.latestFailedAt - a.latestFailedAt);
+        .sort((a, b) => b.latestSignalAt - a.latestSignalAt);
       const totalRuns = groups.reduce((acc, group) => acc + group.count, 0);
       const latest = groups[0]!;
+      const classification = classifyRecurringFailureGroup(groups, totalRuns);
+      const baseSummary = groups.length === 1
+        ? `${latest.agentId}.${latest.jobName} failed ${latest.count} time${latest.count === 1 ? "" : "s"} in the last 24 hours.`
+        : `${groups.length} recurring jobs failed ${totalRuns} total times in the last 24 hours.`;
       const affectedJobs = groups.map((group) => ({
         agentId: group.agentId,
         jobName: group.jobName,
@@ -1280,24 +1504,31 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
         schedule: group.schedule,
         latestTaskId: group.latestTaskId,
         latestFailedAt: group.latestFailedAt,
+        latestQueueItemId: group.latestQueueItemId,
+        latestQueueStatus: group.latestQueueStatus,
+        latestQueueErrorSummary: group.latestQueueErrorSummary,
+        dispatchAttempts: group.dispatchAttempts,
+        maxDispatchAttempts: group.maxDispatchAttempts,
       }));
 
       items.push(item(
         projectId,
-        "watching",
+        classification.urgency,
         "task",
         `Recurring workflows failed recently: ${groups.length} job${groups.length === 1 ? "" : "s"}, ${totalRuns} run${totalRuns === 1 ? "" : "s"}`,
-        groups.length === 1
-          ? `${latest.agentId}.${latest.jobName} failed ${latest.count} time${latest.count === 1 ? "" : "s"} in the last 24 hours.`
-          : `${groups.length} recurring jobs failed ${totalRuns} total times in the last 24 hours.`,
-        "/ops",
+        classification.summarySuffix ? `${baseSummary} ${classification.summarySuffix}` : baseSummary,
+        "/ops?notificationGroup=recurring-workflow-failures",
         { taskId: latest.latestTaskId },
         {
           recurringFailureGroup: true,
-          automationBoundary: "clawforce_safe_recovery",
-          operatorInterventionRequired: false,
-          operatorInterventionReason: "ClawForce can release, retry, or replay known recurring dispatch failures. Operator intervention is only needed if bounded recovery is exhausted or a policy, budget, or configuration decision is required.",
-          manualRecoveryAvailable: true,
+          automationBoundary: classification.automationBoundary,
+          recoveryStatus: classification.recoveryStatus,
+          operatorInterventionRequired: classification.operatorInterventionRequired,
+          operatorInterventionReason: classification.operatorInterventionReason,
+          manualRecoveryAvailable: classification.manualRecoveryAvailable,
+          blockedReason: classification.blockedReason,
+          blockingQueueItemId: classification.blockingQueueItemId,
+          blockingQueueErrorSummary: classification.blockingQueueErrorSummary,
           failedRunCount: totalRuns,
           affectedJobCount: groups.length,
           latestTaskId: latest.latestTaskId,
@@ -1306,14 +1537,14 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
         },
         {
           kind: "issue",
-          severity: "normal",
-          automationState: "auto_handling",
+          severity: classification.severity,
+          automationState: classification.automationState,
           taskId: latest.latestTaskId,
           sourceType: "recurring_job_failures",
           sourceId: `${projectId}:recurring-job-failures`,
-          updatedAt: latest.latestFailedAt,
-          detectedAt: latest.latestFailedAt,
-          recommendedAction: "Let ClawForce recover safe recurring dispatch failures automatically; intervene only if the same lane keeps failing after recovery or needs a policy, budget, or configuration decision.",
+          updatedAt: latest.latestSignalAt,
+          detectedAt: latest.latestSignalAt,
+          recommendedAction: classification.recommendedAction,
         },
       ));
     }

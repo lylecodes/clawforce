@@ -115,6 +115,36 @@ function insertTask(
   }
 }
 
+function insertDispatchQueueFailure(
+  db: DatabaseSync,
+  opts: {
+    id: string;
+    taskId: string;
+    lastError?: string;
+    createdAt?: number;
+    completedAt?: number;
+    dispatchAttempts?: number;
+    maxDispatchAttempts?: number;
+  },
+): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO dispatch_queue (
+      id, project_id, task_id, priority, payload, status, dispatch_attempts,
+      max_dispatch_attempts, last_error, created_at, completed_at
+    ) VALUES (?, ?, ?, 2, NULL, 'failed', ?, ?, ?, ?, ?)
+  `).run(
+    opts.id,
+    PROJECT_ID,
+    opts.taskId,
+    opts.dispatchAttempts ?? 3,
+    opts.maxDispatchAttempts ?? 3,
+    opts.lastError ?? "Lease expired after max attempts",
+    opts.createdAt ?? now,
+    opts.completedAt ?? opts.createdAt ?? now,
+  );
+}
+
 // Helper to insert a cost record
 function insertCost(db: DatabaseSync, taskId: string, costCents: number): void {
   db.prepare(
@@ -1451,13 +1481,135 @@ describe("buildAttentionSummary — recent failed tasks", () => {
 
     expect(recurringItem).toBeDefined();
     expect(recurringItem!.title).toBe("Recurring workflows failed recently: 2 jobs, 3 runs");
-    expect(recurringItem!.destination).toBe("/ops");
+    expect(recurringItem!.destination).toBe("/ops?notificationGroup=recurring-workflow-failures");
     expect(recurringItem!.automationState).toBe("auto_handling");
     expect(recurringItem!.metadata?.affectedJobCount).toBe(2);
     expect(recurringItem!.metadata?.failedRunCount).toBe(3);
     expect(recurringItem!.metadata?.operatorInterventionRequired).toBe(false);
     expect(recurringItem!.metadata?.automationBoundary).toBe("clawforce_safe_recovery");
     expect(summary.items.some((i) => i.title === "Task failed recently: Run recurring workflow source.onboarding")).toBe(false);
+  });
+
+  it("escalates recurring workflow failures when local runtime storage blocks recovery", () => {
+    const db = freshDb();
+    const recentlyFailed = Date.now() - 3_600_000;
+    const metadata = {
+      recurringJob: {
+        agentId: "source",
+        jobName: "onboarding",
+        schedule: "*/5 * * * *",
+      },
+      dispatch_dead_letter: true,
+    };
+    insertTask(db, {
+      id: "r-blocked",
+      state: "FAILED",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentlyFailed,
+      metadata,
+    });
+    insertDispatchQueueFailure(db, {
+      id: "q-blocked",
+      taskId: "r-blocked",
+      lastError: "Fatal error: Codex cannot access session files at /Users/example/.codex/sessions (permission denied). failed to open state db at /Users/example/.codex/state.sqlite: attempt to write a readonly database",
+      completedAt: recentlyFailed + 100,
+    });
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+    const recurringItem = summary.items.find((i) => i.sourceType === "recurring_job_failures");
+
+    expect(recurringItem).toBeDefined();
+    expect(recurringItem!.urgency).toBe("action-needed");
+    expect(recurringItem!.automationState).toBe("needs_human");
+    expect(recurringItem!.severity).toBe("high");
+    expect(recurringItem!.recommendedAction).toContain("Fix the local Codex/OpenClaw runtime storage permissions");
+    expect(recurringItem!.metadata).toMatchObject({
+      operatorInterventionRequired: true,
+      automationBoundary: "operator_environment_fix",
+      recoveryStatus: "blocked_by_environment",
+      manualRecoveryAvailable: false,
+      blockedReason: "local_runtime_storage_not_writable",
+      blockingQueueItemId: "q-blocked",
+    });
+    expect(String(recurringItem!.metadata?.blockingQueueErrorSummary)).toContain("cannot access session files");
+    expect(summary.counts.actionNeeded).toBeGreaterThanOrEqual(1);
+  });
+
+  it("uses failed queue rows as recurring failure evidence before the task is terminal", () => {
+    const db = freshDb();
+    const recentlyFailed = Date.now() - 3_600_000;
+    const metadata = {
+      recurringJob: {
+        agentId: "source",
+        jobName: "onboarding",
+        schedule: "*/5 * * * *",
+      },
+    };
+    insertTask(db, {
+      id: "r-assigned",
+      state: "ASSIGNED",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentlyFailed,
+      metadata,
+    });
+    insertDispatchQueueFailure(db, {
+      id: "q-assigned",
+      taskId: "r-assigned",
+      lastError: "Fatal error: Codex cannot access session files at /Users/example/.codex/sessions (permission denied)",
+      completedAt: recentlyFailed + 100,
+    });
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+    const recurringItem = summary.items.find((i) => i.sourceType === "recurring_job_failures");
+
+    expect(recurringItem).toBeDefined();
+    expect(recurringItem!.title).toBe("Recurring workflows failed recently: 1 job, 1 run");
+    expect(recurringItem!.automationState).toBe("needs_human");
+    expect(recurringItem!.metadata).toMatchObject({
+      operatorInterventionRequired: true,
+      automationBoundary: "operator_environment_fix",
+      manualRecoveryAvailable: false,
+      blockingQueueItemId: "q-assigned",
+    });
+    expect(summary.items.some((i) => i.focusContext?.taskId === "r-assigned" && i.sourceType === "task")).toBe(false);
+  });
+
+  it("escalates recurring workflow failures when bounded recovery has not converged", () => {
+    const db = freshDb();
+    const recentlyFailed = Date.now() - 3_600_000;
+    const metadata = {
+      recurringJob: {
+        agentId: "source",
+        jobName: "onboarding",
+        schedule: "*/5 * * * *",
+      },
+      dispatch_dead_letter: true,
+    };
+    for (let index = 0; index < 4; index += 1) {
+      insertTask(db, {
+        id: `r-repeated-${index}`,
+        state: "FAILED",
+        title: "Run recurring workflow source.onboarding",
+        updatedAt: recentlyFailed + index,
+        metadata,
+      });
+    }
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+    const recurringItem = summary.items.find((i) => i.sourceType === "recurring_job_failures");
+
+    expect(recurringItem).toBeDefined();
+    expect(recurringItem!.title).toBe("Recurring workflows failed recently: 1 job, 4 runs");
+    expect(recurringItem!.urgency).toBe("action-needed");
+    expect(recurringItem!.automationState).toBe("needs_human");
+    expect(recurringItem!.metadata).toMatchObject({
+      operatorInterventionRequired: true,
+      automationBoundary: "bounded_recovery_exhausted",
+      recoveryStatus: "needs_operator_review",
+      manualRecoveryAvailable: true,
+      blockedReason: "bounded_recovery_exhausted",
+    });
+    expect(recurringItem!.recommendedAction).toContain("Open Ops");
   });
 
   it("recently cancelled tasks do not create failure items", () => {
