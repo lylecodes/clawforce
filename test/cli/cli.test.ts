@@ -1604,6 +1604,8 @@ describe("CLI commands", () => {
     beforeEach(() => {
       vi.mocked(configWatcher.startConfigWatcher).mockClear();
       vi.mocked(configWatcher.stopConfigWatcher).mockClear();
+      const runtimeDb = dbModule.getDb(PROJECT_ID);
+      runtimeDb.prepare("DELETE FROM controller_leases WHERE project_id = ?").run(PROJECT_ID);
     });
 
     it("stays alive until explicitly aborted", async () => {
@@ -1631,6 +1633,38 @@ describe("CLI commands", () => {
       expect(initSpy).toHaveBeenCalled();
       expect(configWatcher.startConfigWatcher).toHaveBeenCalledTimes(1);
       expect(configWatcher.stopConfigWatcher).toHaveBeenCalledTimes(1);
+      initSpy.mockRestore();
+    });
+
+    it("reloads the domain after acquiring the startup lease so setup can certify the applied config", async () => {
+      const abortController = new AbortController();
+      const initSpy = vi.spyOn(configInit, "initializeAllDomains").mockReturnValue({
+        domains: [PROJECT_ID],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      const reloadSpy = vi.spyOn(configInit, "reloadDomain").mockReturnValue({
+        domains: [PROJECT_ID],
+        errors: [],
+        warnings: [],
+        claimedProjectDirs: [],
+      });
+      const recordSpy = vi.spyOn(configInit, "recordControllerAppliedDomainConfig").mockReturnValue(true);
+
+      await cli.cmdController(PROJECT_ID, {
+        intervalMs: 25,
+        initialSweep: false,
+        signal: abortController.signal,
+        onStarted: () => abortController.abort(),
+      });
+
+      expect(initSpy).toHaveBeenCalled();
+      expect(reloadSpy).toHaveBeenCalledWith(expect.any(String), PROJECT_ID);
+      expect(recordSpy).toHaveBeenCalledWith(expect.any(String), PROJECT_ID, "config.controller.startup");
+      initSpy.mockRestore();
+      reloadSpy.mockRestore();
+      recordSpy.mockRestore();
     });
 
     it("starts and stops a local controller cleanly on abort", async () => {

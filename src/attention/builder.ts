@@ -245,6 +245,35 @@ function getLatestQueueFailureForTask(
   }
 }
 
+function hasRecurringWorkflowSuccessAfter(
+  projectId: string,
+  group: Pick<RecurringFailureGroup, "agentId" | "jobName">,
+  after: number,
+  db: DatabaseSync,
+): boolean {
+  try {
+    const title = `${RECURRING_WORKFLOW_TITLE_PREFIX}${group.agentId}.${group.jobName}`;
+    const row = db.prepare(`
+      SELECT 1 AS found
+      FROM tasks
+      WHERE project_id = ?
+        AND state = 'DONE'
+        AND updated_at > ?
+        AND (
+          (
+            json_extract(metadata, '$.recurringJob.agentId') = ?
+            AND json_extract(metadata, '$.recurringJob.jobName') = ?
+          )
+          OR title = ?
+        )
+      LIMIT 1
+    `).get(projectId, after, group.agentId, group.jobName, title) as Record<string, unknown> | undefined;
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
 function isLocalAgentRuntimeBlocker(error: string | undefined): boolean {
   if (!error) return false;
   return /cannot access session files|permission denied|operation not permitted|readonly database|failed to open state db|fix ownership/i.test(error)
@@ -1447,7 +1476,17 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
         dq.dispatch_attempts,
         dq.max_dispatch_attempts,
         t.title,
-        t.metadata
+        t.state AS task_state,
+        t.metadata,
+        EXISTS(
+          SELECT 1
+          FROM dispatch_queue newer
+          WHERE newer.project_id = dq.project_id
+            AND newer.task_id = dq.task_id
+            AND newer.status = 'completed'
+            AND COALESCE(newer.completed_at, newer.created_at) > COALESCE(dq.completed_at, dq.created_at)
+          LIMIT 1
+        ) AS has_later_completed_queue
       FROM dispatch_queue dq
       LEFT JOIN tasks t
         ON t.project_id = dq.project_id
@@ -1466,11 +1505,14 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
       dispatch_attempts: number;
       max_dispatch_attempts: number;
       title: string | null;
+      task_state: string | null;
       metadata: string | null;
+      has_later_completed_queue: number;
     }>;
 
     for (const row of queueRows) {
       if (failedTaskIds.has(row.task_id)) continue;
+      if (Number(row.has_later_completed_queue ?? 0) === 1 || row.task_state === "DONE") continue;
       addRecurringFailureSignal({
         taskId: row.task_id,
         title: row.title,
@@ -1490,63 +1532,68 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
 
     if (recurringFailures.size > 0) {
       const groups = [...recurringFailures.values()]
+        .filter((group) => !hasRecurringWorkflowSuccessAfter(projectId, group, group.latestSignalAt, db))
         .sort((a, b) => b.latestSignalAt - a.latestSignalAt);
-      const totalRuns = groups.reduce((acc, group) => acc + group.count, 0);
-      const latest = groups[0]!;
-      const classification = classifyRecurringFailureGroup(groups, totalRuns);
-      const baseSummary = groups.length === 1
-        ? `${latest.agentId}.${latest.jobName} failed ${latest.count} time${latest.count === 1 ? "" : "s"} in the last 24 hours.`
-        : `${groups.length} recurring jobs failed ${totalRuns} total times in the last 24 hours.`;
-      const affectedJobs = groups.map((group) => ({
-        agentId: group.agentId,
-        jobName: group.jobName,
-        failedRuns: group.count,
-        schedule: group.schedule,
-        latestTaskId: group.latestTaskId,
-        latestFailedAt: group.latestFailedAt,
-        latestQueueItemId: group.latestQueueItemId,
-        latestQueueStatus: group.latestQueueStatus,
-        latestQueueErrorSummary: group.latestQueueErrorSummary,
-        dispatchAttempts: group.dispatchAttempts,
-        maxDispatchAttempts: group.maxDispatchAttempts,
-      }));
+      // Recent failures that have already been followed by successful runs are covered by
+      // the completion summary; they should not remain operator action items.
+      if (groups.length > 0) {
+        const totalRuns = groups.reduce((acc, group) => acc + group.count, 0);
+        const latest = groups[0]!;
+        const classification = classifyRecurringFailureGroup(groups, totalRuns);
+        const baseSummary = groups.length === 1
+          ? `${latest.agentId}.${latest.jobName} failed ${latest.count} time${latest.count === 1 ? "" : "s"} in the last 24 hours.`
+          : `${groups.length} recurring jobs failed ${totalRuns} total times in the last 24 hours.`;
+        const affectedJobs = groups.map((group) => ({
+          agentId: group.agentId,
+          jobName: group.jobName,
+          failedRuns: group.count,
+          schedule: group.schedule,
+          latestTaskId: group.latestTaskId,
+          latestFailedAt: group.latestFailedAt,
+          latestQueueItemId: group.latestQueueItemId,
+          latestQueueStatus: group.latestQueueStatus,
+          latestQueueErrorSummary: group.latestQueueErrorSummary,
+          dispatchAttempts: group.dispatchAttempts,
+          maxDispatchAttempts: group.maxDispatchAttempts,
+        }));
 
-      items.push(item(
-        projectId,
-        classification.urgency,
-        "task",
-        `Recurring workflows failed recently: ${groups.length} job${groups.length === 1 ? "" : "s"}, ${totalRuns} run${totalRuns === 1 ? "" : "s"}`,
-        classification.summarySuffix ? `${baseSummary} ${classification.summarySuffix}` : baseSummary,
-        "/ops?notificationGroup=recurring-workflow-failures",
-        { taskId: latest.latestTaskId },
-        {
-          recurringFailureGroup: true,
-          automationBoundary: classification.automationBoundary,
-          recoveryStatus: classification.recoveryStatus,
-          operatorInterventionRequired: classification.operatorInterventionRequired,
-          operatorInterventionReason: classification.operatorInterventionReason,
-          manualRecoveryAvailable: classification.manualRecoveryAvailable,
-          blockedReason: classification.blockedReason,
-          blockingQueueItemId: classification.blockingQueueItemId,
-          blockingQueueErrorSummary: classification.blockingQueueErrorSummary,
-          failedRunCount: totalRuns,
-          affectedJobCount: groups.length,
-          latestTaskId: latest.latestTaskId,
-          latestFailedAt: latest.latestFailedAt,
-          affectedJobs,
-        },
-        {
-          kind: "issue",
-          severity: classification.severity,
-          automationState: classification.automationState,
-          taskId: latest.latestTaskId,
-          sourceType: "recurring_job_failures",
-          sourceId: `${projectId}:recurring-job-failures`,
-          updatedAt: latest.latestSignalAt,
-          detectedAt: latest.latestSignalAt,
-          recommendedAction: classification.recommendedAction,
-        },
-      ));
+        items.push(item(
+          projectId,
+          classification.urgency,
+          "task",
+          `Recurring workflows failed recently: ${groups.length} job${groups.length === 1 ? "" : "s"}, ${totalRuns} run${totalRuns === 1 ? "" : "s"}`,
+          classification.summarySuffix ? `${baseSummary} ${classification.summarySuffix}` : baseSummary,
+          "/ops?notificationGroup=recurring-workflow-failures",
+          { taskId: latest.latestTaskId },
+          {
+            recurringFailureGroup: true,
+            automationBoundary: classification.automationBoundary,
+            recoveryStatus: classification.recoveryStatus,
+            operatorInterventionRequired: classification.operatorInterventionRequired,
+            operatorInterventionReason: classification.operatorInterventionReason,
+            manualRecoveryAvailable: classification.manualRecoveryAvailable,
+            blockedReason: classification.blockedReason,
+            blockingQueueItemId: classification.blockingQueueItemId,
+            blockingQueueErrorSummary: classification.blockingQueueErrorSummary,
+            failedRunCount: totalRuns,
+            affectedJobCount: groups.length,
+            latestTaskId: latest.latestTaskId,
+            latestFailedAt: latest.latestFailedAt,
+            affectedJobs,
+          },
+          {
+            kind: "issue",
+            severity: classification.severity,
+            automationState: classification.automationState,
+            taskId: latest.latestTaskId,
+            sourceType: "recurring_job_failures",
+            sourceId: `${projectId}:recurring-job-failures`,
+            updatedAt: latest.latestSignalAt,
+            detectedAt: latest.latestSignalAt,
+            recommendedAction: classification.recommendedAction,
+          },
+        ));
+      }
     }
 
     for (const t of ordinaryFailures) {

@@ -134,6 +134,7 @@ export function deleteJob(agentId: string, jobName: string, projectId?: string):
  */
 function resolveJobBriefing(base: AgentConfig, job: JobDefinition): ContextSource[] {
   let briefing: ContextSource[];
+  const baseBriefing = Array.isArray(base.briefing) ? base.briefing : [];
 
   if (job.briefing && job.briefing.length > 0) {
     // Job specifies its own briefing — use it directly
@@ -141,10 +142,10 @@ function resolveJobBriefing(base: AgentConfig, job: JobDefinition): ContextSourc
   } else if (job.exclude_briefing && job.exclude_briefing.length > 0) {
     // Job only excludes from base
     const excludeSet = new Set(job.exclude_briefing);
-    briefing = base.briefing.filter((s) => !excludeSet.has(s.source));
+    briefing = baseBriefing.filter((s) => !excludeSet.has(s.source));
   } else {
     // Inherit base briefing
-    briefing = [...base.briefing];
+    briefing = [...baseBriefing];
   }
 
   // Always ensure "instructions" is present

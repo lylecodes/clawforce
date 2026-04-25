@@ -1411,10 +1411,12 @@ export async function sweep(options: SweepOptions): Promise<SweepResult> {
       },
     };
   } finally {
-    try {
-      releaseControllerLease(projectId, controllerLease.lease.ownerId, db);
-    } catch (err) {
-      safeLog("sweep.releaseControllerLease", err);
+    if (controllerLease.acquiredNew) {
+      try {
+        releaseControllerLease(projectId, controllerLease.lease.ownerId, db);
+      } catch (err) {
+        safeLog("sweep.releaseControllerLease", err);
+      }
     }
   }
 }

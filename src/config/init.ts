@@ -518,6 +518,36 @@ function recordAppliedDomainConfigVersion(
   }
 }
 
+export function recordControllerAppliedDomainConfig(
+  baseDir: string,
+  domainId: string,
+  detectedBy: string = "config.controller",
+): boolean {
+  const resolvedBaseDir = normalizeBaseDir(baseDir);
+  const globalConfig = loadGlobalConfig(resolvedBaseDir);
+  const loaded = loadDomainConfigById(resolvedBaseDir, domainId);
+  if (!loaded.exists || !loaded.config || loaded.config.enabled === false) {
+    return false;
+  }
+
+  const db = getDb(domainId);
+  const fingerprint = detectDomainConfigChange(
+    domainId,
+    globalConfig,
+    loaded.config,
+    detectedBy,
+    db,
+  );
+  const marked = markControllerLeaseConfigApplied(
+    domainId,
+    fingerprint.versionId,
+    fingerprint.contentHash,
+    {},
+    db,
+  );
+  return Boolean(marked);
+}
+
 /**
  * Build a WorkforceConfig from global agent definitions + domain config.
  * This bridges the new config format to the existing system.

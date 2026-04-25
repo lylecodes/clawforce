@@ -9,7 +9,7 @@ import type { ClawforceConfig } from "./types.js";
 import { closeAllDbs, setProjectsDir } from "./db.js";
 import { safeLog } from "./diagnostics.js";
 import { sweep } from "./sweep/actions.js";
-import { initializeAllDomains } from "./config/init.js";
+import { initializeAllDomains, recordControllerAppliedDomainConfig } from "./config/init.js";
 import { getDefaultRuntimeState } from "./runtime/default-runtime.js";
 import { acquireControllerLease, releaseControllerLease } from "./runtime/controller-leases.js";
 
@@ -29,6 +29,14 @@ export function initClawforce(config: ClawforceConfig): void {
     runtime.sweepTimer = setInterval(() => {
       for (const projectId of runtime.activeProjectIds) {
         try {
+          const lease = acquireControllerLease(projectId, { purpose: "lifecycle" });
+          if (lease.ok && !lease.lease.appliedConfigHash) {
+            recordControllerAppliedDomainConfig(config.projectsDir, projectId, "config.lifecycle.heartbeat");
+          }
+        } catch (err) {
+          safeLog(`lifecycle.controllerLease.${projectId}`, err);
+        }
+        try {
           const p = sweep({ projectId }).catch((err) => {
             safeLog(`lifecycle.sweep.${projectId}`, err);
           });
@@ -45,7 +53,10 @@ export function initClawforce(config: ClawforceConfig): void {
 
     for (const projectId of runtime.activeProjectIds) {
       try {
-        acquireControllerLease(projectId, { purpose: "lifecycle" });
+        const lease = acquireControllerLease(projectId, { purpose: "lifecycle" });
+        if (lease.ok) {
+          recordControllerAppliedDomainConfig(config.projectsDir, projectId, "config.lifecycle.startup");
+        }
       } catch (err) {
         safeLog(`lifecycle.controllerLease.${projectId}`, err);
       }
@@ -90,7 +101,10 @@ export function registerProject(projectId: string): void {
   runtime.activeProjectIds.add(projectId);
   if (runtime.sweepTimer) {
     try {
-      acquireControllerLease(projectId, { purpose: "lifecycle" });
+      const lease = acquireControllerLease(projectId, { purpose: "lifecycle" });
+      if (lease.ok) {
+        recordControllerAppliedDomainConfig(runtime.projectsDir, projectId, "config.lifecycle.register");
+      }
     } catch (err) {
       safeLog(`lifecycle.registerLease.${projectId}`, err);
     }

@@ -145,6 +145,30 @@ function insertDispatchQueueFailure(
   );
 }
 
+function insertDispatchQueueCompletion(
+  db: DatabaseSync,
+  opts: {
+    id: string;
+    taskId: string;
+    createdAt?: number;
+    completedAt?: number;
+  },
+): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO dispatch_queue (
+      id, project_id, task_id, priority, payload, status, dispatch_attempts,
+      max_dispatch_attempts, last_error, created_at, completed_at
+    ) VALUES (?, ?, ?, 2, NULL, 'completed', 1, 3, NULL, ?, ?)
+  `).run(
+    opts.id,
+    PROJECT_ID,
+    opts.taskId,
+    opts.createdAt ?? now,
+    opts.completedAt ?? opts.createdAt ?? now,
+  );
+}
+
 // Helper to insert a cost record
 function insertCost(db: DatabaseSync, taskId: string, costCents: number): void {
   db.prepare(
@@ -1572,6 +1596,75 @@ describe("buildAttentionSummary — recent failed tasks", () => {
       blockingQueueItemId: "q-assigned",
     });
     expect(summary.items.some((i) => i.focusContext?.taskId === "r-assigned" && i.sourceType === "task")).toBe(false);
+  });
+
+  it("does not keep recovered recurring queue failures as active operator items", () => {
+    const db = freshDb();
+    const recentlyFailed = Date.now() - 3_600_000;
+    const metadata = {
+      recurringJob: {
+        agentId: "source",
+        jobName: "onboarding",
+        schedule: "*/5 * * * *",
+      },
+    };
+    insertTask(db, {
+      id: "r-recovered",
+      state: "DONE",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentlyFailed + 2_000,
+      metadata,
+    });
+    insertDispatchQueueFailure(db, {
+      id: "q-old-failure",
+      taskId: "r-recovered",
+      lastError: "Fatal error: Codex cannot access session files at /Users/example/.codex/sessions (permission denied)",
+      createdAt: recentlyFailed,
+      completedAt: recentlyFailed + 100,
+    });
+    insertDispatchQueueCompletion(db, {
+      id: "q-recovered",
+      taskId: "r-recovered",
+      createdAt: recentlyFailed + 1_000,
+      completedAt: recentlyFailed + 2_000,
+    });
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+
+    expect(summary.items.find((i) => i.sourceType === "recurring_job_failures")).toBeUndefined();
+    expect(summary.items.find((i) => i.sourceType === "task" && i.focusContext?.taskId === "r-recovered")).toBeUndefined();
+  });
+
+  it("does not keep old recurring failures active after the same lane later succeeds", () => {
+    const db = freshDb();
+    const recentlyFailed = Date.now() - 3_600_000;
+    const metadata = {
+      recurringJob: {
+        agentId: "source",
+        jobName: "onboarding",
+        schedule: "*/5 * * * *",
+      },
+      dispatch_dead_letter: true,
+    };
+    insertTask(db, {
+      id: "r-old-failed",
+      state: "FAILED",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentlyFailed,
+      metadata,
+    });
+    insertTask(db, {
+      id: "r-later-done",
+      state: "DONE",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentlyFailed + 1_000,
+      metadata,
+    });
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+
+    expect(summary.items.find((i) => i.sourceType === "recurring_job_failures")).toBeUndefined();
+    expect(summary.items.some((i) => i.title === "Task failed recently: Run recurring workflow source.onboarding")).toBe(false);
   });
 
   it("escalates recurring workflow failures when bounded recovery has not converged", () => {

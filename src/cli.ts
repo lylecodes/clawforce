@@ -79,7 +79,7 @@ import {
   shutdownClawforce,
   unregisterProject,
 } from "./lifecycle.js";
-import { initializeAllDomains, reloadDomain } from "./config/init.js";
+import { initializeAllDomains, recordControllerAppliedDomainConfig, reloadDomain } from "./config/init.js";
 import { startConfigWatcher, stopConfigWatcher } from "./config/watcher.js";
 import { buildAttentionSummary, buildDecisionInboxSummary } from "./attention/builder.js";
 import type { AttentionItem } from "./attention/types.js";
@@ -149,8 +149,8 @@ function getDb(projectId: string): DatabaseSync {
   return getProjectDb(projectId);
 }
 
-function ensureProjectConfigLoaded(): void {
-  initializeAllDomains(getClawforceHome());
+function ensureProjectConfigLoaded(): ReturnType<typeof initializeAllDomains> {
+  return initializeAllDomains(getClawforceHome());
 }
 
 function callOpenClawGateway(method: string, params?: Record<string, unknown>): unknown {
@@ -677,7 +677,24 @@ export async function cmdController(
       }
     }
   };
-  refreshControllerLease(true);
+  try {
+    refreshControllerLease(true);
+    // The first config load can run before this controller owns the lease.
+    // Replay this domain after lease acquisition so setup can certify which
+    // config revision the live controller actually applied.
+    const startupReload = reloadDomain(configRoot, projectId);
+    if (startupReload.domains.includes(projectId)) {
+      recordControllerAppliedDomainConfig(configRoot, projectId, "config.controller.startup");
+      refreshControllerLease();
+    }
+  } catch (err) {
+    releaseControllerLease(projectId);
+    unregisterProject(projectId);
+    if (!runtimeWasInitialized) {
+      await shutdownClawforce();
+    }
+    throw err;
+  }
   const leaseHeartbeat = setInterval(refreshControllerLease, Math.max(1000, Math.min(30_000, intervalMs)));
   leaseHeartbeat.unref();
   startConfigWatcher(configRoot, (event) => {
