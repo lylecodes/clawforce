@@ -104,6 +104,67 @@ function getStringValue(value: Record<string, unknown> | undefined, key: string)
   return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
 }
 
+type RecurringWorkflowIdentity = {
+  agentId: string;
+  jobName: string;
+  schedule?: string;
+};
+
+const RECURRING_WORKFLOW_TITLE_PREFIX = "Run recurring workflow ";
+
+function parseRecurringWorkflowTitle(title: string | null | undefined): RecurringWorkflowIdentity | undefined {
+  const raw = title?.trim();
+  if (!raw?.startsWith(RECURRING_WORKFLOW_TITLE_PREFIX)) return undefined;
+
+  const lane = raw.slice(RECURRING_WORKFLOW_TITLE_PREFIX.length).trim();
+  const separator = lane.indexOf(".");
+  if (separator <= 0 || separator >= lane.length - 1) return undefined;
+
+  return {
+    agentId: lane.slice(0, separator),
+    jobName: lane.slice(separator + 1),
+  };
+}
+
+function getRecurringWorkflowIdentity(
+  metadataValue: string | null | undefined,
+  title?: string | null,
+): RecurringWorkflowIdentity | undefined {
+  const metadata = parseObjectJson(metadataValue);
+  const recurringJob = getNestedRecord(metadata, "recurringJob");
+  const agentId = getStringValue(recurringJob, "agentId");
+  const jobName = getStringValue(recurringJob, "jobName");
+  if (agentId && jobName) {
+    return {
+      agentId,
+      jobName,
+      schedule: getStringValue(recurringJob, "schedule"),
+    };
+  }
+
+  return parseRecurringWorkflowTitle(title);
+}
+
+function compactRecurringAgentId(agentId: string, projectId?: string): string {
+  const projectPrefix = projectId ? `${projectId}-` : "";
+  return projectPrefix && agentId.startsWith(projectPrefix)
+    ? agentId.slice(projectPrefix.length)
+    : agentId;
+}
+
+function formatRecurringWorkflowLane(
+  identity: Pick<RecurringWorkflowIdentity, "agentId" | "jobName">,
+  projectId?: string,
+  jobNameCounts?: Map<string, number>,
+): string {
+  const compactAgentId = compactRecurringAgentId(identity.agentId, projectId);
+  const jobNameIsUnique = (jobNameCounts?.get(identity.jobName) ?? 0) <= 1;
+  if (compactAgentId !== identity.agentId && jobNameIsUnique) {
+    return identity.jobName;
+  }
+  return `${compactAgentId}.${identity.jobName}`;
+}
+
 function summarizeWorkflowMutationQueueError(value: string | undefined): string | undefined {
   if (!value?.trim()) return undefined;
 
@@ -1177,22 +1238,19 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
     const ordinaryFailures: typeof rows = [];
 
     for (const t of rows) {
-      const metadata = parseObjectJson(t.metadata);
-      const recurringJob = getNestedRecord(metadata, "recurringJob");
-      const agentId = getStringValue(recurringJob, "agentId");
-      const jobName = getStringValue(recurringJob, "jobName");
-      if (!agentId || !jobName) {
+      const recurringJob = getRecurringWorkflowIdentity(t.metadata, t.title);
+      if (!recurringJob) {
         ordinaryFailures.push(t);
         continue;
       }
 
-      const key = `${agentId}:${jobName}`;
+      const key = `${recurringJob.agentId}:${recurringJob.jobName}`;
       const existing = recurringFailures.get(key);
       if (!existing) {
         recurringFailures.set(key, {
-          agentId,
-          jobName,
-          schedule: getStringValue(recurringJob, "schedule"),
+          agentId: recurringJob.agentId,
+          jobName: recurringJob.jobName,
+          schedule: recurringJob.schedule,
           count: 1,
           latestTaskId: t.id,
           latestTitle: t.title ?? t.id,
@@ -1206,7 +1264,7 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
         existing.latestTaskId = t.id;
         existing.latestTitle = t.title ?? t.id;
         existing.latestFailedAt = t.updated_at;
-        existing.schedule = getStringValue(recurringJob, "schedule") ?? existing.schedule;
+        existing.schedule = recurringJob.schedule ?? existing.schedule;
       }
     }
 
@@ -1286,26 +1344,118 @@ function detectRecentFailedTasks(projectId: string, db: DatabaseSync, items: Att
   } catch { /* ignore */ }
 }
 
+function summarizeCompletedTasks(projectId: string, rows: Array<{
+  id: string;
+  title: string | null;
+  updated_at: number;
+  metadata: string | null;
+}>): {
+  summary: string;
+  metadata: Record<string, unknown>;
+} {
+  const recurringCompletions = new Map<string, {
+    agentId: string;
+    jobName: string;
+    count: number;
+    latestCompletedAt: number;
+    taskIds: string[];
+  }>();
+  const ordinaryTasks: typeof rows = [];
+
+  for (const t of rows) {
+    const recurringJob = getRecurringWorkflowIdentity(t.metadata, t.title);
+    if (!recurringJob) {
+      ordinaryTasks.push(t);
+      continue;
+    }
+
+    const key = `${recurringJob.agentId}:${recurringJob.jobName}`;
+    const existing = recurringCompletions.get(key);
+    if (!existing) {
+      recurringCompletions.set(key, {
+        agentId: recurringJob.agentId,
+        jobName: recurringJob.jobName,
+        count: 1,
+        latestCompletedAt: t.updated_at,
+        taskIds: [t.id],
+      });
+      continue;
+    }
+
+    existing.count += 1;
+    existing.taskIds.push(t.id);
+    if (t.updated_at > existing.latestCompletedAt) {
+      existing.latestCompletedAt = t.updated_at;
+    }
+  }
+
+  const groups = [...recurringCompletions.values()]
+    .sort((a, b) => b.latestCompletedAt - a.latestCompletedAt);
+  const taskIds = rows.map((t) => t.id);
+  const metadata: Record<string, unknown> = {
+    count: rows.length,
+    taskIds,
+  };
+
+  if (groups.length === 0) {
+    return {
+      summary: buildPreview(rows.map((t) => t.title ?? t.id).join(", "), 280),
+      metadata,
+    };
+  }
+
+  const visibleGroups = groups.slice(0, 5);
+  const hiddenGroupCount = groups.length - visibleGroups.length;
+  const jobNameCounts = new Map<string, number>();
+  for (const group of groups) {
+    jobNameCounts.set(group.jobName, (jobNameCounts.get(group.jobName) ?? 0) + 1);
+  }
+  const groupSummary = visibleGroups
+    .map((group) => `${formatRecurringWorkflowLane(group, projectId, jobNameCounts)} (${group.count})`)
+    .join(", ");
+  const hiddenSummary = hiddenGroupCount > 0 ? `, +${hiddenGroupCount} more` : "";
+  const ordinarySummary = ordinaryTasks.length > 0
+    ? `; ${ordinaryTasks.length} other task${ordinaryTasks.length === 1 ? "" : "s"} completed`
+    : "";
+
+  metadata.recurringWorkflowCompletions = groups.map((group) => ({
+    agentId: group.agentId,
+    jobName: group.jobName,
+    count: group.count,
+    latestCompletedAt: group.latestCompletedAt,
+    taskIds: group.taskIds,
+  }));
+  if (ordinaryTasks.length > 0) {
+    metadata.otherCompletedTaskCount = ordinaryTasks.length;
+  }
+
+  return {
+    summary: `Recurring workflow completions: ${groupSummary}${hiddenSummary}${ordinarySummary}.`,
+    metadata,
+  };
+}
+
 function detectCompletedTasks(projectId: string, db: DatabaseSync, items: AttentionItem[]): void {
   try {
     const since = Date.now() - 24 * 3_600_000;
     const rows = db.prepare(
-      `SELECT id, title, updated_at FROM tasks
+      `SELECT id, title, updated_at, metadata FROM tasks
        WHERE project_id = ? AND state = 'DONE' AND updated_at >= ?
        ORDER BY updated_at DESC
        LIMIT 10`,
-    ).all(projectId, since) as Array<{ id: string; title: string | null; updated_at: number }>;
+    ).all(projectId, since) as Array<{ id: string; title: string | null; updated_at: number; metadata: string | null }>;
 
     if (rows.length > 0) {
+      const completed = summarizeCompletedTasks(projectId, rows);
       items.push(item(
         projectId,
         "fyi",
         "task",
         `${rows.length} task${rows.length === 1 ? "" : "s"} completed in the last 24h`,
-        rows.map((t) => t.title ?? t.id).join(", "),
+        completed.summary,
         "/tasks",
         { state: "DONE" },
-        { count: rows.length, taskIds: rows.map((t) => t.id) },
+        completed.metadata,
         {
           kind: "info",
           severity: "low",

@@ -1482,6 +1482,99 @@ describe("buildAttentionSummary — completed tasks", () => {
     expect(fyiItems.length).toBeGreaterThanOrEqual(1);
     expect(fyiItems[0]!.destination).toBe("/tasks");
     expect(fyiItems[0]!.focusContext?.state).toBe("DONE");
+    expect(fyiItems[0]!.summary).toBe("Finished task");
+  });
+
+  it("groups recurring workflow completions instead of repeating raw task titles", () => {
+    const db = freshDb();
+    const recentDone = Date.now() - 3_600_000;
+    const recurringMetadata = (agentId: string, jobName: string) => ({
+      recurringJob: {
+        agentId,
+        jobName,
+        schedule: "*/5 * * * *",
+        reason: "cron due",
+      },
+    });
+
+    insertTask(db, {
+      id: "r1",
+      state: "DONE",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentDone + 1,
+      metadata: recurringMetadata("source", "onboarding"),
+    });
+    insertTask(db, {
+      id: "r2",
+      state: "DONE",
+      title: "Run recurring workflow source.onboarding",
+      updatedAt: recentDone + 4,
+      metadata: recurringMetadata("source", "onboarding"),
+    });
+    insertTask(db, {
+      id: "r3",
+      state: "DONE",
+      title: "Run recurring workflow integrity.sweep",
+      updatedAt: recentDone + 2,
+      metadata: recurringMetadata("integrity", "sweep"),
+    });
+    insertTask(db, {
+      id: "ordinary",
+      state: "DONE",
+      title: "Finished manual cleanup",
+      updatedAt: recentDone + 3,
+    });
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+    const fyiItem = summary.items.find((i) => i.urgency === "fyi" && i.category === "task");
+
+    expect(fyiItem).toBeDefined();
+    expect(fyiItem!.summary).toBe(
+      "Recurring workflow completions: source.onboarding (2), integrity.sweep (1); 1 other task completed.",
+    );
+    expect(fyiItem!.summary.match(/Run recurring workflow/g)).toBeNull();
+    expect(fyiItem!.metadata?.recurringWorkflowCompletions).toEqual([
+      expect.objectContaining({ agentId: "source", jobName: "onboarding", count: 2 }),
+      expect.objectContaining({ agentId: "integrity", jobName: "sweep", count: 1 }),
+    ]);
+    expect(fyiItem!.metadata?.otherCompletedTaskCount).toBe(1);
+  });
+
+  it("shortens project-prefixed recurring workflow completion labels", () => {
+    const db = freshDb();
+    const recentDone = Date.now() - 3_600_000;
+    const agentId = `${PROJECT_ID}-source-onboarding-steward`;
+    const recurringMetadata = {
+      recurringJob: {
+        agentId,
+        jobName: "onboarding-backlog-sweep",
+        schedule: "*/5 * * * *",
+      },
+    };
+
+    insertTask(db, {
+      id: "r1",
+      state: "DONE",
+      title: `Run recurring workflow ${agentId}.onboarding-backlog-sweep`,
+      updatedAt: recentDone,
+      metadata: recurringMetadata,
+    });
+    insertTask(db, {
+      id: "r2",
+      state: "DONE",
+      title: `Run recurring workflow ${agentId}.onboarding-backlog-sweep`,
+      updatedAt: recentDone + 1,
+      metadata: recurringMetadata,
+    });
+
+    const summary = buildAttentionSummary(PROJECT_ID, db);
+    const fyiItem = summary.items.find((i) => i.urgency === "fyi" && i.category === "task");
+
+    expect(fyiItem).toBeDefined();
+    expect(fyiItem!.summary).toBe("Recurring workflow completions: onboarding-backlog-sweep (2).");
+    expect(fyiItem!.metadata?.recurringWorkflowCompletions).toEqual([
+      expect.objectContaining({ agentId, jobName: "onboarding-backlog-sweep", count: 2 }),
+    ]);
   });
 
   it("completed tasks older than 24h do not create fyi items", () => {
